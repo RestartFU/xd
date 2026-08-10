@@ -427,6 +427,18 @@ impl AppModel {
             .get("working")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // A chat opened while its turn is already running receives the text
+        // streamed before this client selected it as a snapshot. Keep text
+        // delivered by newer live events, but hydrate an otherwise empty live
+        // transcript so switching away and back cannot make Claude's reply
+        // disappear until the turn finishes.
+        if self.working
+            && self.live_text.is_empty()
+            && self.live_items.is_empty()
+            && let Some(segment) = body.get("segment").and_then(Value::as_str)
+        {
+            self.live_text = segment.to_owned();
+        }
         if let Some(selected_chat) = self.selected_chat.as_deref()
             && let Some(summary) = self
                 .chats
@@ -817,6 +829,30 @@ mod tests {
         model.selected_chat = Some("chat-1".into());
         model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
         assert_eq!(model.working_for(), None);
+    }
+
+    #[test]
+    fn chat_snapshots_restore_in_progress_text_without_replacing_newer_events() {
+        let mut model = AppModel::default();
+        model.apply_chat(&json!({
+            "working": true,
+            "segment": "Claude already streamed this"
+        }));
+        assert_eq!(model.live_text, "Claude already streamed this");
+
+        model.selected_chat = Some("chat-1".into());
+        model.apply_event(
+            "text",
+            &json!({"chat":"chat-1", "text":" and this is newer"}),
+        );
+        model.apply_chat(&json!({
+            "working": true,
+            "segment": "stale snapshot"
+        }));
+        assert_eq!(
+            model.live_text,
+            "Claude already streamed this and this is newer"
+        );
     }
 
     #[test]

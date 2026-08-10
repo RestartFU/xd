@@ -3972,6 +3972,9 @@ impl XdDesktop {
                     .then(|| self.model.draft_attachments.clone());
                 self.model.apply_chat(&value);
                 self.sync_active_auth_state();
+                self.transcript_snapshot.sync_live_items(&self.model);
+                self.transcript_snapshot.sync_live_text(&self.model);
+                self.sync_transcript_count(false);
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
                 } else if let Some(attachments) = attachments {
