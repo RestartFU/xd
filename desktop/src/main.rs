@@ -4615,7 +4615,7 @@ impl XdDesktop {
             }
             "text" | "tool" if self.event_is_active(&body) => {
                 let old_count = self.model.display_message_count();
-                let closed_live_text = name == "tool" && !self.model.live_text.is_empty();
+                let had_live_text = name == "tool" && !self.model.live_text.is_empty();
                 self.model.apply_event(name, &body);
                 if name == "text" {
                     self.schedule_live_text_render(cx);
@@ -4623,6 +4623,7 @@ impl XdDesktop {
                     self.transcript_snapshot.sync_live_items(&self.model);
                     self.transcript_snapshot.sync_live_text(&self.model);
                     let new_count = self.model.display_message_count();
+                    let closed_live_text = had_live_text && self.model.live_text.is_empty();
                     if closed_live_text {
                         self.transcript.splice(old_count - 1..old_count, 2);
                     } else if new_count > old_count {
@@ -22120,6 +22121,42 @@ mod tests {
                 .as_deref()
                 .map(|message| message.content.as_str());
             assert_eq!(rendered, Some("smooth stream"));
+            assert_eq!(desktop.transcript.item_count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn todo_update_during_streaming_keeps_transcript_count_in_sync(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("chat-todos".into());
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-todos".into(),
+                folder: "workspace".into(),
+                title: Some("Todos".into()),
+                backend: "codex".into(),
+                working: true,
+            }];
+            desktop.model.live_text = "Still working".into();
+            desktop.transcript_snapshot = TranscriptSnapshot::default();
+            desktop.transcript_snapshot.sync_live_text(&desktop.model);
+            desktop.transcript.reset(1);
+
+            desktop.handle_event(
+                "tool",
+                serde_json::json!({
+                    "chat": "chat-todos",
+                    "text": "todo_list\n[{\"id\":\"1\",\"text\":\"Debug crash\",\"status\":\"in_progress\"}]"
+                }),
+                None,
+                cx,
+            );
+
+            assert_eq!(desktop.model.live_text, "Still working");
+            assert_eq!(desktop.model.todos.len(), 1);
+            assert_eq!(desktop.model.display_message_count(), 1);
+            assert_eq!(desktop.transcript_snapshot.get(0).unwrap().content, "Still working");
+            assert!(desktop.transcript_snapshot.get(1).is_none());
             assert_eq!(desktop.transcript.item_count(), 1);
         });
     }
