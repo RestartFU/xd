@@ -120,6 +120,9 @@ const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const STEADY_PARTIALS_TO_END: usize = 4;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
+const CHAT_COLUMN_MAX_WIDTH: f32 = 1_040.0;
+const TASKS_SIDE_WIDTH: f32 = 220.0;
+const TASKS_SIDE_GUTTER: f32 = 16.0;
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
@@ -696,6 +699,10 @@ fn resized_pane_size(kind: PaneResizeKind, initial_size: f32, delta: Point<f32>)
         PaneResizeKind::Terminal => (180.0, 640.0),
     };
     size.round().clamp(minimum, maximum) as u16
+}
+
+fn tasks_fit_in_right_gutter(chat_pane_width: f32) -> bool {
+    chat_pane_width >= CHAT_COLUMN_MAX_WIDTH + 2.0 * (TASKS_SIDE_WIDTH + TASKS_SIDE_GUTTER)
 }
 
 struct PendingSpeech {
@@ -14456,6 +14463,15 @@ impl Render for XdDesktop {
             .filter(|todo| todo.status == TodoStatus::Completed)
             .count();
         let todo_count = self.model.todos.len();
+        let chat_pane_width = f32::from(window.bounds().size.width)
+            - f32::from(sidebar_width)
+            - 5.0
+            - if diff_open {
+                f32::from(diff_width) + 5.0
+            } else {
+                0.0
+            };
+        let tasks_in_right_gutter = tasks_fit_in_right_gutter(chat_pane_width);
         let todo_rows = self
             .model
             .todos
@@ -14499,6 +14515,58 @@ impl Render for XdDesktop {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        let todo_pane = (todo_count > 0).then(|| {
+            div()
+                .id("todo-pane")
+                .min_w_0()
+                .max_h(px(if tasks_in_right_gutter { 320.0 } else { 176.0 }))
+                .overflow_y_scroll()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(BORDER))
+                .bg(rgb(SURFACE))
+                .when(tasks_in_right_gutter, |pane| {
+                    pane.absolute()
+                        .bottom(px(12.0))
+                        .right(px(12.0))
+                        .w(px(TASKS_SIDE_WIDTH))
+                })
+                .when(!tasks_in_right_gutter, |pane| {
+                    pane.w_full()
+                        .max_w(px(CHAT_COLUMN_MAX_WIDTH))
+                        .mx_auto()
+                        .mb_2()
+                })
+                .child(
+                    div()
+                        .mb_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(MUTED))
+                        .child("Tasks")
+                        .child(
+                            div()
+                                .text_color(rgb(if completed_todos == todo_count {
+                                    0x7fc49a
+                                } else {
+                                    MUTED
+                                }))
+                                .child(format!("{completed_todos}/{todo_count}")),
+                        ),
+                )
+                .children(todo_rows)
+                .into_any_element()
+        });
+        let (composer_todo_pane, side_todo_pane) = if tasks_in_right_gutter {
+            (None, todo_pane)
+        } else {
+            (todo_pane, None)
+        };
 
         let composer = div()
             .flex_shrink_0()
@@ -14573,46 +14641,7 @@ impl Render for XdDesktop {
                         }),
                 )
             })
-            .when(todo_count > 0, |element| {
-                element.child(
-                    div()
-                        .id("todo-pane")
-                        .min_w_0()
-                        .w_full()
-                        .max_w(px(1040.0))
-                        .mx_auto()
-                        .mb_2()
-                        .max_h(px(176.0))
-                        .overflow_y_scroll()
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(SURFACE))
-                        .child(
-                            div()
-                                .mb_1()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_xs()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(MUTED))
-                                .child("Tasks")
-                                .child(
-                                    div()
-                                        .text_color(rgb(if completed_todos == todo_count {
-                                            0x7fc49a
-                                        } else {
-                                            MUTED
-                                        }))
-                                        .child(format!("{completed_todos}/{todo_count}")),
-                                ),
-                        )
-                        .children(todo_rows),
-                )
-            })
+            .when_some(composer_todo_pane, |element, pane| element.child(pane))
             .when(queue_count > 0, |element| {
                 element.child(
                     div()
@@ -19724,7 +19753,14 @@ impl Render for XdDesktop {
                     .child(tab_strip)
                     .map(|column| match active_tab {
                         files::FileTab::Chat => column
-                            .child(div().flex_1().min_h_0().child(transcript))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .relative()
+                                    .child(transcript)
+                                    .when_some(side_todo_pane, |body, pane| body.child(pane)),
+                            )
                             .when_some(working_for, |column, seconds| {
                                 column.child(turn_working_row(seconds))
                             })
@@ -22727,6 +22763,12 @@ mod tests {
             ),
             760
         );
+    }
+
+    #[test]
+    fn tasks_use_the_right_gutter_only_when_the_chat_keeps_its_full_width() {
+        assert!(!tasks_fit_in_right_gutter(1_511.0));
+        assert!(tasks_fit_in_right_gutter(1_512.0));
     }
 
     #[test]
