@@ -326,11 +326,32 @@ jobs:
             -Payload windows-dist `
             -OutputDirectory artifacts `
             -Profile release `
-            -Version '${{ needs.prepare.outputs.version }}'
-          ./scripts/install.ps1 `
-            -SetupPath artifacts/xd-windows-x86_64-setup.exe `
-            -SetupChecksumPath artifacts/xd-windows-x86_64-setup.exe.sha256 `
-            -Quiet
+            -Version '${{ needs.prepare.outputs.version }}' `
+            -TestDownloadBase http://127.0.0.1:18765
+
+          New-Item -ItemType Directory -Path installer-test | Out-Null
+          Copy-Item artifacts/xd-windows-x86_64-setup-download-test.exe* installer-test/
+          $server = Start-Process python -PassThru -WindowStyle Hidden `
+            -ArgumentList @('-m', 'http.server', '18765', '--bind', '127.0.0.1', '--directory', 'artifacts')
+          try {
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                Invoke-WebRequest -UseBasicParsing `
+                  http://127.0.0.1:18765/xd-windows-x86_64-msi.payload `
+                  -Method Head | Out-Null
+                break
+              } catch {
+                if ($attempt -eq 19) { throw }
+                Start-Sleep -Milliseconds 250
+              }
+            }
+            ./scripts/install.ps1 `
+              -SetupPath installer-test/xd-windows-x86_64-setup-download-test.exe `
+              -SetupChecksumPath installer-test/xd-windows-x86_64-setup-download-test.exe.sha256 `
+              -Quiet
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
 
           # Only what this job built. An artifact is rooted at the deepest
           # directory shared by everything in it, so listing a payload under
@@ -341,12 +362,10 @@ jobs:
         with:
           name: windows
           path: |
-            artifacts/xd-windows-x86_64.msi
-            artifacts/xd-windows-x86_64.msi.sha256
-            artifacts/xd1.cab
-            artifacts/xd1.cab.sha256
             artifacts/xd-windows-x86_64-setup.exe
             artifacts/xd-windows-x86_64-setup.exe.sha256
+            artifacts/xd-windows-x86_64-msi.payload
+            artifacts/xd-windows-x86_64-cab.payload
 
   publish:
     needs: [prepare, linux, macos, windows]
@@ -395,7 +414,8 @@ jobs:
           & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1))) -Release
           \`\`\`
 
-          All desktop bundles are self-contained.
+          Linux and macOS are self-contained. The Windows setup downloads its
+          verified payload.
           EOF
           )
 
@@ -403,12 +423,16 @@ jobs:
           # release replaces its files rather than making a second release of
           # the same thing.
           if gh release view "$tag" >/dev/null 2>&1; then
+            for legacy in \
+              xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
+              xd1.cab xd1.cab.sha256; do
+              gh release delete-asset "$tag" "$legacy" --yes || true
+            done
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip xd-macos-*.zip.sha256 \
-              xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
-              xd1.cab xd1.cab.sha256 \
               xd-windows-x86_64-setup.exe xd-windows-x86_64-setup.exe.sha256 \
+              xd-windows-x86_64-msi.payload xd-windows-x86_64-cab.payload \
               scripts/install.sh scripts/install-macos.sh scripts/install.ps1
           else
             gh release create "$tag" \
@@ -419,12 +443,10 @@ jobs:
               xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip \
               xd-macos-*.zip.sha256 \
-              xd-windows-x86_64.msi \
-              xd-windows-x86_64.msi.sha256 \
-              xd1.cab \
-              xd1.cab.sha256 \
               xd-windows-x86_64-setup.exe \
               xd-windows-x86_64-setup.exe.sha256 \
+              xd-windows-x86_64-msi.payload \
+              xd-windows-x86_64-cab.payload \
               scripts/install.sh \
               scripts/install-macos.sh \
               scripts/install.ps1

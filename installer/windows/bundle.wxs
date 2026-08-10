@@ -23,12 +23,12 @@
       <MsiPackage
         SourceFile="$(MsiPath)"
         Compressed="no"
-        DownloadUrl="$(DownloadBase)/{2}"
+        DownloadUrl="$(MsiDownloadUrl)"
         Vital="yes">
         <Payload
           SourceFile="$(CabPath)"
           Compressed="no"
-          DownloadUrl="$(DownloadBase)/{2}" />
+          DownloadUrl="$(CabDownloadUrl)" />
       </MsiPackage>
     </Chain>
   </Bundle>

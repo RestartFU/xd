@@ -27,12 +27,7 @@ pub fn configure_daemon(command: &mut Command, _launcher: &Path) {
         if nightly() { "nightly" } else { "release" },
     );
 
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        command.creation_flags(background_creation_flags(true));
-    }
+    configure_background(command);
 
     #[cfg(windows)]
     if let Some(bin) = _launcher.parent() {
@@ -56,6 +51,15 @@ pub fn configure_daemon(command: &mut Command, _launcher: &Path) {
         if let Ok(path) = env::join_paths(paths) {
             command.env("PATH", path);
         }
+    }
+}
+
+pub fn configure_background(_command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        _command.creation_flags(background_creation_flags(true));
     }
 }
 

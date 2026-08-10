@@ -20,7 +20,9 @@ param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string] $Version = '0.1.0',
 
-    [string] $BundleVersion
+    [string] $BundleVersion,
+
+    [string] $TestDownloadBase
 )
 
 $ErrorActionPreference = 'Stop'
@@ -53,6 +55,8 @@ if ($Profile -eq 'nightly') {
     $installName = 'xd-nightly'
     $asset = 'xd-nightly-windows-x86_64.msi'
     $setupAsset = 'xd-nightly-windows-x86_64-setup.exe'
+    $msiPayloadAsset = 'xd-nightly-windows-x86_64-msi.payload'
+    $cabPayloadAsset = 'xd-nightly-windows-x86_64-cab.payload'
     $downloadBase = 'https://github.com/RestartFU/xd/releases/download/nightly'
     $upgradeCode = '5A04BCF5-0C4A-43DE-B8F4-B5D64E8E4F93'
     $bundleUpgradeCode = '6F7420C1-080C-47A6-92A6-7FB5C3BEBCF2'
@@ -62,6 +66,8 @@ if ($Profile -eq 'nightly') {
     $installName = 'xd'
     $asset = 'xd-windows-x86_64.msi'
     $setupAsset = 'xd-windows-x86_64-setup.exe'
+    $msiPayloadAsset = 'xd-windows-x86_64-msi.payload'
+    $cabPayloadAsset = 'xd-windows-x86_64-cab.payload'
     $downloadBase = 'https://github.com/RestartFU/xd/releases/latest/download'
     $upgradeCode = 'CDE5479B-9093-4E3C-8144-FCE8C86BEA18'
     $bundleUpgradeCode = '94B90C1E-173A-4628-9DC3-188E411429D0'
@@ -99,6 +105,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Installing the WiX bootstrapper extension fail
 $output = Join-Path $outputPath $asset
 $cabOutput = Join-Path $outputPath $cabAsset
 $setupOutput = Join-Path $outputPath $setupAsset
+$msiPayloadOutput = Join-Path $outputPath $msiPayloadAsset
+$cabPayloadOutput = Join-Path $outputPath $cabPayloadAsset
 $iconPath = Join-Path $repositoryRoot 'desktop\assets\xd.ico'
 if (-not (Test-Path -LiteralPath $iconPath -PathType Leaf)) {
     throw "The Windows application icon is missing: $iconPath"
@@ -119,22 +127,38 @@ if ($LASTEXITCODE -ne 0) {
 if (-not (Test-Path -LiteralPath $cabOutput -PathType Leaf)) {
     throw "WiX did not produce the external payload cabinet: $cabOutput"
 }
+Copy-Item -LiteralPath $output -Destination $msiPayloadOutput -Force
+Copy-Item -LiteralPath $cabOutput -Destination $cabPayloadOutput -Force
 
-& $wix build (Join-Path $repositoryRoot 'installer\windows\bundle.wxs') `
-    -arch x64 `
-    -ext $bootstrapperExtension `
-    -d "MsiPath=$output" `
-    -d "CabPath=$cabOutput" `
-    -d "Version=$BundleVersion" `
-    -d "ProductName=$productName" `
-    -d "BundleUpgradeCode=$bundleUpgradeCode" `
-    -d "DownloadBase=$downloadBase" `
-    -d "IconPath=$iconPath" `
-    -o $setupOutput
-if ($LASTEXITCODE -ne 0) {
-    throw "Building the downloading installer failed with exit code $LASTEXITCODE."
+function Build-Bundle([string] $Target, [string] $BaseUri) {
+    $base = $BaseUri.TrimEnd('/')
+    & $wix build (Join-Path $repositoryRoot 'installer\windows\bundle.wxs') `
+        -arch x64 `
+        -ext $bootstrapperExtension `
+        -d "MsiPath=$output" `
+        -d "CabPath=$cabOutput" `
+        -d "Version=$BundleVersion" `
+        -d "ProductName=$productName" `
+        -d "BundleUpgradeCode=$bundleUpgradeCode" `
+        -d "MsiDownloadUrl=$base/$msiPayloadAsset" `
+        -d "CabDownloadUrl=$base/$cabPayloadAsset" `
+        -d "IconPath=$iconPath" `
+        -o $Target
+    if ($LASTEXITCODE -ne 0) {
+        throw "Building the downloading installer failed with exit code $LASTEXITCODE."
+    }
 }
-foreach ($smallArtifact in @($output, $setupOutput)) {
+
+Build-Bundle $setupOutput $downloadBase
+$smallArtifacts = @($output, $setupOutput)
+if (-not [string]::IsNullOrWhiteSpace($TestDownloadBase)) {
+    $testSetupOutput = Join-Path $outputPath (
+        $setupAsset -replace '\.exe$', '-download-test.exe'
+    )
+    Build-Bundle $testSetupOutput $TestDownloadBase
+    $smallArtifacts += $testSetupOutput
+}
+foreach ($smallArtifact in $smallArtifacts) {
     if ((Get-Item -LiteralPath $smallArtifact).Length -ge 32MB) {
         throw "The downloading installer unexpectedly contains the application payload: $smallArtifact"
     }
@@ -150,7 +174,12 @@ function Write-Checksum([string] $Path) {
 Write-Checksum $output
 Write-Checksum $cabOutput
 Write-Checksum $setupOutput
+if (-not [string]::IsNullOrWhiteSpace($TestDownloadBase)) {
+    Write-Checksum $testSetupOutput
+}
 
 Write-Host "Windows web installer: $setupOutput"
+Write-Host "Windows remote MSI payload: $msiPayloadOutput"
+Write-Host "Windows remote cabinet payload: $cabPayloadOutput"
 Write-Host "Windows MSI metadata: $output"
 Write-Host "Windows payload cabinet: $cabOutput"

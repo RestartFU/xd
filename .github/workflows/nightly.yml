@@ -189,11 +189,32 @@ jobs:
             -Payload windows-dist `
             -OutputDirectory artifacts `
             -Profile nightly `
-            -Version 0.1.0
-          ./scripts/install.ps1 `
-            -SetupPath artifacts/xd-nightly-windows-x86_64-setup.exe `
-            -SetupChecksumPath artifacts/xd-nightly-windows-x86_64-setup.exe.sha256 `
-            -Quiet
+            -Version 0.1.0 `
+            -TestDownloadBase http://127.0.0.1:18765
+
+          New-Item -ItemType Directory -Path installer-test | Out-Null
+          Copy-Item artifacts/xd-nightly-windows-x86_64-setup-download-test.exe* installer-test/
+          $server = Start-Process python -PassThru -WindowStyle Hidden `
+            -ArgumentList @('-m', 'http.server', '18765', '--bind', '127.0.0.1', '--directory', 'artifacts')
+          try {
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                Invoke-WebRequest -UseBasicParsing `
+                  http://127.0.0.1:18765/xd-nightly-windows-x86_64-msi.payload `
+                  -Method Head | Out-Null
+                break
+              } catch {
+                if ($attempt -eq 19) { throw }
+                Start-Sleep -Milliseconds 250
+              }
+            }
+            ./scripts/install.ps1 `
+              -SetupPath installer-test/xd-nightly-windows-x86_64-setup-download-test.exe `
+              -SetupChecksumPath installer-test/xd-nightly-windows-x86_64-setup-download-test.exe.sha256 `
+              -Quiet
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
 
           # Only what this job built. An artifact is rooted at the deepest
           # directory shared by everything in it, so listing a payload under
@@ -204,12 +225,10 @@ jobs:
         with:
           name: windows
           path: |
-            artifacts/xd-nightly-windows-x86_64.msi
-            artifacts/xd-nightly-windows-x86_64.msi.sha256
-            artifacts/xd1.cab
-            artifacts/xd1.cab.sha256
             artifacts/xd-nightly-windows-x86_64-setup.exe
             artifacts/xd-nightly-windows-x86_64-setup.exe.sha256
+            artifacts/xd-nightly-windows-x86_64-msi.payload
+            artifacts/xd-nightly-windows-x86_64-cab.payload
 
   android:
     runs-on: [self-hosted, linux, x64, xd]
@@ -299,7 +318,8 @@ jobs:
           It is a test build signed with a per-build key, so uninstall the
           previous one before installing a newer APK.
 
-          Both desktop bundles are self-contained and install beside a release.
+          Linux and macOS are self-contained. The Windows setup downloads its
+          verified payload and installs beside a release.
           EOF
           )
 
@@ -317,12 +337,10 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz.sha256 \
             xd-nightly-macos-*.zip \
             xd-nightly-macos-*.zip.sha256 \
-            xd-nightly-windows-x86_64.msi \
-            xd-nightly-windows-x86_64.msi.sha256 \
-            xd1.cab \
-            xd1.cab.sha256 \
             xd-nightly-windows-x86_64-setup.exe \
             xd-nightly-windows-x86_64-setup.exe.sha256 \
+            xd-nightly-windows-x86_64-msi.payload \
+            xd-nightly-windows-x86_64-cab.payload \
             xd-nightly-android.apk \
             xd-nightly-android.apk.sha256 \
             scripts/install.sh \

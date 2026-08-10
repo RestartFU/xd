@@ -30,10 +30,10 @@ use gpui::{
     Animation, AnimationExt, App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem,
     Context, CursorStyle, Decorations, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
     Image, KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, PathPromptOptions, Point, Render, ResizeEdge, SharedString,
-    StyledText, TextRun, Timer, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*,
-    px, relative, rgb, rgba, size, svg,
+    MouseUpEvent, ObjectFit, PathPromptOptions, Point, Render, ResizeEdge, ScrollHandle,
+    SharedString, StyledText, TextRun, Timer, TitlebarOptions, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowDecorations, WindowOptions, canvas, div, img, list,
+    point, prelude::*, px, relative, rgb, rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -525,6 +525,11 @@ fn terminal_geometry(width: f32, height: f32, cell_width: f32, line_height: f32)
     (columns.clamp(20, 500), rows.clamp(4, 200))
 }
 
+fn terminal_scroll_is_at_bottom(scroll: &ScrollHandle) -> bool {
+    let remaining = f32::from(scroll.max_offset().height) + f32::from(scroll.offset().y);
+    remaining <= 2.0
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 struct GitStatus {
     branch: String,
@@ -554,9 +559,17 @@ impl GitStatus {
 }
 
 struct PendingSend {
+    chat_id: String,
     text: String,
     attachments: Vec<Attachment>,
     restore: bool,
+    optimistic: OptimisticSend,
+}
+
+#[derive(Clone, Copy)]
+enum OptimisticSend {
+    Started { message_index: Option<usize> },
+    Queued { index: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1050,6 +1063,10 @@ impl ChatEndpoint {
     }
 }
 
+fn sidebar_files_replace_secondary(endpoint: ChatEndpoint, remote_state: RemoteState) -> bool {
+    endpoint == ChatEndpoint::Remote && remote_state == RemoteState::Connected
+}
+
 #[derive(Clone, Default)]
 struct RemotePanel {
     host: String,
@@ -1216,6 +1233,7 @@ struct XdDesktop {
     /// The editor behind whichever file tab is in front.
     tab_editor: Entity<FileEditor>,
     terminal_input: Entity<ComposerInput>,
+    terminal_scroll: ScrollHandle,
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
@@ -1670,6 +1688,7 @@ impl XdDesktop {
             file_editor,
             tab_editor,
             terminal_input,
+            terminal_scroll: ScrollHandle::new(),
             auth_input,
             secret_name_input,
             secret_value_input,
@@ -2676,6 +2695,13 @@ impl XdDesktop {
                     self.sending = false;
                     self.restore_pending_send(cx);
                 }
+                RequestKind::QueueMutation { chat_id }
+                | RequestKind::Cancel { chat_id }
+                | RequestKind::SetOption { chat_id }
+                    if self.chat_is_active(chat_id) =>
+                {
+                    self.request_chat(chat_id);
+                }
                 RequestKind::Messages { chat_id, .. } if self.chat_is_active(chat_id) => {
                     self.transcript_loading = false;
                     self.transcript_page_loading = false;
@@ -3082,6 +3108,9 @@ impl XdDesktop {
                     {
                         edit.submitting = None;
                     }
+                    if self.chat_is_active(chat_id) {
+                        self.request_chat(chat_id);
+                    }
                 }
                 RequestKind::RenameFolder { folder_id, .. } => {
                     if let Some(edit) = &mut self.sidebar_edit
@@ -3089,6 +3118,7 @@ impl XdDesktop {
                     {
                         edit.submitting = false;
                     }
+                    self.request_tree();
                 }
                 RequestKind::MoveFolder { folder_id, .. } => {
                     if self.sidebar_move.as_ref() == Some(&SidebarTarget::Folder(folder_id.clone()))
@@ -3096,6 +3126,7 @@ impl XdDesktop {
                         self.sidebar_move_submitting = false;
                         self.sidebar_move_destination = None;
                     }
+                    self.request_tree();
                 }
                 RequestKind::RenameChat { chat_id, .. } => {
                     if let Some(edit) = &mut self.sidebar_edit
@@ -3103,12 +3134,14 @@ impl XdDesktop {
                     {
                         edit.submitting = false;
                     }
+                    self.request_tree();
                 }
                 RequestKind::MoveChat { chat_id, .. } => {
                     if self.sidebar_move.as_ref() == Some(&SidebarTarget::Chat(chat_id.clone())) {
                         self.sidebar_move_submitting = false;
                         self.sidebar_move_destination = None;
                     }
+                    self.request_tree();
                 }
                 RequestKind::TrashFolder { folder_id } => {
                     if self.pending_sidebar_delete.as_ref()
@@ -3116,6 +3149,7 @@ impl XdDesktop {
                     {
                         self.sidebar_delete_submitting = false;
                     }
+                    self.request_tree();
                 }
                 RequestKind::DeleteChat { chat_id } => {
                     if self.pending_sidebar_delete.as_ref()
@@ -3123,6 +3157,7 @@ impl XdDesktop {
                     {
                         self.sidebar_delete_submitting = false;
                     }
+                    self.request_tree();
                 }
                 _ => {}
             }
@@ -4036,11 +4071,20 @@ impl XdDesktop {
             }
             RequestKind::Send { chat_id, text } if self.chat_is_active(&chat_id) => {
                 self.sending = false;
-                self.pending_send = None;
                 let queued = value
                     .get("queued")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                if let Some(pending) = self.pending_send.take() {
+                    let predicted_queued =
+                        matches!(pending.optimistic, OptimisticSend::Queued { .. });
+                    if predicted_queued != queued {
+                        self.rollback_optimistic_send(&pending);
+                        if !queued {
+                            let _ = self.apply_optimistic_send(&pending.text);
+                        }
+                    }
+                }
                 if !queued {
                     self.model.start_working();
                     self.request_messages(&chat_id);
@@ -4357,31 +4401,52 @@ impl XdDesktop {
                             });
                         }
                         panel.selected = Some(terminal_id);
+                        self.terminal_scroll.scroll_to_bottom();
                     }
                 }
             }
             "terminal-output" if self.event_is_active(&body) => {
+                let terminal_id = body.get("terminal").and_then(Value::as_str);
+                let follow_output = self
+                    .terminal_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
+                    && terminal_scroll_is_at_bottom(&self.terminal_scroll);
                 if let Some(panel) = &mut self.terminal_panel
-                    && let Some(session) = panel.sessions.iter_mut().find(|session| {
-                        Some(session.id.as_str()) == body.get("terminal").and_then(Value::as_str)
-                    })
+                    && let Some(session) = panel
+                        .sessions
+                        .iter_mut()
+                        .find(|session| Some(session.id.as_str()) == terminal_id)
                     && let Some(data) = body.get("data").and_then(Value::as_str)
                     && let Ok(data) = STANDARD.decode(data)
                 {
                     session.screen.feed(&data);
                     self.terminal_cursor_visible = true;
+                    if follow_output {
+                        self.terminal_scroll.scroll_to_bottom();
+                    }
                 }
             }
             "terminal-resized" if self.event_is_active(&body) => {
+                let terminal_id = body.get("terminal").and_then(Value::as_str);
+                let follow_output = self
+                    .terminal_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
+                    && terminal_scroll_is_at_bottom(&self.terminal_scroll);
                 if let Some(panel) = &mut self.terminal_panel
-                    && let Some(session) = panel.sessions.iter_mut().find(|session| {
-                        Some(session.id.as_str()) == body.get("terminal").and_then(Value::as_str)
-                    })
+                    && let Some(session) = panel
+                        .sessions
+                        .iter_mut()
+                        .find(|session| Some(session.id.as_str()) == terminal_id)
                 {
                     let columns =
                         body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
                     let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
                     session.screen.resize(columns, rows);
+                    if follow_output {
+                        self.terminal_scroll.scroll_to_bottom();
+                    }
                 }
             }
             "terminal-closed" if self.event_is_active(&body) => {
@@ -6732,6 +6797,7 @@ impl XdDesktop {
 
     fn send_terminal_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         self.terminal_cursor_visible = true;
+        self.terminal_scroll.scroll_to_bottom();
         let Some(terminal_id) = self
             .terminal_panel
             .as_ref()
@@ -6815,6 +6881,7 @@ impl XdDesktop {
             return;
         }
         panel.selected = Some(terminal_id.clone());
+        self.terminal_scroll.scroll_to_bottom();
         let viewport = panel.viewport;
         if let Some((columns, rows)) = viewport
             && let Some(session) = panel.selected_mut()
@@ -6851,6 +6918,7 @@ impl XdDesktop {
         panel.selected = previous
             .filter(|selected| panel.sessions.iter().any(|session| &session.id == selected))
             .or_else(|| panel.sessions.first().map(|session| session.id.clone()));
+        self.terminal_scroll.scroll_to_bottom();
     }
 
     fn terminal_tab_from_snapshot(terminal: &Value) -> Option<TerminalTab> {
@@ -7744,12 +7812,26 @@ impl XdDesktop {
         });
         match result {
             Some(Ok(())) => {
-                if let Some(active) = &mut self.sidebar_edit
-                    && active.target == edit.target
-                {
-                    active.text = text.to_owned();
-                    active.submitting = true;
+                match &edit.target {
+                    SidebarTarget::Folder(folder_id) => {
+                        if let Some(folder) = self
+                            .model
+                            .folders
+                            .iter_mut()
+                            .find(|folder| &folder.id == folder_id)
+                        {
+                            folder.name = text.to_owned();
+                        }
+                    }
+                    SidebarTarget::Chat(chat_id) => {
+                        if let Some(chat) =
+                            self.model.chats.iter_mut().find(|chat| &chat.id == chat_id)
+                        {
+                            chat.title = Some(text.to_owned());
+                        }
+                    }
                 }
+                self.cancel_sidebar_edit(cx);
             }
             Some(Err(error)) => self.model.connection_error = Some(error),
             None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
@@ -7868,9 +7950,27 @@ impl XdDesktop {
                 self.sidebar_context_menu = None;
                 self.pending_sidebar_delete = None;
                 self.sidebar_delete_submitting = false;
-                self.sidebar_move = Some(target);
-                self.sidebar_move_submitting = true;
-                self.sidebar_move_destination = Some(destination);
+                if let Some(index) = self
+                    .model
+                    .folders
+                    .iter()
+                    .position(|folder| folder.id == *folder_id)
+                    && let Some(anchor) = self
+                        .model
+                        .folders
+                        .iter()
+                        .position(|folder| folder.id == anchor_id)
+                {
+                    let mut folder = self.model.folders.remove(index);
+                    folder.parent = destination.clone();
+                    let anchor = if index < anchor { anchor - 1 } else { anchor };
+                    self.model
+                        .folders
+                        .insert(anchor + usize::from(after), folder);
+                }
+                self.sidebar_move = None;
+                self.sidebar_move_submitting = false;
+                self.sidebar_move_destination = None;
             }
             Some(Err(error)) => self.model.connection_error = Some(error),
             None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
@@ -7895,8 +7995,30 @@ impl XdDesktop {
         });
         match result {
             Some(Ok(())) => {
-                self.sidebar_move_submitting = true;
-                self.sidebar_move_destination = Some(destination);
+                match &target {
+                    SidebarTarget::Folder(folder_id) => {
+                        if let Some(folder) = self
+                            .model
+                            .folders
+                            .iter_mut()
+                            .find(|folder| &folder.id == folder_id)
+                        {
+                            folder.parent = destination;
+                        }
+                    }
+                    SidebarTarget::Chat(chat_id) => {
+                        if let Some(folder_id) = destination
+                            && let Some(chat) =
+                                self.model.chats.iter_mut().find(|chat| &chat.id == chat_id)
+                        {
+                            chat.folder = folder_id;
+                        }
+                    }
+                }
+                self.sidebar_move = None;
+                self.sidebar_move_submitting = false;
+                self.sidebar_move_destination = None;
+                self.sidebar_context_menu = None;
             }
             Some(Err(error)) => self.model.connection_error = Some(error),
             None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
@@ -7904,18 +8026,24 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn toggle_new_worktree(&mut self) {
+    fn toggle_new_worktree(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
         if self.model.has_messages || self.model.working {
             return;
         }
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.set_new_worktree(&chat_id, !self.model.new_worktree)
+        let enabled = !self.model.new_worktree;
+        match self
+            .active_daemon()
+            .cloned()
+            .map(|daemon| daemon.set_new_worktree(&chat_id, enabled))
         {
-            self.model.connection_error = Some(error);
+            Some(Ok(())) => self.model.new_worktree = enabled,
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
     fn toggle_composer_menu(&mut self, menu: ComposerMenu, cx: &mut Context<Self>) {
@@ -8001,8 +8129,26 @@ impl XdDesktop {
                             .any(|candidate| candidate.id == model)
                 }) =>
             {
-                self.active_daemon()
-                    .map(|daemon| daemon.set_model(&chat_id, &backend, &model))
+                let result = self
+                    .active_daemon()
+                    .map(|daemon| daemon.set_model(&chat_id, &backend, &model));
+                if result.as_ref().is_some_and(Result::is_ok) {
+                    self.model.backend = backend.clone();
+                    self.model.model = Some(model);
+                    if backend != "codex" {
+                        self.model.fast = false;
+                        self.model.claude_mode = false;
+                    }
+                    if let Some(summary) = self
+                        .model
+                        .chats
+                        .iter_mut()
+                        .find(|summary| summary.id == chat_id)
+                    {
+                        summary.backend = backend;
+                    }
+                }
+                result
             }
             ComposerChoice::Effort(effort)
                 if self.model.agent_backends.iter().any(|backend| {
@@ -8011,14 +8157,24 @@ impl XdDesktop {
                         && !(self.model.claude_mode && effort == "ultra")
                 }) =>
             {
-                self.active_daemon()
-                    .map(|daemon| daemon.set_effort(&chat_id, &effort))
+                let result = self
+                    .active_daemon()
+                    .map(|daemon| daemon.set_effort(&chat_id, &effort));
+                if result.as_ref().is_some_and(Result::is_ok) {
+                    self.model.effort = effort;
+                }
+                result
             }
             ComposerChoice::Access(access)
                 if matches!(access.as_str(), "read-only" | "edit" | "full") =>
             {
-                self.active_daemon()
-                    .map(|daemon| daemon.set_access(&chat_id, &access))
+                let result = self
+                    .active_daemon()
+                    .map(|daemon| daemon.set_access(&chat_id, &access));
+                if result.as_ref().is_some_and(Result::is_ok) {
+                    self.model.access = access;
+                }
+                result
             }
             // A turn runs inside the workspace, so this one waits for it.
             ComposerChoice::Workspace(path)
@@ -8030,8 +8186,16 @@ impl XdDesktop {
                         .iter()
                         .any(|worktree| worktree.path == path) =>
             {
-                self.active_daemon()
-                    .map(|daemon| daemon.set_workspace(&chat_id, &path))
+                let result = self
+                    .active_daemon()
+                    .map(|daemon| daemon.set_workspace(&chat_id, &path));
+                if result.as_ref().is_some_and(Result::is_ok) {
+                    for worktree in &mut self.model.worktrees {
+                        worktree.current = worktree.path == path;
+                    }
+                    self.model.new_worktree = false;
+                }
+                result
             }
             _ => {
                 cx.notify();
@@ -8046,43 +8210,66 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn toggle_plan(&mut self) {
+    fn toggle_plan(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.set_plan(&chat_id, !self.model.plan)
+        let enabled = !self.model.plan;
+        match self
+            .active_daemon()
+            .cloned()
+            .map(|daemon| daemon.set_plan(&chat_id, enabled))
         {
-            self.model.connection_error = Some(error);
+            Some(Ok(())) => self.model.plan = enabled,
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
-    fn toggle_fast(&mut self) {
+    fn toggle_fast(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
         if self.model.backend != "codex" {
             return;
         }
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.set_fast(&chat_id, !self.model.fast)
+        let enabled = !self.model.fast;
+        match self
+            .active_daemon()
+            .cloned()
+            .map(|daemon| daemon.set_fast(&chat_id, enabled))
         {
-            self.model.connection_error = Some(error);
+            Some(Ok(())) => self.model.fast = enabled,
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
-    fn toggle_claude_mode(&mut self) {
+    fn toggle_claude_mode(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
         if self.model.backend != "codex" {
             return;
         }
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.set_claude_mode(&chat_id, !self.model.claude_mode)
+        let enabled = !self.model.claude_mode;
+        match self
+            .active_daemon()
+            .cloned()
+            .map(|daemon| daemon.set_claude_mode(&chat_id, enabled))
         {
-            self.model.connection_error = Some(error);
+            Some(Ok(())) => {
+                self.model.claude_mode = enabled;
+                if enabled && self.model.effort == "ultra" {
+                    self.model.effort = "max".into();
+                }
+            }
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
     fn remove_selected_worktree(&mut self) {
@@ -8362,11 +8549,14 @@ impl XdDesktop {
             return;
         }
 
+        let optimistic = self.apply_optimistic_send(&text);
         self.sending = true;
         self.pending_send = Some(PendingSend {
+            chat_id: chat_id.clone(),
             text,
             attachments,
             restore: true,
+            optimistic,
         });
         self.set_composer_text(String::new(), cx);
         self.model.draft_attachments.clear();
@@ -8378,10 +8568,77 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn apply_optimistic_send(&mut self, text: &str) -> OptimisticSend {
+        if self.model.working {
+            let index = self.model.queue.len();
+            self.model.queue.push(text.to_owned());
+            return OptimisticSend::Queued { index };
+        }
+
+        let message_index = (!text.is_empty()).then(|| {
+            let index = self.model.messages.len();
+            self.model
+                .messages
+                .push(Message::new(None, "user", text, None));
+            self.transcript_snapshot.sync_messages(&self.model);
+            self.sync_transcript_count(false);
+            index
+        });
+        self.model.start_working();
+        self.model.has_messages = true;
+        if let Some(summary) = self
+            .model
+            .chats
+            .iter_mut()
+            .find(|summary| Some(summary.id.as_str()) == self.model.selected_chat.as_deref())
+        {
+            summary.working = true;
+        }
+        OptimisticSend::Started { message_index }
+    }
+
+    fn rollback_optimistic_send(&mut self, pending: &PendingSend) {
+        if self.model.selected_chat.as_deref() != Some(pending.chat_id.as_str()) {
+            return;
+        }
+        match pending.optimistic {
+            OptimisticSend::Started { message_index } => {
+                if let Some(index) = message_index
+                    && self.model.messages.get(index).is_some_and(|message| {
+                        message.id.is_none()
+                            && message.role == "user"
+                            && message.content == pending.text
+                    })
+                {
+                    self.model.messages.remove(index);
+                    self.transcript_snapshot.sync_messages(&self.model);
+                    self.sync_transcript_count(false);
+                }
+                self.model.stop_working();
+                self.model.has_messages = self
+                    .model
+                    .messages
+                    .iter()
+                    .any(|message| message.role == "user");
+                if let Some(summary) = self.model.chats.iter_mut().find(|summary| {
+                    Some(summary.id.as_str()) == self.model.selected_chat.as_deref()
+                }) {
+                    summary.working = false;
+                }
+            }
+            OptimisticSend::Queued { index } => {
+                if self.model.queue.get(index) == Some(&pending.text) {
+                    self.model.queue.remove(index);
+                }
+            }
+        }
+    }
+
     fn restore_pending_send(&mut self, cx: &mut Context<Self>) {
         let Some(pending) = self.pending_send.take() else {
             return;
         };
+        self.rollback_optimistic_send(&pending);
         if !pending.restore {
             return;
         }
@@ -8420,10 +8677,13 @@ impl XdDesktop {
             return false;
         }
         self.sending = true;
+        let optimistic = self.apply_optimistic_send(&prompt);
         self.pending_send = Some(PendingSend {
+            chat_id,
             text: prompt,
             attachments: Vec::new(),
             restore: false,
+            optimistic,
         });
         true
     }
@@ -8491,15 +8751,23 @@ impl XdDesktop {
         self.answer_question(self.question_answer.trim().to_owned(), cx);
     }
 
-    fn drop_queued(&mut self, index: usize) {
-        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+    fn drop_queued(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.drop_queue(chat_id, index)
+        match self
+            .active_daemon()
+            .cloned()
+            .map(|daemon| daemon.drop_queue(&chat_id, index))
         {
-            self.model.connection_error = Some(error);
+            Some(Ok(())) if index < self.model.queue.len() => {
+                self.model.queue.remove(index);
+            }
+            Some(Ok(())) => {}
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
     fn begin_queue_edit(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -8547,14 +8815,16 @@ impl XdDesktop {
         if let Some(daemon) = self.active_daemon().cloned() {
             if let Err(error) = daemon.edit_queue(&edit.chat_id, edit.index, &edit.original, text) {
                 self.model.connection_error = Some(error);
-            } else if let Some(active) = &mut self.queue_edit
-                && active.chat_id == edit.chat_id
-                && active.index == edit.index
-                && active.original == edit.original
-            {
-                active.submitting = Some(text.to_owned());
+            } else {
+                if self.model.selected_chat.as_deref() == Some(edit.chat_id.as_str())
+                    && self.model.queue.get(edit.index) == Some(&edit.original)
+                {
+                    self.model.queue[edit.index] = text.to_owned();
+                }
+                self.cancel_queue_edit(cx);
             }
         }
+        cx.notify();
     }
 
     fn cancel_queue_edit(&mut self, cx: &mut Context<Self>) {
@@ -8564,18 +8834,27 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn steer_queued(&mut self, index: usize) {
-        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+    fn steer_queued(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        let Some(text) = self.model.queue.get(index) else {
+        let Some(text) = self.model.queue.get(index).cloned() else {
             return;
         };
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.steer_queue(chat_id, index, text)
+        match self
+            .active_daemon()
+            .cloned()
+            .map(|daemon| daemon.steer_queue(&chat_id, index, &text))
         {
-            self.model.connection_error = Some(error);
+            Some(Ok(())) if index < self.model.queue.len() => {
+                let selected = self.model.queue.remove(index);
+                self.model.queue.insert(0, selected);
+            }
+            Some(Ok(())) => {}
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
     fn reorder_queued(
@@ -8585,8 +8864,9 @@ impl XdDesktop {
         anchor: usize,
         anchor_text: &str,
         after: bool,
+        cx: &mut Context<Self>,
     ) {
-        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
         if source == anchor
@@ -8595,23 +8875,46 @@ impl XdDesktop {
         {
             return;
         }
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) =
-                daemon.reorder_queue(chat_id, source, source_text, anchor, anchor_text, after)
-        {
-            self.model.connection_error = Some(error);
+        match self.active_daemon().cloned().map(|daemon| {
+            daemon.reorder_queue(&chat_id, source, source_text, anchor, anchor_text, after)
+        }) {
+            Some(Ok(())) => {
+                let selected = self.model.queue.remove(source);
+                let anchor = if source < anchor { anchor - 1 } else { anchor };
+                self.model
+                    .queue
+                    .insert(anchor + usize::from(after), selected);
+            }
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
-    fn cancel_turn(&mut self) {
-        let Some(chat_id) = self.model.selected_chat.as_deref() else {
+    fn cancel_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.cancel(chat_id)
+        match self
+            .active_daemon()
+            .cloned()
+            .map(|daemon| daemon.cancel(&chat_id))
         {
-            self.model.connection_error = Some(error);
+            Some(Ok(())) => {
+                self.model.stop_working();
+                if let Some(summary) = self
+                    .model
+                    .chats
+                    .iter_mut()
+                    .find(|summary| summary.id == chat_id)
+                {
+                    summary.working = false;
+                }
+            }
+            Some(Err(error)) => self.model.connection_error = Some(error),
+            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
         }
+        cx.notify();
     }
 
     fn toggle_shortcut(&mut self, workspace: bool) {
@@ -11783,9 +12086,12 @@ impl Render for XdDesktop {
             }
         }
 
+        let remote_sidebar_files =
+            sidebar_files_replace_secondary(self.active_endpoint, self.remote_state);
         let secondary_endpoint = self.active_endpoint.other();
         let secondary_is_remote = secondary_endpoint == ChatEndpoint::Remote;
-        let show_secondary = !secondary_is_remote || self.remote_credentials.is_some();
+        let show_secondary =
+            !remote_sidebar_files && (!secondary_is_remote || self.remote_credentials.is_some());
         if show_secondary {
             let secondary_connected = if secondary_is_remote {
                 self.remote_state == RemoteState::Connected
@@ -11943,6 +12249,115 @@ impl Render for XdDesktop {
                 );
             }
         }
+
+        let sidebar_file_browser = remote_sidebar_files.then(|| {
+            let rows = self
+                .file_tree
+                .rows()
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let path = row.path.clone();
+                    let directory = row.directory;
+                    div()
+                        .id(("sidebar-file-row", index))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .py_0p5()
+                        .pr_2()
+                        .pl(px(12.0 + 12.0 * row.depth as f32))
+                        .text_xs()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(SURFACE_HIGH)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if directory {
+                                this.toggle_tree_directory(path.clone(), cx);
+                            } else {
+                                this.open_file_tab(path.clone(), cx);
+                            }
+                        }))
+                        .child(div().w(px(12.0)).text_color(rgb(MUTED)).child(
+                            match (row.directory, row.loading, row.expanded) {
+                                (_, true, _) => "·",
+                                (true, false, true) => "▾",
+                                (true, false, false) => "▸",
+                                _ => "",
+                            },
+                        ))
+                        .text_color(rgb(if row.directory { TEXT } else { MUTED }))
+                        .child(row.name)
+                })
+                .collect::<Vec<_>>();
+            let empty = rows.is_empty();
+            let status = if self.model.selected_chat.is_none() {
+                "Select a chat to browse its files."
+            } else if self.file_tree.is_loading("") {
+                "Loading files…"
+            } else if self.file_tree.has_failed("") {
+                "Couldn’t load files."
+            } else if self.file_tree.is_loaded("") {
+                "This workspace has no visible files."
+            } else {
+                "Loading files…"
+            };
+            let chat_title = selected
+                .as_ref()
+                .and_then(|chat| chat.title.as_deref())
+                .unwrap_or("Select a chat")
+                .to_owned();
+            div()
+                .id("remote-chat-files")
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .h(px(38.0))
+                        .flex_shrink_0()
+                        .px_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("FILES")
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .text_color(rgb(TEXT))
+                                .child(chat_title),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("remote-chat-file-tree")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .children(rows)
+                        .when(empty, |tree| {
+                            tree.child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .px_4()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(status),
+                            )
+                        }),
+                )
+        });
 
         let creating_workspace = self.creating_workspace;
         let workspace_create_submitting = self.workspace_create_submitting;
@@ -12245,6 +12660,7 @@ impl Render for XdDesktop {
                 div()
                     .id("workspace-tree")
                     .flex_1()
+                    .min_h_0()
                     .overflow_y_scroll()
                     .can_drop(move |value, _, _| {
                         value.downcast_ref::<SidebarDrag>().is_some_and(|drag| {
@@ -12264,7 +12680,10 @@ impl Render for XdDesktop {
                         }),
                     )
                     .children(tree_rows),
-            );
+            )
+            .when_some(sidebar_file_browser, |sidebar, browser| {
+                sidebar.child(browser)
+            });
 
         let title = selected
             .as_ref()
@@ -12860,9 +13279,9 @@ impl Render for XdDesktop {
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(0x242428)))
                         })
-                        .on_click(cx.listener(move |this, _, _, _| {
+                        .on_click(cx.listener(move |this, _, _, cx| {
                             if can_toggle_fast {
-                                this.toggle_fast();
+                                this.toggle_fast(cx);
                             }
                         }))
                         .child(if fast { "Fast: on" } else { "Fast: off" }),
@@ -12883,9 +13302,9 @@ impl Render for XdDesktop {
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(0x242428)))
                         })
-                        .on_click(cx.listener(move |this, _, _, _| {
+                        .on_click(cx.listener(move |this, _, _, cx| {
                             if can_toggle_claude_mode {
-                                this.toggle_claude_mode();
+                                this.toggle_claude_mode(cx);
                             }
                         }))
                         .child(if claude_mode {
@@ -12934,9 +13353,9 @@ impl Render for XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .on_click(cx.listener(move |this, _, _, _| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if can_change_agent {
-                            this.toggle_plan();
+                            this.toggle_plan(cx);
                         }
                     }))
                     .child(if self.model.plan {
@@ -12996,9 +13415,9 @@ impl Render for XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(0x242428)))
                     })
-                    .on_click(cx.listener(move |this, _, _, _| {
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if can_change_worktree {
-                            this.toggle_new_worktree();
+                            this.toggle_new_worktree(cx);
                         }
                     }))
                     .child(if new_worktree {
@@ -13023,8 +13442,7 @@ impl Render for XdDesktop {
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if working {
-                            this.cancel_turn();
-                            cx.notify();
+                            this.cancel_turn(cx);
                         }
                     }))
                     .child(if working { "■ Stop turn" } else { "Ready" }),
@@ -13367,8 +13785,7 @@ impl Render for XdDesktop {
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(0x242428)))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.steer_queued(index);
-                                        cx.notify();
+                                        this.steer_queued(index, cx);
                                     }))
                                     .child("Send now"),
                             )
@@ -13384,8 +13801,7 @@ impl Render for XdDesktop {
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(0x3b282e)))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.drop_queued(index);
-                                        cx.notify();
+                                        this.drop_queued(index, cx);
                                     }))
                                     .child("Remove"),
                             ),
@@ -13414,8 +13830,8 @@ impl Render for XdDesktop {
                                     index,
                                     &before_anchor_text,
                                     false,
+                                    cx,
                                 );
-                                cx.notify();
                             })),
                     )
                     .child(
@@ -13441,8 +13857,8 @@ impl Render for XdDesktop {
                                     index,
                                     &after_anchor_text,
                                     true,
+                                    cx,
                                 );
-                                cx.notify();
                             })),
                     )
                     .into_any_element()
@@ -14102,8 +14518,7 @@ impl Render for XdDesktop {
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if working {
-                                    this.cancel_turn();
-                                    cx.notify();
+                                    this.cancel_turn(cx);
                                 } else if can_send {
                                     this.send_composer(cx);
                                 }
@@ -15294,6 +15709,7 @@ impl Render for XdDesktop {
                         .flex_1()
                         .min_h_0()
                         .overflow_y_scroll()
+                        .track_scroll(&self.terminal_scroll)
                         .p_3()
                         .font_family(MONO)
                         .text_size(px(13.0))
@@ -20563,6 +20979,22 @@ mod tests {
         assert_eq!(ChatEndpoint::Remote.other(), ChatEndpoint::Local);
     }
 
+    #[test]
+    fn active_connected_remote_replaces_the_local_sidebar_with_files() {
+        assert!(sidebar_files_replace_secondary(
+            ChatEndpoint::Remote,
+            RemoteState::Connected
+        ));
+        assert!(!sidebar_files_replace_secondary(
+            ChatEndpoint::Remote,
+            RemoteState::Offline
+        ));
+        assert!(!sidebar_files_replace_secondary(
+            ChatEndpoint::Local,
+            RemoteState::Connected
+        ));
+    }
+
     #[gpui::test]
     fn remote_startup_selects_a_chat_when_local_has_none(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
@@ -20920,8 +21352,9 @@ mod tests {
 
         assert!(action.contains("if working { STOP_ICON } else { SEND_ICON }"));
         assert!(
-            action
-                .contains("if working {\n                                    this.cancel_turn();")
+            action.contains(
+                "if working {\n                                    this.cancel_turn(cx);"
+            )
         );
     }
 
@@ -21596,6 +22029,48 @@ mod tests {
             desktop.kill_terminal(cx);
 
             assert!(desktop.terminal_panel.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn optimistic_sends_render_immediately_and_roll_back_cleanly(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            desktop.model.selected_chat = Some("chat".into());
+            desktop.model.chats.push(ChatSummary {
+                id: "chat".into(),
+                folder: "folder".into(),
+                title: Some("Chat".into()),
+                backend: "codex".into(),
+                working: false,
+            });
+
+            let optimistic = desktop.apply_optimistic_send("hello");
+            assert!(desktop.model.working);
+            assert!(desktop.model.has_messages);
+            assert_eq!(desktop.model.messages.last().unwrap().content, "hello");
+            desktop.rollback_optimistic_send(&PendingSend {
+                chat_id: "chat".into(),
+                text: "hello".into(),
+                attachments: Vec::new(),
+                restore: true,
+                optimistic,
+            });
+            assert!(!desktop.model.working);
+            assert!(!desktop.model.has_messages);
+            assert!(desktop.model.messages.is_empty());
+
+            desktop.model.start_working();
+            let optimistic = desktop.apply_optimistic_send("next");
+            assert_eq!(desktop.model.queue, ["next"]);
+            desktop.rollback_optimistic_send(&PendingSend {
+                chat_id: "chat".into(),
+                text: "next".into(),
+                attachments: Vec::new(),
+                restore: true,
+                optimistic,
+            });
+            assert!(desktop.model.queue.is_empty());
         });
     }
 

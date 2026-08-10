@@ -556,7 +556,7 @@ impl StateStore {
         let queue = queue_from_column(row.10.as_deref());
         let attachments = serde_json::from_str::<Value>(&row.14).unwrap_or_else(|_| json!([]));
         let has_messages: bool = database.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ?)",
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
             [chat_id],
             |row| row.get(0),
         )?;
@@ -1000,7 +1000,7 @@ impl StateStore {
             }
             "new-worktree" => transaction.execute(
                 "UPDATE chats SET new_worktree = ?, updated_at = ? WHERE id = ? \
-                 AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+                 AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
                 params![value == Some("true"), now, chat_id, chat_id],
             )?,
             "workspace" => {
@@ -1046,7 +1046,7 @@ impl StateStore {
                 transaction.execute(
                     "UPDATE chats SET workdir = ?, original_workdir = COALESCE(original_workdir, ?), \
                      new_worktree = 0, updated_at = ? WHERE id = ? \
-                     AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+                     AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
                     params![selected, source, now, chat_id, chat_id],
                 )?
             }
@@ -1160,7 +1160,7 @@ impl StateStore {
             let (backend, model, effort, new_worktree, working, has_messages) = database
                 .query_row(
                     "SELECT backend, model, effort, new_worktree, daemon_working, \
-                     EXISTS (SELECT 1 FROM messages WHERE chat_id = chats.id) \
+                     EXISTS (SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
                      FROM chats WHERE id = ?",
                     [chat_id],
                     |row| {
@@ -2832,7 +2832,7 @@ impl StateStore {
             ));
         }
         let has_messages: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ?)",
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
             [chat_id],
             |row| row.get(0),
         )?;
@@ -2899,7 +2899,7 @@ impl StateStore {
         let changed = transaction.execute(
             "UPDATE chats SET workdir = ?, original_workdir = NULL, new_worktree = 0, updated_at = ? \
              WHERE id = ? AND workdir = ? AND original_workdir = ? \
-             AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+             AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
             params![original, now_seconds(), chat_id, selected, original, chat_id],
         )?;
         if changed != 1 {
@@ -4878,7 +4878,7 @@ fn prepare_turn(
         let changed = transaction.execute(
             "UPDATE chats SET workdir = ?, original_workdir = COALESCE(original_workdir, ?), \
              new_worktree = 0, updated_at = ? WHERE id = ? AND new_worktree = 1 \
-             AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ?)",
+             AND NOT EXISTS (SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
             params![workdir, source, now_seconds(), chat_id, chat_id],
         )?;
         if changed != 1 {
@@ -6664,6 +6664,39 @@ mod tests {
             .clone();
         assert_eq!(events[0]["role"], "event");
         assert_eq!(events[0]["content"], "Switched to GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn model_switch_event_does_not_lock_worktree_selection() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        store
+            .set_option(&json!({
+                "chat": "chat-1", "option": "model", "backend": "claude", "value": "claude-opus-5"
+            }))
+            .unwrap();
+
+        assert_eq!(store.chat("chat-1").unwrap()["has_messages"], false);
+        store
+            .set_option(&json!({"chat": "chat-1", "option": "new-worktree", "value": "true"}))
+            .unwrap();
+        store
+            .set_option(&json!({"chat": "chat-1", "option": "new-worktree", "value": "false"}))
+            .unwrap();
+
+        store
+            .append_turn_message("chat-1", "user", "Start working", None)
+            .unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["has_messages"], true);
+        let error = store
+            .set_option(&json!({"chat": "chat-1", "option": "new-worktree", "value": "true"}))
+            .unwrap_err();
+        assert!(error.to_string().contains("before the first message"));
     }
 
     #[test]

@@ -506,6 +506,7 @@ fn launch_helper(
     if let Some(fingerprint) = fingerprint {
         command.arg("--fingerprint").arg(fingerprint);
     }
+    channel::configure_background(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| format!("cannot launch the TLS bridge: {error}"))?;

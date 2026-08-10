@@ -2,6 +2,7 @@ const SUBAGENT_PREFIX: &str = "subagent\n";
 const WORKFLOW_PREFIX: &str = "workflow_run\n";
 const FILE_CHANGE_PREFIX: &str = "file_change\n";
 const PATCH_MARKER: &str = "diff --git ";
+const MAX_AUTO_EXPANDED_PATCH_LINES: usize = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivityCard {
@@ -44,10 +45,13 @@ pub fn is_plain_activity(content: &str) -> bool {
 }
 
 impl ActivityCard {
-    /// File edits lead with their useful content on desktop. Other activity
-    /// stays compact until the user asks for its details.
+    /// Compact file edits lead with their useful content on desktop. A larger
+    /// patch starts closed so it does not take over the transcript; the user's
+    /// explicit toggle still inverts this default in either direction.
     pub fn starts_expanded(&self) -> bool {
-        self.patch.is_some()
+        self.patch
+            .as_deref()
+            .is_some_and(patch_fits_expanded_viewport)
     }
 
     pub fn can_expand(&self) -> bool {
@@ -364,6 +368,26 @@ fn change_counts(patch: &str) -> (usize, usize) {
     (added, removed)
 }
 
+fn patch_fits_expanded_viewport(patch: &str) -> bool {
+    let mut visible_lines = 0;
+    for line in patch.lines() {
+        // The inline renderer replaces these Git headers with its own compact
+        // file heading. Count that heading, but not the metadata it replaces.
+        if line.starts_with(PATCH_MARKER) {
+            visible_lines += 1;
+        } else if line.starts_with("index ") || line.starts_with("--- ") || line.starts_with("+++ ")
+        {
+            continue;
+        } else {
+            visible_lines += 1;
+        }
+        if visible_lines > MAX_AUTO_EXPANDED_PATCH_LINES {
+            return false;
+        }
+    }
+    true
+}
+
 fn compact(value: &str, limit: usize, fallback: &str) -> String {
     let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if value.is_empty() {
@@ -550,6 +574,20 @@ mod tests {
         ));
         assert_eq!(two.name, "2 files changed");
         assert_eq!(two.status, "+3 −1");
+    }
+
+    #[test]
+    fn large_file_changes_start_collapsed() {
+        let patch = format!(
+            "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n{}",
+            (0..MAX_AUTO_EXPANDED_PATCH_LINES)
+                .map(|index| format!("+line {index}\n"))
+                .collect::<String>()
+        );
+        let card = ActivityCard::parse(&format!("file_change\n{patch}"));
+
+        assert!(!card.starts_expanded());
+        assert!(card.can_expand());
     }
 
     #[test]

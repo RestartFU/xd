@@ -134,7 +134,7 @@ impl TerminalScreen {
                         self.parser = Parser::Ground;
                     }
                     b'c' => {
-                        self.clear();
+                        self.reset();
                         self.parser = Parser::Ground;
                     }
                     _ => self.parser = Parser::Ground,
@@ -291,11 +291,43 @@ impl TerminalScreen {
         }
     }
 
-    fn clear(&mut self) {
+    fn reset(&mut self) {
         self.grid = vec![vec![Cell::default(); self.columns]; self.rows];
+        self.scrollback.clear();
         self.row = 0;
         self.column = 0;
+        self.saved = (0, 0);
         self.style = TerminalStyle::default();
+    }
+
+    fn erase_display(&mut self, mode: usize) {
+        match mode {
+            1 => {
+                for row in 0..self.row {
+                    self.grid[row].fill(Cell::default());
+                }
+                for column in 0..=self.column.min(self.columns - 1) {
+                    self.grid[self.row][column] = Cell::default();
+                }
+            }
+            2 => {
+                for row in &mut self.grid {
+                    row.fill(Cell::default());
+                }
+            }
+            // xterm's erase-saved-lines extension is emitted by `clear` after
+            // erasing the visible display. The renderer includes saved lines,
+            // so retaining them makes a successful clear appear to do nothing.
+            3 => self.scrollback.clear(),
+            _ => {
+                for column in self.column..self.columns {
+                    self.grid[self.row][column] = Cell::default();
+                }
+                for row in self.row + 1..self.rows {
+                    self.grid[row].fill(Cell::default());
+                }
+            }
+        }
     }
 
     fn csi(&mut self, sequence: &str, command: char) {
@@ -329,15 +361,7 @@ impl TerminalScreen {
                     .saturating_sub(1)
                     .min(self.columns - 1);
             }
-            'J' if first == 2 || first == 3 => self.clear(),
-            'J' => {
-                for column in self.column..self.columns {
-                    self.grid[self.row][column] = Cell::default();
-                }
-                for row in self.row + 1..self.rows {
-                    self.grid[row].fill(Cell::default());
-                }
-            }
+            'J' => self.erase_display(first),
             'K' if first == 2 => self.grid[self.row].fill(Cell::default()),
             'K' if first == 1 => {
                 for column in 0..=self.column.min(self.columns - 1) {
@@ -470,6 +494,43 @@ mod tests {
 
         assert_eq!(screen.text(), "new terminal");
         assert!(screen.scrollback.is_empty());
+    }
+
+    #[test]
+    fn clear_sequence_erases_the_display_and_scrollback() {
+        let mut screen = TerminalScreen::new(12, 2);
+        screen.feed(b"old one\nold two\nold three");
+        assert!(!screen.scrollback.is_empty());
+
+        // xterm-256color's `clear` capability: home, erase the display, then
+        // erase saved lines. The following prompt may arrive in another frame.
+        screen.feed(b"\x1b[H\x1b[2J\x1b[3J");
+
+        assert_eq!(screen.text(), "");
+        assert!(screen.scrollback.is_empty());
+        assert_eq!((screen.row, screen.column), (0, 0));
+
+        screen.feed(b"prompt> ");
+        assert_eq!(screen.text(), "prompt>");
+    }
+
+    #[test]
+    fn erase_display_modes_preserve_the_cursor_position() {
+        let mut screen = TerminalScreen::new(12, 3);
+        screen.feed(b"first\nsecond\nthird");
+        let cursor = (screen.row, screen.column);
+
+        screen.feed(b"\x1b[2J");
+
+        assert_eq!((screen.row, screen.column), cursor);
+        assert!(
+            screen
+                .grid
+                .iter()
+                .flatten()
+                .all(|cell| cell.character == ' ')
+        );
+        assert_eq!(screen.text(), "first");
     }
 
     #[test]
