@@ -91,6 +91,7 @@ pub struct TerminalScreen {
     active_hyperlink: Option<u16>,
     bracketed_paste: bool,
     cursor_visible: bool,
+    synchronized_output: bool,
     scroll_top: usize,
     scroll_bottom: usize,
     origin_mode: bool,
@@ -135,6 +136,7 @@ impl TerminalScreen {
             active_hyperlink: None,
             bracketed_paste: false,
             cursor_visible: true,
+            synchronized_output: false,
             scroll_top: 0,
             scroll_bottom: rows - 1,
             origin_mode: false,
@@ -443,6 +445,7 @@ impl TerminalScreen {
         );
         append_private_mode(bytes, 25, self.cursor_visible);
         append_private_mode(bytes, 2004, self.bracketed_paste);
+        append_private_mode(bytes, 2026, self.synchronized_output);
         append_style(bytes, self.style);
         if let Some(url) = self
             .active_hyperlink
@@ -567,7 +570,7 @@ impl TerminalScreen {
     }
 
     fn rendered_inner(&self, include_cursor: bool) -> TerminalText {
-        let include_cursor = include_cursor && self.cursor_visible;
+        let include_cursor = include_cursor && self.cursor_visible && !self.synchronized_output;
         let mut lines = self
             .scrollback
             .iter()
@@ -822,6 +825,7 @@ impl TerminalScreen {
         self.active_hyperlink = None;
         self.bracketed_paste = false;
         self.cursor_visible = true;
+        self.synchronized_output = false;
         self.scroll_top = 0;
         self.scroll_bottom = self.rows - 1;
         self.origin_mode = false;
@@ -931,6 +935,7 @@ impl TerminalScreen {
             47 | 1047 | 1049 if enabled => self.enter_alternate_screen(),
             47 | 1047 | 1049 => self.leave_alternate_screen(),
             2004 => self.bracketed_paste = enabled,
+            2026 => self.synchronized_output = enabled,
             _ => {}
         }
     }
@@ -1909,6 +1914,23 @@ mod tests {
 
         screen.feed(b"\x1b[?25h");
         assert!(screen.rendered_with_cursor().cursor.is_some());
+    }
+
+    #[test]
+    fn synchronized_output_hides_the_cursor_until_the_frame_is_committed() {
+        let mut screen = TerminalScreen::new(20, 3);
+        screen.feed(b"prompt\x1b[1;7H\x1b[?25h");
+        assert!(screen.rendered_with_cursor().cursor.is_some());
+
+        // Codex and other TUIs draw their footer before restoring the input
+        // cursor. A real terminal does not expose that intermediate cursor.
+        screen.feed(b"\x1b[?2026h\x1b[3;1Hfooter\x1b[3;7H");
+        assert_eq!(screen.rendered_with_cursor().cursor, None);
+
+        screen.feed(b"\x1b[1;7H\x1b[?2026l");
+        let rendered = screen.rendered_with_cursor();
+        let cursor = rendered.cursor.expect("committed input cursor");
+        assert_eq!(&rendered.text[cursor], " ");
     }
 
     #[test]

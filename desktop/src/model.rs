@@ -63,6 +63,8 @@ pub struct ChatSummary {
     #[serde(default)]
     pub title: Option<String>,
     pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default)]
     pub working: bool,
     #[serde(default)]
@@ -839,6 +841,7 @@ impl AppModel {
                     folder: "workspace-xd".into(),
                     title: Some("Rewrite desktop with GPUI".into()),
                     backend: "codex".into(),
+                    branch: Some("main".into()),
                     working: true,
                     terminal_working: false,
                 },
@@ -847,6 +850,7 @@ impl AppModel {
                     folder: "workspace-xd".into(),
                     title: Some("Smooth transcript scrolling".into()),
                     backend: "codex".into(),
+                    branch: Some("xd/smooth-transcript-scrolling".into()),
                     working: false,
                     terminal_working: false,
                 },
@@ -997,6 +1001,24 @@ mod tests {
         assert!(model.connected);
         assert_eq!(model.selected_chat, None);
         assert!(model.messages.is_empty());
+    }
+
+    #[test]
+    fn tree_snapshots_preserve_each_chats_branch() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "folders": [{"id":"folder-1", "name":"xd"}],
+                "chats": [{
+                    "id":"chat-1", "folder":"folder-1", "title":"GPUI",
+                    "backend":"codex", "working":false,
+                    "branch":"session/scheming-hawk-jhgk"
+                }]
+            }))
+            .unwrap();
+
+        let serialized = serde_json::to_value(&model.chats[0]).unwrap();
+        assert_eq!(serialized["branch"], "session/scheming-hawk-jhgk");
     }
 
     #[test]
@@ -1515,6 +1537,7 @@ mod tests {
                 folder: "folder-1".into(),
                 title: None,
                 backend: "codex".into(),
+                branch: None,
                 working: false,
                 terminal_working: false,
             }],

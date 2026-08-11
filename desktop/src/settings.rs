@@ -47,6 +47,7 @@ pub struct AppSettings {
     pub accent: AccentPreset,
     pub notifications: bool,
     pub speech: bool,
+    pub allow_all_permissions: bool,
     pub git_writer: GitWriter,
     pub git_writer_model: Option<String>,
     pub build_source: String,
@@ -79,6 +80,7 @@ impl Default for AppSettings {
             accent: AccentPreset::Blue,
             notifications: true,
             speech: false,
+            allow_all_permissions: false,
             git_writer: GitWriter::Chat,
             git_writer_model: None,
             build_source: String::new(),
@@ -206,6 +208,7 @@ mod tests {
             accent: AccentPreset::Purple,
             notifications: false,
             speech: true,
+            allow_all_permissions: true,
             git_writer: GitWriter::Claude,
             git_writer_model: Some("claude-opus-5".into()),
             build_source: "#128".into(),
@@ -261,6 +264,17 @@ mod tests {
             serde_json::from_str(r#"{"accent":"green","notifications":true}"#).unwrap();
 
         assert_eq!(settings.theme, ThemePreset::Dark);
+    }
+
+    #[test]
+    fn all_permissions_is_safe_by_default_and_survives_serialization() {
+        let defaults = serde_json::to_value(AppSettings::default()).unwrap();
+        assert_eq!(defaults["allow_all_permissions"], false);
+
+        let enabled: AppSettings =
+            serde_json::from_str(r#"{"allow_all_permissions":true}"#).unwrap();
+        let enabled = serde_json::to_value(enabled).unwrap();
+        assert_eq!(enabled["allow_all_permissions"], true);
     }
 
     #[test]

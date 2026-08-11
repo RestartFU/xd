@@ -71,6 +71,7 @@ pub(crate) struct SessionCard {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) agent: AgentCli,
+    pub(crate) branch: String,
     pub(crate) working: bool,
 }
 
@@ -107,6 +108,10 @@ pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<S
                     .unwrap_or("New Session")
                     .to_owned(),
                 agent: AgentCli::from_backend(&chat.backend)?,
+                branch: chat
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "Project directory".into()),
                 working: chat.working || chat.terminal_working,
             })
         })
@@ -191,6 +196,7 @@ mod tests {
             folder: folder.into(),
             title: Some(title.into()),
             backend: backend.into(),
+            branch: Some(format!("session/{id}")),
             working,
             terminal_working: false,
         }
@@ -239,12 +245,14 @@ mod tests {
                     id: "a".into(),
                     title: "Fix parser".into(),
                     agent: AgentCli::Codex,
+                    branch: "session/a".into(),
                     working: true,
                 },
                 SessionCard {
                     id: "b".into(),
                     title: "Review lexer".into(),
                     agent: AgentCli::Claude,
+                    branch: "session/b".into(),
                     working: false,
                 },
             ]

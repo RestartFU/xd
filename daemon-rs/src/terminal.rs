@@ -89,6 +89,7 @@ struct TerminalSession {
     chat_id: String,
     title: String,
     agent: Option<TerminalAgent>,
+    allow_all_permissions: bool,
     pid: c_int,
     writer: Mutex<Option<File>>,
     state: Mutex<TerminalState>,
@@ -152,6 +153,11 @@ impl TerminalManager {
             .get("reuse")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let allow_all_permissions = agent.is_some()
+            && request
+                .get("allow_all_permissions")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         if reuse
             && let Some(existing) = self
                 .sessions
@@ -159,7 +165,10 @@ impl TerminalManager {
                 .map_err(|_| "Terminal state is unavailable.".to_string())?
                 .values()
                 .find(|session| {
-                    session.chat_id == chat_id && session.agent == agent && !session.is_closing()
+                    session.chat_id == chat_id
+                        && session.agent == agent
+                        && session.allow_all_permissions == allow_all_permissions
+                        && !session.is_closing()
                 })
         {
             return Ok(json!({"ok": true, "id": existing.id}));
@@ -172,6 +181,7 @@ impl TerminalManager {
             columns,
             rows,
             agent,
+            allow_all_permissions,
             environment,
             self.activity.clone(),
         )?;
@@ -374,6 +384,7 @@ impl TerminalSession {
         columns: u16,
         rows: u16,
         agent: Option<TerminalAgent>,
+        allow_all_permissions: bool,
         environment: &[(String, String)],
         activity: Arc<TerminalActivityState>,
     ) -> Result<(Arc<Self>, File), String> {
@@ -410,6 +421,8 @@ impl TerminalSession {
         let codex_config = c"-c";
         let codex_terminal_title = c"tui.terminal_title=[\"run-state\"]";
         let codex_resize_reflow = c"tui.terminal_resize_reflow_max_rows=5000";
+        let codex_all_permissions = c"--dangerously-bypass-approvals-and-sandbox";
+        let claude_all_permissions = c"--dangerously-skip-permissions";
         let environment = environment
             .iter()
             .map(|(name, value)| {
@@ -464,6 +477,19 @@ impl TerminalSession {
                     setenv(c"ConEmuANSI".as_ptr(), c"ON".as_ptr(), 1);
                 }
                 match agent {
+                    Some(TerminalAgent::Codex) if allow_all_permissions => {
+                        execlp(
+                            executable.as_ptr(),
+                            executable.as_ptr(),
+                            codex_no_alt_screen.as_ptr(),
+                            codex_config.as_ptr(),
+                            codex_terminal_title.as_ptr(),
+                            codex_config.as_ptr(),
+                            codex_resize_reflow.as_ptr(),
+                            codex_all_permissions.as_ptr(),
+                            std::ptr::null::<c_char>(),
+                        );
+                    }
                     Some(TerminalAgent::Codex) => {
                         execlp(
                             executable.as_ptr(),
@@ -473,6 +499,14 @@ impl TerminalSession {
                             codex_terminal_title.as_ptr(),
                             codex_config.as_ptr(),
                             codex_resize_reflow.as_ptr(),
+                            std::ptr::null::<c_char>(),
+                        );
+                    }
+                    Some(TerminalAgent::Claude) if allow_all_permissions => {
+                        execlp(
+                            executable.as_ptr(),
+                            executable.as_ptr(),
+                            claude_all_permissions.as_ptr(),
                             std::ptr::null::<c_char>(),
                         );
                     }
@@ -497,6 +531,7 @@ impl TerminalSession {
             chat_id: chat_id.to_owned(),
             title,
             agent,
+            allow_all_permissions,
             pid,
             writer: Mutex::new(Some(writer)),
             activity,
@@ -877,7 +912,12 @@ mod tests {
         }
     }
 
-    fn fake_agent_output(agent: TerminalAgent, variable: &str, chat_id: &str) -> Vec<u8> {
+    fn fake_agent_output(
+        agent: TerminalAgent,
+        variable: &str,
+        chat_id: &str,
+        allow_all_permissions: bool,
+    ) -> Vec<u8> {
         let _environment = AGENT_ENV_LOCK.lock().unwrap();
         let directory = env::temp_dir().join(format!(
             "xd-terminal-agent-{}-{}",
@@ -907,7 +947,15 @@ mod tests {
             ("ZELLIJ".to_owned(), "xd-zellij".to_owned()),
             ("TERM_PROGRAM".to_owned(), "xd-terminal".to_owned()),
         ];
-        let opened = manager.open_agent(&json!({"chat": chat_id}), &directory, agent, &topology);
+        let opened = manager.open_agent(
+            &json!({
+                "chat": chat_id,
+                "allow_all_permissions": allow_all_permissions,
+            }),
+            &directory,
+            agent,
+            &topology,
+        );
         match previous {
             Some(previous) => {
                 // SAFETY: direct-agent executable overrides are serialized by AGENT_ENV_LOCK.
@@ -968,6 +1016,7 @@ mod tests {
             TerminalAgent::Codex,
             "XD_CODEX_EXECUTABLE",
             "codex-activity",
+            false,
         );
         let output = String::from_utf8_lossy(&output);
 
@@ -989,11 +1038,39 @@ mod tests {
             TerminalAgent::Claude,
             "XD_CLAUDE_EXECUTABLE",
             "claude-activity",
+            false,
         );
         let output = String::from_utf8_lossy(&output);
 
         assert!(output.contains("xd-conemu:ON"), "{output}");
         assert!(output.contains("xd-topology::::::"), "{output}");
+    }
+
+    #[test]
+    fn all_permissions_use_each_agents_explicit_command_line_flag() {
+        let codex = fake_agent_output(
+            TerminalAgent::Codex,
+            "XD_CODEX_EXECUTABLE",
+            "codex-all-permissions",
+            true,
+        );
+        let codex = String::from_utf8_lossy(&codex);
+        assert!(
+            codex.contains("<--dangerously-bypass-approvals-and-sandbox>"),
+            "{codex}"
+        );
+
+        let claude = fake_agent_output(
+            TerminalAgent::Claude,
+            "XD_CLAUDE_EXECUTABLE",
+            "claude-all-permissions",
+            true,
+        );
+        let claude = String::from_utf8_lossy(&claude);
+        assert!(
+            claude.contains("<--dangerously-skip-permissions>"),
+            "{claude}"
+        );
     }
 
     #[test]

@@ -114,6 +114,12 @@ struct GitWorktree {
     detached: bool,
 }
 
+enum RequestedNewChatWorktree<'a> {
+    Default,
+    Existing(&'a str),
+    New,
+}
+
 impl MaterializedMessage {
     fn keep(&mut self) {
         self.keep = true;
@@ -447,29 +453,72 @@ impl StateStore {
             .collect::<Vec<_>>();
 
         let mut statement = database.prepare(
-            "SELECT id, folder_id, title, backend, daemon_working FROM chats \
+            "SELECT id, folder_id, title, backend, daemon_working, workdir, original_workdir FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
-        let chats = statement
+        let stored_chats = statement
             .query_map([], |row| {
-                let folder: String = row.get(1)?;
                 Ok((
-                    folder.clone(),
-                    json!({
-                        "id": row.get::<_, String>(0)?,
-                        "folder": folder,
-                        "title": row.get::<_, Option<String>>(2)?,
-                        "backend": row.get::<_, String>(3)?,
-                        "working": row.get::<_, bool>(4)?,
-                    }),
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
                 ))
             })?
-            .filter_map(|result| match result {
-                Ok((folder, chat)) if visible_ids.contains(folder.as_str()) => Some(Ok(chat)),
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+        drop(statement);
+
+        let mut branches = HashMap::<String, Option<String>>::new();
+        let mut chats = Vec::new();
+        for (id, folder, title, backend, working, workdir, original_workdir) in stored_chats {
+            if !visible_ids.contains(folder.as_str()) {
+                continue;
+            }
+            let branch = resolve_workdir(
+                &database,
+                &self.workspace_root,
+                &folder,
+                workdir.as_deref(),
+                original_workdir.as_deref(),
+            )
+            .ok()
+            .and_then(|workdir| {
+                let normalized = normalize_existing_path(Path::new(&workdir));
+                let cached = cached_worktree_branch(&branches, &normalized);
+                if cached.is_none() {
+                    match list_git_worktrees(Path::new(&workdir)) {
+                        Ok(worktrees) => {
+                            for worktree in worktrees {
+                                branches.insert(
+                                    normalize_existing_path(&worktree.path),
+                                    worktree.branch.or_else(|| {
+                                        worktree.detached.then(|| "Detached HEAD".into())
+                                    }),
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            branches.insert(normalized.clone(), None);
+                        }
+                    }
+                }
+                cached_worktree_branch(&branches, &normalized).flatten()
+            });
+            let mut chat = json!({
+                "id": id,
+                "folder": folder,
+                "title": title,
+                "backend": backend,
+                "working": working,
+            });
+            if let Some(branch) = branch {
+                chat["branch"] = Value::String(branch);
+            }
+            chats.push(chat);
+        }
         Ok(json!({"ok": true, "folders": folders, "chats": chats}))
     }
 
@@ -822,6 +871,32 @@ impl StateStore {
         let inherited = resolved_folder_values(&chain[..chain.len() - 1]);
         let effective = resolved_folder_values(&chain);
         let fallback = self.workspace_root.join(&current.relative);
+        let effective_workdir = effective
+            .workdir
+            .clone()
+            .or_else(|| effective.repo.clone())
+            .unwrap_or_else(|| fallback.to_string_lossy().into_owned());
+        let selected = normalize_existing_path(Path::new(&effective_workdir));
+        let worktrees = list_git_worktrees(Path::new(&effective_workdir)).ok();
+        let can_create_worktree = worktrees.is_some();
+        let worktrees = worktrees
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, worktree)| {
+                let path = normalize_existing_path(&worktree.path);
+                let mut value = json!({
+                    "path": path,
+                    "detached": worktree.detached,
+                    "main": index == 0,
+                    "current": path == selected,
+                });
+                if let Some(branch) = worktree.branch {
+                    value["branch"] = Value::String(branch);
+                }
+                value
+            })
+            .collect::<Vec<_>>();
         Ok(json!({
             "ok": true,
             "backend": current.backend,
@@ -830,9 +905,10 @@ impl StateStore {
             "repo": current.repo,
             "effective_backend": effective.backend.as_deref().unwrap_or("claude"),
             "effective_model": effective.model,
-            "effective_workdir": effective.workdir.or_else(|| effective.repo.clone())
-                .unwrap_or_else(|| fallback.to_string_lossy().into_owned()),
+            "effective_workdir": effective_workdir,
             "effective_repo": effective.repo,
+            "can_create_worktree": can_create_worktree,
+            "worktrees": worktrees,
             "inherited_backend": inherited.backend,
             "inherited_model": inherited.model,
             "inherited_workdir": inherited.workdir,
@@ -2543,14 +2619,23 @@ impl StateStore {
     pub fn new_chat(&self, request: &Value) -> Result<Value, StorageError> {
         let folder_id = required_string(request, "folder", "That request needs a folder.")?;
         let title = optional_string(request, "title")?.unwrap_or("New Chat");
-        let workdir = optional_string(request, "workdir")?;
+        let legacy_workdir = optional_string(request, "workdir")?;
+        let requested_worktree = requested_new_chat_worktree(request)?;
+        if legacy_workdir.is_some()
+            && !matches!(requested_worktree, RequestedNewChatWorktree::Default)
+        {
+            return Err(StorageError::InvalidRequest(
+                "Choose either a legacy working directory or a worktree.".into(),
+            ));
+        }
         let backend_override = optional_string(request, "backend")?;
         if let Some(backend) = backend_override {
             validate_backend(backend)?;
         }
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
         let root = self.workspace_root.to_string_lossy();
-        let folder_exists: bool = database.query_row(
+        let folder_exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM workspace_folders WHERE root_path = ? AND id = ?)",
             params![root.as_ref(), folder_id],
             |row| row.get(0),
@@ -2560,7 +2645,7 @@ impl StateStore {
                 "No such folder on the daemon.".into(),
             ));
         }
-        let defaults = database
+        let defaults = transaction
             .query_row(
                 "SELECT backend, model, effort, access, plan, fast, claude_mode \
                  FROM agent_defaults WHERE singleton = 1",
@@ -2580,7 +2665,7 @@ impl StateStore {
             .optional()?
             .unwrap_or_else(|| ("claude".into(), None, None, None, false, false, false));
         let folder_values = resolved_folder_values(&folder_setting_chain(
-            &database,
+            &transaction,
             &self.workspace_root,
             folder_id,
         )?);
@@ -2605,16 +2690,50 @@ impl StateStore {
         };
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
-        let sort_order = database.query_row(
+        let (workdir, original_workdir) = match requested_worktree {
+            RequestedNewChatWorktree::Default => (legacy_workdir.map(str::to_owned), None),
+            RequestedNewChatWorktree::Existing(requested) => {
+                if !Path::new(requested).is_absolute() {
+                    return Err(StorageError::InvalidRequest(
+                        "An existing worktree path is required.".into(),
+                    ));
+                }
+                let source =
+                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                let requested = normalize_existing_path(Path::new(requested));
+                let normalized_source = normalize_existing_path(Path::new(&source));
+                let selected = match list_git_worktrees(Path::new(&source)) {
+                    Ok(worktrees) => worktrees
+                        .into_iter()
+                        .find(|worktree| normalize_existing_path(&worktree.path) == requested)
+                        .map(|worktree| normalize_existing_path(&worktree.path))
+                        .ok_or_else(|| {
+                            StorageError::InvalidRequest(
+                                "That path is not a worktree of this repository.".into(),
+                            )
+                        })?,
+                    Err(_) if requested == normalized_source => normalized_source,
+                    Err(error) => return Err(error),
+                };
+                (Some(selected), Some(source))
+            }
+            RequestedNewChatWorktree::New => {
+                let source =
+                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                let created = create_worktree(&transaction, &source, &id, Some(title))?;
+                (Some(created), Some(source))
+            }
+        };
+        let sort_order = transaction.query_row(
             "SELECT COALESCE(MIN(sort_order), 0) - 1 FROM chats WHERE folder_id = ?",
             [folder_id],
             |row| row.get::<_, i64>(0),
         )?;
-        database.execute(
+        transaction.execute(
             "INSERT INTO chats \
              (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
-              workdir, sort_order, created_at, updated_at, last_user_message_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 folder_id,
@@ -2627,12 +2746,14 @@ impl StateStore {
                 defaults.5,
                 defaults.6,
                 workdir,
+                original_workdir,
                 sort_order,
                 now,
                 now,
                 now * 1_000_000,
             ],
         )?;
+        transaction.commit()?;
         Ok(json!({"ok": true, "id": id, "backend": backend}))
     }
 
@@ -4649,6 +4770,19 @@ fn normalize_existing_path(path: &Path) -> String {
         .into_owned()
 }
 
+fn cached_worktree_branch(
+    branches: &HashMap<String, Option<String>>,
+    workdir: &str,
+) -> Option<Option<String>> {
+    branches
+        .iter()
+        .filter(|(root, _)| {
+            workdir == root.as_str() || Path::new(workdir).starts_with(Path::new(root.as_str()))
+        })
+        .max_by_key(|(root, _)| root.len())
+        .map(|(_, branch)| branch.clone())
+}
+
 struct BrowsableEntry {
     name: String,
     directory: bool,
@@ -5110,6 +5244,37 @@ fn optional_string<'a>(request: &'a Value, key: &str) -> Result<Option<&'a str>,
             .as_str()
             .map(Some)
             .ok_or_else(|| StorageError::InvalidRequest(format!("{key} must be text"))),
+    }
+}
+
+fn requested_new_chat_worktree(
+    request: &Value,
+) -> Result<RequestedNewChatWorktree<'_>, StorageError> {
+    let Some(value) = request.get("worktree") else {
+        return Ok(RequestedNewChatWorktree::Default);
+    };
+    if value.is_null() {
+        return Ok(RequestedNewChatWorktree::Default);
+    }
+    let object = value.as_object().ok_or_else(|| {
+        StorageError::InvalidRequest("A new chat worktree must be an object.".into())
+    })?;
+    match object.get("kind").and_then(Value::as_str) {
+        Some("new") if object.get("path").is_none() => Ok(RequestedNewChatWorktree::New),
+        Some("new") => Err(StorageError::InvalidRequest(
+            "A new worktree cannot include an existing path.".into(),
+        )),
+        Some("existing") => object
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(RequestedNewChatWorktree::Existing)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("An existing worktree path is required.".into())
+            }),
+        _ => Err(StorageError::InvalidRequest(
+            "A new chat worktree kind must be new or existing.".into(),
+        )),
     }
 }
 
@@ -7125,6 +7290,167 @@ mod tests {
         assert_eq!(next.prompt, "second");
         assert_eq!(next.backend, "claude");
         assert_eq!(next.model, "claude-opus-5");
+    }
+
+    #[test]
+    fn new_chats_choose_an_existing_or_immediately_created_worktree() {
+        let fixture = Fixture::new();
+        let repository = fixture.workspaces.join("Repo");
+        let existing = fixture.root.join("existing-worktree");
+        fs::create_dir_all(&repository).unwrap();
+        for arguments in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.name", "xd test"],
+            vec!["config", "user.email", "xd@example.test"],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(arguments)
+                    .current_dir(&repository)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(repository.join("README.md"), "ready\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "README.md"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "initial"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "worktree",
+                    "add",
+                    "-b",
+                    "existing",
+                    existing.to_str().unwrap(),
+                    "HEAD",
+                ])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        database
+            .execute(
+                "INSERT INTO workspace_folders \
+                 (id, root_path, relative_path, repo, shortcuts) VALUES ('repo', ?, 'Repo', ?, '[]')",
+                params![
+                    fixture.workspaces.to_string_lossy(),
+                    repository.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let settings = store.folder_settings(&json!({"folder": "repo"})).unwrap();
+        assert_eq!(settings["can_create_worktree"], true);
+        assert_eq!(settings["worktrees"].as_array().unwrap().len(), 2);
+        assert!(
+            settings["worktrees"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|worktree| {
+                    worktree["path"] == normalize_existing_path(&existing)
+                        && worktree["branch"] == "existing"
+                })
+        );
+
+        let selected = store
+            .new_chat(&json!({
+                "folder": "repo",
+                "title": "Use existing",
+                "worktree": {"kind": "existing", "path": existing},
+            }))
+            .unwrap();
+        let selected_id = selected["id"].as_str().unwrap().to_owned();
+        let selected = store.chat(&selected_id).unwrap();
+        assert_eq!(selected["workdir"], normalize_existing_path(&existing));
+        assert_eq!(
+            selected["selected_worktree"],
+            normalize_existing_path(&existing)
+        );
+
+        let created = store
+            .new_chat(&json!({
+                "folder": "repo",
+                "title": "Fresh Session",
+                "worktree": {"kind": "new"},
+            }))
+            .unwrap();
+        let created_id = created["id"].as_str().unwrap().to_owned();
+        let created = store.chat(&created_id).unwrap();
+        let created_path = PathBuf::from(created["workdir"].as_str().unwrap());
+        assert!(created_path.is_dir());
+        assert!(created_path.join(".git").exists());
+        assert_ne!(created_path, fs::canonicalize(&repository).unwrap());
+        assert_ne!(created_path, fs::canonicalize(&existing).unwrap());
+        assert_eq!(created["new_worktree"], false);
+        assert_eq!(created["selected_worktree"], created["workdir"]);
+
+        let tree = store.tree().unwrap();
+        let chats = tree["chats"].as_array().unwrap();
+        assert_eq!(
+            chats.iter().find(|chat| chat["id"] == selected_id).unwrap()["branch"],
+            "existing"
+        );
+        assert!(
+            chats.iter().find(|chat| chat["id"] == created_id).unwrap()["branch"]
+                .as_str()
+                .unwrap()
+                .starts_with("xd/fresh-session-")
+        );
+    }
+
+    #[test]
+    fn new_chats_can_use_the_project_directory_when_git_is_unavailable() {
+        let fixture = Fixture::new();
+        let project = fixture.workspaces.join("Plain Project");
+        fs::create_dir_all(&project).unwrap();
+
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        database
+            .execute(
+                "INSERT INTO workspace_folders \
+                 (id, root_path, relative_path, shortcuts) VALUES ('plain', ?, 'Plain Project', '[]')",
+                [fixture.workspaces.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let settings = store.folder_settings(&json!({"folder": "plain"})).unwrap();
+        assert_eq!(settings["can_create_worktree"], false);
+        assert_eq!(settings["worktrees"], json!([]));
+
+        let created = store
+            .new_chat(&json!({
+                "folder": "plain",
+                "title": "Use project",
+                "worktree": {"kind": "existing", "path": project},
+            }))
+            .unwrap();
+        let chat = store.chat(created["id"].as_str().unwrap()).unwrap();
+        assert_eq!(chat["workdir"], normalize_existing_path(&project));
     }
 
     #[test]

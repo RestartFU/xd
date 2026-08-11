@@ -55,6 +55,7 @@ struct TerminalSession {
     chat_id: String,
     title: String,
     agent: Option<TerminalAgent>,
+    allow_all_permissions: bool,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
@@ -119,6 +120,11 @@ impl TerminalManager {
             .get("reuse")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let allow_all_permissions = agent.is_some()
+            && request
+                .get("allow_all_permissions")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         if reuse
             && let Some(existing) = self
                 .sessions
@@ -126,7 +132,10 @@ impl TerminalManager {
                 .map_err(|_| "Terminal state is unavailable.".to_string())?
                 .values()
                 .find(|session| {
-                    session.chat_id == chat_id && session.agent == agent && !session.is_closing()
+                    session.chat_id == chat_id
+                        && session.agent == agent
+                        && session.allow_all_permissions == allow_all_permissions
+                        && !session.is_closing()
                 })
         {
             return Ok(json!({"ok": true, "id": existing.id}));
@@ -139,6 +148,7 @@ impl TerminalManager {
             columns,
             rows,
             agent,
+            allow_all_permissions,
             environment,
             self.activity.clone(),
         )?;
@@ -328,6 +338,7 @@ impl TerminalSession {
         columns: u16,
         rows: u16,
         agent: Option<TerminalAgent>,
+        allow_all_permissions: bool,
         environment: &[(String, String)],
         activity: Arc<TerminalActivityState>,
     ) -> Result<(Arc<Self>, Box<dyn Read + Send>), String> {
@@ -341,7 +352,7 @@ impl TerminalSession {
             .map(|agent| CommandBuilder::new(agent.executable()))
             .unwrap_or_else(terminal_command);
         command.cwd(workdir.as_os_str());
-        configure_command(&mut command, agent, environment);
+        configure_command(&mut command, agent, allow_all_permissions, environment);
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -371,6 +382,7 @@ impl TerminalSession {
             chat_id: chat_id.to_owned(),
             title,
             agent,
+            allow_all_permissions,
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(Some(child)),
@@ -474,6 +486,7 @@ impl TerminalSession {
 fn configure_command(
     command: &mut CommandBuilder,
     agent: Option<TerminalAgent>,
+    allow_all_permissions: bool,
     environment: &[(String, String)],
 ) {
     command.env("TERM", "xterm-256color");
@@ -488,6 +501,9 @@ fn configure_command(
             command.arg("tui.terminal_title=[\"run-state\"]");
             command.arg("-c");
             command.arg("tui.terminal_resize_reflow_max_rows=5000");
+            if allow_all_permissions {
+                command.arg("--dangerously-bypass-approvals-and-sandbox");
+            }
         }
         Some(TerminalAgent::Claude) => {
             for name in [
@@ -503,6 +519,9 @@ fn configure_command(
                 command.env_remove(name);
             }
             command.env("ConEmuANSI", "ON");
+            if allow_all_permissions {
+                command.arg("--dangerously-skip-permissions");
+            }
         }
         None => {}
     }
@@ -747,7 +766,7 @@ mod tests {
             ("ConEmuANSI".to_owned(), "OFF".to_owned()),
         ];
         let mut codex = CommandBuilder::new("codex.exe");
-        configure_command(&mut codex, Some(TerminalAgent::Codex), &topology);
+        configure_command(&mut codex, Some(TerminalAgent::Codex), true, &topology);
         let arguments = codex
             .get_argv()
             .iter()
@@ -761,12 +780,19 @@ mod tests {
                 "-c",
                 "tui.terminal_title=[\"run-state\"]",
                 "-c",
-                "tui.terminal_resize_reflow_max_rows=5000"
+                "tui.terminal_resize_reflow_max_rows=5000",
+                "--dangerously-bypass-approvals-and-sandbox"
             ]
         );
 
         let mut claude = CommandBuilder::new("claude.exe");
-        configure_command(&mut claude, Some(TerminalAgent::Claude), &topology);
+        configure_command(&mut claude, Some(TerminalAgent::Claude), true, &topology);
+        assert!(
+            claude
+                .get_argv()
+                .iter()
+                .any(|argument| argument == "--dangerously-skip-permissions")
+        );
         for name in [
             "WT_SESSION",
             "TMUX",

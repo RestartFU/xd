@@ -30,6 +30,12 @@ pub enum MessageCursor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NewSessionWorktree {
+    New,
+    Existing(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Tree,
     AgentCatalog,
@@ -725,7 +731,7 @@ impl DaemonHandle {
         title: &str,
         workdir: Option<&str>,
     ) -> Result<(), String> {
-        self.send_new_chat(folder_id, title, workdir, None)
+        self.send_new_chat(folder_id, title, workdir, None, None)
     }
 
     pub fn new_chat_with_backend(
@@ -735,7 +741,17 @@ impl DaemonHandle {
         workdir: Option<&str>,
         backend: &str,
     ) -> Result<(), String> {
-        self.send_new_chat(folder_id, title, workdir, Some(backend))
+        self.send_new_chat(folder_id, title, workdir, Some(backend), None)
+    }
+
+    pub fn new_chat_with_backend_in_worktree(
+        &self,
+        folder_id: &str,
+        title: &str,
+        backend: &str,
+        worktree: &NewSessionWorktree,
+    ) -> Result<(), String> {
+        self.send_new_chat(folder_id, title, None, Some(backend), Some(worktree))
     }
 
     fn send_new_chat(
@@ -744,6 +760,7 @@ impl DaemonHandle {
         title: &str,
         workdir: Option<&str>,
         backend: Option<&str>,
+        worktree: Option<&NewSessionWorktree>,
     ) -> Result<(), String> {
         let mut body = json!({"op": "new-chat", "folder": folder_id, "title": title});
         if let Some(workdir) = workdir {
@@ -751,6 +768,14 @@ impl DaemonHandle {
         }
         if let Some(backend) = backend {
             body["backend"] = Value::String(backend.to_owned());
+        }
+        if let Some(worktree) = worktree {
+            body["worktree"] = match worktree {
+                NewSessionWorktree::New => json!({"kind": "new"}),
+                NewSessionWorktree::Existing(path) => {
+                    json!({"kind": "existing", "path": path})
+                }
+            };
         }
         self.send(
             RequestKind::NewChat {
@@ -1183,6 +1208,7 @@ impl DaemonHandle {
         rows: usize,
         reuse: bool,
         agent: &str,
+        allow_all_permissions: bool,
         foreground: u32,
         background: u32,
     ) -> Result<(), String> {
@@ -1199,6 +1225,7 @@ impl DaemonHandle {
                 "rows": rows,
                 "reuse": reuse,
                 "agent": agent,
+                "allow_all_permissions": allow_all_permissions,
                 "foreground": foreground,
                 "background": background,
             }),
@@ -1778,6 +1805,7 @@ mod tests {
             assert_eq!(request["chat"], "chat-1");
             assert_eq!(request["agent"], "claude");
             assert_eq!(request["reuse"], true);
+            assert_eq!(request["allow_all_permissions"], true);
             assert_eq!(request["foreground"], 0x202020);
             assert_eq!(request["background"], 0xfafafa);
             let request_id = request["_xd_request"].as_u64().unwrap();
@@ -1790,7 +1818,7 @@ mod tests {
             DaemonUpdate::Connected { .. }
         ));
         daemon
-            .terminal_open_agent("chat-1", 120, 32, true, "claude", 0x202020, 0xfafafa)
+            .terminal_open_agent("chat-1", 120, 32, true, "claude", true, 0x202020, 0xfafafa)
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
@@ -2343,10 +2371,30 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
-            for (title, workdir, backend) in [
-                ("Selected directory", Some("/srv/workspaces/project"), None),
-                ("Workspace default", None, None),
-                ("Direct Claude", None, Some("claude")),
+            for (title, workdir, backend, worktree) in [
+                (
+                    "Selected directory",
+                    Some("/srv/workspaces/project"),
+                    None,
+                    None,
+                ),
+                ("Workspace default", None, None, None),
+                ("Direct Claude", None, Some("claude"), None),
+                (
+                    "Fresh worktree",
+                    None,
+                    Some("codex"),
+                    Some(json!({"kind": "new"})),
+                ),
+                (
+                    "Existing worktree",
+                    None,
+                    Some("claude"),
+                    Some(json!({
+                        "kind": "existing",
+                        "path": "/srv/workspaces/feature",
+                    })),
+                ),
             ] {
                 let mut request = String::new();
                 reader.read_line(&mut request).unwrap();
@@ -2361,6 +2409,10 @@ mod tests {
                 match backend {
                     Some(backend) => assert_eq!(request["backend"], backend),
                     None => assert!(request.get("backend").is_none()),
+                }
+                match worktree {
+                    Some(worktree) => assert_eq!(request["worktree"], worktree),
+                    None => assert!(request.get("worktree").is_none()),
                 }
                 let request_id = request["_xd_request"].as_u64().unwrap();
                 writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
@@ -2419,6 +2471,44 @@ mod tests {
                 },
                 ..
             } if folder_id == "folder-1" && title == "Direct Claude"
+        ));
+        daemon
+            .new_chat_with_backend_in_worktree(
+                "folder-1",
+                "Fresh worktree",
+                "codex",
+                &NewSessionWorktree::New,
+            )
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::NewChat {
+                    folder_id,
+                    title,
+                    workdir: None,
+                },
+                ..
+            } if folder_id == "folder-1" && title == "Fresh worktree"
+        ));
+        daemon
+            .new_chat_with_backend_in_worktree(
+                "folder-1",
+                "Existing worktree",
+                "claude",
+                &NewSessionWorktree::Existing("/srv/workspaces/feature".into()),
+            )
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::NewChat {
+                    folder_id,
+                    title,
+                    workdir: None,
+                },
+                ..
+            } if folder_id == "folder-1" && title == "Existing worktree"
         ));
 
         server.join().unwrap();
