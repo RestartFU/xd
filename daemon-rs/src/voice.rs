@@ -630,12 +630,7 @@ impl Transcriber {
             .limit(1024 * 1024)
             .read_to_string()
             .map_err(|error| format!("Cannot read local voice transcription: {error}"))?;
-        let text = text.trim().to_owned();
-        if text.is_empty() {
-            Err("No speech was detected.".into())
-        } else {
-            Ok(text)
-        }
+        spoken_transcript(&text).ok_or_else(|| "No speech was detected.".into())
     }
 
     fn ensure_server(&mut self, model: &Path) -> Result<u16, String> {
@@ -801,6 +796,35 @@ fn validate_wav(wav: &[u8]) -> Result<(), ()> {
     (bytes % 2 == 0 && bytes <= wav.len() - 44)
         .then_some(())
         .ok_or(())
+}
+
+fn spoken_transcript(text: &str) -> Option<String> {
+    let spoken = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !annotation_only(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!spoken.is_empty()).then_some(spoken)
+}
+
+fn annotation_only(mut text: &str) -> bool {
+    let mut found = false;
+    text = text.trim();
+    while !text.is_empty() {
+        let (open, close) = match text.chars().next() {
+            Some('[') => ('[', ']'),
+            Some('(') => ('(', ')'),
+            _ => return false,
+        };
+        let remainder = &text[open.len_utf8()..];
+        let Some(end) = remainder.find(close) else {
+            return false;
+        };
+        found = true;
+        text = remainder[end + close.len_utf8()..].trim_start();
+    }
+    found
 }
 
 fn decode_audio(request: &Value, label: &str) -> Result<Vec<u8>, String> {
@@ -981,5 +1005,21 @@ mod tests {
         assert!(job_key(7, &json!({"request": "dictation-1"})).is_ok());
         assert!(job_key(7, &json!({"request": ""})).is_err());
         assert!(decode_audio(&json!({"audio": "%%%"}), "Voice recording").is_err());
+    }
+
+    #[test]
+    fn annotation_only_recognition_is_not_spoken_text() {
+        assert_eq!(spoken_transcript(" [BLANK_AUDIO] "), None);
+        assert_eq!(spoken_transcript("[SOUND]"), None);
+        assert_eq!(spoken_transcript("[music]\n(silence)"), None);
+        assert_eq!(
+            spoken_transcript("[SOUND]\nsend the real sentence"),
+            Some("send the real sentence".to_owned())
+        );
+        assert_eq!(spoken_transcript("OK"), Some("OK".to_owned()));
+        assert_eq!(
+            spoken_transcript("send the real sentence"),
+            Some("send the real sentence".to_owned())
+        );
     }
 }
