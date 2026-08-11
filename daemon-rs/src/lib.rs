@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -34,8 +34,10 @@ mod terminal;
 #[cfg(windows)]
 #[path = "terminal_windows.rs"]
 mod terminal;
+mod terminal_activity;
 mod terminal_agent;
 mod terminal_query;
+mod terminal_replay;
 mod tool_diff;
 mod voice;
 mod workflow;
@@ -229,7 +231,7 @@ impl Engine {
             Some("pair") => self.pair(owner, &request),
             Some("hello") => self.hello(owner, &request),
             Some("peer-pairing") => self.peer_pairing(owner, &request),
-            Some("tree") => self.read(|store| store.tree()),
+            Some("tree") => self.tree(),
             Some("devices") => self.devices(),
             Some("rename-device") => self.read(|store| store.rename_device(&request)),
             Some("revoke-device") => self.revoke_device(&request),
@@ -512,6 +514,17 @@ impl Engine {
             Some(store) => operation(store).unwrap_or_else(error_reply),
             None => error_reply("Rust daemon state storage is not configured."),
         }
+    }
+
+    fn tree(&self) -> Value {
+        let mut tree = self.read(StateStore::tree);
+        if tree.get("ok").and_then(Value::as_bool) == Some(true) {
+            let activity = self.terminals.activity_snapshot();
+            overlay_terminal_working(&mut tree, &activity.working_chats);
+            tree["terminal_activity_epoch"] = Value::String(activity.epoch);
+            tree["terminal_activity_revision"] = activity.revision.into();
+        }
+        tree
     }
 
     fn compat_repository_file(&self, request: &Value, action: &str) -> Value {
@@ -1464,6 +1477,19 @@ fn required_string<'a>(request: &'a Value, key: &str, message: &str) -> Result<&
         .ok_or_else(|| message.into())
 }
 
+fn overlay_terminal_working(tree: &mut Value, working_chats: &HashSet<String>) {
+    let Some(chats) = tree.get_mut("chats").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for chat in chats {
+        let working = chat
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|chat_id| working_chats.contains(chat_id));
+        chat["terminal_working"] = Value::Bool(working);
+    }
+}
+
 /// Tell a client that just loaded a chat where its live turn already is.
 ///
 /// A chat row only records *that* a turn is running. Without the rest, a client
@@ -1567,6 +1593,43 @@ mod tests {
             dispatch(json!({"op": "ping", "_xd_request": 42})),
             json!({"ok": true, "_xd_request": 42})
         );
+    }
+
+    #[test]
+    fn tree_activity_overlay_is_transient_and_total_for_visible_chats() {
+        let mut tree = json!({
+            "ok": true,
+            "chats": [
+                {"id": "idle", "working": false},
+                {"id": "direct", "working": false},
+                {"id": "managed", "working": true}
+            ]
+        });
+
+        overlay_terminal_working(
+            &mut tree,
+            &std::collections::HashSet::from(["direct".to_owned(), "hidden".to_owned()]),
+        );
+
+        assert_eq!(tree["chats"][0]["terminal_working"], false);
+        assert_eq!(tree["chats"][1]["terminal_working"], true);
+        assert_eq!(tree["chats"][2]["terminal_working"], false);
+        assert_eq!(tree["chats"][1]["working"], false);
+    }
+
+    #[test]
+    fn tree_replies_include_the_terminal_activity_epoch_and_revision() {
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(store);
+
+        let tree = engine.dispatch(json!({"op": "tree"}));
+
+        assert_eq!(tree["ok"], true);
+        assert!(!tree["terminal_activity_epoch"].as_str().unwrap().is_empty());
+        assert_eq!(tree["terminal_activity_revision"], 0);
+        drop(engine);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

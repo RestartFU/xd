@@ -1,6 +1,5 @@
 pub mod activity;
 pub mod channel;
-pub mod context_usage;
 pub mod daemon;
 pub mod local_socket;
 pub mod markdown;
@@ -9,4 +8,3 @@ mod private_fs;
 pub mod protocol;
 pub mod remote;
 pub mod theme;
-pub mod transcript;

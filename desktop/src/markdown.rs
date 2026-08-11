@@ -830,6 +830,37 @@ fn table_delimiter(cell: &str) -> bool {
     cell.len() >= 3 && cell.bytes().all(|byte| byte == b'-')
 }
 
+pub fn web_links(source: &str) -> Vec<(Range<usize>, String)> {
+    const MAX_WEB_LINKS: usize = 4_096;
+
+    let mut links = Vec::new();
+    let mut offset = 0;
+    while offset < source.len() && links.len() < MAX_WEB_LINKS {
+        let rest = &source[offset..];
+        let Some(relative_start) = rest
+            .char_indices()
+            .find_map(|(index, _)| starts_web_url(&rest[index..]).then_some(index))
+        else {
+            break;
+        };
+        let start = offset + relative_start;
+        let length = bare_url_length(&source[start..]);
+        if length > 0 {
+            let end = start + length;
+            links.push((start..end, source[start..end].to_owned()));
+            offset = end;
+        } else {
+            offset = start
+                + source[start..]
+                    .chars()
+                    .next()
+                    .map(char::len_utf8)
+                    .unwrap_or(1);
+        }
+    }
+    links
+}
+
 fn parse_inline(source: &str) -> InlineText {
     let mut text = String::with_capacity(source.len());
     let mut spans = Vec::new();
@@ -1057,7 +1088,7 @@ fn inline_image(source: &str) -> Option<ParsedInline<'_>> {
     })
 }
 
-fn safe_link_url(url: &str) -> Option<&str> {
+pub fn safe_link_url(url: &str) -> Option<&str> {
     const MAX_LINK_BYTES: usize = 2_048;
     if url.len() > MAX_LINK_BYTES
         || url
@@ -1550,6 +1581,29 @@ mod tests {
             vec![
                 "https://github.com/RestartFU/xd/issues/5",
                 "https://example.com/a_(b)",
+            ]
+        );
+    }
+
+    #[test]
+    fn finds_web_links_in_terminal_text_without_rewriting_ranges() {
+        let source =
+            "Result: https://github.com/org/repo/job/123. Also (https://example.com/a_(b)).";
+
+        let links = web_links(source);
+        let actual = links
+            .iter()
+            .map(|(range, url)| (&source[range.clone()], url.as_str()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            [
+                (
+                    "https://github.com/org/repo/job/123",
+                    "https://github.com/org/repo/job/123"
+                ),
+                ("https://example.com/a_(b)", "https://example.com/a_(b)"),
             ]
         );
     }

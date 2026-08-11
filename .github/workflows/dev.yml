@@ -84,10 +84,11 @@ jobs:
             ~/.cargo/git/db
             desktop/target
             daemon-rs/target
+            terminal-core/target
             tls-proxy-rs/target
           key: >-
             cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
-            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock') }}
+            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-
 
       - uses: actions/cache@v4
@@ -144,10 +145,11 @@ jobs:
             ~/.cargo/git/db
             desktop/target
             daemon-rs/target
+            terminal-core/target
             tls-proxy-rs/target
           key: >-
             cargo-${{ runner.os }}-x86_64-1.95.0-${{
-            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock') }}
+            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-x86_64-1.95.0-
 
       - uses: actions/cache@v4

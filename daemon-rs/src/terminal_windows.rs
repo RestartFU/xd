@@ -1,9 +1,12 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet},
     env,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
 };
 
@@ -12,19 +15,39 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::{EventBus, terminal_agent::TerminalAgent, terminal_query::TerminalQueryResponder};
+use crate::{
+    EventBus,
+    terminal_activity::TerminalActivityParser,
+    terminal_agent::TerminalAgent,
+    terminal_query::TerminalQueryResponder,
+    terminal_replay::{
+        HISTORY_LIMIT, REPLAY_ITEM_LIMIT, RecordOutcome, ReplayFrame, TerminalState,
+    },
+};
 
 const DEFAULT_COLUMNS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
-const MAX_GEOMETRY: u16 = 1_000;
-const HISTORY_LIMIT: usize = 16 * 1024 * 1024;
-const REPLAY_ITEM_LIMIT: usize = 65_536;
+const MAX_COLUMNS: u16 = 500;
+const MAX_ROWS: u16 = 200;
 const INPUT_LIMIT: usize = 1024 * 1024;
 const READ_SIZE: usize = 8_192;
 
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
     events: Arc<EventBus>,
+    activity: Arc<TerminalActivityState>,
+}
+
+struct TerminalActivityState {
+    epoch: String,
+    revision: AtomicU64,
+    gate: Mutex<()>,
+}
+
+pub(crate) struct TerminalActivitySnapshot {
+    pub(crate) epoch: String,
+    pub(crate) revision: u64,
+    pub(crate) working_chats: HashSet<String>,
 }
 
 struct TerminalSession {
@@ -36,71 +59,7 @@ struct TerminalSession {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     state: Mutex<TerminalState>,
-}
-
-struct TerminalState {
-    columns: u16,
-    rows: u16,
-    replay: VecDeque<ReplayFrame>,
-    replay_bytes: usize,
-    sequence: u64,
-    closing: bool,
-}
-
-enum ReplayFrame {
-    Output(Vec<u8>),
-    Resize { columns: u16, rows: u16 },
-}
-
-enum RecordOutcome {
-    Accepted(u64),
-    Unchanged,
-    CapacityReached,
-    Closing,
-}
-
-impl TerminalState {
-    fn record_output_bounded(
-        &mut self,
-        data: Vec<u8>,
-        byte_limit: usize,
-        item_limit: usize,
-    ) -> RecordOutcome {
-        if self.closing {
-            return RecordOutcome::Closing;
-        }
-        if self.replay.len() >= item_limit
-            || data.len() > byte_limit.saturating_sub(self.replay_bytes)
-        {
-            return RecordOutcome::CapacityReached;
-        }
-        self.replay_bytes = self.replay_bytes.saturating_add(data.len());
-        self.replay.push_back(ReplayFrame::Output(data));
-        self.sequence = self.sequence.saturating_add(1);
-        RecordOutcome::Accepted(self.sequence)
-    }
-
-    fn record_resize_bounded(
-        &mut self,
-        columns: u16,
-        rows: u16,
-        item_limit: usize,
-    ) -> RecordOutcome {
-        if self.closing {
-            return RecordOutcome::Closing;
-        }
-        if self.columns == columns && self.rows == rows {
-            return RecordOutcome::Unchanged;
-        }
-        if self.replay.len() >= item_limit {
-            return RecordOutcome::CapacityReached;
-        }
-        self.columns = columns;
-        self.rows = rows;
-        self.replay.push_back(ReplayFrame::Resize { columns, rows });
-        self.sequence = self.sequence.saturating_add(1);
-        RecordOutcome::Accepted(self.sequence)
-    }
+    activity: Arc<TerminalActivityState>,
 }
 
 impl TerminalManager {
@@ -108,6 +67,11 @@ impl TerminalManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             events,
+            activity: Arc::new(TerminalActivityState {
+                epoch: Uuid::new_v4().to_string(),
+                revision: AtomicU64::new(0),
+                gate: Mutex::new(()),
+            }),
         }
     }
 
@@ -149,8 +113,8 @@ impl TerminalManager {
         environment: &[(String, String)],
     ) -> Result<Value, String> {
         let chat_id = text(request, "chat", "terminal-open needs a chat id")?;
-        let columns = geometry(request, "columns", DEFAULT_COLUMNS)?;
-        let rows = geometry(request, "rows", DEFAULT_ROWS)?;
+        let columns = geometry(request, "columns", DEFAULT_COLUMNS, MAX_COLUMNS)?;
+        let rows = geometry(request, "rows", DEFAULT_ROWS, MAX_ROWS)?;
         let reuse = request
             .get("reuse")
             .and_then(Value::as_bool)
@@ -167,9 +131,17 @@ impl TerminalManager {
         {
             return Ok(json!({"ok": true, "id": existing.id}));
         }
+        let queries = TerminalQueryResponder::from_request(request);
 
-        let (session, reader) =
-            TerminalSession::spawn(chat_id, workdir, columns, rows, agent, environment)?;
+        let (session, reader) = TerminalSession::spawn(
+            chat_id,
+            workdir,
+            columns,
+            rows,
+            agent,
+            environment,
+            self.activity.clone(),
+        )?;
         let id = session.id.clone();
         self.sessions
             .lock()
@@ -183,9 +155,16 @@ impl TerminalManager {
             "agent": session.agent.map(TerminalAgent::wire_name),
             "columns": columns,
             "rows": rows,
+            "working": false,
             "sequence": 0,
         }));
-        start_reader(session, reader, self.sessions.clone(), self.events.clone());
+        start_reader(
+            session,
+            reader,
+            self.sessions.clone(),
+            self.events.clone(),
+            queries,
+        );
         Ok(json!({"ok": true, "id": id}))
     }
 
@@ -215,19 +194,17 @@ impl TerminalManager {
 
     pub fn resize(&self, request: &Value) -> Result<Value, String> {
         let session = self.session(text(request, "terminal", "A terminal id is required.")?)?;
-        let columns = geometry(request, "columns", DEFAULT_COLUMNS)?;
-        let rows = geometry(request, "rows", DEFAULT_ROWS)?;
-        {
-            let state = session
-                .state
-                .lock()
-                .map_err(|_| "Terminal state is unavailable.".to_string())?;
-            if state.closing {
-                return Err("The terminal is closed.".into());
-            }
-            if state.columns == columns && state.rows == rows {
-                return Ok(json!({"ok": true, "changed": false}));
-            }
+        let columns = geometry(request, "columns", DEFAULT_COLUMNS, MAX_COLUMNS)?;
+        let rows = geometry(request, "rows", DEFAULT_ROWS, MAX_ROWS)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_string())?;
+        if state.closing {
+            return Err("The terminal is closed.".into());
+        }
+        if state.columns == columns && state.rows == rows {
+            return Ok(json!({"ok": true, "changed": false}));
         }
         session
             .master
@@ -237,41 +214,33 @@ impl TerminalManager {
             .ok_or_else(|| "The terminal is closed.".to_string())?
             .resize(pty_size(columns, rows))
             .map_err(|error| format!("Cannot resize terminal: {error}."))?;
-        let outcome = {
-            let mut state = session
-                .state
-                .lock()
-                .map_err(|_| "Terminal state is unavailable.".to_string())?;
-            let outcome = state.record_resize_bounded(columns, rows, REPLAY_ITEM_LIMIT);
-            if let RecordOutcome::Accepted(sequence) = outcome {
-                self.events.publish(json!({
-                    "event": "terminal-resized",
-                    "chat": session.chat_id,
-                    "terminal": session.id,
-                    "columns": columns,
-                    "rows": rows,
-                    "sequence": sequence,
-                }));
-            }
-            outcome
-        };
+        let outcome = state.record_resize_bounded(columns, rows, REPLAY_ITEM_LIMIT);
+        if let RecordOutcome::Accepted(sequence) = outcome {
+            self.events.publish(json!({
+                "event": "terminal-resized",
+                "chat": session.chat_id,
+                "terminal": session.id,
+                "columns": columns,
+                "rows": rows,
+                "sequence": sequence,
+            }));
+        }
         match outcome {
             RecordOutcome::Accepted(_) => Ok(json!({"ok": true, "changed": true})),
             RecordOutcome::Unchanged => Ok(json!({"ok": true, "changed": false})),
             RecordOutcome::Closing => Err("The terminal is closed.".into()),
-            RecordOutcome::CapacityReached => {
-                session.begin_close();
-                Err("The terminal replay limit was reached, so it was closed safely.".into())
-            }
         }
     }
 
     pub fn kill(&self, request: &Value) -> Result<Value, String> {
         let terminal = text(request, "terminal", "A terminal id is required.")?;
-        if let Ok(sessions) = self.sessions.lock()
-            && let Some(session) = sessions.get(terminal)
-        {
-            session.begin_close();
+        let session = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(terminal).cloned());
+        if let Some(session) = session {
+            close_session(&session, &self.sessions, &self.events);
         }
         Ok(json!({"ok": true}))
     }
@@ -289,7 +258,7 @@ impl TerminalManager {
             })
             .unwrap_or_default();
         for session in sessions {
-            session.begin_close();
+            close_session(&session, &self.sessions, &self.events);
         }
     }
 
@@ -302,6 +271,31 @@ impl TerminalManager {
                 })
             })
             .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub fn working_chats(&self) -> HashSet<String> {
+        self.activity_snapshot().working_chats
+    }
+
+    pub(crate) fn activity_snapshot(&self) -> TerminalActivitySnapshot {
+        let _activity = self
+            .activity
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            let before = self.activity.revision.load(Ordering::Acquire);
+            let working_chats = working_chats(&self.sessions);
+            let after = self.activity.revision.load(Ordering::Acquire);
+            if before == after {
+                return TerminalActivitySnapshot {
+                    epoch: self.activity.epoch.clone(),
+                    revision: after,
+                    working_chats,
+                };
+            }
+        }
     }
 
     fn session(&self, id: &str) -> Result<Arc<TerminalSession>, String> {
@@ -322,7 +316,7 @@ impl Drop for TerminalManager {
             .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         for session in sessions {
-            session.begin_close();
+            close_session(&session, &self.sessions, &self.events);
         }
     }
 }
@@ -335,6 +329,7 @@ impl TerminalSession {
         rows: u16,
         agent: Option<TerminalAgent>,
         environment: &[(String, String)],
+        activity: Arc<TerminalActivityState>,
     ) -> Result<(Arc<Self>, Box<dyn Read + Send>), String> {
         if !workdir.is_dir() {
             return Err(format!("{} is not a directory.", workdir.display()));
@@ -346,11 +341,7 @@ impl TerminalSession {
             .map(|agent| CommandBuilder::new(agent.executable()))
             .unwrap_or_else(terminal_command);
         command.cwd(workdir.as_os_str());
-        command.env("TERM", "xterm-256color");
-        command.env("COLORTERM", "truecolor");
-        for (name, value) in environment {
-            command.env(name, value);
-        }
+        configure_command(&mut command, agent, environment);
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -373,7 +364,6 @@ impl TerminalSession {
 
         let title = agent
             .map(TerminalAgent::title)
-            .or_else(|| workdir.file_name().and_then(|name| name.to_str()))
             .unwrap_or("Terminal")
             .to_owned();
         let session = Arc::new(Self {
@@ -384,14 +374,8 @@ impl TerminalSession {
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(Some(child)),
-            state: Mutex::new(TerminalState {
-                columns,
-                rows,
-                replay: VecDeque::from([ReplayFrame::Resize { columns, rows }]),
-                replay_bytes: 0,
-                sequence: 0,
-                closing: false,
-            }),
+            activity,
+            state: Mutex::new(TerminalState::new(columns, rows)),
         });
         Ok((session, reader))
     }
@@ -409,6 +393,10 @@ impl TerminalSession {
                 ReplayFrame::Resize { columns, rows } => {
                     json!({"columns": columns, "rows": rows})
                 }
+                ReplayFrame::Checkpoint { exact, fallback } => json!({
+                    "checkpoint": STANDARD.encode(exact),
+                    "data": STANDARD.encode(fallback),
+                }),
             })
             .collect::<Vec<_>>();
         Some(json!({
@@ -417,6 +405,7 @@ impl TerminalSession {
             "agent": self.agent.map(TerminalAgent::wire_name),
             "columns": state.columns,
             "rows": state.rows,
+            "working": state.working,
             "sequence": state.sequence,
             "replay": replay,
         }))
@@ -426,23 +415,46 @@ impl TerminalSession {
         self.state.lock().map(|state| state.closing).unwrap_or(true)
     }
 
-    fn begin_close(&self) {
-        let should_close = self
-            .state
+    fn contributes_working(&self) -> bool {
+        self.agent.is_some()
+            && self
+                .state
+                .lock()
+                .map(|state| state.working && !state.closing)
+                .unwrap_or(false)
+    }
+
+    fn set_working_state(&self, working: bool) -> bool {
+        self.state
+            .lock()
+            .map(|mut state| {
+                if state.closing || state.working == working {
+                    false
+                } else {
+                    state.working = working;
+                    true
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    fn begin_close_state(&self) -> bool {
+        self.state
             .lock()
             .map(|mut state| {
                 if !state.closing {
                     state.closing = true;
+                    state.working = false;
                     state.sequence = state.sequence.saturating_add(1);
                     true
                 } else {
                     false
                 }
             })
-            .unwrap_or(false);
-        if !should_close {
-            return;
-        }
+            .unwrap_or(false)
+    }
+
+    fn close_resources(&self) {
         if let Ok(mut writer) = self.writer.lock() {
             writer.take();
         }
@@ -456,6 +468,43 @@ impl TerminalSession {
                 let _ = child.wait();
             });
         }
+    }
+}
+
+fn configure_command(
+    command: &mut CommandBuilder,
+    agent: Option<TerminalAgent>,
+    environment: &[(String, String)],
+) {
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    match agent {
+        Some(TerminalAgent::Codex) => {
+            command.arg("--no-alt-screen");
+            command.arg("-c");
+            command.arg("tui.terminal_title=[\"run-state\"]");
+            command.arg("-c");
+            command.arg("tui.terminal_resize_reflow_max_rows=5000");
+        }
+        Some(TerminalAgent::Claude) => {
+            for name in [
+                "WT_SESSION",
+                "TMUX",
+                "TMUX_PANE",
+                "STY",
+                "ZELLIJ",
+                "ZELLIJ_SESSION_NAME",
+                "TERM_PROGRAM",
+                "TERM_PROGRAM_VERSION",
+            ] {
+                command.env_remove(name);
+            }
+            command.env("ConEmuANSI", "ON");
+        }
+        None => {}
     }
 }
 
@@ -492,23 +541,116 @@ fn pty_size(columns: u16, rows: u16) -> PtySize {
     }
 }
 
+fn working_chats(sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>) -> HashSet<String> {
+    sessions
+        .lock()
+        .map(|sessions| {
+            sessions
+                .values()
+                .filter(|session| session.contributes_working())
+                .map(|session| session.chat_id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn chat_terminal_working(
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    chat_id: &str,
+) -> bool {
+    sessions
+        .lock()
+        .map(|sessions| {
+            sessions
+                .values()
+                .any(|session| session.chat_id == chat_id && session.contributes_working())
+        })
+        .unwrap_or(false)
+}
+
+fn publish_activity_locked(
+    events: &EventBus,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    session: &TerminalSession,
+    working: bool,
+    revision: u64,
+) {
+    let terminal_working = chat_terminal_working(sessions, &session.chat_id);
+    events.publish(json!({
+        "event": "terminal-activity",
+        "chat": session.chat_id,
+        "terminal": session.id,
+        "working": working,
+        "terminal_working": terminal_working,
+        "terminal_activity_epoch": session.activity.epoch,
+        "terminal_activity_revision": revision,
+    }));
+}
+
+fn transition_activity(
+    events: &EventBus,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    session: &TerminalSession,
+    working: bool,
+) {
+    let _activity = session
+        .activity
+        .gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !session.set_working_state(working) {
+        return;
+    }
+    let revision = session.activity.revision.fetch_add(1, Ordering::AcqRel) + 1;
+    publish_activity_locked(events, sessions, session, working, revision);
+}
+
+fn close_session(
+    session: &TerminalSession,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    events: &EventBus,
+) {
+    let closed = {
+        let _activity = session
+            .activity
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !session.begin_close_state() {
+            false
+        } else {
+            if let Ok(mut sessions) = sessions.lock() {
+                sessions.remove(&session.id);
+            }
+            let revision = session.activity.revision.fetch_add(1, Ordering::AcqRel) + 1;
+            publish_activity_locked(events, sessions, session, false, revision);
+            true
+        }
+    };
+    if closed {
+        session.close_resources();
+    }
+}
+
 fn start_reader(
     session: Arc<TerminalSession>,
     mut reader: Box<dyn Read + Send>,
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
     events: Arc<EventBus>,
+    mut queries: TerminalQueryResponder,
 ) {
     thread::Builder::new()
         .name(format!("xd-terminal-{}", session.id))
         .spawn(move || {
             let mut buffer = [0_u8; READ_SIZE];
-            let mut queries = TerminalQueryResponder::new();
+            let mut activity = TerminalActivityParser::default();
             loop {
                 let count = match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
                 let data = buffer[..count].to_vec();
+                let activity_updates = activity.feed(&data);
                 let replies = queries.feed(&data);
                 if !replies.is_empty()
                     && let Ok(mut writer) = session.writer.lock()
@@ -538,22 +680,23 @@ fn start_reader(
                         outcome
                     });
                 match outcome {
-                    RecordOutcome::Accepted(_) => {}
+                    RecordOutcome::Accepted(_) => {
+                        for working in activity_updates {
+                            transition_activity(&events, &sessions, &session, working);
+                        }
+                    }
                     RecordOutcome::Unchanged => {
                         unreachable!("terminal output always changes state")
                     }
-                    RecordOutcome::CapacityReached | RecordOutcome::Closing => break,
+                    RecordOutcome::Closing => break,
                 }
             }
-            session.begin_close();
+            close_session(&session, &sessions, &events);
             let sequence = session
                 .state
                 .lock()
                 .map(|state| state.sequence)
                 .unwrap_or_default();
-            if let Ok(mut sessions) = sessions.lock() {
-                sessions.remove(&session.id);
-            }
             events.publish(json!({
                 "event": "terminal-closed",
                 "chat": session.chat_id,
@@ -572,14 +715,14 @@ fn text<'a>(request: &'a Value, key: &str, message: &str) -> Result<&'a str, Str
         .ok_or_else(|| message.to_owned())
 }
 
-fn geometry(request: &Value, key: &str, default: u16) -> Result<u16, String> {
+fn geometry(request: &Value, key: &str, default: u16, maximum: u16) -> Result<u16, String> {
     let Some(value) = request.get(key) else {
         return Ok(default);
     };
     let value = value
         .as_u64()
-        .filter(|value| (1..=u64::from(MAX_GEOMETRY)).contains(value))
-        .ok_or_else(|| format!("Terminal {key} must be between 1 and {MAX_GEOMETRY}."))?;
+        .filter(|value| (1..=u64::from(maximum)).contains(value))
+        .ok_or_else(|| format!("Terminal {key} must be between 1 and {maximum}."))?;
     Ok(value as u16)
 }
 
@@ -591,6 +734,51 @@ fn error(message: impl Into<String>) -> Value {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn direct_agent_commands_apply_activity_configuration_after_user_environment() {
+        let topology = [
+            ("WT_SESSION".to_owned(), "xd-wt".to_owned()),
+            ("TMUX".to_owned(), "xd-tmux".to_owned()),
+            ("TMUX_PANE".to_owned(), "xd-pane".to_owned()),
+            ("STY".to_owned(), "xd-screen".to_owned()),
+            ("ZELLIJ".to_owned(), "xd-zellij".to_owned()),
+            ("TERM_PROGRAM".to_owned(), "xd-terminal".to_owned()),
+            ("ConEmuANSI".to_owned(), "OFF".to_owned()),
+        ];
+        let mut codex = CommandBuilder::new("codex.exe");
+        configure_command(&mut codex, Some(TerminalAgent::Codex), &topology);
+        let arguments = codex
+            .get_argv()
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "codex.exe",
+                "--no-alt-screen",
+                "-c",
+                "tui.terminal_title=[\"run-state\"]",
+                "-c",
+                "tui.terminal_resize_reflow_max_rows=5000"
+            ]
+        );
+
+        let mut claude = CommandBuilder::new("claude.exe");
+        configure_command(&mut claude, Some(TerminalAgent::Claude), &topology);
+        for name in [
+            "WT_SESSION",
+            "TMUX",
+            "TMUX_PANE",
+            "STY",
+            "ZELLIJ",
+            "TERM_PROGRAM",
+        ] {
+            assert!(claude.get_env(name).is_none(), "{name} was not removed");
+        }
+        assert_eq!(claude.get_env("ConEmuANSI").unwrap(), "ON");
+    }
 
     #[test]
     fn conpty_output_is_replayed_and_input_is_bounded() {
@@ -647,6 +835,24 @@ mod tests {
                 .open(&json!({"chat": "chat-1", "columns": 0}), &env::temp_dir(),)
                 .unwrap_err()
                 .contains("columns")
+        );
+        assert!(
+            manager
+                .open(
+                    &json!({"chat": "chat-1", "columns": MAX_COLUMNS + 1}),
+                    &env::temp_dir(),
+                )
+                .unwrap_err()
+                .contains("columns")
+        );
+        assert!(
+            manager
+                .open(
+                    &json!({"chat": "chat-1", "rows": MAX_ROWS + 1}),
+                    &env::temp_dir(),
+                )
+                .unwrap_err()
+                .contains("rows")
         );
         assert!(
             manager

@@ -379,9 +379,9 @@ fn release_identity(channel: UpdateChannel, release: &Value) -> Result<String, S
         .ok_or_else(|| format!("The {} did not identify its build.", channel.feed_name()))
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 enum InstallerMode {
+    #[cfg(any(unix, test))]
     Install,
     #[cfg(any(windows, test))]
     Stage(PathBuf),
@@ -548,6 +548,7 @@ fn windows_installer_arguments(
         UpdateChannel::Nightly => {}
     }
     match mode {
+        #[cfg(any(unix, test))]
         InstallerMode::Install => {
             arguments.push("-Quiet".into());
             arguments.push("-InApp".into());

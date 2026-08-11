@@ -85,7 +85,9 @@ pub(crate) fn project_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<Pr
                 id: folder.id.clone(),
                 name: folder.name.clone(),
                 sessions: project_chats.clone().count(),
-                working: project_chats.filter(|chat| chat.working).count(),
+                working: project_chats
+                    .filter(|chat| chat.working || chat.terminal_working)
+                    .count(),
             }
         })
         .collect()
@@ -105,7 +107,7 @@ pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<S
                     .unwrap_or("New Session")
                     .to_owned(),
                 agent: AgentCli::from_backend(&chat.backend)?,
-                working: chat.working,
+                working: chat.working || chat.terminal_working,
             })
         })
         .collect()
@@ -190,6 +192,7 @@ mod tests {
             title: Some(title.into()),
             backend: backend.into(),
             working,
+            terminal_working: false,
         }
     }
 
@@ -246,6 +249,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn direct_cli_activity_marks_sessions_and_projects_working() {
+        let folders = vec![folder("one", "Compiler")];
+        let chats: Vec<ChatSummary> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "a",
+                "folder": "one",
+                "title": "Fix parser",
+                "backend": "codex",
+                "working": false,
+                "terminal_working": true
+            }
+        ]))
+        .unwrap();
+
+        assert!(project_sessions("one", &chats)[0].working);
+        assert_eq!(project_cards(&folders, &chats)[0].working, 1);
     }
 
     #[test]

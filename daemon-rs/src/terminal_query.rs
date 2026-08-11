@@ -1,14 +1,18 @@
+use serde_json::Value;
+
 const MAX_CONTROL_SEQUENCE: usize = 64;
 const PRIMARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[?1;2c";
-const FOREGROUND_COLOR: &[u8] = b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\";
-const BACKGROUND_COLOR: &[u8] = b"\x1b]11;rgb:0000/0000/0000\x1b\\";
+const DEFAULT_FOREGROUND: u32 = 0xffffff;
+const DEFAULT_BACKGROUND: u32 = 0x000000;
 const KITTY_KEYBOARD_FLAGS: &[u8] = b"\x1b[?0u";
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct TerminalQueryResponder {
     parser: Parser,
     cursor_row: usize,
     cursor_column: usize,
+    foreground_reply: Vec<u8>,
+    background_reply: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -31,11 +35,25 @@ enum Parser {
 }
 
 impl TerminalQueryResponder {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_colors(DEFAULT_FOREGROUND, DEFAULT_BACKGROUND)
+    }
+
+    pub(crate) fn from_request(request: &Value) -> Self {
+        Self::with_colors(
+            requested_color(request, "foreground", DEFAULT_FOREGROUND),
+            requested_color(request, "background", DEFAULT_BACKGROUND),
+        )
+    }
+
+    fn with_colors(foreground: u32, background: u32) -> Self {
         Self {
+            parser: Parser::default(),
             cursor_row: 1,
             cursor_column: 1,
-            ..Self::default()
+            foreground_reply: color_reply(10, foreground),
+            background_reply: color_reply(11, background),
         }
     }
 
@@ -96,7 +114,7 @@ impl TerminalQueryResponder {
                 } => {
                     if byte == 0x9c || byte == 0x07 || (escaped && byte == b'\\') {
                         if !overflowed {
-                            Self::reply_to_osc(&sequence, &mut replies);
+                            self.reply_to_osc(&sequence, &mut replies);
                         }
                         Parser::Ground
                     } else {
@@ -163,18 +181,34 @@ impl TerminalQueryResponder {
         }
     }
 
-    fn reply_to_osc(sequence: &[u8], replies: &mut Vec<u8>) {
+    fn reply_to_osc(&self, sequence: &[u8], replies: &mut Vec<u8>) {
         match sequence {
-            b"10;?" => replies.extend_from_slice(FOREGROUND_COLOR),
-            b"11;?" => replies.extend_from_slice(BACKGROUND_COLOR),
+            b"10;?" => replies.extend_from_slice(&self.foreground_reply),
+            b"11;?" => replies.extend_from_slice(&self.background_reply),
             _ => {}
         }
     }
 }
 
+fn requested_color(request: &Value, name: &str, default: u32) -> u32 {
+    request
+        .get(name)
+        .and_then(Value::as_u64)
+        .filter(|color| *color <= u64::from(0xffffff_u32))
+        .map_or(default, |color| color as u32)
+}
+
+fn color_reply(code: u8, color: u32) -> Vec<u8> {
+    let red = ((color >> 16) & 0xff) * 0x101;
+    let green = ((color >> 8) & 0xff) * 0x101;
+    let blue = (color & 0xff) * 0x101;
+    format!("\x1b]{code};rgb:{red:04x}/{green:04x}/{blue:04x}\x1b\\").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn replies_to_status_and_cursor_reports() {
@@ -205,6 +239,40 @@ mod tests {
 
         assert_eq!(
             responder.feed(b"\x1b]10;?\x07\x1b]11;?\x1b\\"),
+            concat!(
+                "\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+                "\x1b]11;rgb:0000/0000/0000\x1b\\"
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
+    fn replies_to_dynamic_color_queries_with_the_requested_palette() {
+        let mut responder = TerminalQueryResponder::from_request(&json!({
+            "foreground": 0x202020,
+            "background": 0xfafafa,
+        }));
+
+        assert_eq!(
+            responder.feed(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\"),
+            concat!(
+                "\x1b]10;rgb:2020/2020/2020\x1b\\",
+                "\x1b]11;rgb:fafa/fafa/fafa\x1b\\"
+            )
+            .as_bytes()
+        );
+    }
+
+    #[test]
+    fn invalid_requested_colors_keep_the_legacy_dark_palette() {
+        let mut responder = TerminalQueryResponder::from_request(&json!({
+            "foreground": -1,
+            "background": 0x1000000,
+        }));
+
+        assert_eq!(
+            responder.feed(b"\x1b]10;?\x07\x1b]11;?\x07"),
             concat!(
                 "\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
                 "\x1b]11;rgb:0000/0000/0000\x1b\\"

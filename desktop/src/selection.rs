@@ -16,28 +16,6 @@ use gpui::{
 
 const SELECTION: u32 = 0x6b8cff55;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SelectionSource {
-    ChatMessage {
-        chat_id: String,
-        chat_title: String,
-        message_id: Option<i64>,
-        role: String,
-    },
-    WorkspaceFile {
-        chat_id: String,
-        path: String,
-    },
-}
-
-#[derive(Clone)]
-pub struct SelectedTextContext {
-    pub text: String,
-    pub source: SelectionSource,
-    pub position: Point<Pixels>,
-    pub menu_open: bool,
-}
-
 /// The one selection in the window, keyed by the document that owns it.
 #[derive(Clone, Default)]
 pub struct TextSelection {
@@ -47,10 +25,6 @@ pub struct TextSelection {
     head: usize,
     dragging: bool,
     pressed_link: Option<(u64, usize)>,
-    source: Option<SelectionSource>,
-    action_position: Option<Point<Pixels>>,
-    action_ready: bool,
-    action_menu_open: bool,
 }
 
 impl Global for TextSelection {}
@@ -72,38 +46,6 @@ impl TextSelection {
             .get(selection.range())
             .filter(|text| !text.is_empty())
             .map(str::to_owned)
-    }
-
-    pub fn context(cx: &App) -> Option<SelectedTextContext> {
-        let selection = cx.try_global::<Self>()?;
-        if !selection.action_ready {
-            return None;
-        }
-        let text = selection
-            .text
-            .get(selection.range())
-            .filter(|text| !text.is_empty())?
-            .to_owned();
-        Some(SelectedTextContext {
-            text,
-            source: selection.source.clone()?,
-            position: selection.action_position?,
-            menu_open: selection.action_menu_open,
-        })
-    }
-
-    pub fn toggle_action_menu(cx: &mut App) {
-        if cx.try_global::<Self>().is_some() {
-            let selection = cx.global_mut::<Self>();
-            selection.action_menu_open = !selection.action_menu_open;
-        }
-    }
-
-    pub fn close_action_menu(cx: &mut App) -> bool {
-        if cx.try_global::<Self>().is_none() {
-            return false;
-        }
-        std::mem::take(&mut cx.global_mut::<Self>().action_menu_open)
     }
 
     pub fn clear(cx: &mut App) {
@@ -128,7 +70,6 @@ pub fn selectable_in_document(
     document: u64,
     text: SharedString,
     range: Range<usize>,
-    source: Option<SelectionSource>,
     layout: TextLayout,
     element: impl IntoElement,
 ) -> Selectable {
@@ -137,34 +78,10 @@ pub fn selectable_in_document(
         document,
         document_text: Some(text),
         document_range: Some(range),
-        source,
         layout,
         element: Some(element.into_any_element()),
         links: Vec::new(),
         link_listener: None,
-    }
-}
-
-/// Makes text selectable while preserving clickable character ranges. Keeping
-/// selection and link activation on one hit target avoids competing cursors and
-/// lets the pressed link survive redraws between mouse-down and mouse-up.
-pub fn selectable_links(
-    block: u64,
-    layout: TextLayout,
-    element: impl IntoElement,
-    links: Vec<Range<usize>>,
-    listener: impl Fn(usize, &mut Window, &mut App) + 'static,
-) -> Selectable {
-    Selectable {
-        block,
-        document: block,
-        document_text: None,
-        document_range: None,
-        source: None,
-        layout,
-        element: Some(element.into_any_element()),
-        links,
-        link_listener: Some(Box::new(listener)),
     }
 }
 
@@ -173,7 +90,6 @@ pub fn selectable_links_in_document(
     document: u64,
     text: SharedString,
     range: Range<usize>,
-    source: Option<SelectionSource>,
     layout: TextLayout,
     element: impl IntoElement,
     links: Vec<Range<usize>>,
@@ -184,7 +100,6 @@ pub fn selectable_links_in_document(
         document,
         document_text: Some(text),
         document_range: Some(range),
-        source,
         layout,
         element: Some(element.into_any_element()),
         links,
@@ -199,7 +114,6 @@ pub struct Selectable {
     document: u64,
     document_text: Option<SharedString>,
     document_range: Option<Range<usize>>,
-    source: Option<SelectionSource>,
     layout: TextLayout,
     element: Option<AnyElement>,
     links: Vec<Range<usize>>,
@@ -267,7 +181,6 @@ impl Selectable {
             .clone()
             .unwrap_or_else(|| layout_text.clone().into());
         let document_range = self.document_range.clone().unwrap_or(0..layout_text.len());
-        let source = self.source.clone();
         let links = self.links.clone();
         let pressed = hitbox.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
@@ -296,10 +209,6 @@ impl Selectable {
                     .iter()
                     .position(|range| range.contains(&index))
                     .map(|link| (block, link)),
-                source: source.clone(),
-                action_position: Some(event.position),
-                action_ready: false,
-                action_menu_open: false,
             });
             window.refresh();
         });
@@ -346,7 +255,6 @@ impl Selectable {
             let pressed_link = {
                 let selection = cx.global_mut::<TextSelection>();
                 selection.dragging = false;
-                selection.action_ready = true;
                 match selection.pressed_link {
                     Some((pressed_block, link)) if pressed_block == block => {
                         selection.pressed_link = None;
@@ -557,11 +465,19 @@ mod tests {
         impl Render for SelectableLinkList {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 list(self.list.clone(), move |_, _, _| {
-                    let text = StyledText::new("open link");
+                    let value: SharedString = "open link".into();
+                    let text = StyledText::new(value.clone());
                     let layout = text.layout().clone();
-                    selectable_links(1, layout, text, vec![0..9], |_, _, cx| {
-                        cx.open_url("https://example.com")
-                    })
+                    selectable_links_in_document(
+                        1,
+                        1,
+                        value,
+                        0..9,
+                        layout,
+                        text,
+                        vec![0..9],
+                        |_, _, cx| cx.open_url("https://example.com"),
+                    )
                     .into_any_element()
                 })
                 .size_full()
@@ -589,57 +505,6 @@ mod tests {
         cx.simulate_mouse_up(link, MouseButton::Left, Modifiers::default());
 
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
-    }
-
-    #[gpui::test]
-    fn selection_action_appears_after_release_at_the_selection_anchor(cx: &mut TestAppContext) {
-        struct SelectableTextList {
-            list: ListState,
-        }
-
-        impl Render for SelectableTextList {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                list(self.list.clone(), move |_, _, _| {
-                    let text: SharedString = "select this text".into();
-                    let styled = StyledText::new(text.clone());
-                    let layout = styled.layout().clone();
-                    selectable_in_document(
-                        1,
-                        1,
-                        text,
-                        0..16,
-                        Some(SelectionSource::ChatMessage {
-                            chat_id: "source".into(),
-                            chat_title: "Source".into(),
-                            message_id: Some(1),
-                            role: "assistant".into(),
-                        }),
-                        layout,
-                        styled,
-                    )
-                    .into_any_element()
-                })
-                .size_full()
-            }
-        }
-
-        let (_, cx) = cx.add_window_view(|_, _| SelectableTextList {
-            list: ListState::new(1, ListAlignment::Top, px(100.0)),
-        });
-        cx.run_until_parked();
-
-        let anchor = point(px(10.0), px(10.0));
-        let drag_end = point(px(80.0), px(10.0));
-        cx.simulate_mouse_move(anchor, None, Modifiers::default());
-        cx.simulate_mouse_down(anchor, MouseButton::Left, Modifiers::default());
-        cx.simulate_mouse_move(drag_end, Some(MouseButton::Left), Modifiers::default());
-        cx.update(|_, cx| assert!(TextSelection::context(cx).is_none()));
-
-        cx.simulate_mouse_up(drag_end, MouseButton::Left, Modifiers::default());
-        cx.update(|_, cx| {
-            let context = TextSelection::context(cx).expect("selection action after release");
-            assert_eq!(context.position, anchor);
-        });
     }
 
     #[test]

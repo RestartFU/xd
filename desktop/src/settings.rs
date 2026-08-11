@@ -21,50 +21,6 @@ pub enum AccentPreset {
     Red,
 }
 
-impl AccentPreset {
-    pub const ALL: [Self; 6] = [
-        Self::Blue,
-        Self::Purple,
-        Self::Green,
-        Self::Orange,
-        Self::Pink,
-        Self::Red,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Blue => "Blue",
-            Self::Purple => "Purple",
-            Self::Green => "Green",
-            Self::Orange => "Orange",
-            Self::Pink => "Pink",
-            Self::Red => "Red",
-        }
-    }
-
-    pub fn color(self) -> u32 {
-        match self {
-            Self::Blue => 0x6b8cff,
-            Self::Purple => 0xa77bff,
-            Self::Green => 0x42b883,
-            Self::Orange => 0xe98949,
-            Self::Pink => 0xe66da8,
-            Self::Red => 0xe56870,
-        }
-    }
-
-    pub fn hover_color(self) -> u32 {
-        match self {
-            Self::Blue => 0x7b98ff,
-            Self::Purple => 0xb38cff,
-            Self::Green => 0x52c493,
-            Self::Orange => 0xf19a5f,
-            Self::Pink => 0xee7db5,
-            Self::Red => 0xed7880,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GitWriter {
@@ -75,16 +31,6 @@ pub enum GitWriter {
 }
 
 impl GitWriter {
-    pub const ALL: [Self; 3] = [Self::Chat, Self::Claude, Self::Codex];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Chat => "Use chat model",
-            Self::Claude => "Claude Code",
-            Self::Codex => "Codex",
-        }
-    }
-
     pub fn backend(self) -> Option<&'static str> {
         match self {
             Self::Chat => None,
