@@ -369,12 +369,6 @@ impl ComposerInput {
         self.terminal_bytes(b"\x1b[6~".to_vec(), cx);
     }
     fn interrupt(&mut self, _: &Interrupt, _: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal
-            && let Some(text) = TextSelection::selected(cx)
-        {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            return;
-        }
         self.terminal_bytes(vec![3], cx);
     }
     fn end_of_file(&mut self, _: &EndOfFile, _: &mut Window, cx: &mut Context<Self>) {

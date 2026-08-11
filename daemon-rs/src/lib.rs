@@ -860,9 +860,6 @@ impl Engine {
                     "Stop the daemon-managed turn before opening this chat's direct CLI.",
                 );
             }
-            Ok(chat) if chat["backend"].as_str() != Some(agent.wire_name()) => {
-                return error_reply("The requested CLI does not match this session's assistant.");
-            }
             Ok(_) => {}
             Err(error) => return error_reply(error),
         }
@@ -1596,6 +1593,52 @@ mod tests {
                 .unwrap()["ok"],
             false
         );
+    }
+
+    #[test]
+    fn a_session_can_open_either_supported_direct_cli() {
+        let root = test_directory();
+        let workspaces = root.join("Workspaces");
+        let store = StateStore::open(root.join("chats.db"), workspaces.clone()).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({
+            "op": "new-folder",
+            "name": "Project",
+        }))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = engine.dispatch(json!({
+            "op": "new-chat",
+            "folder": folder,
+            "backend": "codex",
+        }))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        fs::remove_dir_all(workspaces.join("Project")).unwrap();
+        let reply = engine.dispatch(json!({
+            "op": "terminal-open-agent",
+            "chat": chat,
+            "agent": "claude",
+            "columns": 80,
+            "rows": 24,
+            "reuse": false,
+        }));
+
+        assert_ne!(
+            reply["error"],
+            "The requested CLI does not match this session's assistant."
+        );
+        assert!(
+            reply["error"]
+                .as_str()
+                .unwrap()
+                .contains("working directory does not exist")
+        );
+        drop(engine);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
