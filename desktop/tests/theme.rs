@@ -32,6 +32,8 @@ fn every_preset_exposes_a_complete_readable_semantic_palette() {
 
         assert_ne!(colors.background, colors.surface, "{preset:?}");
         assert_ne!(colors.surface, colors.surface_high, "{preset:?}");
+        assert_ne!(colors.selected_surface, colors.surface, "{preset:?}");
+        assert_ne!(colors.selected_border, colors.border, "{preset:?}");
         assert_ne!(colors.text, colors.muted, "{preset:?}");
         assert!(
             contrast(colors.text, colors.background) >= 7.0,
@@ -43,6 +45,26 @@ fn every_preset_exposes_a_complete_readable_semantic_palette() {
         );
         assert!(
             contrast(colors.accent_text, colors.accent) >= 4.5,
+            "{preset:?}"
+        );
+        assert!(
+            contrast(colors.text, colors.selected_surface) >= 7.0,
+            "{preset:?}"
+        );
+        assert!(
+            contrast(colors.muted, colors.selected_surface) >= 4.5,
+            "{preset:?}"
+        );
+        assert!(
+            contrast(colors.accent_text, colors.accent_hover) >= 4.5,
+            "{preset:?}"
+        );
+        assert!(
+            contrast(colors.accent_ink, colors.background) >= 4.5,
+            "{preset:?}"
+        );
+        assert!(
+            contrast(colors.accent_ink, colors.selected_surface) >= 4.5,
             "{preset:?}"
         );
     }

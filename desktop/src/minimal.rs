@@ -111,6 +111,22 @@ pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<S
         .collect()
 }
 
+pub(crate) fn resumable_session(
+    last_chat: Option<&str>,
+    chats: &[ChatSummary],
+) -> Option<(String, String, AgentCli)> {
+    let supported = |chat: &&ChatSummary| AgentCli::from_backend(&chat.backend).is_some();
+    let chat = last_chat
+        .and_then(|chat_id| {
+            chats
+                .iter()
+                .find(|chat| chat.id == chat_id && supported(chat))
+        })
+        .or_else(|| chats.iter().find(supported))?;
+    let agent = AgentCli::from_backend(&chat.backend)?;
+    Some((chat.folder.clone(), chat.id.clone(), agent))
+}
+
 pub(crate) fn reconcile_route(
     route: &MinimalRoute,
     folders: &[Folder],
@@ -230,6 +246,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn sessions_tab_resumes_the_last_supported_cli_session() {
+        let chats = vec![
+            session("a", "one", "First", "codex", false),
+            session("b", "two", "Last", "claude", true),
+            session("c", "two", "Unsupported", "shell", false),
+        ];
+
+        assert_eq!(
+            resumable_session(Some("b"), &chats),
+            Some(("two".into(), "b".into(), AgentCli::Claude))
+        );
+        assert_eq!(
+            resumable_session(Some("c"), &chats),
+            Some(("one".into(), "a".into(), AgentCli::Codex))
+        );
+        assert_eq!(resumable_session(None, &chats).unwrap().1, "a");
     }
 
     #[test]

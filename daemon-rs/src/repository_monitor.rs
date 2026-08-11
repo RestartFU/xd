@@ -86,6 +86,7 @@ pub(crate) struct RepositoryMonitor {
 pub(crate) struct RepositoryMonitorHandle(Weak<Shared>);
 
 impl RepositoryMonitor {
+    #[cfg(test)]
     pub(crate) fn disabled() -> Self {
         Self { shared: None }
     }

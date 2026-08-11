@@ -43,8 +43,8 @@ const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_REPOSITORY_FILES: usize = 5_000;
-const MAX_FILE_PREVIEW_BYTES: usize = 128 * 1024;
+const MAX_COMPAT_REPOSITORY_FILES: usize = 5_000;
+const MAX_COMPAT_REPOSITORY_PREVIEW_BYTES: usize = 128 * 1024;
 const MAX_FILE_BROWSE_BYTES: usize = 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 5_000;
 const MAX_GIT_DRAFT_CONTEXT_BYTES: usize = 256 * 1024;
@@ -212,17 +212,6 @@ impl StateStore {
         )
     }
 
-    pub fn open_read_only(
-        database_path: impl AsRef<Path>,
-        workspace_root: impl Into<PathBuf>,
-    ) -> Result<Self, StorageError> {
-        Self::open_with_flags(
-            database_path.as_ref(),
-            workspace_root,
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-    }
-
     pub fn remote_listener(&self) -> Result<Option<(String, u16)>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let encoded = database
@@ -297,6 +286,7 @@ impl StateStore {
         })
     }
 
+    #[cfg(test)]
     pub fn devices(&self) -> Result<Value, StorageError> {
         self.devices_with_connected(&HashSet::new())
     }
@@ -688,39 +678,68 @@ impl StateStore {
         let message = "file-browse needs a chat and action.";
         let chat_id = required_string(request, "chat", message)?;
         let action = required_string(request, "action", message)?;
-        let relative = optional_string(request, "path")?;
         let root = self.terminal_workdir(chat_id)?;
-        let path = safe_chat_path(&root, relative)?;
+        browse_file(&root, request, action, None)
+    }
 
-        match action {
-            "list" => {
-                let entries = visible_directory_entries(&path, false)?;
-                Ok(json!({
-                    "ok": true,
-                    "entries": entries.into_iter().take(MAX_DIRECTORY_ENTRIES).map(|entry| {
-                        json!({"name": entry.name, "directory": entry.directory})
-                    }).collect::<Vec<_>>(),
-                }))
+    pub(crate) fn compat_repository_files(&self, request: &Value) -> Result<Value, StorageError> {
+        let workdir = self.chat_repository(request, "repository-files needs a chat.")?;
+        let output = checked_git(
+            &workdir,
+            &["ls-files", "-co", "--exclude-standard", "-z"],
+            &[],
+        )?;
+        let output = String::from_utf8(output)
+            .map_err(|_| StorageError::InvalidRequest("Git returned invalid file names.".into()))?;
+        let mut files = output
+            .split('\0')
+            .filter(|path| !path.is_empty() && path.len() <= 4_096)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        files.sort_unstable();
+        files.dedup();
+        let truncated = files.len() > MAX_COMPAT_REPOSITORY_FILES;
+        files.truncate(MAX_COMPAT_REPOSITORY_FILES);
+        Ok(json!({"ok": true, "files": files, "truncated": truncated}))
+    }
+
+    pub(crate) fn compat_repository_file(
+        &self,
+        request: &Value,
+        action: &str,
+    ) -> Result<Value, StorageError> {
+        let root = self.chat_repository(request, "A repository file needs a chat and path.")?;
+        if action == "write" {
+            let original = request
+                .get("original")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest(
+                        "The original repository file content is required.".into(),
+                    )
+                })?;
+            let content = request
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("Repository file content must be text.".into())
+                })?;
+            if original.len() > MAX_COMPAT_REPOSITORY_PREVIEW_BYTES
+                || content.len() > MAX_COMPAT_REPOSITORY_PREVIEW_BYTES
+                || original.contains('\0')
+                || content.contains('\0')
+            {
+                return Err(StorageError::InvalidRequest(format!(
+                    "Editable repository files are limited to {MAX_COMPAT_REPOSITORY_PREVIEW_BYTES} bytes of UTF-8 text."
+                )));
             }
-            "read" => {
-                let content = read_browsable_file(&path)?;
-                Ok(json!({"ok": true, "content": content}))
-            }
-            "write" => {
-                let content = request
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        StorageError::InvalidRequest("file-browse write needs content.".into())
-                    })?;
-                let original = optional_string(request, "original")?;
-                write_browsable_file(&path, original, content)?;
-                Ok(json!({"ok": true}))
-            }
-            _ => Err(StorageError::InvalidRequest(
-                "No such file-browse action.".into(),
-            )),
         }
+        browse_file(
+            &root,
+            request,
+            action,
+            Some(MAX_COMPAT_REPOSITORY_PREVIEW_BYTES),
+        )
     }
 
     pub fn shortcuts(&self, request: &Value) -> Result<Value, StorageError> {
@@ -2073,146 +2092,6 @@ impl StateStore {
             model,
             effort,
         })
-    }
-
-    pub fn repository_files(&self, request: &Value) -> Result<Value, StorageError> {
-        let workdir = self.chat_repository(request, "repository-files needs a chat.")?;
-        let output = checked_git(
-            &workdir,
-            &["ls-files", "-co", "--exclude-standard", "-z"],
-            &[],
-        )?;
-        let output = String::from_utf8(output)
-            .map_err(|_| StorageError::InvalidRequest("Git returned invalid file names.".into()))?;
-        let mut files = output
-            .split('\0')
-            .filter(|path| !path.is_empty() && path.len() <= 4_096)
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        files.sort_unstable();
-        files.dedup();
-        let truncated = files.len() > MAX_REPOSITORY_FILES;
-        files.truncate(MAX_REPOSITORY_FILES);
-        Ok(json!({"ok": true, "files": files, "truncated": truncated}))
-    }
-
-    pub fn repository_file(&self, request: &Value) -> Result<Value, StorageError> {
-        let workdir = self.chat_repository(request, "repository-file needs a chat and path.")?;
-        let relative = required_string(request, "path", "A repository file path is required.")?;
-        let path = safe_repository_file(&workdir, relative)?;
-        let mut bytes = Vec::new();
-        fs::File::open(&path)
-            .and_then(|file| {
-                file.take((MAX_FILE_PREVIEW_BYTES + 1) as u64)
-                    .read_to_end(&mut bytes)
-            })
-            .map_err(|source| StorageError::Filesystem {
-                context: "Cannot read the repository file".into(),
-                source,
-            })?;
-        let truncated = bytes.len() > MAX_FILE_PREVIEW_BYTES;
-        bytes.truncate(MAX_FILE_PREVIEW_BYTES);
-        if bytes.contains(&0) {
-            return Err(StorageError::InvalidRequest(
-                "Binary files cannot be previewed.".into(),
-            ));
-        }
-        let content = String::from_utf8(bytes).map_err(|_| {
-            StorageError::InvalidRequest("Only UTF-8 text files can be previewed.".into())
-        })?;
-        Ok(json!({
-            "ok": true,
-            "path": relative,
-            "content": content,
-            "truncated": truncated,
-        }))
-    }
-
-    pub fn write_repository_file(&self, request: &Value) -> Result<Value, StorageError> {
-        let workdir = self.chat_repository(
-            request,
-            "repository-file-write needs a chat, path, and content.",
-        )?;
-        let relative = required_string(request, "path", "A repository file path is required.")?;
-        let original = request
-            .get("original")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StorageError::InvalidRequest(
-                    "The original repository file content is required.".into(),
-                )
-            })?;
-        let content = request
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                StorageError::InvalidRequest("Repository file content must be text.".into())
-            })?;
-        if original.len() > MAX_FILE_PREVIEW_BYTES
-            || content.len() > MAX_FILE_PREVIEW_BYTES
-            || original.contains('\0')
-            || content.contains('\0')
-        {
-            return Err(StorageError::InvalidRequest(format!(
-                "Editable repository files are limited to {MAX_FILE_PREVIEW_BYTES} bytes of UTF-8 text."
-            )));
-        }
-        let path = safe_repository_file(&workdir, relative)?;
-        let mut current = Vec::new();
-        fs::File::open(&path)
-            .and_then(|file| {
-                file.take((MAX_FILE_PREVIEW_BYTES + 1) as u64)
-                    .read_to_end(&mut current)
-            })
-            .map_err(|source| StorageError::Filesystem {
-                context: "Cannot read the repository file before saving".into(),
-                source,
-            })?;
-        if current != original.as_bytes() {
-            return Err(StorageError::InvalidRequest(
-                "The file changed outside xd. Refresh before saving.".into(),
-            ));
-        }
-        let parent = path.parent().ok_or_else(|| {
-            StorageError::InvalidRequest("The repository file has no parent directory.".into())
-        })?;
-        let temporary = parent.join(format!(".xd-save-{}", Uuid::new_v4()));
-        let result = (|| -> Result<(), StorageError> {
-            let mut output =
-                create_private_file(&temporary).map_err(|source| StorageError::Filesystem {
-                    context: "Cannot create a temporary repository file".into(),
-                    source,
-                })?;
-            output
-                .write_all(content.as_bytes())
-                .and_then(|()| output.sync_all())
-                .map_err(|source| StorageError::Filesystem {
-                    context: "Cannot write the repository file".into(),
-                    source,
-                })?;
-            let permissions = fs::metadata(&path)
-                .map_err(|source| StorageError::Filesystem {
-                    context: "Cannot inspect repository file permissions".into(),
-                    source,
-                })?
-                .permissions();
-            fs::set_permissions(&temporary, permissions).map_err(|source| {
-                StorageError::Filesystem {
-                    context: "Cannot preserve repository file permissions".into(),
-                    source,
-                }
-            })?;
-            fs::rename(&temporary, &path).map_err(|source| StorageError::Filesystem {
-                context: "Cannot replace the repository file".into(),
-                source,
-            })?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result?;
-        Ok(json!({"ok": true, "path": relative, "content": content}))
     }
 
     pub fn git_commit(&self, request: &Value) -> Result<Value, StorageError> {
@@ -4775,6 +4654,50 @@ struct BrowsableEntry {
     directory: bool,
 }
 
+fn browse_file(
+    root: &Path,
+    request: &Value,
+    action: &str,
+    truncated_preview_bytes: Option<usize>,
+) -> Result<Value, StorageError> {
+    let relative = optional_string(request, "path")?;
+    let path = safe_chat_path(root, relative)?;
+
+    match action {
+        "list" => {
+            let entries = visible_directory_entries(&path, false)?;
+            Ok(json!({
+                "ok": true,
+                "entries": entries.into_iter().take(MAX_DIRECTORY_ENTRIES).map(|entry| {
+                    json!({"name": entry.name, "directory": entry.directory})
+                }).collect::<Vec<_>>(),
+            }))
+        }
+        "read" => {
+            let (content, truncated) = read_browsable_file(&path, truncated_preview_bytes)?;
+            let mut response = json!({"ok": true, "content": content});
+            if truncated_preview_bytes.is_some() {
+                response["truncated"] = Value::Bool(truncated);
+            }
+            Ok(response)
+        }
+        "write" => {
+            let content = request
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("file-browse write needs content.".into())
+                })?;
+            let original = optional_string(request, "original")?;
+            write_browsable_file(&path, original, content)?;
+            Ok(json!({"ok": true}))
+        }
+        _ => Err(StorageError::InvalidRequest(
+            "No such file-browse action.".into(),
+        )),
+    }
+}
+
 fn visible_directory_entries(
     path: &Path,
     directories_only: bool,
@@ -4841,7 +4764,10 @@ fn safe_chat_path(root: &Path, relative: Option<&str>) -> Result<PathBuf, Storag
     Ok(path)
 }
 
-fn read_browsable_file(path: &Path) -> Result<String, StorageError> {
+fn read_browsable_file(
+    path: &Path,
+    truncated_preview_bytes: Option<usize>,
+) -> Result<(String, bool), StorageError> {
     let metadata = fs::symlink_metadata(path).map_err(|source| StorageError::Filesystem {
         context: "Cannot inspect that file".into(),
         source,
@@ -4851,34 +4777,35 @@ fn read_browsable_file(path: &Path) -> Result<String, StorageError> {
             "Only regular files can be previewed.".into(),
         ));
     }
-    if metadata.len() > MAX_FILE_BROWSE_BYTES as u64 {
+    let limit = truncated_preview_bytes.unwrap_or(MAX_FILE_BROWSE_BYTES);
+    if truncated_preview_bytes.is_none() && metadata.len() > limit as u64 {
         return Err(StorageError::InvalidRequest(
             "Files larger than 1 MB are not previewed.".into(),
         ));
     }
     let mut bytes = Vec::new();
     fs::File::open(path)
-        .and_then(|file| {
-            file.take((MAX_FILE_BROWSE_BYTES + 1) as u64)
-                .read_to_end(&mut bytes)
-        })
+        .and_then(|file| file.take((limit + 1) as u64).read_to_end(&mut bytes))
         .map_err(|source| StorageError::Filesystem {
             context: "Cannot read that file".into(),
             source,
         })?;
-    if bytes.len() > MAX_FILE_BROWSE_BYTES {
+    let truncated = bytes.len() > limit;
+    if truncated && truncated_preview_bytes.is_none() {
         return Err(StorageError::InvalidRequest(
             "Files larger than 1 MB are not previewed.".into(),
         ));
     }
+    bytes.truncate(limit);
     if bytes.contains(&0) {
         return Err(StorageError::InvalidRequest(
             "Binary files cannot be previewed as text.".into(),
         ));
     }
-    String::from_utf8(bytes).map_err(|_| {
+    let content = String::from_utf8(bytes).map_err(|_| {
         StorageError::InvalidRequest("Binary files cannot be previewed as text.".into())
-    })
+    })?;
+    Ok((content, truncated))
 }
 
 fn write_browsable_file(
@@ -4906,7 +4833,7 @@ fn write_browsable_file(
                 "The original file content is invalid.".into(),
             ));
         }
-        if read_browsable_file(path)? != original {
+        if read_browsable_file(path, None)?.0 != original {
             return Err(StorageError::InvalidRequest(
                 "The file changed outside xd. Refresh before saving.".into(),
             ));
@@ -4921,39 +4848,6 @@ fn write_browsable_file(
             context: "Cannot save that file".into(),
             source,
         })
-}
-
-fn safe_repository_file(workdir: &Path, relative: &str) -> Result<PathBuf, StorageError> {
-    if relative.len() > 4_096 {
-        return Err(StorageError::InvalidRequest(
-            "The repository file path is too long.".into(),
-        ));
-    }
-    let relative_path = Path::new(relative);
-    if relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(StorageError::InvalidRequest(
-            "A safe relative repository file path is required.".into(),
-        ));
-    }
-    let root = fs::canonicalize(workdir).map_err(|source| StorageError::Filesystem {
-        context: "Cannot resolve the repository root".into(),
-        source,
-    })?;
-    let path =
-        fs::canonicalize(root.join(relative_path)).map_err(|source| StorageError::Filesystem {
-            context: "Cannot resolve the repository file".into(),
-            source,
-        })?;
-    if !path.starts_with(&root) || !path.is_file() {
-        return Err(StorageError::InvalidRequest(
-            "The requested path is not a repository file.".into(),
-        ));
-    }
-    Ok(path)
 }
 
 fn prepare_turn(
@@ -5653,49 +5547,6 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("outside the repository")
-        );
-        let files = store.repository_files(&json!({"chat": chat})).unwrap();
-        assert_eq!(files["files"], json!(["tracked.txt", "untracked.txt"]));
-        assert_eq!(files["truncated"], false);
-        assert_eq!(
-            store
-                .repository_file(&json!({"chat": chat, "path": "untracked.txt"}))
-                .unwrap()["content"],
-            "new\n"
-        );
-        assert_eq!(
-            store
-                .write_repository_file(&json!({
-                    "chat": chat,
-                    "path": "untracked.txt",
-                    "original": "new\n",
-                    "content": "saved\n"
-                }))
-                .unwrap()["content"],
-            "saved\n"
-        );
-        assert_eq!(
-            fs::read_to_string(repository.join("untracked.txt")).unwrap(),
-            "saved\n"
-        );
-        assert!(
-            store
-                .write_repository_file(&json!({
-                    "chat": chat,
-                    "path": "untracked.txt",
-                    "original": "new\n",
-                    "content": "overwrite\n"
-                }))
-                .unwrap_err()
-                .to_string()
-                .contains("changed outside xd")
-        );
-        assert!(
-            store
-                .repository_file(&json!({"chat": chat, "path": "../tracked.txt"}))
-                .unwrap_err()
-                .to_string()
-                .contains("safe relative")
         );
         let status = store.git_status(&json!({"chat": chat})).unwrap();
         assert_eq!(status["branch"], "main");

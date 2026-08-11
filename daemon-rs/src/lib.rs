@@ -14,7 +14,7 @@ use std::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
-pub mod agent;
+mod agent;
 mod ask;
 mod auth;
 mod background_process;
@@ -47,10 +47,11 @@ use git_draft::GitDraftService;
 use local_socket::{UnixListener, UnixStream, make_private, path_is_socket};
 use pairing::{PairingService, Transport, generate_token, token_hash};
 use repository_monitor::RepositoryMonitor;
-pub use runtime::{LiveTurn, TurnRuntime};
+use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
-pub use storage::{SendDisposition, StateStore, StorageError};
+use storage::SendDisposition;
+pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
 use terminal_agent::TerminalAgent;
@@ -140,6 +141,7 @@ struct Subscriber {
 }
 
 impl Engine {
+    #[cfg(test)]
     pub fn transport_only() -> Self {
         let events = Arc::new(EventBus::default());
         let secrets = Arc::new(SecretsStore::new(None));
@@ -164,6 +166,7 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
     pub fn with_store(store: StateStore) -> Self {
         Self::with_store_and_data(store, None)
     }
@@ -203,6 +206,7 @@ impl Engine {
         engine
     }
 
+    #[cfg(test)]
     pub fn dispatch(&self, request: Value) -> Value {
         self.dispatch_for(0, request)
     }
@@ -248,11 +252,12 @@ impl Engine {
                 .start(&request)
                 .map(|()| json!({"ok": true}))
                 .unwrap_or_else(error_reply),
-            Some("repository-files") => self.read(|store| store.repository_files(&request)),
-            Some("repository-file") => self.read(|store| store.repository_file(&request)),
-            Some("repository-file-write") => {
-                self.read(|store| store.write_repository_file(&request))
-            }
+            // Protocol v1 desktop builds used these names before file-browse
+            // became the shared file API. Keep only the wire aliases so an
+            // independently updated remote daemon does not strand them.
+            Some("repository-files") => self.read(|store| store.compat_repository_files(&request)),
+            Some("repository-file") => self.compat_repository_file(&request, "read"),
+            Some("repository-file-write") => self.compat_repository_file(&request, "write"),
             Some("git-commit") => self.git_commit(&request),
             Some("git-push") => self.git_push(&request),
             Some("git-action") => self.git_action(&request),
@@ -282,17 +287,6 @@ impl Engine {
                 .self_update
                 .perform(request.get("action").and_then(Value::as_str))
                 .unwrap_or_else(error_reply),
-            Some("agent-auth-refresh") => {
-                let provider = request.get("provider").and_then(Value::as_str);
-                match provider {
-                    Some(provider) if self.auth.refresh(provider) => json!({"ok": true}),
-                    Some(_) => error_reply("No such assistant."),
-                    None => {
-                        self.auth.refresh_all();
-                        json!({"ok": true})
-                    }
-                }
-            }
             Some("agent-auth-start") => {
                 self.auth_mutation(&request, |auth, provider, _| auth.login(provider))
             }
@@ -518,6 +512,24 @@ impl Engine {
             Some(store) => operation(store).unwrap_or_else(error_reply),
             None => error_reply("Rust daemon state storage is not configured."),
         }
+    }
+
+    fn compat_repository_file(&self, request: &Value, action: &str) -> Value {
+        let mut response = self.read(|store| store.compat_repository_file(request, action));
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            return response;
+        }
+        if let Some(path) = request.get("path").cloned() {
+            response["path"] = path;
+        }
+        if action == "read" {
+            if response.get("truncated").is_none() {
+                response["truncated"] = Value::Bool(false);
+            }
+        } else if let Some(content) = request.get("content").cloned() {
+            response["content"] = content;
+        }
+        response
     }
 
     fn chat(&self, chat_id: &str) -> Value {
@@ -1287,6 +1299,7 @@ fn accept_connections(listener: UnixListener, engine: Arc<Engine>, transport: Tr
 }
 
 impl LocalServer {
+    #[cfg(test)]
     pub fn bind(socket_path: impl Into<PathBuf>) -> Result<Self, ServerError> {
         Self::bind_with_engine(socket_path, Engine::transport_only())
     }
@@ -1337,10 +1350,12 @@ impl LocalServer {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
+    #[cfg(test)]
     pub fn remote_socket_path(&self) -> &Path {
         &self.remote_socket_path
     }
@@ -1353,6 +1368,7 @@ impl Drop for LocalServer {
     }
 }
 
+#[cfg(test)]
 pub fn serve_connection(stream: UnixStream) -> std::io::Result<()> {
     serve_connection_with_engine(stream, Arc::new(Engine::transport_only()), Transport::Local)
 }
@@ -1435,6 +1451,7 @@ fn write_frames(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn dispatch(request: Value) -> Value {
     Engine::transport_only().dispatch(request)
 }
@@ -1558,6 +1575,93 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
         assert!(reply["error"].as_str().unwrap().contains("terminal-open"));
+    }
+
+    #[test]
+    fn daemon_does_not_expose_the_orphaned_auth_refresh_operation() {
+        let operation = "agent-auth-refresh";
+        let reply = dispatch(json!({"op": operation}));
+        assert_eq!(reply["ok"], false);
+        assert_eq!(
+            reply["error"],
+            format!("Operation {operation} is not implemented by the Rust daemon yet.")
+        );
+    }
+
+    #[test]
+    fn legacy_repository_operations_are_compatibility_aliases() {
+        use std::process::Command;
+
+        let root = test_directory();
+        let workspaces = root.join("Workspaces");
+        let store = StateStore::open(root.join("chats.db"), workspaces.clone()).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let repository = workspaces.join("Project");
+        fs::create_dir_all(repository.join("src")).unwrap();
+        fs::write(repository.join("src/main.rs"), "before\n").unwrap();
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["-C", repository.to_str().unwrap(), "add", "src/main.rs"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let chat = engine.dispatch(json!({
+            "op": "new-chat",
+            "folder": folder,
+            "backend": "codex",
+            "workdir": repository.join("src"),
+        }))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let files = engine.dispatch(json!({"op": "repository-files", "chat": chat}));
+        assert_eq!(files["files"], json!(["src/main.rs"]));
+        let read = engine.dispatch(json!({
+            "op": "repository-file",
+            "chat": chat,
+            "path": "src/main.rs",
+            "content": "ignored request member",
+        }));
+        assert_eq!(read["content"], "before\n");
+        let write = engine.dispatch(json!({
+            "op": "repository-file-write",
+            "chat": chat,
+            "path": "src/main.rs",
+            "original": "before\n",
+            "content": "after\n",
+        }));
+        assert_eq!(write["content"], "after\n");
+        assert_eq!(
+            fs::read_to_string(repository.join("src/main.rs")).unwrap(),
+            "after\n"
+        );
+
+        fs::write(repository.join("large.txt"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        let preview = engine.dispatch(json!({
+            "op": "repository-file",
+            "chat": chat,
+            "path": "large.txt",
+        }));
+        assert_eq!(preview["ok"], true);
+        assert_eq!(preview["content"].as_str().unwrap().len(), 128 * 1024);
+        assert_eq!(preview["truncated"], true);
+
+        drop(engine);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
