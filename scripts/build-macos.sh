@@ -2,6 +2,7 @@
 #
 # Build and pack the native Rust/GPUI app on the current Mac.
 #
+#   PROFILE=dev ./scripts/build-macos.sh
 #   PROFILE=nightly ./scripts/build-macos.sh
 #   PROFILE=release ./scripts/build-macos.sh
 
@@ -24,6 +25,11 @@ WHISPER_SHA256=147267177eef7b22ec3d2476dd514d1b12e160e176230b740e3d1bd600118447
 }
 
 case "$PROFILE" in
+  dev)
+    BUNDLE_NAME=xd-dev
+    DISPLAY_NAME='xd (Dev)'
+    APP_ID=com.restartfu.Xd.Dev
+    ;;
   nightly)
     BUNDLE_NAME=xd-nightly
     DISPLAY_NAME='xd (Nightly)'
@@ -36,7 +42,7 @@ case "$PROFILE" in
     APP_ID=com.restartfu.Xd
     ;;
   *)
-    echo "build-macos: PROFILE must be nightly or release" >&2
+    echo "build-macos: PROFILE must be dev, nightly, or release" >&2
     exit 1
     ;;
 esac
@@ -76,7 +82,7 @@ done
 VERSION=$("$ROOT/scripts/bump-version.sh" --current)
 COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
 BUILD_VERSION=$VERSION
-if [ "$PROFILE" = nightly ]; then
+if [ "$PROFILE" != release ]; then
   BUILD_VERSION=$(git -C "$ROOT" show -s --format=%ct HEAD 2>/dev/null || true)
   case "$BUILD_VERSION" in
     ''|*[!0-9]*) BUILD_VERSION=$VERSION ;;
@@ -147,7 +153,10 @@ fi
 "$WHISPER_CACHE/whisper-server-bin" --help >/dev/null
 
 cd "$ROOT"
-XD_COMMIT="$COMMIT" cargo build --locked --release --manifest-path desktop/Cargo.toml
+DESKTOP_PROFILE=$PROFILE
+[ "$DESKTOP_PROFILE" != dev ] || DESKTOP_PROFILE=nightly
+XD_BUILD_PROFILE="$DESKTOP_PROFILE" XD_COMMIT="$COMMIT" \
+  cargo build --locked --release --manifest-path desktop/Cargo.toml
 XD_COMMIT="$COMMIT" cargo build --locked --release --manifest-path daemon-rs/Cargo.toml
 cargo build --release --manifest-path tls-proxy-rs/Cargo.toml
 

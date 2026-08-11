@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+pub use xd_desktop::theme::ThemePreset;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -96,6 +97,7 @@ impl GitWriter {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
+    pub theme: ThemePreset,
     pub accent: AccentPreset,
     pub notifications: bool,
     pub speech: bool,
@@ -127,6 +129,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            theme: ThemePreset::Dark,
             accent: AccentPreset::Blue,
             notifications: true,
             speech: false,
@@ -239,6 +242,7 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xd_desktop::theme::ThemePreset;
 
     #[test]
     fn settings_round_trip_and_unknown_fields_are_ignored() {
@@ -252,6 +256,7 @@ mod tests {
         ));
         let path = directory.join("settings.json");
         let settings = AppSettings {
+            theme: ThemePreset::Warm,
             accent: AccentPreset::Purple,
             notifications: false,
             speech: true,
@@ -302,6 +307,14 @@ mod tests {
         .unwrap();
         assert_eq!(load_from(&path).unwrap().accent, AccentPreset::Green);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_without_a_theme_use_the_dark_default() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"accent":"green","notifications":true}"#).unwrap();
+
+        assert_eq!(settings.theme, ThemePreset::Dark);
     }
 
     #[test]

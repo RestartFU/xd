@@ -8,4 +8,5 @@ pub mod model;
 mod private_fs;
 pub mod protocol;
 pub mod remote;
+pub mod theme;
 pub mod transcript;

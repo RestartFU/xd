@@ -1,11 +1,12 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     ffi::CString,
     fs::File,
     io::{Read, Write},
     os::fd::{AsRawFd, FromRawFd},
     os::raw::{c_char, c_int, c_void},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -16,7 +17,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::EventBus;
+use crate::{EventBus, terminal_agent::TerminalAgent, terminal_query::TerminalQueryResponder};
 
 const DEFAULT_COLUMNS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
@@ -25,7 +26,6 @@ const HISTORY_LIMIT: usize = 16 * 1024 * 1024;
 const REPLAY_ITEM_LIMIT: usize = 65_536;
 const INPUT_LIMIT: usize = 1024 * 1024;
 const READ_SIZE: usize = 8_192;
-const LIMIT_NOTICE: &[u8] = b"\r\n[xd: terminal closed after exceeding its replay limit]\r\n";
 const SIGHUP: c_int = 1;
 const SIGKILL: c_int = 9;
 const WNOHANG: c_int = 1;
@@ -49,7 +49,7 @@ unsafe extern "C" {
     fn ioctl(fd: c_int, request: usize, ...) -> c_int;
     fn chdir(path: *const c_char) -> c_int;
     fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
-    fn execl(path: *const c_char, argument: *const c_char, ...) -> c_int;
+    fn execlp(file: *const c_char, argument: *const c_char, ...) -> c_int;
     fn _exit(status: c_int) -> !;
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
@@ -64,6 +64,7 @@ struct TerminalSession {
     id: String,
     chat_id: String,
     title: String,
+    agent: Option<TerminalAgent>,
     pid: c_int,
     writer: Mutex<Option<File>>,
     state: Mutex<TerminalState>,
@@ -72,8 +73,9 @@ struct TerminalSession {
 struct TerminalState {
     columns: u16,
     rows: u16,
-    replay: Vec<ReplayFrame>,
+    replay: VecDeque<ReplayFrame>,
     replay_bytes: usize,
+    sequence: u64,
     closing: bool,
 }
 
@@ -83,9 +85,54 @@ enum ReplayFrame {
 }
 
 enum RecordOutcome {
-    Accepted,
+    Accepted(u64),
+    Unchanged,
+    CapacityReached,
     Closing,
-    Full,
+}
+
+impl TerminalState {
+    fn record_output_bounded(
+        &mut self,
+        data: Vec<u8>,
+        byte_limit: usize,
+        item_limit: usize,
+    ) -> RecordOutcome {
+        if self.closing {
+            return RecordOutcome::Closing;
+        }
+        if self.replay.len() >= item_limit
+            || data.len() > byte_limit.saturating_sub(self.replay_bytes)
+        {
+            return RecordOutcome::CapacityReached;
+        }
+        self.replay_bytes = self.replay_bytes.saturating_add(data.len());
+        self.replay.push_back(ReplayFrame::Output(data));
+        self.sequence = self.sequence.saturating_add(1);
+        RecordOutcome::Accepted(self.sequence)
+    }
+
+    fn record_resize_bounded(
+        &mut self,
+        columns: u16,
+        rows: u16,
+        item_limit: usize,
+    ) -> RecordOutcome {
+        if self.closing {
+            return RecordOutcome::Closing;
+        }
+        if self.columns == columns && self.rows == rows {
+            return RecordOutcome::Unchanged;
+        }
+        if self.replay.len() >= item_limit {
+            return RecordOutcome::CapacityReached;
+        }
+        self.columns = columns;
+        self.rows = rows;
+        self.replay.push_back(ReplayFrame::Resize { columns, rows });
+        self.sequence = self.sequence.saturating_add(1);
+        RecordOutcome::Accepted(self.sequence)
+    }
 }
 
 impl TerminalManager {
@@ -113,6 +160,26 @@ impl TerminalManager {
     }
 
     pub fn open(&self, request: &Value, workdir: &Path) -> Result<Value, String> {
+        self.open_session(request, workdir, None, &[])
+    }
+
+    pub fn open_agent(
+        &self,
+        request: &Value,
+        workdir: &Path,
+        agent: TerminalAgent,
+        environment: &[(String, String)],
+    ) -> Result<Value, String> {
+        self.open_session(request, workdir, Some(agent), environment)
+    }
+
+    fn open_session(
+        &self,
+        request: &Value,
+        workdir: &Path,
+        agent: Option<TerminalAgent>,
+        environment: &[(String, String)],
+    ) -> Result<Value, String> {
         let chat_id = text(request, "chat", "terminal-open needs a chat id")?;
         let columns = geometry(request, "columns", DEFAULT_COLUMNS)?;
         let rows = geometry(request, "rows", DEFAULT_ROWS)?;
@@ -126,12 +193,15 @@ impl TerminalManager {
                 .lock()
                 .map_err(|_| "Terminal state is unavailable.".to_string())?
                 .values()
-                .find(|session| session.chat_id == chat_id && !session.is_closing())
+                .find(|session| {
+                    session.chat_id == chat_id && session.agent == agent && !session.is_closing()
+                })
         {
             return Ok(json!({"ok": true, "id": existing.id}));
         }
 
-        let (session, reader) = TerminalSession::spawn(chat_id, workdir, columns, rows)?;
+        let (session, reader) =
+            TerminalSession::spawn(chat_id, workdir, columns, rows, agent, environment)?;
         let id = session.id.clone();
         self.sessions
             .lock()
@@ -142,8 +212,10 @@ impl TerminalManager {
             "chat": chat_id,
             "terminal": id,
             "title": session.title,
+            "agent": session.agent.map(TerminalAgent::wire_name),
             "columns": columns,
             "rows": rows,
+            "sequence": 0,
         }));
         start_reader(session, reader, self.sessions.clone(), self.events.clone());
         Ok(json!({"ok": true, "id": id}))
@@ -210,35 +282,33 @@ impl TerminalManager {
             ));
         }
         drop(writer);
-        {
+        let outcome = {
             let mut state = session
                 .state
                 .lock()
                 .map_err(|_| "Terminal state is unavailable.".to_string())?;
-            if state.closing {
-                return Err("The terminal is closed.".into());
+            let outcome = state.record_resize_bounded(columns, rows, REPLAY_ITEM_LIMIT);
+            if let RecordOutcome::Accepted(sequence) = outcome {
+                self.events.publish(json!({
+                    "event": "terminal-resized",
+                    "chat": session.chat_id,
+                    "terminal": session.id,
+                    "columns": columns,
+                    "rows": rows,
+                    "sequence": sequence,
+                }));
             }
-            if state.replay.len() >= REPLAY_ITEM_LIMIT {
-                return Err("The terminal replay is full.".into());
-            }
-            state.columns = columns;
-            state.rows = rows;
-            if !matches!(
-                state.replay.last(),
-                Some(ReplayFrame::Resize { columns: old_columns, rows: old_rows })
-                    if *old_columns == columns && *old_rows == rows
-            ) {
-                state.replay.push(ReplayFrame::Resize { columns, rows });
+            outcome
+        };
+        match outcome {
+            RecordOutcome::Accepted(_) => Ok(json!({"ok": true, "changed": true})),
+            RecordOutcome::Unchanged => Ok(json!({"ok": true, "changed": false})),
+            RecordOutcome::Closing => Err("The terminal is closed.".into()),
+            RecordOutcome::CapacityReached => {
+                session.begin_close();
+                Err("The terminal replay limit was reached, so it was closed safely.".into())
             }
         }
-        self.events.publish(json!({
-            "event": "terminal-resized",
-            "chat": session.chat_id,
-            "terminal": session.id,
-            "columns": columns,
-            "rows": rows,
-        }));
-        Ok(json!({"ok": true, "changed": true}))
     }
 
     pub fn kill(&self, request: &Value) -> Result<Value, String> {
@@ -249,6 +319,34 @@ impl TerminalManager {
             session.begin_close();
         }
         Ok(json!({"ok": true}))
+    }
+
+    pub fn kill_chat(&self, chat_id: &str) {
+        let sessions = self
+            .sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .filter(|session| session.chat_id == chat_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for session in sessions {
+            session.begin_close();
+        }
+    }
+
+    pub fn has_agent_session(&self, chat_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions.values().any(|session| {
+                    session.chat_id == chat_id && session.agent.is_some() && !session.is_closing()
+                })
+            })
+            .unwrap_or(false)
     }
 
     fn session(&self, id: &str) -> Result<Arc<TerminalSession>, String> {
@@ -280,22 +378,50 @@ impl TerminalSession {
         workdir: &Path,
         columns: u16,
         rows: u16,
+        agent: Option<TerminalAgent>,
+        environment: &[(String, String)],
     ) -> Result<(Arc<Self>, File), String> {
         if !workdir.is_dir() {
             return Err(format!("{} is not a directory.", workdir.display()));
         }
-        let shell = env::var_os("SHELL")
-            .map(PathBuf::from)
-            .filter(|shell| shell.is_file())
-            .unwrap_or_else(|| PathBuf::from("/bin/sh"));
-        let shell = CString::new(shell.as_os_str().as_encoded_bytes())
-            .map_err(|_| "The configured shell path is invalid.".to_string())?;
+        let executable = agent.map(TerminalAgent::executable).unwrap_or_else(|| {
+            env::var_os("SHELL")
+                .map(PathBuf::from)
+                .filter(|shell| shell.is_file())
+                .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+        });
+        if let Some(agent) = agent
+            && !executable_available(&executable)
+        {
+            return Err(format!(
+                "{} is not installed or is unavailable on the daemon machine.",
+                agent.title()
+            ));
+        }
+        let executable = CString::new(executable.as_os_str().as_encoded_bytes())
+            .map_err(|_| "The terminal executable path is invalid.".to_string())?;
+        let title = agent
+            .map(TerminalAgent::title)
+            .or_else(|| workdir.file_name().and_then(|name| name.to_str()))
+            .unwrap_or("Terminal")
+            .to_owned();
         let workdir = CString::new(workdir.as_os_str().as_encoded_bytes())
             .map_err(|_| "The terminal working directory is invalid.".to_string())?;
         let term = c"TERM";
         let term_value = c"xterm-256color";
         let colorterm = c"COLORTERM";
         let colorterm_value = c"truecolor";
+        let environment = environment
+            .iter()
+            .map(|(name, value)| {
+                Ok((
+                    CString::new(name.as_bytes())
+                        .map_err(|_| "A terminal environment name is invalid.".to_string())?,
+                    CString::new(value.as_bytes())
+                        .map_err(|_| "A terminal environment value is invalid.".to_string())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let size = WinSize {
             rows,
             columns,
@@ -320,7 +446,14 @@ impl TerminalSession {
                 }
                 setenv(term.as_ptr(), term_value.as_ptr(), 1);
                 setenv(colorterm.as_ptr(), colorterm_value.as_ptr(), 1);
-                execl(shell.as_ptr(), shell.as_ptr(), std::ptr::null::<c_char>());
+                for (name, value) in &environment {
+                    setenv(name.as_ptr(), value.as_ptr(), 1);
+                }
+                execlp(
+                    executable.as_ptr(),
+                    executable.as_ptr(),
+                    std::ptr::null::<c_char>(),
+                );
                 _exit(127);
             }
         }
@@ -329,22 +462,19 @@ impl TerminalSession {
         let reader = writer
             .try_clone()
             .map_err(|error| format!("Cannot prepare terminal output: {error}."))?;
-        let title = Path::new(workdir.to_str().unwrap_or_default())
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Terminal")
-            .to_owned();
         let session = Arc::new(Self {
             id: Uuid::new_v4().to_string(),
             chat_id: chat_id.to_owned(),
             title,
+            agent,
             pid,
             writer: Mutex::new(Some(writer)),
             state: Mutex::new(TerminalState {
                 columns,
                 rows,
-                replay: vec![ReplayFrame::Resize { columns, rows }],
+                replay: VecDeque::from([ReplayFrame::Resize { columns, rows }]),
                 replay_bytes: 0,
+                sequence: 0,
                 closing: false,
             }),
         });
@@ -369,8 +499,10 @@ impl TerminalSession {
         Some(json!({
             "id": self.id,
             "title": self.title,
+            "agent": self.agent.map(TerminalAgent::wire_name),
             "columns": state.columns,
             "rows": state.rows,
+            "sequence": state.sequence,
             "replay": replay,
         }))
     }
@@ -384,11 +516,12 @@ impl TerminalSession {
             .state
             .lock()
             .map(|mut state| {
-                if state.closing {
-                    false
-                } else {
+                if !state.closing {
                     state.closing = true;
+                    state.sequence = state.sequence.saturating_add(1);
                     true
+                } else {
+                    false
                 }
             })
             .unwrap_or(false);
@@ -423,6 +556,21 @@ impl TerminalSession {
     }
 }
 
+fn executable_available(executable: &Path) -> bool {
+    let is_executable_file = |path: &Path| {
+        path.metadata()
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    if executable.is_absolute() || executable.components().count() > 1 {
+        return is_executable_file(executable);
+    }
+    env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
+        .any(|directory| is_executable_file(&directory.join(executable)))
+}
+
 fn start_reader(
     session: Arc<TerminalSession>,
     mut reader: File,
@@ -433,51 +581,55 @@ fn start_reader(
         .name(format!("xd-terminal-{}", session.id))
         .spawn(move || {
             let mut buffer = [0_u8; READ_SIZE];
+            let mut queries = TerminalQueryResponder::new();
             loop {
                 let count = match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
                 let data = buffer[..count].to_vec();
+                let replies = queries.feed(&data);
+                if !replies.is_empty()
+                    && let Ok(mut writer) = session.writer.lock()
+                    && let Some(writer) = writer.as_mut()
+                {
+                    let _ = writer.write_all(&replies);
+                    let _ = writer.flush();
+                }
                 let outcome = session
                     .state
                     .lock()
-                    .map(|mut state| {
-                        if state.closing {
-                            RecordOutcome::Closing
-                        } else if data.len() > HISTORY_LIMIT.saturating_sub(state.replay_bytes)
-                            || state.replay.len() >= REPLAY_ITEM_LIMIT
-                        {
-                            RecordOutcome::Full
-                        } else {
-                            state.replay_bytes += data.len();
-                            state.replay.push(ReplayFrame::Output(data.clone()));
-                            RecordOutcome::Accepted
+                    .map_or(RecordOutcome::Closing, |mut state| {
+                        let outcome = state.record_output_bounded(
+                            data.clone(),
+                            HISTORY_LIMIT,
+                            REPLAY_ITEM_LIMIT,
+                        );
+                        if let RecordOutcome::Accepted(sequence) = outcome {
+                            events.publish(json!({
+                                "event": "terminal-output",
+                                "chat": session.chat_id,
+                                "terminal": session.id,
+                                "data": STANDARD.encode(&data),
+                                "sequence": sequence,
+                            }));
                         }
-                    })
-                    .unwrap_or(RecordOutcome::Closing);
+                        outcome
+                    });
                 match outcome {
-                    RecordOutcome::Closing => break,
-                    RecordOutcome::Full => {
-                        events.publish(json!({
-                            "event": "terminal-output",
-                            "chat": session.chat_id,
-                            "terminal": session.id,
-                            "data": STANDARD.encode(LIMIT_NOTICE),
-                        }));
-                        session.begin_close();
-                        break;
+                    RecordOutcome::Accepted(_) => {}
+                    RecordOutcome::Unchanged => {
+                        unreachable!("terminal output always changes state")
                     }
-                    RecordOutcome::Accepted => {}
+                    RecordOutcome::CapacityReached | RecordOutcome::Closing => break,
                 }
-                events.publish(json!({
-                    "event": "terminal-output",
-                    "chat": session.chat_id,
-                    "terminal": session.id,
-                    "data": STANDARD.encode(&data),
-                }));
             }
             session.begin_close();
+            let sequence = session
+                .state
+                .lock()
+                .map(|state| state.sequence)
+                .unwrap_or_default();
             if let Ok(mut sessions) = sessions.lock() {
                 sessions.remove(&session.id);
             }
@@ -485,6 +637,7 @@ fn start_reader(
                 "event": "terminal-closed",
                 "chat": session.chat_id,
                 "terminal": session.id,
+                "sequence": sequence,
             }));
         })
         .expect("terminal reader thread should start");
@@ -519,19 +672,71 @@ mod tests {
     use std::time::Instant;
 
     #[test]
-    fn pty_output_is_replayed_and_input_is_bounded() {
+    fn replay_capacity_closes_instead_of_replaying_an_invalid_suffix() {
+        let mut state = TerminalState {
+            columns: 80,
+            rows: 24,
+            replay: VecDeque::new(),
+            replay_bytes: 0,
+            sequence: 0,
+            closing: false,
+        };
+        assert!(matches!(
+            state.record_output_bounded(b"first".to_vec(), 8, 3),
+            RecordOutcome::Accepted(1)
+        ));
+        assert!(matches!(
+            state.record_output_bounded(b"second".to_vec(), 8, 3),
+            RecordOutcome::CapacityReached
+        ));
+
+        assert!(state.replay_bytes <= 8);
+        assert_eq!(state.sequence, 1);
+        assert_eq!(state.replay.len(), 1);
+        assert!(matches!(state.replay.back(), Some(ReplayFrame::Output(data)) if data == b"first"));
+    }
+
+    #[test]
+    fn direct_cli_preflight_checks_paths_before_forking() {
+        assert!(executable_available(Path::new("/bin/sh")));
+        assert!(executable_available(Path::new("sh")));
+        assert!(!executable_available(Path::new(
+            "/definitely/missing/xd-agent-cli"
+        )));
+    }
+
+    #[test]
+    fn legacy_terminal_open_ignores_agent_fields() {
         let manager = TerminalManager::new(Arc::new(EventBus::default()));
         let opened = manager
             .open(
+                &json!({"chat": "shell-chat", "agent": "not-an-agent"}),
+                Path::new("/tmp"),
+            )
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+        let snapshot = &manager.list("shell-chat")["terminals"][0];
+
+        assert!(snapshot["agent"].is_null());
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+    }
+
+    #[test]
+    fn pty_output_is_replayed_and_input_is_bounded() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open_session(
                 &json!({"chat": "chat-1", "columns": 92, "rows": 31}),
                 Path::new("/tmp"),
+                None,
+                &[("XD_DIRECT_CLI_TEST".into(), "xd-pty-ready".into())],
             )
             .unwrap();
         let terminal = opened["id"].as_str().unwrap();
         manager
             .input(&json!({
                 "terminal": terminal,
-                "data": STANDARD.encode(b"printf 'xd-pty-ready\\n'\n"),
+                "data": STANDARD.encode(b"printf '%s\\n' \"$XD_DIRECT_CLI_TEST\"\n"),
             }))
             .unwrap();
 
@@ -562,6 +767,99 @@ mod tests {
             manager
                 .input(&json!({"terminal": terminal, "data": STANDARD.encode(b"x")}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn output_and_resize_sequences_are_monotonic_snapshot_boundaries() {
+        let mut state = TerminalState {
+            columns: 80,
+            rows: 24,
+            replay: VecDeque::new(),
+            replay_bytes: 0,
+            sequence: 0,
+            closing: false,
+        };
+
+        assert!(matches!(
+            state.record_output_bounded(b"one".to_vec(), 64, 8),
+            RecordOutcome::Accepted(1)
+        ));
+        assert!(matches!(
+            state.record_resize_bounded(100, 30, 8),
+            RecordOutcome::Accepted(2)
+        ));
+        assert!(matches!(
+            state.record_output_bounded(b"two".to_vec(), 64, 8),
+            RecordOutcome::Accepted(3)
+        ));
+        assert_eq!(state.sequence, 3);
+    }
+
+    #[test]
+    fn pty_terminal_queries_are_answered_without_a_connected_ui() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(&json!({"chat": "query-chat"}), Path::new("/tmp"))
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(
+                    b"stty raw -echo; printf '\\033[5n'; reply=$(dd bs=1 count=4 2>/dev/null); stty sane; printf '\\nxd-query-reply:%s\\n' \"$reply\"\n"
+                ),
+            }))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let output = manager.list("query-chat")["terminals"]
+                .as_array()
+                .and_then(|terminals| terminals.first())
+                .and_then(|terminal| terminal["replay"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|frame| frame["data"].as_str())
+                .filter_map(|data| STANDARD.decode(data).ok())
+                .flatten()
+                .collect::<Vec<_>>();
+            if output
+                .windows(b"xd-query-reply:\x1b[0n".len())
+                .any(|window| window == b"xd-query-reply:\x1b[0n")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the PTY child never received xd's terminal-query reply: {:?}",
+                String::from_utf8_lossy(&output)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_chat_closes_all_of_its_terminals() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(&json!({"chat": "deleted-chat"}), Path::new("/tmp"))
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+
+        manager.kill_chat("deleted-chat");
+
+        assert!(
+            manager
+                .input(&json!({"terminal": terminal, "data": STANDARD.encode(b"x")}))
+                .is_err()
+        );
+        assert!(
+            manager.list("deleted-chat")["terminals"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
     }
 

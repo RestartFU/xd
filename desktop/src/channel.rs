@@ -1,4 +1,9 @@
-use std::{env, ffi::OsString, path::Path, process::Command};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    path::Path,
+    process::Command,
+};
 
 pub fn nightly() -> bool {
     option_env!("XD_BUILD_PROFILE") == Some("nightly")
@@ -21,10 +26,20 @@ pub fn app_id() -> String {
     })
 }
 
+fn daemon_update_channel(configured: Option<OsString>, nightly_build: bool) -> OsString {
+    if configured.as_deref() == Some(OsStr::new("dev")) {
+        "dev".into()
+    } else if nightly_build {
+        "nightly".into()
+    } else {
+        "release".into()
+    }
+}
+
 pub fn configure_daemon(command: &mut Command, _launcher: &Path) {
     command.env("XD_DATA_NAME", data_name()).env(
         "XD_UPDATE_CHANNEL",
-        if nightly() { "nightly" } else { "release" },
+        daemon_update_channel(env::var_os("XD_UPDATE_CHANNEL"), nightly()),
     );
 
     configure_background(command);
@@ -83,5 +98,26 @@ mod tests {
     fn background_daemons_use_the_windows_no_console_flag() {
         assert_eq!(background_creation_flags(true), 0x0800_0000);
         assert_eq!(background_creation_flags(false), 0);
+    }
+
+    #[test]
+    fn daemon_update_channel_preserves_explicit_dev_identity() {
+        assert_eq!(
+            daemon_update_channel(Some(OsString::from("dev")), true),
+            OsString::from("dev")
+        );
+        assert_eq!(
+            daemon_update_channel(Some(OsString::from("nightly")), false),
+            OsString::from("release")
+        );
+        assert_eq!(
+            daemon_update_channel(Some(OsString::from("release")), true),
+            OsString::from("nightly")
+        );
+        assert_eq!(daemon_update_channel(None, true), OsString::from("nightly"));
+        assert_eq!(
+            daemon_update_channel(None, false),
+            OsString::from("release")
+        );
     }
 }

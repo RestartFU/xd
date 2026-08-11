@@ -4,7 +4,7 @@
 # setup executable backed by MSI metadata and an external cabinet.
 #
 #   package-windows.ps1 -Payload windows-dist -OutputDirectory artifacts
-#                       [-Profile nightly|release] [-Version 0.1.0]
+#                       [-Profile dev|nightly|release] [-Version 0.1.0]
 
 [CmdletBinding()]
 param(
@@ -14,7 +14,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $OutputDirectory,
 
-    [ValidateSet('nightly', 'release')]
+    [ValidateSet('dev', 'nightly', 'release')]
     [string] $Profile = 'nightly',
 
     [ValidatePattern('^\d+\.\d+\.\d+$')]
@@ -49,8 +49,23 @@ foreach ($relativePath in @(
         throw "Windows payload is missing $relativePath`: $payloadPath"
     }
 }
+if ($Profile -eq 'dev' -and
+    -not (Test-Path -LiteralPath (Join-Path $payloadPath 'bin\xd-desktop.exe'))) {
+    throw "Windows dev payload is missing bin\xd-desktop.exe`: $payloadPath"
+}
 
-if ($Profile -eq 'nightly') {
+if ($Profile -eq 'dev') {
+    $productName = 'xd (Dev)'
+    $installName = 'xd-dev'
+    $asset = 'xd-dev-windows-x86_64.msi'
+    $setupAsset = 'xd-dev-windows-x86_64-setup.exe'
+    $msiPayloadAsset = 'xd-dev-windows-x86_64-msi.payload'
+    $cabPayloadAsset = 'xd-dev-windows-x86_64-cab.payload'
+    $downloadBase = 'https://github.com/RestartFU/xd/releases/download/dev'
+    $upgradeCode = 'EEA6BB82-95FA-4166-B9C1-CD11D42541C6'
+    $bundleUpgradeCode = 'B3942064-156A-4522-AFB9-A20D28E29A54'
+    $shortcutGuid = '10D7B5B7-B89C-4D6F-8AE9-98B78CBCB30D'
+} elseif ($Profile -eq 'nightly') {
     $productName = 'xd (Nightly)'
     $installName = 'xd-nightly'
     $asset = 'xd-nightly-windows-x86_64.msi'
@@ -75,7 +90,7 @@ if ($Profile -eq 'nightly') {
 }
 $cabAsset = 'xd1.cab'
 if ([string]::IsNullOrWhiteSpace($BundleVersion)) {
-    if ($Profile -eq 'nightly') {
+    if ($Profile -ne 'release') {
         $epoch = [DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
         $now = [DateTime]::UtcNow
         $day = [Math]::Floor(($now - $epoch).TotalDays)

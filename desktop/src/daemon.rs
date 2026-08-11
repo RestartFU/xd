@@ -150,6 +150,7 @@ pub enum RequestKind {
     TerminalOpen {
         chat_id: String,
         reuse: bool,
+        agent: Option<String>,
     },
     TerminalList {
         chat_id: String,
@@ -724,9 +725,32 @@ impl DaemonHandle {
         title: &str,
         workdir: Option<&str>,
     ) -> Result<(), String> {
+        self.send_new_chat(folder_id, title, workdir, None)
+    }
+
+    pub fn new_chat_with_backend(
+        &self,
+        folder_id: &str,
+        title: &str,
+        workdir: Option<&str>,
+        backend: &str,
+    ) -> Result<(), String> {
+        self.send_new_chat(folder_id, title, workdir, Some(backend))
+    }
+
+    fn send_new_chat(
+        &self,
+        folder_id: &str,
+        title: &str,
+        workdir: Option<&str>,
+        backend: Option<&str>,
+    ) -> Result<(), String> {
         let mut body = json!({"op": "new-chat", "folder": folder_id, "title": title});
         if let Some(workdir) = workdir {
             body["workdir"] = Value::String(workdir.to_owned());
+        }
+        if let Some(backend) = backend {
+            body["backend"] = Value::String(backend.to_owned());
         }
         self.send(
             RequestKind::NewChat {
@@ -1136,8 +1160,34 @@ impl DaemonHandle {
             RequestKind::TerminalOpen {
                 chat_id: chat_id.to_owned(),
                 reuse,
+                agent: None,
             },
             json!({"op": "terminal-open", "chat": chat_id, "columns": columns, "rows": rows, "reuse": reuse}),
+        )
+    }
+
+    pub fn terminal_open_agent(
+        &self,
+        chat_id: &str,
+        columns: usize,
+        rows: usize,
+        reuse: bool,
+        agent: &str,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalOpen {
+                chat_id: chat_id.to_owned(),
+                reuse,
+                agent: Some(agent.to_owned()),
+            },
+            json!({
+                "op": "terminal-open-agent",
+                "chat": chat_id,
+                "columns": columns,
+                "rows": rows,
+                "reuse": reuse,
+                "agent": agent,
+            }),
         )
     }
 
@@ -1696,6 +1746,49 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn direct_cli_terminals_name_the_requested_agent_on_the_wire() {
+        let directory =
+            env::temp_dir().join(format!("xd-direct-cli-terminal-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "terminal-open-agent");
+            assert_eq!(request["chat"], "chat-1");
+            assert_eq!(request["agent"], "claude");
+            assert_eq!(request["reuse"], true);
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Connected { .. }
+        ));
+        daemon
+            .terminal_open_agent("chat-1", 120, 32, true, "claude")
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::TerminalOpen { chat_id, reuse, agent },
+                ..
+            } if chat_id == "chat-1" && reuse && agent.as_deref() == Some("claude")
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn correlates_replies_and_continues_delivering_events() {
         let directory = env::temp_dir().join(format!("xd-daemon-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
@@ -2192,9 +2285,10 @@ mod tests {
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
-            for (title, workdir) in [
-                ("Selected directory", Some("/srv/workspaces/project")),
-                ("Workspace default", None),
+            for (title, workdir, backend) in [
+                ("Selected directory", Some("/srv/workspaces/project"), None),
+                ("Workspace default", None, None),
+                ("Direct Claude", None, Some("claude")),
             ] {
                 let mut request = String::new();
                 reader.read_line(&mut request).unwrap();
@@ -2205,6 +2299,10 @@ mod tests {
                 match workdir {
                     Some(workdir) => assert_eq!(request["workdir"], workdir),
                     None => assert!(request.get("workdir").is_none()),
+                }
+                match backend {
+                    Some(backend) => assert_eq!(request["backend"], backend),
+                    None => assert!(request.get("backend").is_none()),
                 }
                 let request_id = request["_xd_request"].as_u64().unwrap();
                 writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
@@ -2249,6 +2347,20 @@ mod tests {
                 },
                 ..
             } if folder_id == "folder-1" && title == "Workspace default"
+        ));
+        daemon
+            .new_chat_with_backend("folder-1", "Direct Claude", None, "claude")
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            DaemonUpdate::Reply {
+                kind: RequestKind::NewChat {
+                    folder_id,
+                    title,
+                    workdir: None,
+                },
+                ..
+            } if folder_id == "folder-1" && title == "Direct Claude"
         ));
 
         server.join().unwrap();

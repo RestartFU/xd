@@ -1,0 +1,287 @@
+# A rolling development build for the minimal-agent desktop branch.
+#
+# It uses the same tested platform builds as nightly, but every published
+# artifact and installed desktop identity belongs to the independent dev
+# channel. Replacing this prerelease cannot move or alter nightly or stable.
+
+name: dev
+
+on:
+  push:
+    branches:
+      - dev/minimal-agent-desktop
+
+# One at a time. Do not cancel a publisher after it removes the previous
+# rolling release; the newest queued push will replace it when this run ends.
+concurrency:
+  group: dev
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: [self-hosted, linux, x64, xd]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run the headless tests
+        run: ./scripts/test.sh
+
+      - name: Build the dev bundle
+        env:
+          PROFILE: dev
+        run: ./scripts/build.sh
+
+      - name: Pack it
+        run: |
+          set -euo pipefail
+          mv dist xd-dev
+          tar -czf xd-dev-linux-x86_64.tar.gz xd-dev
+          sha256sum xd-dev-linux-x86_64.tar.gz > xd-dev-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            xd-dev-linux-x86_64.tar.gz
+            xd-dev-linux-x86_64.tar.gz.sha256
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Limit build parallelism
+        run: |
+          jobs=$(./scripts/runner-jobs.sh --jobs)
+          echo "CARGO_BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            daemon-rs/target
+            tls-proxy-rs/target
+          key: >-
+            cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-
+
+      - uses: actions/cache@v4
+        with:
+          path: .build-cache
+          key: >-
+            payload-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('scripts/build-macos.sh') }}
+          restore-keys: payload-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Build and smoke-test the native app bundle
+        env:
+          PROFILE: dev
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          brew install librsvg
+          ./scripts/build-macos.sh
+          ./scripts/smoke-macos.sh dist/macos/xd-dev.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos/xd-dev-macos-${{ matrix.arch }}.zip
+            dist/macos/xd-dev-macos-${{ matrix.arch }}.zip.sha256
+
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Limit build parallelism
+        shell: pwsh
+        run: |
+          $jobs = [Math]::Max(
+            1,
+            [Math]::Floor([Environment]::ProcessorCount * 0.75)
+          )
+          "CARGO_BUILD_JOBS=$jobs" >> $env:GITHUB_ENV
+          "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> $env:GITHUB_ENV
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            daemon-rs/target
+            tls-proxy-rs/target
+          key: >-
+            cargo-${{ runner.os }}-x86_64-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-x86_64-1.95.0-
+
+      - uses: actions/cache@v4
+        with:
+          path: .build-cache
+          key: >-
+            payload-${{ runner.os }}-x86_64-${{ hashFiles('scripts/build-windows.ps1', 'scripts/package-windows.ps1') }}
+          restore-keys: payload-${{ runner.os }}-x86_64-
+
+      - name: Build the self-contained native payload
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: >-
+          ./scripts/build-windows.ps1
+          -OutputDirectory windows-dist
+          -Profile dev
+
+      - name: Build and exercise the Windows downloader
+        run: |
+          ./scripts/package-windows.ps1 `
+            -Payload windows-dist `
+            -OutputDirectory artifacts `
+            -Profile dev `
+            -Version 0.1.0 `
+            -TestDownloadBase http://127.0.0.1:18765
+
+          New-Item -ItemType Directory -Path installer-test | Out-Null
+          Copy-Item artifacts/xd-dev-windows-x86_64-setup-download-test.exe* installer-test/
+          $server = Start-Process python -PassThru -WindowStyle Hidden `
+            -ArgumentList @('-m', 'http.server', '18765', '--bind', '127.0.0.1', '--directory', 'artifacts')
+          try {
+            for ($attempt = 0; $attempt -lt 20; $attempt++) {
+              try {
+                Invoke-WebRequest -UseBasicParsing `
+                  http://127.0.0.1:18765/xd-dev-windows-x86_64-msi.payload `
+                  -Method Head | Out-Null
+                break
+              } catch {
+                if ($attempt -eq 19) { throw }
+                Start-Sleep -Milliseconds 250
+              }
+            }
+            ./scripts/install.ps1 `
+              -Dev `
+              -SetupPath installer-test/xd-dev-windows-x86_64-setup-download-test.exe `
+              -SetupChecksumPath installer-test/xd-dev-windows-x86_64-setup-download-test.exe.sha256 `
+              -Quiet
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            artifacts/xd-dev-windows-x86_64-setup.exe
+            artifacts/xd-dev-windows-x86_64-setup.exe.sha256
+            artifacts/xd-dev-windows-x86_64-msi.payload
+            artifacts/xd-dev-windows-x86_64-cab.payload
+
+  publish:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: .
+          merge-multiple: true
+
+      - name: Publish the rolling dev prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          subject=$(git log -1 --format=%s)
+          notes=$(cat <<EOF
+          Built from \`${GITHUB_SHA:0:7}\` on \`dev/minimal-agent-desktop\` — $subject
+
+          This development build installs beside both stable and nightly and
+          keeps its own settings, data, workspaces, shortcuts, and package ids.
+
+          Linux:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/dev/install.sh | sh -s -- --dev
+          \`\`\`
+
+          macOS:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/dev/install-macos.sh | sh -s -- --dev
+          \`\`\`
+
+          Windows downloader:
+
+          https://github.com/${GITHUB_REPOSITORY}/releases/download/dev/xd-dev-windows-x86_64-setup.exe
+
+          Or PowerShell:
+
+          \`\`\`
+          & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/download/dev/install.ps1))) -Dev
+          \`\`\`
+
+          Or unpack the Linux build yourself:
+
+          \`\`\`
+          tar -xzf xd-dev-linux-x86_64.tar.gz
+          ./xd-dev/xd.sh
+          \`\`\`
+
+          EOF
+          )
+
+          # Only the dev release and tag move. Stable version tags and the
+          # independent nightly release are never named by this workflow.
+          gh release delete dev --cleanup-tag --yes || true
+
+          gh release create dev \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Dev $(date -u +%Y-%m-%d)" \
+            --notes "$notes" \
+            xd-dev-linux-x86_64.tar.gz \
+            xd-dev-linux-x86_64.tar.gz.sha256 \
+            xd-dev-macos-*.zip \
+            xd-dev-macos-*.zip.sha256 \
+            xd-dev-windows-x86_64-setup.exe \
+            xd-dev-windows-x86_64-setup.exe.sha256 \
+            xd-dev-windows-x86_64-msi.payload \
+            xd-dev-windows-x86_64-cab.payload \
+            scripts/install.sh \
+            scripts/install-macos.sh \
+            scripts/install.ps1

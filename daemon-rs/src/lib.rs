@@ -34,6 +34,8 @@ mod terminal;
 #[cfg(windows)]
 #[path = "terminal_windows.rs"]
 mod terminal;
+mod terminal_agent;
+mod terminal_query;
 mod tool_diff;
 mod voice;
 mod workflow;
@@ -51,6 +53,7 @@ use self_update::SelfUpdate;
 pub use storage::{SendDisposition, StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
+use terminal_agent::TerminalAgent;
 use voice::VoiceService;
 use workflow::WorkflowStatuses;
 
@@ -104,6 +107,7 @@ pub struct Engine {
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
     terminals: TerminalManager,
+    chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     voice: VoiceService,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
@@ -146,6 +150,7 @@ impl Engine {
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
+            chat_execution: Mutex::new(HashMap::new()),
             voice: VoiceService::new(events.clone(), None),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
@@ -183,6 +188,7 @@ impl Engine {
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
+            chat_execution: Mutex::new(HashMap::new()),
             voice: VoiceService::new(events.clone(), data_directory),
             secrets,
             git_drafts,
@@ -321,7 +327,7 @@ impl Engine {
             Some("new-chat") => self.tree_mutation(|store| store.new_chat(&request)),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
-            Some("delete-chat") => self.tree_mutation(|store| store.delete_chat(&request)),
+            Some("delete-chat") => self.delete_chat(&request),
             Some("remove-worktree") => self.remove_worktree(&request),
             Some("queue") => self.event_mutation(|store| store.queue(&request)),
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
@@ -331,6 +337,7 @@ impl Engine {
             Some("workflow-status") => self.workflow_status(owner, &request),
             Some("terminal-list") => self.terminal_list(&request),
             Some("terminal-open") => self.terminal_open(&request),
+            Some("terminal-open-agent") => self.terminal_open_agent(&request),
             Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
             Some("terminal-resize") => self.terminals.resize(&request).unwrap_or_else(error_reply),
             Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
@@ -777,6 +784,32 @@ impl Engine {
         self.terminals.list(chat_id)
     }
 
+    fn delete_chat(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "delete-chat needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let gate = match self.chat_execution_gate(chat_id) {
+            Ok(gate) => gate,
+            Err(error) => return error_reply(error),
+        };
+        let _execution = match gate.lock() {
+            Ok(execution) => execution,
+            Err(_) => return error_reply("This session's agent state is unavailable."),
+        };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match store.delete_chat(request) {
+            Ok(reply) => {
+                self.terminals.kill_chat(chat_id);
+                self.events.publish(json!({"event": "tree"}));
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
     fn terminal_open(&self, request: &Value) -> Value {
         let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
             Ok(chat_id) => chat_id,
@@ -792,6 +825,73 @@ impl Engine {
                 .unwrap_or_else(error_reply),
             Err(error) => error_reply(error),
         }
+    }
+
+    fn terminal_open_agent(&self, request: &Value) -> Value {
+        let agent = match required_string(
+            request,
+            "agent",
+            "terminal-open-agent needs codex or claude.",
+        ) {
+            Ok(agent) => match TerminalAgent::from_wire_name(agent) {
+                Some(agent) => agent,
+                None => return error_reply("terminal-open-agent needs codex or claude."),
+            },
+            _ => return error_reply("terminal-open-agent needs codex or claude."),
+        };
+        let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let gate = match self.chat_execution_gate(chat_id) {
+            Ok(gate) => gate,
+            Err(error) => return error_reply(error),
+        };
+        let _execution = match gate.lock() {
+            Ok(execution) => execution,
+            Err(_) => return error_reply("This session's agent state is unavailable."),
+        };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        match store.chat(chat_id) {
+            Ok(chat) if chat["working"].as_bool() == Some(true) => {
+                return error_reply(
+                    "Stop the daemon-managed turn before opening this chat's direct CLI.",
+                );
+            }
+            Ok(chat) if chat["backend"].as_str() != Some(agent.wire_name()) => {
+                return error_reply("The requested CLI does not match this session's assistant.");
+            }
+            Ok(_) => {}
+            Err(error) => return error_reply(error),
+        }
+        let workdir = match store.terminal_workdir(chat_id) {
+            Ok(workdir) => workdir,
+            Err(error) => return error_reply(error),
+        };
+        let environment = match store
+            .folder_lineage_for_chat(chat_id)
+            .map_err(|error| error.to_string())
+            .and_then(|lineage| self.secrets.effective(&lineage))
+        {
+            Ok(secrets) => secrets.environment,
+            Err(error) => return error_reply(error),
+        };
+        self.terminals
+            .open_agent(request, &workdir, agent, &environment)
+            .unwrap_or_else(error_reply)
+    }
+
+    fn chat_execution_gate(&self, chat_id: &str) -> Result<Arc<Mutex<()>>, String> {
+        let mut chats = self
+            .chat_execution
+            .lock()
+            .map_err(|_| "Session agent state is unavailable.".to_string())?;
+        Ok(chats
+            .entry(chat_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone())
     }
 
     fn tree_mutation(
@@ -874,9 +974,26 @@ impl Engine {
     }
 
     fn send_message(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "send needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let gate = match self.chat_execution_gate(chat_id) {
+            Ok(gate) => gate,
+            Err(error) => return error_reply(error),
+        };
+        let _execution = match gate.lock() {
+            Ok(execution) => execution,
+            Err(_) => return error_reply("This session's agent state is unavailable."),
+        };
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust daemon state storage is not configured.");
         };
+        if self.terminals.has_agent_session(chat_id) {
+            return error_reply(
+                "Close the direct CLI before starting a daemon-managed turn in this session.",
+            );
+        }
         let mut request = request.clone();
         if request.get("worktree_name").is_none() {
             match store.prepare_worktree_name(&request) {
@@ -1444,6 +1561,68 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
         assert!(reply["error"].as_str().unwrap().contains("terminal-open"));
+    }
+
+    #[test]
+    fn direct_and_managed_agent_starts_share_one_cross_client_gate() {
+        let engine = Arc::new(Engine::transport_only());
+        let gate = engine.chat_execution_gate("missing").unwrap();
+        let gate = gate.lock().unwrap();
+        let (finished, replies) = std::sync::mpsc::channel();
+
+        for request in [
+            json!({"op": "terminal-open-agent", "chat": "missing", "agent": "codex"}),
+            json!({"op": "send", "chat": "missing", "text": "hello"}),
+        ] {
+            let engine = engine.clone();
+            let finished = finished.clone();
+            thread::spawn(move || finished.send(engine.dispatch(request)).unwrap());
+        }
+
+        assert!(matches!(
+            replies.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(gate);
+        assert_eq!(
+            replies
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()["ok"],
+            false
+        );
+        assert_eq!(
+            replies
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()["ok"],
+            false
+        );
+    }
+
+    #[test]
+    fn deleting_a_chat_waits_for_its_agent_execution_gate() {
+        let engine = Arc::new(Engine::transport_only());
+        let gate = engine.chat_execution_gate("missing").unwrap();
+        let gate = gate.lock().unwrap();
+        let (finished, reply) = std::sync::mpsc::channel();
+        let worker = engine.clone();
+
+        thread::spawn(move || {
+            finished
+                .send(worker.dispatch(json!({"op": "delete-chat", "chat": "missing"})))
+                .unwrap();
+        });
+
+        assert!(matches!(
+            reply.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(gate);
+        assert_eq!(
+            reply
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()["ok"],
+            false
+        );
     }
 
     #[test]

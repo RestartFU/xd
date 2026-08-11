@@ -47,11 +47,13 @@ use xd_desktop::{
         TodoStatus,
     },
     remote::{self, CredentialsFile, RemoteBridge, RemoteCredentials, RemoteError, RemoteSession},
+    theme::ThemeColors,
 };
 
 mod editor;
 mod files;
 mod input;
+mod minimal;
 mod presence;
 mod selection;
 mod settings;
@@ -71,15 +73,26 @@ use editor::{
     Up as EditorUp, WordLeft as EditorWordLeft, WordRight as EditorWordRight,
 };
 use input::{
-    Backspace, ComposerEvent, ComposerInput, Copy, Cut, Delete, DeleteWord, DeleteWordForward,
-    Down, End, Escape, Home, Interrupt, Left, Paste, Right, SelectAll, SelectLeft, SelectRight,
-    SelectWordLeft, SelectWordRight, ShowCharacterPalette, Submit, Tab, Up, WordLeft, WordRight,
+    Backspace, ClearScreen as TerminalClearScreen, ComposerEvent, ComposerInput,
+    ControlA as TerminalControlA, ControlB as TerminalControlB, ControlE as TerminalControlE,
+    ControlF as TerminalControlF, ControlG as TerminalControlG, ControlH as TerminalControlH,
+    ControlI as TerminalControlI, ControlJ as TerminalControlJ, ControlK as TerminalControlK,
+    ControlM as TerminalControlM, ControlN as TerminalControlN, ControlO as TerminalControlO,
+    ControlP as TerminalControlP, ControlQ as TerminalControlQ, ControlS as TerminalControlS,
+    ControlT as TerminalControlT, ControlU as TerminalControlU, ControlW as TerminalControlW,
+    ControlX as TerminalControlX, ControlY as TerminalControlY, Copy, Cut, Delete, DeleteWord,
+    DeleteWordForward, Down, End, EndOfFile as TerminalEndOfFile, Escape, Home, Interrupt, Left,
+    PageDown as TerminalPageDown, PageUp as TerminalPageUp, Paste,
+    ReverseSearch as TerminalReverseSearch, Right, SelectAll, SelectLeft, SelectRight,
+    SelectWordLeft, SelectWordRight, ShiftTab as TerminalShiftTab, ShowCharacterPalette, Submit,
+    Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight,
 };
+use minimal::{AgentCli, MinimalRoute, project_cards, project_sessions, reconcile_route};
 use presence::DiscordPresence;
 use selection::{
     SelectionSource, TextSelection, selectable_in_document, selectable_links_in_document,
 };
-use settings::{AccentPreset, AppSettings, GitWriter};
+use settings::{AccentPreset, AppSettings, GitWriter, ThemePreset};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
@@ -124,6 +137,10 @@ const CHAT_COLUMN_MAX_WIDTH: f32 = 1_040.0;
 const TASKS_SIDE_WIDTH: f32 = 220.0;
 const TASKS_SIDE_GUTTER: f32 = 16.0;
 static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+fn minimal_agent_desktop_enabled() -> bool {
+    true
+}
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
     let lit = frame % 4;
@@ -487,16 +504,29 @@ struct DiffPanel {
 struct TerminalTab {
     id: String,
     title: String,
+    agent: Option<AgentCli>,
+    sequence: Option<u64>,
     screen: TerminalScreen,
+}
+
+#[derive(Clone)]
+enum PendingTerminalEvent {
+    Opened(Value),
+    Output(Value),
+    Resized(Value),
+    Closed(Value),
 }
 
 struct TerminalPanel {
     chat_id: String,
+    agent: Option<AgentCli>,
     sessions: Vec<TerminalTab>,
     selected: Option<String>,
     viewport: Option<(usize, usize)>,
+    auto_open: bool,
     opening: bool,
     loading: bool,
+    pending_events: Vec<PendingTerminalEvent>,
     error: Option<String>,
 }
 
@@ -510,6 +540,10 @@ impl TerminalPanel {
     fn selected(&self) -> Option<&TerminalTab> {
         let selected = self.selected.as_deref()?;
         self.sessions.iter().find(|session| session.id == selected)
+    }
+
+    fn should_auto_open(&self) -> bool {
+        self.sessions.is_empty() && self.auto_open && !self.opening
     }
 
     fn selected_mut(&mut self) -> Option<&mut TerminalTab> {
@@ -1098,6 +1132,13 @@ impl ChatEndpoint {
     }
 }
 
+fn persisted_runtime(saved: Option<&str>, remote_key: Option<&str>) -> ChatEndpoint {
+    match (saved, remote_key) {
+        (Some(saved), Some(remote)) if saved == remote => ChatEndpoint::Remote,
+        _ => ChatEndpoint::Local,
+    }
+}
+
 fn sidebar_files_replace_secondary(endpoint: ChatEndpoint, remote_state: RemoteState) -> bool {
     endpoint == ChatEndpoint::Remote && remote_state == RemoteState::Connected
 }
@@ -1204,6 +1245,10 @@ struct XdDesktop {
     model: AppModel,
     inactive_model: AppModel,
     active_endpoint: ChatEndpoint,
+    minimal_route: MinimalRoute,
+    minimal_theme_open: bool,
+    minimal_new_session_agent: AgentCli,
+    pending_minimal_session: Option<(String, String)>,
     settings: AppSettings,
     settings_open: bool,
     settings_menu: Option<SettingsMenu>,
@@ -1658,10 +1703,8 @@ impl XdDesktop {
         let remote_key = remote_credentials
             .as_ref()
             .map(|credentials| format!("remote/{}:{}", credentials.host, credentials.port));
-        let active_endpoint = match (&settings.active_connection, &remote_key) {
-            (Some(saved), Some(remote)) if saved == remote => ChatEndpoint::Remote,
-            _ => ChatEndpoint::Local,
-        };
+        let active_endpoint =
+            persisted_runtime(settings.active_connection.as_deref(), remote_key.as_deref());
         let active_connection = match active_endpoint {
             ChatEndpoint::Local => "local".to_owned(),
             ChatEndpoint::Remote => remote_key.expect("a cached remote connection has credentials"),
@@ -1689,6 +1732,10 @@ impl XdDesktop {
                 ..Default::default()
             },
             active_endpoint,
+            minimal_route: MinimalRoute::default(),
+            minimal_theme_open: false,
+            minimal_new_session_agent: AgentCli::Codex,
+            pending_minimal_session: None,
             settings,
             settings_open: false,
             settings_menu: None,
@@ -1839,9 +1886,9 @@ impl XdDesktop {
             this.window_bounds_changed(window, cx);
         })
         .detach();
-        desktop.schedule_connect(Duration::ZERO, cx);
-        if desktop.remote_credentials.is_some() {
-            desktop.schedule_remote_connect(Duration::ZERO, cx);
+        match desktop.active_endpoint {
+            ChatEndpoint::Local => desktop.schedule_connect(Duration::ZERO, cx),
+            ChatEndpoint::Remote => desktop.schedule_remote_connect(Duration::ZERO, cx),
         }
         cx.spawn(async move |this, cx| {
             loop {
@@ -2087,6 +2134,63 @@ impl XdDesktop {
         name == "daemon-update"
     }
 
+    fn switch_active_endpoint(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) {
+        if endpoint == self.active_endpoint {
+            return;
+        }
+        self.sync_draft();
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        self.cancel_voice(false, cx);
+        std::mem::swap(&mut self.model, &mut self.inactive_model);
+        self.active_endpoint = endpoint;
+        self.remember_active_connection();
+        self.restore_collapsed_folders();
+        self.model.selected_chat = None;
+        self.invalidate_live_render();
+        self.transcript_snapshot = TranscriptSnapshot::default();
+        self.transcript_loaded = false;
+        self.transcript.reset(0);
+        self.composer_menu = None;
+        self.pending_speech = None;
+        self.speech_output.stop();
+        self.diff_panel = None;
+        self.terminal_panel = None;
+        self.sync_terminal_input_mode(cx);
+        self.sidebar_edit = None;
+        self.sidebar_context_menu = None;
+        self.pending_sidebar_delete = None;
+        self.sidebar_move = None;
+        self.creating_workspace = false;
+        self.creating_chat_folder = None;
+        self.workspace_context_folder = None;
+        self.workspace_defaults = None;
+        self.directory_browser = None;
+        self.workspace_clone_status = None;
+        self.search = None;
+        self.secrets_panel = None;
+        self.auth_open = false;
+        self.auth_providers.clear();
+        self.cli_versions.clear();
+        self.cli_versions_loading = false;
+        self.cli_versions_error = None;
+        self.auth_input_text.clear();
+        self.auth_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.pending_send = None;
+        self.sending = false;
+        self.clear_question(cx);
+        self.cancel_queue_edit(cx);
+        Arc::make_mut(&mut self.workflow_statuses).clear();
+        Arc::make_mut(&mut self.workflow_pending).clear();
+        if let Ok(mut images) = self.message_images.lock() {
+            images.clear();
+        }
+        self.message_image_viewer = None;
+        self.minimal_route = MinimalRoute::default();
+        self.pending_minimal_session = None;
+        self.request_agent_catalog();
+    }
+
     fn select_endpoint_chat(
         &mut self,
         endpoint: ChatEndpoint,
@@ -2098,61 +2202,15 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        if endpoint != self.active_endpoint {
-            self.sync_draft();
-            self.draft_generation = self.draft_generation.saturating_add(1);
-            self.cancel_voice(false, cx);
-            std::mem::swap(&mut self.model, &mut self.inactive_model);
-            self.active_endpoint = endpoint;
-            self.remember_active_connection();
-            self.restore_collapsed_folders();
-            self.model.selected_chat = None;
-            self.invalidate_live_render();
-            self.transcript_snapshot = TranscriptSnapshot::default();
-            self.transcript_loaded = false;
-            self.transcript.reset(0);
-            self.composer_menu = None;
-            self.pending_speech = None;
-            self.speech_output.stop();
-            self.diff_panel = None;
-            self.terminal_panel = None;
-            self.sidebar_edit = None;
-            self.sidebar_context_menu = None;
-            self.pending_sidebar_delete = None;
-            self.sidebar_move = None;
-            self.creating_workspace = false;
-            self.creating_chat_folder = None;
-            self.workspace_context_folder = None;
-            self.workspace_defaults = None;
-            self.directory_browser = None;
-            self.workspace_clone_status = None;
-            self.search = None;
-            self.secrets_panel = None;
-            self.auth_open = false;
-            self.auth_providers.clear();
-            self.cli_versions.clear();
-            self.cli_versions_loading = false;
-            self.cli_versions_error = None;
-            self.auth_input_text.clear();
-            self.auth_input
-                .update(cx, |input, cx| input.set_text("", cx));
-            self.pending_send = None;
-            self.sending = false;
-            self.clear_question(cx);
-            self.cancel_queue_edit(cx);
-            Arc::make_mut(&mut self.workflow_statuses).clear();
-            Arc::make_mut(&mut self.workflow_pending).clear();
-            if let Ok(mut images) = self.message_images.lock() {
-                images.clear();
-            }
-            self.message_image_viewer = None;
-            self.request_agent_catalog();
-        }
+        self.switch_active_endpoint(endpoint, cx);
         self.select_chat(chat_id, cx);
     }
 
     fn schedule_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        if self.connecting || self.endpoint_model(ChatEndpoint::Local).connected {
+        if self.active_endpoint != ChatEndpoint::Local
+            || self.connecting
+            || self.endpoint_model(ChatEndpoint::Local).connected
+        {
             return;
         }
         self.connecting = true;
@@ -2250,7 +2308,8 @@ impl XdDesktop {
     }
 
     fn schedule_remote_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        if self.remote_credentials.is_none()
+        if self.active_endpoint != ChatEndpoint::Remote
+            || self.remote_credentials.is_none()
             || matches!(
                 self.remote_state,
                 RemoteState::Connecting | RemoteState::Connected
@@ -2429,20 +2488,7 @@ impl XdDesktop {
                     let value = Value::Object(body);
                     if !self.handle_workspace_create_reply(ChatEndpoint::Remote, &kind, &value, cx)
                     {
-                        let select_remote_startup_chat = matches!(kind, RequestKind::Tree)
-                            && value.get("ok").and_then(Value::as_bool) == Some(true)
-                            && self.model.selected_chat.is_none()
-                            && self.model.chats.is_empty();
                         Self::apply_passive_reply(&mut self.inactive_model, &kind, value);
-                        if select_remote_startup_chat
-                            && let Some(chat_id) = self
-                                .inactive_model
-                                .chats
-                                .first()
-                                .map(|chat| chat.id.clone())
-                        {
-                            self.select_endpoint_chat(ChatEndpoint::Remote, chat_id, cx);
-                        }
                     }
                 }
             }
@@ -2483,6 +2529,9 @@ impl XdDesktop {
                 let _ = file.clear();
             }
             self.remote_credentials = None;
+            if self.active_endpoint == ChatEndpoint::Remote {
+                self.disconnect_remote_runtime(cx);
+            }
             self.remote_state = RemoteState::Unconfigured;
             self.remote_error = Some("This machine revoked the saved device. Pair again.".into());
         } else {
@@ -2517,12 +2566,59 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn activate_remote_runtime(&mut self, cx: &mut Context<Self>) {
+        if self.remote_credentials.is_none() {
+            self.remote_error = Some("Pair a remote daemon first.".into());
+            cx.notify();
+            return;
+        }
+        if self.active_endpoint == ChatEndpoint::Local {
+            self.connection_generation = self.connection_generation.saturating_add(1);
+            self.daemon = None;
+            self.connecting = false;
+            self.connection_in_flight = false;
+            self.endpoint_model_mut(ChatEndpoint::Local).connected = false;
+            self.switch_active_endpoint(ChatEndpoint::Remote, cx);
+        }
+        if self.remote_state == RemoteState::Connected {
+            if let Some(daemon) = &self.remote_daemon {
+                let _ = daemon.tree();
+                let _ = daemon.agent_catalog();
+            }
+        } else {
+            self.schedule_remote_connect(Duration::ZERO, cx);
+        }
+        cx.notify();
+    }
+
+    fn disconnect_remote_runtime(&mut self, cx: &mut Context<Self>) {
+        if self.active_endpoint != ChatEndpoint::Remote {
+            return;
+        }
+        self.remote_generation = self.remote_generation.saturating_add(1);
+        self.remote_daemon = None;
+        self.remote_bridge = None;
+        self.remote_state = if self.remote_credentials.is_some() {
+            RemoteState::Offline
+        } else {
+            RemoteState::Unconfigured
+        };
+        self.remote_reconnect_attempt = 0;
+        self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
+        self.switch_active_endpoint(ChatEndpoint::Local, cx);
+        self.schedule_connect(Duration::ZERO, cx);
+        cx.notify();
+    }
+
     fn handle_daemon_update(
         &mut self,
         update: DaemonUpdate,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
+        if generation != self.connection_generation {
+            return;
+        }
         if self.active_endpoint == ChatEndpoint::Remote {
             match update {
                 DaemonUpdate::Connected { .. } => {
@@ -3015,8 +3111,22 @@ impl XdDesktop {
                             .map(str::to_owned);
                     }
                 }
-                RequestKind::TerminalOpen { chat_id, .. }
-                | RequestKind::TerminalList { chat_id }
+                RequestKind::TerminalOpen { chat_id, agent, .. }
+                    if self.terminal_panel.as_ref().is_some_and(|panel| {
+                        &panel.chat_id == chat_id
+                            && panel.agent.map(AgentCli::protocol_name) == agent.as_deref()
+                    }) =>
+                {
+                    if let Some(panel) = &mut self.terminal_panel {
+                        panel.loading = false;
+                        panel.opening = false;
+                        panel.error = value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                }
+                RequestKind::TerminalList { chat_id }
                     if self
                         .terminal_panel
                         .as_ref()
@@ -3337,7 +3447,9 @@ impl XdDesktop {
                 }) {
                     self.close_secrets(cx);
                 }
-                if self.model.selected_chat.is_none() {
+                if minimal_agent_desktop_enabled() {
+                    self.reconcile_minimal_navigation(cx);
+                } else if self.model.selected_chat.is_none() {
                     let chat_id = self
                         .cached_last_chat()
                         .filter(|chat_id| self.model.chats.iter().any(|chat| &chat.id == chat_id))
@@ -4029,7 +4141,20 @@ impl XdDesktop {
                     self.cancel_chat_create(cx);
                 }
                 self.request_tree();
-                self.select_chat(chat_id.to_owned(), cx);
+                if minimal_agent_desktop_enabled() {
+                    let chat_id = chat_id.to_owned();
+                    if let Some(agent) = value
+                        .get("backend")
+                        .and_then(Value::as_str)
+                        .and_then(AgentCli::from_backend)
+                    {
+                        self.select_minimal_session(folder_id, chat_id, agent, cx);
+                    } else {
+                        self.pending_minimal_session = Some((folder_id, chat_id));
+                    }
+                } else {
+                    self.select_chat(chat_id.to_owned(), cx);
+                }
             }
             RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder { .. } => self.request_tree(),
@@ -4227,11 +4352,11 @@ impl XdDesktop {
                     self.attachments_dirty = false;
                 }
             }
-            RequestKind::TerminalOpen { chat_id, .. }
-                if self
-                    .terminal_panel
-                    .as_ref()
-                    .is_some_and(|panel| panel.chat_id == chat_id) =>
+            RequestKind::TerminalOpen { chat_id, agent, .. }
+                if self.terminal_panel.as_ref().is_some_and(|panel| {
+                    panel.chat_id == chat_id
+                        && panel.agent.map(AgentCli::protocol_name) == agent.as_deref()
+                }) =>
             {
                 let mut resize = None;
                 if let Some(panel) = &mut self.terminal_panel {
@@ -4265,7 +4390,7 @@ impl XdDesktop {
                     .as_ref()
                     .is_some_and(|panel| panel.chat_id == chat_id) =>
             {
-                self.apply_terminal_list(&value);
+                self.apply_terminal_list(&value, cx);
             }
             RequestKind::TerminalInput { .. } | RequestKind::TerminalResize { .. } => {}
             RequestKind::TerminalKill { .. } => {}
@@ -4450,35 +4575,16 @@ impl XdDesktop {
             }
             "terminal-opened" if self.event_is_active(&body) => {
                 if let Some(panel) = &mut self.terminal_panel {
-                    let terminal_id = body
-                        .get("terminal")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    panel.opening = false;
-                    let title = body
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Terminal")
-                        .to_owned();
-                    let columns =
-                        body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
-                    let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
-                    if let Some(terminal_id) = terminal_id {
-                        if !panel
-                            .sessions
-                            .iter()
-                            .any(|session| session.id == terminal_id)
-                        {
-                            panel.sessions.push(TerminalTab {
-                                id: terminal_id.clone(),
-                                title,
-                                screen: TerminalScreen::new(columns, rows),
-                            });
-                        }
-                        panel.selected = Some(terminal_id);
+                    if panel.loading {
+                        panel
+                            .pending_events
+                            .push(PendingTerminalEvent::Opened(body.clone()));
+                    }
+                    if Self::apply_terminal_opened_event(panel, &body) {
                         self.terminal_scroll.scroll_to_bottom();
                     }
                 }
+                self.sync_terminal_input_mode(cx);
             }
             "terminal-output" if self.event_is_active(&body) => {
                 let terminal_id = body.get("terminal").and_then(Value::as_str);
@@ -4487,20 +4593,20 @@ impl XdDesktop {
                     .as_ref()
                     .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
                     && terminal_scroll_is_at_bottom(&self.terminal_scroll);
-                if let Some(panel) = &mut self.terminal_panel
-                    && let Some(session) = panel
-                        .sessions
-                        .iter_mut()
-                        .find(|session| Some(session.id.as_str()) == terminal_id)
-                    && let Some(data) = body.get("data").and_then(Value::as_str)
-                    && let Ok(data) = STANDARD.decode(data)
-                {
-                    session.screen.feed(&data);
-                    self.terminal_cursor_visible = true;
-                    if follow_output {
-                        self.terminal_scroll.scroll_to_bottom();
+                if let Some(panel) = &mut self.terminal_panel {
+                    if panel.loading {
+                        panel
+                            .pending_events
+                            .push(PendingTerminalEvent::Output(body.clone()));
+                    }
+                    if Self::apply_terminal_output_event(panel, &body) {
+                        self.terminal_cursor_visible = true;
+                        if follow_output {
+                            self.terminal_scroll.scroll_to_bottom();
+                        }
                     }
                 }
+                self.sync_terminal_input_mode(cx);
             }
             "terminal-resized" if self.event_is_active(&body) => {
                 let terminal_id = body.get("terminal").and_then(Value::as_str);
@@ -4509,29 +4615,27 @@ impl XdDesktop {
                     .as_ref()
                     .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
                     && terminal_scroll_is_at_bottom(&self.terminal_scroll);
-                if let Some(panel) = &mut self.terminal_panel
-                    && let Some(session) = panel
-                        .sessions
-                        .iter_mut()
-                        .find(|session| Some(session.id.as_str()) == terminal_id)
-                {
-                    let columns =
-                        body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
-                    let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
-                    session.screen.resize(columns, rows);
-                    if follow_output {
+                if let Some(panel) = &mut self.terminal_panel {
+                    if panel.loading {
+                        panel
+                            .pending_events
+                            .push(PendingTerminalEvent::Resized(body.clone()));
+                    }
+                    if Self::apply_terminal_resized_event(panel, &body) && follow_output {
                         self.terminal_scroll.scroll_to_bottom();
                     }
                 }
             }
             "terminal-closed" if self.event_is_active(&body) => {
                 if let Some(panel) = &mut self.terminal_panel {
-                    let closed = body.get("terminal").and_then(Value::as_str);
-                    if let Some(closed) = closed {
-                        panel.remove(closed);
+                    if panel.loading {
+                        panel
+                            .pending_events
+                            .push(PendingTerminalEvent::Closed(body.clone()));
                     }
-                    panel.loading = false;
+                    Self::apply_terminal_closed_event(panel, &body);
                 }
+                self.sync_terminal_input_mode(cx);
             }
             "git-draft-finished" if self.event_is_active(&body) => {
                 let kind = body.get("kind").and_then(Value::as_str).unwrap_or_default();
@@ -6000,6 +6104,8 @@ impl XdDesktop {
                         Ok(()) => {
                             this.remote_credentials = Some(credentials);
                             this.install_remote_session(session, generation, cx);
+                            this.activate_remote_runtime(cx);
+                            this.remote_panel = None;
                         }
                         Err(error) => {
                             this.remote_state = RemoteState::Offline;
@@ -6044,24 +6150,7 @@ impl XdDesktop {
             return;
         }
         if self.active_endpoint == ChatEndpoint::Remote {
-            let local_chat = self.inactive_model.selected_chat.clone().or_else(|| {
-                self.inactive_model
-                    .chats
-                    .first()
-                    .map(|chat| chat.id.clone())
-            });
-            if let Some(chat_id) = local_chat {
-                self.select_endpoint_chat(ChatEndpoint::Local, chat_id, cx);
-            } else {
-                std::mem::swap(&mut self.model, &mut self.inactive_model);
-                self.active_endpoint = ChatEndpoint::Local;
-                self.remember_active_connection();
-                self.restore_collapsed_folders();
-                self.transcript_snapshot = TranscriptSnapshot::default();
-                self.transcript_loaded = false;
-                self.transcript.reset(0);
-                self.set_composer_text(String::new(), cx);
-            }
+            self.disconnect_remote_runtime(cx);
         }
         self.remote_generation = self.remote_generation.saturating_add(1);
         self.remote_credentials = None;
@@ -6718,6 +6807,7 @@ impl XdDesktop {
     fn toggle_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_panel.is_some() {
             self.terminal_panel = None;
+            self.sync_terminal_input_mode(cx);
             if self
                 .pane_resize
                 .is_some_and(|resize| resize.kind == PaneResizeKind::Terminal)
@@ -6726,6 +6816,7 @@ impl XdDesktop {
             }
         } else if let Some(chat_id) = self.model.selected_chat.clone() {
             self.terminal_panel = Some(Self::new_terminal_panel(chat_id));
+            self.sync_terminal_input_mode(cx);
             self.refresh_terminal_sessions(cx);
             self.terminal_cursor_visible = true;
             let focus = self.terminal_input.read(cx).focus_handle(cx);
@@ -6738,12 +6829,22 @@ impl XdDesktop {
     fn new_terminal_panel(chat_id: String) -> TerminalPanel {
         TerminalPanel {
             chat_id,
+            agent: None,
             sessions: Vec::new(),
             selected: None,
             viewport: None,
+            auto_open: true,
             opening: false,
             loading: true,
+            pending_events: Vec::new(),
             error: None,
+        }
+    }
+
+    fn new_agent_terminal_panel(chat_id: String, agent: AgentCli) -> TerminalPanel {
+        TerminalPanel {
+            agent: Some(agent),
+            ..Self::new_terminal_panel(chat_id)
         }
     }
 
@@ -6829,6 +6930,7 @@ impl XdDesktop {
     fn restore_panes(&mut self, cx: &mut Context<Self>) {
         self.diff_panel = None;
         self.terminal_panel = None;
+        self.sync_terminal_input_mode(cx);
         let Some(key) = self.current_pane_key() else {
             return;
         };
@@ -6899,39 +7001,30 @@ impl XdDesktop {
             return;
         };
         let geometry = (columns, rows);
-        if panel.viewport == Some(geometry) {
-            return;
-        }
-        panel.viewport = Some(geometry);
-        if let Some(session) = panel.selected_mut()
-            && session.screen.geometry() != geometry
-        {
-            session.screen.resize(columns, rows);
+        let geometry_changed = panel.viewport != Some(geometry);
+        if geometry_changed {
+            panel.viewport = Some(geometry);
+            if let Some(session) = panel.selected_mut()
+                && session.screen.geometry() != geometry
+            {
+                session.screen.resize(columns, rows);
+            }
         }
         let terminal_id = panel.selected.clone();
-        let should_open = panel.sessions.is_empty() && panel.loading && !panel.opening;
-        let chat_id = panel.chat_id.clone();
-        if should_open {
-            panel.opening = true;
-        }
-
-        let result = if let Some(daemon) = self.active_daemon().cloned() {
-            if let Some(terminal_id) = terminal_id {
-                daemon.terminal_resize(&terminal_id, columns, rows)
-            } else if should_open {
-                daemon.terminal_open(&chat_id, columns, rows, true)
-            } else {
-                Ok(())
+        let should_auto_open = panel.should_auto_open();
+        if geometry_changed && let Some(terminal_id) = terminal_id {
+            let result = self
+                .active_daemon()
+                .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+                .and_then(|daemon| daemon.terminal_resize(&terminal_id, columns, rows));
+            if let Err(error) = result
+                && let Some(panel) = &mut self.terminal_panel
+            {
+                panel.error = Some(error);
             }
-        } else {
-            Err("xd is not connected to a daemon.".into())
-        };
-        if let Err(error) = result
-            && let Some(panel) = &mut self.terminal_panel
-        {
-            panel.loading = false;
-            panel.opening = false;
-            panel.error = Some(error);
+        }
+        if should_auto_open {
+            self.start_terminal_session(true, cx);
         }
         cx.notify();
     }
@@ -6953,6 +7046,17 @@ impl XdDesktop {
             panel.error = Some(error);
         }
         cx.notify();
+    }
+
+    fn sync_terminal_input_mode(&mut self, cx: &mut Context<Self>) {
+        let bracketed_paste = self
+            .terminal_panel
+            .as_ref()
+            .and_then(TerminalPanel::selected)
+            .is_some_and(|session| session.screen.bracketed_paste());
+        self.terminal_input.update(cx, |input, _| {
+            input.set_terminal_bracketed_paste(bracketed_paste);
+        });
     }
 
     fn kill_terminal(&mut self, cx: &mut Context<Self>) {
@@ -6986,6 +7090,10 @@ impl XdDesktop {
     }
 
     fn new_terminal_session(&mut self, cx: &mut Context<Self>) {
+        self.start_terminal_session(false, cx);
+    }
+
+    fn start_terminal_session(&mut self, reuse: bool, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
@@ -6994,12 +7102,23 @@ impl XdDesktop {
         }
         let (columns, rows) = panel.viewport.unwrap_or((120, 32));
         let chat_id = panel.chat_id.clone();
+        let agent = panel.agent;
+        panel.auto_open = false;
         panel.opening = true;
         panel.error = None;
         let result = self
             .active_daemon()
             .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
-            .and_then(|daemon| daemon.terminal_open(&chat_id, columns, rows, false));
+            .and_then(|daemon| match agent {
+                Some(agent) => daemon.terminal_open_agent(
+                    &chat_id,
+                    columns,
+                    rows,
+                    reuse,
+                    agent.protocol_name(),
+                ),
+                None => daemon.terminal_open(&chat_id, columns, rows, reuse),
+            });
         if let Err(error) = result
             && let Some(panel) = &mut self.terminal_panel
         {
@@ -7063,17 +7182,152 @@ impl XdDesktop {
                 panel.error = Some(error);
             }
         }
+        self.sync_terminal_input_mode(cx);
         cx.notify();
     }
 
-    fn apply_terminal_list(&mut self, value: &Value) {
+    fn terminal_event_is_new(session: &TerminalTab, body: &Value) -> bool {
+        match body.get("sequence").and_then(Value::as_u64) {
+            Some(sequence) => session.sequence.is_none_or(|current| sequence > current),
+            None => true,
+        }
+    }
+
+    fn advance_terminal_sequence(session: &mut TerminalTab, body: &Value) {
+        if let Some(sequence) = body.get("sequence").and_then(Value::as_u64) {
+            session.sequence = Some(sequence);
+        }
+    }
+
+    fn apply_terminal_opened_event(panel: &mut TerminalPanel, body: &Value) -> bool {
+        let event_agent = body
+            .get("agent")
+            .and_then(Value::as_str)
+            .and_then(AgentCli::from_protocol_name);
+        if panel.agent != event_agent {
+            return false;
+        }
+        let Some(terminal_id) = body.get("terminal").and_then(Value::as_str) else {
+            return false;
+        };
+        panel.opening = false;
+        if !panel
+            .sessions
+            .iter()
+            .any(|session| session.id == terminal_id)
+        {
+            let title = body
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Terminal")
+                .to_owned();
+            let columns = body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
+            let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
+            panel.sessions.push(TerminalTab {
+                id: terminal_id.to_owned(),
+                title,
+                agent: event_agent,
+                sequence: body.get("sequence").and_then(Value::as_u64),
+                screen: TerminalScreen::new(columns, rows),
+            });
+        }
+        panel.selected = Some(terminal_id.to_owned());
+        true
+    }
+
+    fn apply_terminal_output_event(panel: &mut TerminalPanel, body: &Value) -> bool {
+        let Some(terminal_id) = body.get("terminal").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(session) = panel
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == terminal_id)
+        else {
+            return false;
+        };
+        if !Self::terminal_event_is_new(session, body) {
+            return false;
+        }
+        let Some(data) = body
+            .get("data")
+            .and_then(Value::as_str)
+            .and_then(|data| STANDARD.decode(data).ok())
+        else {
+            return false;
+        };
+        session.screen.feed(&data);
+        Self::advance_terminal_sequence(session, body);
+        true
+    }
+
+    fn apply_terminal_resized_event(panel: &mut TerminalPanel, body: &Value) -> bool {
+        let Some(terminal_id) = body.get("terminal").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(session) = panel
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == terminal_id)
+        else {
+            return false;
+        };
+        if !Self::terminal_event_is_new(session, body) {
+            return false;
+        }
+        let columns = body.get("columns").and_then(Value::as_u64).unwrap_or(120) as usize;
+        let rows = body.get("rows").and_then(Value::as_u64).unwrap_or(32) as usize;
+        session.screen.resize(columns, rows);
+        Self::advance_terminal_sequence(session, body);
+        true
+    }
+
+    fn apply_terminal_closed_event(panel: &mut TerminalPanel, body: &Value) -> bool {
+        let Some(terminal_id) = body.get("terminal").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(session) = panel
+            .sessions
+            .iter()
+            .find(|session| session.id == terminal_id)
+        else {
+            return false;
+        };
+        if !Self::terminal_event_is_new(session, body) {
+            return false;
+        }
+        panel.remove(terminal_id);
+        true
+    }
+
+    fn apply_pending_terminal_event(panel: &mut TerminalPanel, event: PendingTerminalEvent) {
+        match event {
+            PendingTerminalEvent::Opened(body) => {
+                Self::apply_terminal_opened_event(panel, &body);
+            }
+            PendingTerminalEvent::Output(body) => {
+                Self::apply_terminal_output_event(panel, &body);
+            }
+            PendingTerminalEvent::Resized(body) => {
+                Self::apply_terminal_resized_event(panel, &body);
+            }
+            PendingTerminalEvent::Closed(body) => {
+                Self::apply_terminal_closed_event(panel, &body);
+            }
+        }
+    }
+
+    fn apply_terminal_list(&mut self, value: &Value, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
         panel.loading = false;
         panel.opening = false;
         panel.error = None;
+        let pending_events = std::mem::take(&mut panel.pending_events);
         let previous = panel.selected.clone();
+        let requested_agent = panel.agent;
+        let mut existing = std::mem::take(&mut panel.sessions);
         let sessions = value
             .get("terminals")
             .and_then(Value::as_array)
@@ -7081,6 +7335,21 @@ impl XdDesktop {
                 items
                     .iter()
                     .filter_map(Self::terminal_tab_from_snapshot)
+                    .filter(|session| session.agent == requested_agent)
+                    .map(|snapshot| {
+                        let newer = existing
+                            .iter()
+                            .position(|session| session.id == snapshot.id)
+                            .filter(|index| {
+                                matches!(
+                                    (existing[*index].sequence, snapshot.sequence),
+                                    (Some(current), Some(boundary)) if current > boundary
+                                )
+                            });
+                        newer
+                            .map(|index| existing.swap_remove(index))
+                            .unwrap_or(snapshot)
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -7088,7 +7357,18 @@ impl XdDesktop {
         panel.selected = previous
             .filter(|selected| panel.sessions.iter().any(|session| &session.id == selected))
             .or_else(|| panel.sessions.first().map(|session| session.id.clone()));
+        for event in pending_events {
+            Self::apply_pending_terminal_event(panel, event);
+        }
+        if !panel.sessions.is_empty() {
+            panel.auto_open = false;
+        }
+        let should_auto_open = panel.should_auto_open();
         self.terminal_scroll.scroll_to_bottom();
+        if should_auto_open {
+            self.start_terminal_session(true, cx);
+        }
+        self.sync_terminal_input_mode(cx);
     }
 
     fn terminal_tab_from_snapshot(terminal: &Value) -> Option<TerminalTab> {
@@ -7098,6 +7378,10 @@ impl XdDesktop {
             .and_then(Value::as_str)
             .unwrap_or("Terminal")
             .to_owned();
+        let agent = terminal
+            .get("agent")
+            .and_then(Value::as_str)
+            .and_then(AgentCli::from_protocol_name);
         let columns = terminal
             .get("columns")
             .and_then(Value::as_u64)
@@ -7120,7 +7404,13 @@ impl XdDesktop {
                 }
             }
         }
-        Some(TerminalTab { id, title, screen })
+        Some(TerminalTab {
+            id,
+            title,
+            agent,
+            sequence: terminal.get("sequence").and_then(Value::as_u64),
+            screen,
+        })
     }
 
     fn set_diff_mode(&mut self, branch: bool, cx: &mut Context<Self>) {
@@ -10998,6 +11288,1880 @@ impl XdDesktop {
     }
 }
 
+impl XdDesktop {
+    fn show_minimal_projects(&mut self, cx: &mut Context<Self>) {
+        let project_id = match &self.minimal_route {
+            MinimalRoute::Projects { project_id } => project_id.clone(),
+            MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
+        };
+        self.minimal_route = MinimalRoute::Projects { project_id };
+        self.terminal_panel = None;
+        self.model.selected_chat = None;
+        self.sync_terminal_input_mode(cx);
+        cx.notify();
+    }
+
+    fn open_minimal_session(
+        &mut self,
+        project_id: String,
+        chat_id: String,
+        agent: AgentCli,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_minimal_session(project_id, chat_id, agent, cx);
+        let focus = self.terminal_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn select_minimal_session(
+        &mut self,
+        project_id: String,
+        chat_id: String,
+        agent: AgentCli,
+        cx: &mut Context<Self>,
+    ) {
+        let same_panel = self
+            .terminal_panel
+            .as_ref()
+            .is_some_and(|panel| panel.chat_id == chat_id && panel.agent == Some(agent));
+        if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
+            self.model.select_chat(chat_id.clone());
+            self.remember_last_chat(&chat_id);
+            self.invalidate_live_render();
+            self.transcript_snapshot = TranscriptSnapshot::default();
+            self.transcript_loaded = false;
+            self.transcript_loading = false;
+            self.transcript_page_loading = false;
+            self.transcript.reset(0);
+        }
+        self.minimal_route = MinimalRoute::Cli {
+            project_id,
+            chat_id: chat_id.clone(),
+            agent,
+        };
+        if !same_panel {
+            self.terminal_panel = Some(Self::new_agent_terminal_panel(chat_id, agent));
+            self.sync_terminal_input_mode(cx);
+            self.refresh_terminal_sessions(cx);
+        }
+        cx.notify();
+    }
+
+    fn reconcile_minimal_navigation(&mut self, cx: &mut Context<Self>) {
+        if let Some((project_id, chat_id)) = self.pending_minimal_session.clone()
+            && let Some(agent) = self
+                .model
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id && chat.folder == project_id)
+                .and_then(|chat| AgentCli::from_backend(&chat.backend))
+        {
+            self.pending_minimal_session = None;
+            self.select_minimal_session(project_id, chat_id, agent, cx);
+            return;
+        }
+
+        let next = reconcile_route(&self.minimal_route, &self.model.folders, &self.model.chats);
+        if next == self.minimal_route {
+            return;
+        }
+        match next.clone() {
+            MinimalRoute::Cli {
+                project_id,
+                chat_id,
+                agent,
+            } => self.select_minimal_session(project_id, chat_id, agent, cx),
+            MinimalRoute::Projects { .. } => {
+                self.minimal_route = next;
+                self.terminal_panel = None;
+                self.model.selected_chat = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn save_minimal_chat_create(&mut self, cx: &mut Context<Self>) {
+        let Some(folder_id) = self.creating_chat_folder.clone() else {
+            return;
+        };
+        if self.chat_create_submitting {
+            return;
+        }
+        let title = chat_create_title(&self.chat_create_title).to_owned();
+        let agent = self.minimal_new_session_agent.protocol_name();
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.new_chat_with_backend(&folder_id, &title, None, agent));
+        match result {
+            Ok(()) => {
+                self.chat_create_title = title;
+                self.chat_create_submitting = true;
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn choose_minimal_theme(&mut self, theme: ThemePreset, cx: &mut Context<Self>) {
+        self.settings.theme = theme;
+        self.minimal_theme_open = false;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn render_minimal_terminal(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let terminal_input = self.terminal_input.clone();
+        let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
+        let desktop = cx.entity();
+        let Some(panel) = self.terminal_panel.as_ref() else {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(colors.muted))
+                .child("Choose a session to start its CLI.")
+                .into_any_element();
+        };
+
+        let selected_id = panel.selected.clone();
+        let output = panel
+            .selected()
+            .map(|session| session.screen.rendered_with_cursor());
+        let (output_text, output_spans, output_cursor) = output
+            .map(|output| (output.text, output.spans, output.cursor))
+            .unwrap_or_else(|| (String::new(), Vec::new(), None));
+        let mut highlights = output_spans
+            .into_iter()
+            .map(|span| {
+                (
+                    span.range,
+                    HighlightStyle {
+                        color: span.style.foreground.map(|color| rgb(color).into()),
+                        background_color: span.style.background.map(|color| rgb(color).into()),
+                        font_weight: span.style.bold.then_some(FontWeight::BOLD),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if self.terminal_cursor_visible
+            && terminal_focus.is_focused(window)
+            && let Some(cursor) = output_cursor
+        {
+            highlights.push((
+                cursor,
+                HighlightStyle {
+                    color: Some(rgb(colors.background).into()),
+                    background_color: Some(rgb(colors.text).into()),
+                    ..Default::default()
+                },
+            ));
+        }
+        let output_text: SharedString = output_text.into();
+        let output_range = 0..output_text.len();
+        let output = StyledText::new(output_text.clone()).with_highlights(highlights);
+        let output_layout = output.layout().clone();
+        let output = if let Some(terminal_id) = selected_id.as_deref() {
+            let scope = format!("minimal-terminal-output:{terminal_id}");
+            let document = scoped_element_id(&scope, 0);
+            selectable_in_document(
+                document,
+                document,
+                output_text,
+                output_range,
+                None,
+                output_layout,
+                output,
+            )
+            .into_any_element()
+        } else {
+            output.into_any_element()
+        };
+        let active = selected_id.is_some() && !panel.loading;
+        let tabs = panel
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| {
+                let terminal_id = session.id.clone();
+                let close_id = terminal_id.clone();
+                let selected = selected_id.as_deref() == Some(terminal_id.as_str());
+                div()
+                    .id(("minimal-terminal-tab", index))
+                    .h_full()
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_b_2()
+                    .border_color(rgb(if selected {
+                        colors.accent
+                    } else {
+                        colors.surface
+                    }))
+                    .text_xs()
+                    .text_color(rgb(if selected { colors.text } else { colors.muted }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_terminal(terminal_id.clone(), cx);
+                    }))
+                    .child(session.title.clone())
+                    .child(
+                        div()
+                            .id(("minimal-close-terminal", index))
+                            .px_1()
+                            .rounded_sm()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.kill_terminal_id(close_id.clone(), cx);
+                            }))
+                            .child("×"),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .size_full()
+            .min_h_0()
+            .relative()
+            .flex()
+            .flex_col()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.surface))
+            .overflow_hidden()
+            .child(
+                div()
+                    .h(px(42.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .children(tabs)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("minimal-new-terminal")
+                            .size(px(30.0))
+                            .mr_2()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(cx.listener(|this, _, _, cx| this.new_terminal_session(cx)))
+                            .child(plus_icon(colors.text)),
+                    ),
+            )
+            .when(panel.loading, |pane| {
+                pane.child(
+                    div()
+                        .absolute()
+                        .top(px(54.0))
+                        .left(px(16.0))
+                        .text_xs()
+                        .text_color(rgb(colors.muted))
+                        .child("Starting CLI…"),
+                )
+            })
+            .when_some(panel.error.clone(), |pane, error| {
+                pane.child(
+                    div()
+                        .absolute()
+                        .top(px(54.0))
+                        .left(px(16.0))
+                        .right(px(16.0))
+                        .text_xs()
+                        .text_color(rgb(0xd86f7c))
+                        .child(error),
+                )
+            })
+            .child(
+                div()
+                    .id("minimal-terminal-output")
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.terminal_scroll)
+                    .p_4()
+                    .font_family(MONO)
+                    .text_size(px(13.0))
+                    .line_height(px(19.0))
+                    .text_color(rgb(colors.text))
+                    .track_focus(&terminal_focus)
+                    .when(active, |output| {
+                        output.cursor(CursorStyle::IBeam).on_click(cx.listener(
+                            |this, _, window, cx| {
+                                let focus = this.terminal_input.read(cx).focus_handle(cx);
+                                window.focus(&focus);
+                            },
+                        ))
+                    })
+                    .child(
+                        canvas(
+                            {
+                                let desktop = desktop.clone();
+                                move |bounds, window, cx| {
+                                    const SAMPLE: &str = "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM";
+                                    let style = window.text_style();
+                                    let run = TextRun {
+                                        len: SAMPLE.len(),
+                                        font: style.font(),
+                                        color: style.color,
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    };
+                                    let line = window.text_system().shape_line(
+                                        SharedString::from(SAMPLE),
+                                        style.font_size.to_pixels(window.rem_size()),
+                                        &[run],
+                                        None,
+                                    );
+                                    let cell_width = f32::from(line.width) / SAMPLE.len() as f32;
+                                    let geometry = terminal_geometry(
+                                        f32::from(bounds.size.width),
+                                        f32::from(bounds.size.height),
+                                        cell_width,
+                                        19.0,
+                                    );
+                                    window.defer(cx, move |_, cx| {
+                                        desktop.update(cx, |this, cx| {
+                                            this.resize_terminal_viewport(
+                                                geometry.0, geometry.1, cx,
+                                            );
+                                        });
+                                    });
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+                    .child(output)
+                    .child(terminal_input),
+            )
+            .into_any_element()
+    }
+
+    fn render_minimal_titlebar(&self, colors: ThemeColors) -> gpui::AnyElement {
+        div()
+            .h(px(34.0))
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .border_b_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.sidebar))
+            .on_mouse_down(MouseButton::Left, |event, window, _| {
+                if event.click_count >= 2 {
+                    if cfg!(target_os = "macos") {
+                        window.titlebar_double_click();
+                    } else {
+                        window.zoom_window();
+                    }
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .px_3()
+                    .when(cfg!(target_os = "macos"), |title| title.pl(px(72.0)))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.muted))
+                    .window_control_area(WindowControlArea::Drag)
+                    .child("xd · dev"),
+            )
+            .when(!cfg!(target_os = "macos"), |titlebar| {
+                titlebar.child(
+                    div()
+                        .id("minimal-window-minimize")
+                        .w(px(38.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(colors.muted))
+                        .cursor_pointer()
+                        .hover(|style| {
+                            style
+                                .bg(rgb(colors.surface_high))
+                                .text_color(rgb(colors.text))
+                        })
+                        .window_control_area(WindowControlArea::Min)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, window, _| window.minimize_window())
+                        .child("−"),
+                )
+            })
+            .when(!cfg!(target_os = "macos"), |titlebar| {
+                titlebar.child(
+                    div()
+                        .id("minimal-window-maximize")
+                        .w(px(38.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .text_color(rgb(colors.muted))
+                        .cursor_pointer()
+                        .hover(|style| {
+                            style
+                                .bg(rgb(colors.surface_high))
+                                .text_color(rgb(colors.text))
+                        })
+                        .window_control_area(WindowControlArea::Max)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, window, _| window.zoom_window())
+                        .child("□"),
+                )
+            })
+            .when(!cfg!(target_os = "macos"), |titlebar| {
+                titlebar.child(
+                    div()
+                        .id("minimal-window-close")
+                        .w(px(42.0))
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(colors.muted))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(0x5a252b)).text_color(rgb(0xffffff)))
+                        .window_control_area(WindowControlArea::Close)
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, window, _| window.remove_window())
+                        .child("×"),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn render_minimal_home(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let projects = project_cards(&self.model.folders, &self.model.chats);
+        let requested_project_id = match &self.minimal_route {
+            MinimalRoute::Projects { project_id } => project_id.as_ref(),
+            MinimalRoute::Cli { project_id, .. } => Some(project_id),
+        };
+        let selected_project_id = requested_project_id
+            .filter(|selected| projects.iter().any(|project| &project.id == *selected))
+            .cloned()
+            .or_else(|| projects.first().map(|project| project.id.clone()));
+        let selected_project = selected_project_id
+            .as_deref()
+            .and_then(|selected| projects.iter().find(|project| project.id == selected));
+        let sessions = selected_project_id
+            .as_deref()
+            .map(|project_id| project_sessions(project_id, &self.model.chats))
+            .unwrap_or_default();
+        let connected = self.model.connected;
+        let remote_active = self.active_endpoint == ChatEndpoint::Remote;
+        let remote_saved = self.remote_credentials.is_some();
+        let runtime_label = if remote_active {
+            self.remote_credentials
+                .as_ref()
+                .map(|credentials| format!("Remote · {}", credentials.host))
+                .unwrap_or_else(|| "Remote".into())
+        } else {
+            "Local".into()
+        };
+        let project_rows = projects
+            .iter()
+            .enumerate()
+            .map(|(index, project)| {
+                let project_id = project.id.clone();
+                let selected = selected_project_id.as_deref() == Some(project.id.as_str());
+                div()
+                    .id(("minimal-project", index))
+                    .w_full()
+                    .px_3()
+                    .py_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(rgb(if selected {
+                        colors.accent
+                    } else {
+                        colors.border
+                    }))
+                    .bg(rgb(if selected {
+                        colors.surface_high
+                    } else {
+                        colors.surface
+                    }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.minimal_route = MinimalRoute::Projects {
+                            project_id: Some(project_id.clone()),
+                        };
+                        cx.notify();
+                    }))
+                    .child(
+                        svg()
+                            .path(FOLDER_ICON)
+                            .size(px(18.0))
+                            .text_color(rgb(if selected {
+                                colors.accent
+                            } else {
+                                colors.muted
+                            })),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(colors.text))
+                                    .child(project.name.clone()),
+                            )
+                            .child(div().text_xs().text_color(rgb(colors.muted)).child(format!(
+                                "{} session{}",
+                                project.sessions,
+                                if project.sessions == 1 { "" } else { "s" }
+                            ))),
+                    )
+                    .when(project.working > 0, |row| {
+                        row.child(working_dots(index, colors.accent))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let session_rows = sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| {
+                let project_id = selected_project_id.clone().unwrap_or_default();
+                let chat_id = session.id.clone();
+                let agent = session.agent;
+                let icon = match agent {
+                    AgentCli::Codex => CODEX_ICON,
+                    AgentCli::Claude => CLAUDE_ICON,
+                };
+                div()
+                    .id(("minimal-session", index))
+                    .w_full()
+                    .max_w(px(760.0))
+                    .px_4()
+                    .py_4()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.surface))
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(rgb(colors.surface_high))
+                            .border_color(rgb(colors.accent))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_minimal_session(
+                            project_id.clone(),
+                            chat_id.clone(),
+                            agent,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(
+                        div()
+                            .size(px(38.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .bg(rgb(colors.background))
+                            .child(svg().path(icon).size(px(22.0)).text_color(rgb(colors.text))),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(colors.text))
+                                    .child(session.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_xs()
+                                    .text_color(rgb(colors.muted))
+                                    .child(format!("{} CLI", agent.label())),
+                            ),
+                    )
+                    .when(session.working, |row| {
+                        row.child(working_dots(index + projects.len(), colors.accent))
+                    })
+                    .child(div().text_lg().text_color(rgb(colors.muted)).child("›"))
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .bg(rgb(colors.background))
+            .child(
+                div()
+                    .w(px(68.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .py_4()
+                    .gap_3()
+                    .border_r_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.sidebar))
+                    .child(
+                        div()
+                            .size(px(36.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .bg(rgb(colors.accent))
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(colors.accent_text))
+                            .child("xd"),
+                    )
+                    .child(
+                        div()
+                            .id("minimal-home")
+                            .size(px(38.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .bg(rgb(colors.surface_high))
+                            .text_lg()
+                            .text_color(rgb(colors.text))
+                            .child("⌂"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .size(px(10.0))
+                            .rounded_full()
+                            .bg(rgb(if connected { 0x55b982 } else { 0xd86f7c })),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(292.0))
+                    .h_full()
+                    .min_h_0()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .border_r_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.sidebar))
+                    .child(
+                        div()
+                            .h(px(64.0))
+                            .px_5()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(rgb(colors.border))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(colors.text))
+                                    .child("Projects"),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-new-project")
+                                    .size(px(30.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.begin_workspace_create(cx)
+                                    }))
+                                    .child(plus_icon(colors.text)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("minimal-project-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(project_rows)
+                            .when(projects.is_empty(), |list| {
+                                list.child(
+                                    div()
+                                        .px_3()
+                                        .py_5()
+                                        .text_sm()
+                                        .text_color(rgb(colors.muted))
+                                        .child("No projects yet."),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(64.0))
+                            .px_6()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(rgb(colors.border))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .text_color(rgb(colors.muted))
+                                    .child("Agent sessions"),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-runtime")
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.surface))
+                                    .text_xs()
+                                    .text_color(rgb(colors.text))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if remote_active {
+                                            this.disconnect_remote_runtime(cx);
+                                        } else if remote_saved {
+                                            this.activate_remote_runtime(cx);
+                                        } else {
+                                            this.open_remote(window, cx);
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .size(px(7.0))
+                                            .rounded_full()
+                                            .bg(rgb(if connected { 0x55b982 } else { 0xd86f7c })),
+                                    )
+                                    .child(runtime_label)
+                                    .child(if remote_active {
+                                        "Disconnect"
+                                    } else {
+                                        "Connect remote"
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-theme")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.surface))
+                                    .text_xs()
+                                    .text_color(rgb(colors.text))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.minimal_theme_open = !this.minimal_theme_open;
+                                        cx.notify();
+                                    }))
+                                    .child(self.settings.theme.label()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("minimal-project-content")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_8()
+                            .py_7()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(900.0))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(colors.muted))
+                                            .child("PROJECT"),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_1()
+                                            .text_3xl()
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(rgb(colors.text))
+                                            .child(
+                                                selected_project
+                                                    .map(|project| project.name.clone())
+                                                    .unwrap_or_else(|| "Welcome to xd".into()),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_8()
+                                            .mb_3()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(colors.text))
+                                                    .child("Sessions"),
+                                            )
+                                            .when_some(selected_project_id.clone(), |row, folder_id| {
+                                                row.child(
+                                                    div()
+                                                        .id("minimal-new-session")
+                                                        .px_3()
+                                                        .py_2()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .rounded_lg()
+                                                        .bg(rgb(colors.accent))
+                                                        .text_xs()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(rgb(colors.accent_text))
+                                                        .cursor_pointer()
+                                                        .hover(|style| {
+                                                            style.bg(rgb(colors.accent_hover))
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.begin_chat_create(
+                                                                    folder_id.clone(),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(plus_icon(colors.accent_text))
+                                                        .child("New session"),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_3()
+                                            .children(session_rows)
+                                            .when(
+                                                selected_project_id.is_some()
+                                                    && sessions.is_empty(),
+                                                |list| {
+                                                    list.child(
+                                                        div()
+                                                            .w_full()
+                                                            .max_w(px(760.0))
+                                                            .p_6()
+                                                            .rounded_xl()
+                                                            .border_1()
+                                                            .border_color(rgb(colors.border))
+                                                            .text_sm()
+                                                            .text_color(rgb(colors.muted))
+                                                            .child(
+                                                                "No sessions yet. Start one with Codex or Claude.",
+                                                            ),
+                                                    )
+                                                },
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_minimal_cli(
+        &mut self,
+        colors: ThemeColors,
+        project_id: String,
+        chat_id: String,
+        agent: AgentCli,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let project_name = self
+            .model
+            .folders
+            .iter()
+            .find(|folder| folder.id == project_id)
+            .map(|folder| folder.name.clone())
+            .unwrap_or_else(|| "Project".into());
+        let sessions = project_sessions(&project_id, &self.model.chats);
+        let title = sessions
+            .iter()
+            .find(|session| session.id == chat_id)
+            .map(|session| session.title.clone())
+            .unwrap_or_else(|| "Session".into());
+        let session_rows = sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| {
+                let selected = session.id == chat_id;
+                let open_project = project_id.clone();
+                let open_chat = session.id.clone();
+                let open_agent = session.agent;
+                let icon = match session.agent {
+                    AgentCli::Codex => CODEX_ICON,
+                    AgentCli::Claude => CLAUDE_ICON,
+                };
+                div()
+                    .id(("minimal-cli-session", index))
+                    .w_full()
+                    .px_3()
+                    .py_3()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .rounded_lg()
+                    .bg(rgb(if selected {
+                        colors.surface_high
+                    } else {
+                        colors.sidebar
+                    }))
+                    .text_color(rgb(if selected { colors.text } else { colors.muted }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_minimal_session(
+                            open_project.clone(),
+                            open_chat.clone(),
+                            open_agent,
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(svg().path(icon).size(px(18.0)).text_color(rgb(colors.text)))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_sm()
+                            .child(session.title.clone()),
+                    )
+                    .when(session.working, |row| {
+                        row.child(working_dots(index, colors.accent))
+                    })
+            })
+            .collect::<Vec<_>>();
+        let terminal = self.render_minimal_terminal(colors, window, cx);
+        let remote_active = self.active_endpoint == ChatEndpoint::Remote;
+        let remote_saved = self.remote_credentials.is_some();
+        let runtime = if remote_active {
+            self.remote_credentials
+                .as_ref()
+                .map(|credentials| format!("Remote · {}", credentials.host))
+                .unwrap_or_else(|| "Remote".into())
+        } else {
+            "Local".into()
+        };
+
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .bg(rgb(colors.background))
+            .child(
+                div()
+                    .w(px(68.0))
+                    .h_full()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .py_4()
+                    .gap_3()
+                    .border_r_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.sidebar))
+                    .child(
+                        div()
+                            .size(px(36.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .bg(rgb(colors.accent))
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(colors.accent_text))
+                            .child("xd"),
+                    )
+                    .child(
+                        div()
+                            .id("minimal-cli-home")
+                            .size(px(38.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_lg()
+                            .text_lg()
+                            .text_color(rgb(colors.muted))
+                            .cursor_pointer()
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(colors.surface_high))
+                                    .text_color(rgb(colors.text))
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.show_minimal_projects(cx)))
+                            .child("⌂"),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(292.0))
+                    .h_full()
+                    .min_h_0()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .border_r_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.sidebar))
+                    .child(
+                        div()
+                            .h(px(64.0))
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(rgb(colors.border))
+                            .child(
+                                div()
+                                    .id("minimal-project-back")
+                                    .size(px(30.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .text_lg()
+                                    .text_color(rgb(colors.muted))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.show_minimal_projects(cx)
+                                        }),
+                                    )
+                                    .child("‹"),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(colors.text))
+                                    .child(project_name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-cli-new-session")
+                                    .size(px(30.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener({
+                                        let project_id = project_id.clone();
+                                        move |this, _, _, cx| {
+                                            this.begin_chat_create(project_id.clone(), cx)
+                                        }
+                                    }))
+                                    .child(plus_icon(colors.text)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("minimal-cli-session-list")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(session_rows),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(64.0))
+                            .px_6()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .border_b_1()
+                            .border_color(rgb(colors.border))
+                            .child(
+                                svg()
+                                    .path(match agent {
+                                        AgentCli::Codex => CODEX_ICON,
+                                        AgentCli::Claude => CLAUDE_ICON,
+                                    })
+                                    .size(px(20.0))
+                                    .text_color(rgb(colors.text)),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(colors.text))
+                                            .child(title),
+                                    )
+                                    .child(div().text_xs().text_color(rgb(colors.muted)).child(
+                                        format!("{} / {} CLI", project_name, agent.label()),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-cli-runtime")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.surface))
+                                    .text_xs()
+                                    .text_color(rgb(colors.muted))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if remote_active {
+                                            this.disconnect_remote_runtime(cx);
+                                        } else if remote_saved {
+                                            this.activate_remote_runtime(cx);
+                                        } else {
+                                            this.open_remote(window, cx);
+                                        }
+                                    }))
+                                    .child(runtime),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-cli-theme")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.surface))
+                                    .text_xs()
+                                    .text_color(rgb(colors.text))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.minimal_theme_open = !this.minimal_theme_open;
+                                        cx.notify();
+                                    }))
+                                    .child(self.settings.theme.label()),
+                            ),
+                    )
+                    .child(div().flex_1().min_h_0().p_4().child(terminal)),
+            )
+            .into_any_element()
+    }
+
+    fn render_minimal(
+        &mut self,
+        custom_titlebar: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let colors = self.settings.theme.colors();
+        let route = self.minimal_route.clone();
+        let content = match route {
+            MinimalRoute::Projects { .. } => self.render_minimal_home(colors, cx),
+            MinimalRoute::Cli {
+                project_id,
+                chat_id,
+                agent,
+            } => self.render_minimal_cli(colors, project_id, chat_id, agent, window, cx),
+        };
+        let titlebar = custom_titlebar.then(|| self.render_minimal_titlebar(colors));
+        let theme_overlay = self.minimal_theme_open.then(|| {
+            let rows = ThemePreset::ALL
+                .into_iter()
+                .enumerate()
+                .map(|(index, theme)| {
+                    let selected = self.settings.theme == theme;
+                    let swatch = theme.colors();
+                    div()
+                        .id(("minimal-theme-choice", index))
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(rgb(colors.text))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.choose_minimal_theme(theme, cx)),
+                        )
+                        .child(
+                            div()
+                                .size(px(18.0))
+                                .rounded_full()
+                                .border_1()
+                                .border_color(rgb(swatch.border))
+                                .bg(rgb(swatch.background)),
+                        )
+                        .child(div().flex_1().child(theme.label()))
+                        .when(selected, |row| {
+                            row.child(div().text_color(rgb(colors.accent)).child("✓"))
+                        })
+                })
+                .collect::<Vec<_>>();
+            div()
+                .absolute()
+                .top(px(if custom_titlebar { 108.0 } else { 74.0 }))
+                .right(px(22.0))
+                .w(px(190.0))
+                .p_2()
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(colors.border))
+                .bg(rgb(colors.surface))
+                .shadow_lg()
+                .children(rows)
+                .into_any_element()
+        });
+        let remote_overlay = self.remote_panel.clone().map(|panel| {
+            let can_pair = !panel.submitting
+                && !panel.host.trim().is_empty()
+                && !panel.port.trim().is_empty()
+                && !panel.code.trim().is_empty()
+                && !panel.name.trim().is_empty();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(470.0))
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .bg(rgb(colors.surface))
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(colors.text))
+                                .child("Connect to a remote daemon"),
+                        )
+                        .child(
+                            div()
+                                .mb_2()
+                                .text_sm()
+                                .text_color(rgb(colors.muted))
+                                .child("This replaces the local runtime until you disconnect."),
+                        )
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.remote_host_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.remote_port_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.remote_code_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.remote_name_input.clone()),
+                        )
+                        .when_some(panel.error.clone(), |card, error| {
+                            card.child(div().text_sm().text_color(rgb(0xd86f7c)).child(error))
+                        })
+                        .child(
+                            div()
+                                .mt_2()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("minimal-cancel-remote")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(colors.muted))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.close_remote(cx)),
+                                        )
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .id("minimal-pair-remote")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_pair {
+                                            colors.accent
+                                        } else {
+                                            colors.surface_high
+                                        }))
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(if can_pair {
+                                            colors.accent_text
+                                        } else {
+                                            colors.muted
+                                        }))
+                                        .when(can_pair, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.accent_hover)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_pair {
+                                                this.pair_remote_machine(cx);
+                                            }
+                                        }))
+                                        .child(if panel.submitting {
+                                            "Connecting…"
+                                        } else {
+                                            "Connect"
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+        let workspace_overlay = self.creating_workspace.then(|| {
+            let can_save =
+                !self.workspace_create_submitting && !self.workspace_create_name.trim().is_empty();
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(500.0))
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .bg(rgb(colors.surface))
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(colors.text))
+                                .child("New project"),
+                        )
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.workspace_create_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.workspace_repo_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .h(px(42.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.workspace_clone_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(colors.muted))
+                                .child("Use either an existing repository path or a clone URL."),
+                        )
+                        .child(
+                            div()
+                                .mt_2()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("minimal-cancel-project")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .text_color(rgb(colors.muted))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.cancel_workspace_create(cx)
+                                        }))
+                                        .child("Cancel"),
+                                )
+                                .child(
+                                    div()
+                                        .id("minimal-save-project")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded_lg()
+                                        .bg(rgb(if can_save {
+                                            colors.accent
+                                        } else {
+                                            colors.surface_high
+                                        }))
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(if can_save {
+                                            colors.accent_text
+                                        } else {
+                                            colors.muted
+                                        }))
+                                        .when(can_save, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.accent_hover)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_save {
+                                                this.save_workspace_create(cx)
+                                            }
+                                        }))
+                                        .child(if self.workspace_create_submitting {
+                                            "Creating…"
+                                        } else {
+                                            "Create project"
+                                        }),
+                                ),
+                        ),
+                )
+                .into_any_element()
+        });
+        let chat_overlay =
+            self.creating_chat_folder.is_some().then(|| {
+                let can_save = !self.chat_create_submitting;
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(0x00000099))
+                    .child(
+                        div()
+                            .w(px(430.0))
+                            .p_5()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .bg(rgb(colors.surface))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(colors.text))
+                                    .child("New agent session"),
+                            )
+                            .child(
+                                div()
+                                    .h(px(42.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.background))
+                                    .child(self.chat_create_input.clone()),
+                            )
+                            .child(
+                                div().flex().gap_2().children(
+                                    [AgentCli::Codex, AgentCli::Claude]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(index, agent)| {
+                                            let selected = self.minimal_new_session_agent == agent;
+                                            div()
+                                                .id(("minimal-session-agent", index))
+                                                .flex_1()
+                                                .px_3()
+                                                .py_2()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .gap_2()
+                                                .rounded_lg()
+                                                .border_1()
+                                                .border_color(rgb(if selected {
+                                                    colors.accent
+                                                } else {
+                                                    colors.border
+                                                }))
+                                                .bg(rgb(if selected {
+                                                    colors.surface_high
+                                                } else {
+                                                    colors.background
+                                                }))
+                                                .text_sm()
+                                                .text_color(rgb(colors.text))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.minimal_new_session_agent = agent;
+                                                    cx.notify();
+                                                }))
+                                                .child(
+                                                    svg()
+                                                        .path(match agent {
+                                                            AgentCli::Codex => CODEX_ICON,
+                                                            AgentCli::Claude => CLAUDE_ICON,
+                                                        })
+                                                        .size(px(18.0))
+                                                        .text_color(rgb(colors.text)),
+                                                )
+                                                .child(agent.label())
+                                        }),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(colors.muted))
+                                    .child("The selected CLI opens directly in this project."),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("minimal-cancel-session")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .text_sm()
+                                            .text_color(rgb(colors.muted))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.cancel_chat_create(cx)
+                                            }))
+                                            .child("Cancel"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("minimal-save-session")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(if can_save {
+                                                colors.accent
+                                            } else {
+                                                colors.surface_high
+                                            }))
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(if can_save {
+                                                colors.accent_text
+                                            } else {
+                                                colors.muted
+                                            }))
+                                            .when(can_save, |button| {
+                                                button.cursor_pointer().hover(|style| {
+                                                    style.bg(rgb(colors.accent_hover))
+                                                })
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if can_save {
+                                                    this.save_minimal_chat_create(cx)
+                                                }
+                                            }))
+                                            .child(if self.chat_create_submitting {
+                                                "Creating…"
+                                            } else {
+                                                "Create session"
+                                            }),
+                                    ),
+                            ),
+                    )
+                    .into_any_element()
+            });
+        let error_banner = self.model.connection_error.clone().map(|error| {
+            div()
+                .absolute()
+                .bottom(px(20.0))
+                .left(px(50.0))
+                .right(px(50.0))
+                .mx_auto()
+                .max_w(px(760.0))
+                .px_4()
+                .py_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(0x8f3f4b))
+                .bg(rgb(colors.surface))
+                .text_sm()
+                .text_color(rgb(0xd86f7c))
+                .child(error)
+                .into_any_element()
+        });
+
+        div()
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .key_context("XdDesktop")
+            .bg(rgb(colors.background))
+            .font_family(UI_FONT)
+            .on_action(cx.listener(|_, _: &CopyRenderedSelection, _, cx| {
+                if let Some(text) = TextSelection::selected(cx) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
+                if TextSelection::close_action_menu(cx) {
+                    cx.notify();
+                } else if this.remote_panel.is_some() {
+                    this.close_remote(cx);
+                } else if this.creating_workspace {
+                    this.cancel_workspace_create(cx);
+                } else if this.creating_chat_folder.is_some() {
+                    this.cancel_chat_create(cx);
+                } else if this.minimal_theme_open {
+                    this.minimal_theme_open = false;
+                    cx.notify();
+                } else if matches!(this.minimal_route, MinimalRoute::Cli { .. }) {
+                    this.show_minimal_projects(cx);
+                }
+            }))
+            .when_some(titlebar, |root, titlebar| root.child(titlebar))
+            .child(content)
+            .when_some(theme_overlay, |root, overlay| root.child(overlay))
+            .when_some(remote_overlay, |root, overlay| root.child(overlay))
+            .when_some(workspace_overlay, |root, overlay| root.child(overlay))
+            .when_some(chat_overlay, |root, overlay| root.child(overlay))
+            .when_some(error_banner, |root, banner| root.child(banner))
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(6.0))
+                    .right(px(6.0))
+                    .h(px(6.0))
+                    .cursor(CursorStyle::ResizeUpDown)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_resize(ResizeEdge::Top)
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .bottom(px(0.0))
+                    .left(px(6.0))
+                    .right(px(6.0))
+                    .h(px(6.0))
+                    .cursor(CursorStyle::ResizeUpDown)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_resize(ResizeEdge::Bottom)
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(6.0))
+                    .bottom(px(6.0))
+                    .left(px(0.0))
+                    .w(px(6.0))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_resize(ResizeEdge::Left)
+                    }),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(6.0))
+                    .right(px(0.0))
+                    .bottom(px(6.0))
+                    .w(px(6.0))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_resize(ResizeEdge::Right)
+                    }),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.expire_action_error(cx);
@@ -11022,6 +13186,9 @@ impl Render for XdDesktop {
         let custom_titlebar =
             client_decorations || cfg!(any(target_os = "windows", target_os = "macos"));
         window.set_client_inset(if client_decorations { px(6.0) } else { px(0.0) });
+        if minimal_agent_desktop_enabled() {
+            return self.render_minimal(custom_titlebar, window, cx);
+        }
         let accent = self.settings.accent.color();
         let accent_hover = self.settings.accent.hover_color();
         let sidebar_width = self.settings.sidebar_width;
@@ -20065,6 +22232,7 @@ impl Render for XdDesktop {
                         window.start_window_resize(ResizeEdge::BottomRight)
                     }),
             )
+            .into_any_element()
     }
 }
 
@@ -21423,6 +23591,21 @@ mod tests {
     }
 
     #[test]
+    fn startup_restores_exactly_one_persisted_runtime() {
+        let remote = "remote/dev.example:4001";
+        assert_eq!(
+            persisted_runtime(Some(remote), Some(remote)),
+            ChatEndpoint::Remote
+        );
+        assert_eq!(
+            persisted_runtime(Some("local"), Some(remote)),
+            ChatEndpoint::Local
+        );
+        assert_eq!(persisted_runtime(Some(remote), None), ChatEndpoint::Local);
+        assert_eq!(persisted_runtime(None, Some(remote)), ChatEndpoint::Local);
+    }
+
+    #[test]
     fn active_connected_remote_replaces_the_local_sidebar_with_files() {
         assert!(sidebar_files_replace_secondary(
             ChatEndpoint::Remote,
@@ -21453,7 +23636,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn remote_startup_selects_a_chat_when_local_has_none(cx: &mut gpui::TestAppContext) {
+    fn passive_remote_tree_never_overrides_the_explicit_local_runtime(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, cx| {
             desktop.remote_state = RemoteState::Connected;
@@ -21479,8 +23664,44 @@ mod tests {
                 cx,
             );
 
-            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
-            assert_eq!(desktop.model.selected_chat.as_deref(), Some("remote-chat"));
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert_eq!(desktop.model.selected_chat, None);
+            assert_eq!(desktop.inactive_model.chats[0].id, "remote-chat");
+        });
+    }
+
+    #[gpui::test]
+    fn revoked_active_remote_falls_back_to_local_without_forgetting_the_error(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            let credentials =
+                RemoteCredentials::new("dev.example", 4001, "token", "a".repeat(64)).unwrap();
+            let credentials_path = std::env::temp_dir().join(format!(
+                "xd-revoked-remote-{}-{}.json",
+                std::process::id(),
+                desktop.remote_generation
+            ));
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.settings.active_connection = Some("remote/dev.example:4001".into());
+            desktop.remote_credentials = Some(credentials);
+            desktop.remote_credentials_file = Some(CredentialsFile::new(credentials_path));
+            desktop.remote_state = RemoteState::Connected;
+
+            desktop.remote_connection_failed(
+                RemoteError::Authentication("Unknown device. Pair first.".into()),
+                cx,
+            );
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert_eq!(desktop.settings.active_connection.as_deref(), Some("local"));
+            assert!(desktop.remote_credentials.is_none());
+            assert_eq!(desktop.remote_state, RemoteState::Unconfigured);
+            assert_eq!(
+                desktop.remote_error.as_deref(),
+                Some("This machine revoked the saved device. Pair again.")
+            );
         });
     }
 
@@ -21524,6 +23745,7 @@ mod tests {
         assert!(XdDesktop::remote_chat_reply(&RequestKind::TerminalOpen {
             chat_id: "chat".into(),
             reuse: false,
+            agent: Some("codex".into()),
         }));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::RenameFolder {
             folder_id: "workspace".into(),
@@ -22636,11 +24858,14 @@ mod tests {
 
         let mut panel = TerminalPanel {
             chat_id: "chat".into(),
+            agent: None,
             sessions: vec![first, second],
             selected: Some("terminal-one".into()),
             viewport: None,
+            auto_open: false,
             opening: false,
             loading: false,
+            pending_events: Vec::new(),
             error: Some("Terminal disconnected.".into()),
         };
         panel.opening = true;
@@ -22655,6 +24880,126 @@ mod tests {
             panel.selected().map(|session| session.title.as_str()),
             Some("shell two")
         );
+
+        let mut empty = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Codex);
+        // A fast empty terminal-list reply may clear loading before GPUI has
+        // measured the viewport. Auto-open must remain independent of loading.
+        empty.loading = false;
+        assert!(empty.should_auto_open());
+        empty.opening = true;
+        assert!(!empty.should_auto_open());
+    }
+
+    #[gpui::test]
+    fn terminal_list_replays_cold_pending_output_without_duplicates(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("chat".into());
+            let mut panel = XdDesktop::new_terminal_panel("chat".into());
+            panel.auto_open = false;
+            desktop.terminal_panel = Some(panel);
+
+            desktop.handle_event(
+                "terminal-output",
+                serde_json::json!({
+                    "chat": "chat",
+                    "terminal": "terminal-one",
+                    "sequence": 2,
+                    "data": "YWZ0ZXI=",
+                }),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop
+                    .terminal_panel
+                    .as_ref()
+                    .map(|panel| panel.pending_events.len()),
+                Some(1)
+            );
+
+            desktop.apply_terminal_list(
+                &serde_json::json!({
+                    "terminals": [{
+                        "id": "terminal-one",
+                        "title": "shell",
+                        "columns": 40,
+                        "rows": 8,
+                        "sequence": 1,
+                        "replay": [{"data": "YmVmb3Jl"}],
+                    }],
+                }),
+                cx,
+            );
+            let session = desktop
+                .terminal_panel
+                .as_ref()
+                .unwrap()
+                .sessions
+                .first()
+                .unwrap();
+            assert_eq!(session.sequence, Some(2));
+            assert_eq!(session.screen.rendered().text.matches("after").count(), 1);
+
+            desktop.handle_event(
+                "terminal-output",
+                serde_json::json!({
+                    "chat": "chat",
+                    "terminal": "terminal-one",
+                    "sequence": 2,
+                    "data": "YWZ0ZXI=",
+                }),
+                None,
+                cx,
+            );
+            let session = desktop
+                .terminal_panel
+                .as_ref()
+                .unwrap()
+                .sessions
+                .first()
+                .unwrap();
+            assert_eq!(session.screen.rendered().text.matches("after").count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_close_tombstone_prevents_a_stale_list_from_resurrecting_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("chat".into());
+            let mut panel = XdDesktop::new_terminal_panel("chat".into());
+            panel.auto_open = false;
+            desktop.terminal_panel = Some(panel);
+
+            desktop.handle_event(
+                "terminal-closed",
+                serde_json::json!({
+                    "chat": "chat",
+                    "terminal": "terminal-one",
+                    "sequence": 2,
+                }),
+                None,
+                cx,
+            );
+            desktop.apply_terminal_list(
+                &serde_json::json!({
+                    "terminals": [{
+                        "id": "terminal-one",
+                        "title": "shell",
+                        "columns": 40,
+                        "rows": 8,
+                        "sequence": 1,
+                        "replay": [{"data": "YmVmb3Jl"}],
+                    }],
+                }),
+                cx,
+            );
+
+            assert!(desktop.terminal_panel.as_ref().unwrap().sessions.is_empty());
+        });
     }
 
     #[gpui::test]
@@ -22663,11 +25008,14 @@ mod tests {
         desktop.update(cx, |desktop, cx| {
             desktop.terminal_panel = Some(TerminalPanel {
                 chat_id: "chat".into(),
+                agent: None,
                 sessions: Vec::new(),
                 selected: Some("terminal".into()),
                 viewport: None,
+                auto_open: false,
                 opening: false,
                 loading: false,
+                pending_events: Vec::new(),
                 error: None,
             });
 
@@ -23203,16 +25551,51 @@ fn main() {
                 KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
                 KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
                 KeyBinding::new("delete", Delete, Some("TerminalInput")),
+                KeyBinding::new("ctrl-backspace", DeleteWord, Some("TerminalInput")),
+                KeyBinding::new("alt-backspace", DeleteWord, Some("TerminalInput")),
+                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("TerminalInput")),
+                KeyBinding::new("alt-delete", DeleteWordForward, Some("TerminalInput")),
                 KeyBinding::new("left", Left, Some("TerminalInput")),
                 KeyBinding::new("right", Right, Some("TerminalInput")),
+                KeyBinding::new("ctrl-left", WordLeft, Some("TerminalInput")),
+                KeyBinding::new("alt-left", WordLeft, Some("TerminalInput")),
+                KeyBinding::new("ctrl-right", WordRight, Some("TerminalInput")),
+                KeyBinding::new("alt-right", WordRight, Some("TerminalInput")),
                 KeyBinding::new("up", Up, Some("TerminalInput")),
                 KeyBinding::new("down", Down, Some("TerminalInput")),
+                KeyBinding::new("pageup", TerminalPageUp, Some("TerminalInput")),
+                KeyBinding::new("pagedown", TerminalPageDown, Some("TerminalInput")),
                 KeyBinding::new("home", Home, Some("TerminalInput")),
                 KeyBinding::new("end", End, Some("TerminalInput")),
                 KeyBinding::new("enter", Submit, Some("TerminalInput")),
                 KeyBinding::new("tab", Tab, Some("TerminalInput")),
+                KeyBinding::new("shift-tab", TerminalShiftTab, Some("TerminalInput")),
                 KeyBinding::new("escape", Escape, Some("TerminalInput")),
                 KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
+                KeyBinding::new("ctrl-a", TerminalControlA, Some("TerminalInput")),
+                KeyBinding::new("ctrl-b", TerminalControlB, Some("TerminalInput")),
+                KeyBinding::new("ctrl-d", TerminalEndOfFile, Some("TerminalInput")),
+                KeyBinding::new("ctrl-e", TerminalControlE, Some("TerminalInput")),
+                KeyBinding::new("ctrl-f", TerminalControlF, Some("TerminalInput")),
+                KeyBinding::new("ctrl-g", TerminalControlG, Some("TerminalInput")),
+                KeyBinding::new("ctrl-h", TerminalControlH, Some("TerminalInput")),
+                KeyBinding::new("ctrl-i", TerminalControlI, Some("TerminalInput")),
+                KeyBinding::new("ctrl-j", TerminalControlJ, Some("TerminalInput")),
+                KeyBinding::new("ctrl-k", TerminalControlK, Some("TerminalInput")),
+                KeyBinding::new("ctrl-l", TerminalClearScreen, Some("TerminalInput")),
+                KeyBinding::new("ctrl-m", TerminalControlM, Some("TerminalInput")),
+                KeyBinding::new("ctrl-n", TerminalControlN, Some("TerminalInput")),
+                KeyBinding::new("ctrl-o", TerminalControlO, Some("TerminalInput")),
+                KeyBinding::new("ctrl-p", TerminalControlP, Some("TerminalInput")),
+                KeyBinding::new("ctrl-q", TerminalControlQ, Some("TerminalInput")),
+                KeyBinding::new("ctrl-r", TerminalReverseSearch, Some("TerminalInput")),
+                KeyBinding::new("ctrl-s", TerminalControlS, Some("TerminalInput")),
+                KeyBinding::new("ctrl-t", TerminalControlT, Some("TerminalInput")),
+                KeyBinding::new("ctrl-u", TerminalControlU, Some("TerminalInput")),
+                KeyBinding::new("ctrl-w", TerminalControlW, Some("TerminalInput")),
+                KeyBinding::new("ctrl-x", TerminalControlX, Some("TerminalInput")),
+                KeyBinding::new("ctrl-y", TerminalControlY, Some("TerminalInput")),
+                KeyBinding::new("ctrl-z", TerminalSuspend, Some("TerminalInput")),
                 KeyBinding::new("ctrl-shift-c", Copy, Some("TerminalInput")),
                 KeyBinding::new("ctrl-v", Paste, Some("TerminalInput")),
                 KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),

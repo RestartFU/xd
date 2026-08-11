@@ -2665,6 +2665,10 @@ impl StateStore {
         let folder_id = required_string(request, "folder", "That request needs a folder.")?;
         let title = optional_string(request, "title")?.unwrap_or("New Chat");
         let workdir = optional_string(request, "workdir")?;
+        let backend_override = optional_string(request, "backend")?;
+        if let Some(backend) = backend_override {
+            validate_backend(backend)?;
+        }
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let root = self.workspace_root.to_string_lossy();
         let folder_exists: bool = database.query_row(
@@ -2701,17 +2705,24 @@ impl StateStore {
             &self.workspace_root,
             folder_id,
         )?);
-        let backend = folder_values.backend.unwrap_or(defaults.0);
-        let model = match folder_values.model {
-            Some(model)
-                if backend_models(&backend)
-                    .iter()
-                    .any(|known| known.0 == model) =>
-            {
+        let backend = backend_override
+            .map(str::to_owned)
+            .or(folder_values.backend)
+            .unwrap_or(defaults.0);
+        let model = if backend_override.is_some() {
+            Some(default_model(&backend).to_owned())
+        } else {
+            match folder_values.model {
                 Some(model)
+                    if backend_models(&backend)
+                        .iter()
+                        .any(|known| known.0 == model) =>
+                {
+                    Some(model)
+                }
+                Some(_) => None,
+                None => defaults.1,
             }
-            Some(_) => None,
-            None => defaults.1,
         };
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
@@ -2743,7 +2754,7 @@ impl StateStore {
                 now * 1_000_000,
             ],
         )?;
-        Ok(json!({"ok": true, "id": id}))
+        Ok(json!({"ok": true, "id": id, "backend": backend}))
     }
 
     pub fn rename_chat(&self, request: &Value) -> Result<Value, StorageError> {
@@ -5441,7 +5452,7 @@ mod tests {
             .to_owned();
         let chat = store
             .new_chat(&json!({
-                "folder": folder,
+                "folder": folder.clone(),
                 "workdir": workdir.to_string_lossy(),
             }))
             .unwrap()["id"]
@@ -6550,6 +6561,37 @@ mod tests {
         assert_eq!(chat["folder"], "two");
         store.delete_chat(&json!({"chat": chat_id})).unwrap();
         assert!(matches!(store.chat(&chat_id), Err(StorageError::NoChat(_))));
+    }
+
+    #[test]
+    fn new_direct_cli_sessions_choose_and_return_the_requested_backend() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Workspace"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let reply = store
+            .new_chat(&json!({
+                "folder": folder,
+                "title": "Claude session",
+                "backend": "claude",
+            }))
+            .unwrap();
+        assert_eq!(reply["backend"], "claude");
+        assert_eq!(
+            store.chat(reply["id"].as_str().unwrap()).unwrap()["backend"],
+            "claude"
+        );
+
+        assert!(
+            store
+                .new_chat(&json!({"folder": folder, "backend": "shell"}))
+                .unwrap_err()
+                .to_string()
+                .contains("No such assistant")
+        );
     }
 
     #[test]
