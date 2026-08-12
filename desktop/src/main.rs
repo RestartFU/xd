@@ -5991,6 +5991,45 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn begin_sidebar_delete(&mut self, target: SidebarTarget, cx: &mut Context<Self>) {
+        self.sidebar_edit = None;
+        self.sidebar_move = None;
+        self.sidebar_move_submitting = false;
+        self.sidebar_move_destination = None;
+        self.pending_sidebar_delete = Some(target);
+        self.sidebar_delete_submitting = false;
+        cx.notify();
+    }
+
+    fn cancel_sidebar_delete(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_delete_submitting {
+            return;
+        }
+        self.pending_sidebar_delete = None;
+        cx.notify();
+    }
+
+    fn confirm_sidebar_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.pending_sidebar_delete.clone() else {
+            return;
+        };
+        if self.sidebar_delete_submitting {
+            return;
+        }
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| match &target {
+                SidebarTarget::Folder(folder_id) => daemon.trash_folder(folder_id),
+                SidebarTarget::Chat(chat_id) => daemon.delete_chat(chat_id),
+            });
+        match result {
+            Ok(()) => self.sidebar_delete_submitting = true,
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn sidebar_edit_changed(&mut self, text: String, cx: &mut Context<Self>) {
         if let Some(edit) = &mut self.sidebar_edit
             && !edit.submitting
@@ -8018,6 +8057,7 @@ impl XdDesktop {
             .unwrap_or_else(|| "Welcome to xd".into());
         let selected_project_rename =
             selected_project.map(|project| (project.id.clone(), project.name.clone()));
+        let selected_project_delete = selected_project.map(|project| project.id.clone());
         let sessions = selected_project_id
             .as_deref()
             .map(|project_id| project_sessions(project_id, &self.model.chats))
@@ -8310,6 +8350,37 @@ impl XdDesktop {
                                                 },
                                             ))
                                             .child("✎"),
+                                    )
+                                },
+                            )
+                            .when_some(
+                                selected_project_delete,
+                                |heading, folder_id| {
+                                    heading.child(
+                                        div()
+                                            .id("minimal-delete-project")
+                                            .h(px(34.0))
+                                            .px_3()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(rgb(colors.border))
+                                            .bg(rgb(colors.surface))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(0xd86f7c))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(0x5a252b)))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.begin_sidebar_delete(
+                                                    SidebarTarget::Folder(folder_id.clone()),
+                                                    cx,
+                                                );
+                                            }))
+                                            .child("Delete"),
                                     )
                                 },
                             ),
@@ -8966,6 +9037,112 @@ impl XdDesktop {
                     .into_any_element(),
             )
         });
+        let workspace_delete_overlay = self.pending_sidebar_delete.clone().and_then(|target| {
+            let SidebarTarget::Folder(folder_id) = target else {
+                return None;
+            };
+            let project_name = self
+                .model
+                .folders
+                .iter()
+                .find(|folder| folder.id == folder_id)
+                .map(|folder| folder.name.clone())?;
+            let submitting = self.sidebar_delete_submitting;
+            Some(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(0x00000099))
+                    .child(
+                        div()
+                            .w(px(450.0))
+                            .p_5()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .bg(rgb(colors.surface))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(colors.text))
+                                    .child("Delete project?"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(colors.muted))
+                                    .child(format!(
+                                        "This removes {project_name} and all its sessions from xd. Its files will be moved to the workspace trash."
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("minimal-cancel-project-delete")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .text_sm()
+                                            .text_color(rgb(colors.muted))
+                                            .when(!submitting, |button| {
+                                                button
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.cancel_sidebar_delete(cx)
+                                            }))
+                                            .child("Cancel"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("minimal-confirm-project-delete")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(if submitting {
+                                                colors.surface_high
+                                            } else {
+                                                0x9f3544
+                                            }))
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(if submitting {
+                                                colors.muted
+                                            } else {
+                                                0xffffff
+                                            }))
+                                            .when(!submitting, |button| {
+                                                button
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgb(0xb84252)))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.confirm_sidebar_delete(cx)
+                                            }))
+                                            .child(if submitting {
+                                                "Deleting…"
+                                            } else {
+                                                "Delete project"
+                                            }),
+                                    ),
+                            ),
+                    )
+                    .into_any_element(),
+            )
+        });
         let chat_overlay = self.creating_chat_folder.is_some().then(|| {
             let can_save = !self.chat_create_submitting
                 && !self.chat_create_worktrees_loading
@@ -9300,6 +9477,8 @@ impl XdDesktop {
             .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
                 if this.remote_panel.is_some() {
                     this.close_remote(cx);
+                } else if this.pending_sidebar_delete.is_some() {
+                    this.cancel_sidebar_delete(cx);
                 } else if this.sidebar_edit.is_some() {
                     this.cancel_sidebar_edit(cx);
                 } else if this.creating_workspace {
@@ -9322,6 +9501,9 @@ impl XdDesktop {
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_rename_overlay, |root, overlay| {
+                root.child(overlay)
+            })
+            .when_some(workspace_delete_overlay, |root, overlay| {
                 root.child(overlay)
             })
             .when_some(chat_overlay, |root, overlay| root.child(overlay))
@@ -11065,6 +11247,44 @@ mod tests {
             "minimal-save-project-rename",
             "this.save_sidebar_edit(cx)",
             ".when_some(workspace_rename_overlay",
+        ] {
+            assert!(root.contains(behavior), "missing {behavior}");
+        }
+    }
+
+    #[test]
+    fn minimal_projects_exposes_confirmed_workspace_delete_flow() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let home = production
+            .split_once("fn render_minimal_home(")
+            .expect("minimal home renderer")
+            .1
+            .split_once("fn render_minimal_cli(")
+            .expect("end of minimal home renderer")
+            .0;
+        for behavior in [
+            "minimal-delete-project",
+            "this.begin_sidebar_delete(",
+            "SidebarTarget::Folder",
+        ] {
+            assert!(home.contains(behavior), "missing {behavior}");
+        }
+
+        let root = production
+            .split_once("fn render_minimal(")
+            .expect("minimal root renderer")
+            .1;
+        for behavior in [
+            "let workspace_delete_overlay =",
+            ".child(\"Delete project?\")",
+            "minimal-cancel-project-delete",
+            "minimal-confirm-project-delete",
+            "this.confirm_sidebar_delete(cx)",
+            ".when_some(workspace_delete_overlay",
         ] {
             assert!(root.contains(behavior), "missing {behavior}");
         }
