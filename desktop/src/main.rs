@@ -111,6 +111,7 @@ const STOP_ICON: &str = "icons/stop.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
+const TRASH_ICON: &str = "icons/trash.svg";
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
 const MAX_ATTACHMENTS: usize = 4;
@@ -7969,9 +7970,10 @@ impl XdDesktop {
                                     svg()
                                         .path(GIT_BRANCH_ICON)
                                         .size(px(14.0))
+                                        .flex_none()
                                         .text_color(rgb(colors.muted)),
                                 )
-                                .child(session.branch),
+                                .child(div().min_w_0().flex_1().truncate().child(session.branch)),
                         )
                         .child(status),
                 );
@@ -8413,8 +8415,7 @@ impl XdDesktop {
                                     heading.child(
                                         div()
                                             .id("minimal-delete-project")
-                                            .h(px(34.0))
-                                            .px_3()
+                                            .size(px(34.0))
                                             .flex_none()
                                             .flex()
                                             .items_center()
@@ -8423,8 +8424,6 @@ impl XdDesktop {
                                             .border_1()
                                             .border_color(rgb(colors.border))
                                             .bg(rgb(colors.surface))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(0xd86f7c))
                                             .cursor_pointer()
                                             .hover(|style| style.bg(rgb(0x5a252b)))
@@ -8434,7 +8433,7 @@ impl XdDesktop {
                                                     cx,
                                                 );
                                             }))
-                                            .child("Delete"),
+                                            .child(svg().path(TRASH_ICON).size(px(17.0))),
                                     )
                                 },
                             ),
@@ -9843,6 +9842,9 @@ impl AssetSource for EmbeddedIcons {
             GIT_BRANCH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/git-branch.svg").as_slice(),
             )),
+            TRASH_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/trash.svg").as_slice(),
+            )),
             _ => None,
         })
     }
@@ -9857,6 +9859,7 @@ impl AssetSource for EmbeddedIcons {
             FOLDER_ICON.into(),
             FILE_ICON.into(),
             GIT_BRANCH_ICON.into(),
+            TRASH_ICON.into(),
         ])
     }
 }
@@ -10615,6 +10618,7 @@ mod tests {
             "icons/mic.svg",
             "icons/stop.svg",
             GIT_BRANCH_ICON,
+            TRASH_ICON,
         ] {
             let bytes = EmbeddedIcons
                 .load(path)
@@ -11272,6 +11276,23 @@ mod tests {
     }
 
     #[test]
+    fn session_board_truncates_branch_names_inside_cards() {
+        let source = include_str!("main.rs");
+        let board = source
+            .split_once("fn render_minimal_session_board(")
+            .expect("shared session board")
+            .1
+            .split_once("fn render_minimal_home(")
+            .expect("end of shared session board")
+            .0;
+
+        assert!(
+            board.contains(".child(div().min_w_0().flex_1().truncate().child(session.branch))"),
+            "branch text needs a shrinking, truncating flex child"
+        );
+    }
+
+    #[test]
     fn minimal_projects_exposes_workspace_rename_flow() {
         let source = include_str!("main.rs");
         let production = source
@@ -11328,9 +11349,14 @@ mod tests {
             "minimal-delete-project",
             "this.begin_sidebar_delete(",
             "SidebarTarget::Folder",
+            ".child(svg().path(TRASH_ICON)",
         ] {
             assert!(home.contains(behavior), "missing {behavior}");
         }
+        assert!(
+            !home.contains(".child(\"Delete\")"),
+            "the project delete control should use an icon instead of text"
+        );
 
         let root = production
             .split_once("fn render_minimal(")
