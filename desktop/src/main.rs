@@ -947,7 +947,6 @@ struct XdDesktop {
     workspace_create_submitting: bool,
     workspace_clone_status: Option<String>,
     pending_clone_requests: HashMap<ChatEndpoint, String>,
-    pending_clone_chats: HashSet<(ChatEndpoint, String)>,
     workspace_clone_outcomes: HashMap<(ChatEndpoint, String), Option<String>>,
     creating_chat_folder: Option<String>,
     chat_create_title: String,
@@ -1390,7 +1389,6 @@ impl XdDesktop {
             workspace_create_submitting: false,
             workspace_clone_status: None,
             pending_clone_requests: HashMap::new(),
-            pending_clone_chats: HashSet::new(),
             workspace_clone_outcomes: HashMap::new(),
             creating_chat_folder: None,
             chat_create_title: String::new(),
@@ -2220,8 +2218,6 @@ impl XdDesktop {
                 self.workspace_context_submitting = false;
                 self.workspace_clone_status = None;
                 self.pending_clone_requests.remove(&ChatEndpoint::Local);
-                self.pending_clone_chats
-                    .retain(|(endpoint, _)| *endpoint != ChatEndpoint::Local);
                 self.workspace_clone_outcomes
                     .retain(|(endpoint, _), _| *endpoint != ChatEndpoint::Local);
                 self.pending_speech = None;
@@ -3789,11 +3785,6 @@ impl XdDesktop {
                     if endpoint == self.active_endpoint {
                         self.workspace_clone_status = Some("Repository cloned".into());
                     }
-                    if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-                        && let Err(error) = daemon.new_chat(folder_id, DEFAULT_CHAT_TITLE, None)
-                    {
-                        self.endpoint_model_mut(endpoint).connection_error = Some(error);
-                    }
                 }
                 Some(Some(error)) => {
                     if endpoint == self.active_endpoint {
@@ -3802,16 +3793,11 @@ impl XdDesktop {
                     self.endpoint_model_mut(endpoint).connection_error = Some(error);
                 }
                 None => {
-                    self.pending_clone_chats.insert(key);
                     if endpoint == self.active_endpoint {
                         self.workspace_clone_status = Some("Cloning repository…".into());
                     }
                 }
             }
-        } else if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-            && let Err(error) = daemon.new_chat(folder_id, DEFAULT_CHAT_TITLE, None)
-        {
-            self.endpoint_model_mut(endpoint).connection_error = Some(error);
         }
         true
     }
@@ -3820,13 +3806,10 @@ impl XdDesktop {
         let folder_id = body.get("folder").and_then(Value::as_str);
         let key = folder_id.map(|folder_id| (endpoint, folder_id.to_owned()));
         let event_url = body.get("url").and_then(Value::as_str);
-        let preserve_outcome = key
-            .as_ref()
-            .is_some_and(|key| self.pending_clone_chats.contains(key))
-            || self
-                .pending_clone_requests
-                .get(&endpoint)
-                .is_some_and(|url| Some(url.as_str()) == event_url);
+        let preserve_outcome = self
+            .pending_clone_requests
+            .get(&endpoint)
+            .is_some_and(|url| Some(url.as_str()) == event_url);
         match body.get("state").and_then(Value::as_str) {
             Some("cloning") => {
                 if endpoint == self.active_endpoint {
@@ -3840,16 +3823,6 @@ impl XdDesktop {
                 if preserve_outcome && let Some(key) = &key {
                     self.workspace_clone_outcomes.insert(key.clone(), None);
                 }
-                if let Some(key) = &key
-                    && self.pending_clone_chats.remove(key)
-                {
-                    if let Some(daemon) = self.endpoint_daemon(endpoint).cloned()
-                        && let Err(error) = daemon.new_chat(&key.1, DEFAULT_CHAT_TITLE, None)
-                    {
-                        self.endpoint_model_mut(endpoint).connection_error = Some(error);
-                    }
-                    self.workspace_clone_outcomes.remove(key);
-                }
             }
             Some("failed") => {
                 let error = body
@@ -3860,11 +3833,6 @@ impl XdDesktop {
                 if preserve_outcome && let Some(key) = &key {
                     self.workspace_clone_outcomes
                         .insert(key.clone(), Some(error.clone()));
-                }
-                if let Some(key) = &key
-                    && self.pending_clone_chats.remove(key)
-                {
-                    self.workspace_clone_outcomes.remove(key);
                 }
                 if endpoint == self.active_endpoint {
                     self.workspace_clone_status = None;
@@ -10290,18 +10258,35 @@ mod tests {
     }
 
     #[test]
-    fn workspace_clone_tracking_keeps_identical_folder_ids_isolated() {
+    fn workspace_clone_outcomes_keep_identical_folder_ids_isolated() {
         let local = (ChatEndpoint::Local, "same-folder".to_owned());
         let remote = (ChatEndpoint::Remote, "same-folder".to_owned());
-        let mut pending = HashSet::new();
-        pending.insert(local.clone());
-        assert!(pending.contains(&local));
-        assert!(!pending.contains(&remote));
-
         let mut outcomes = HashMap::new();
         outcomes.insert(local, None::<String>);
         outcomes.insert(remote, Some("remote clone failed".to_owned()));
         assert_eq!(outcomes.len(), 2);
+    }
+
+    #[test]
+    fn workspace_completion_never_creates_a_session_implicitly() {
+        let source = include_str!("main.rs");
+        let completion = source
+            .split_once("fn handle_workspace_create_reply(")
+            .expect("workspace completion handler")
+            .1
+            .split_once("fn handle_folder_clone_event(")
+            .expect("clone completion handler")
+            .0;
+        let clone_event = source
+            .split_once("fn handle_folder_clone_event(")
+            .expect("clone completion handler")
+            .1
+            .split_once("fn apply_reply(")
+            .expect("end of clone completion handler")
+            .0;
+
+        assert!(!completion.contains(".new_chat("));
+        assert!(!clone_event.contains(".new_chat("));
     }
 
     #[test]
