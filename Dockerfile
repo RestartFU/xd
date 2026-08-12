@@ -322,6 +322,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssl \
       patchelf \
       shared-mime-info \
+      tmux \
       xkb-data \
     && git --version | grep -F "git version $GIT_VERSION" \
     && rm -rf /var/lib/apt/lists/*
@@ -347,6 +348,8 @@ COPY scripts/git-helper.sh /stage/usr/libexec/git-helper
 COPY scripts/openssl.sh /stage/usr/libexec/openssl
 COPY scripts/whisper.sh /stage/usr/libexec/whisper
 COPY scripts/whisper-server.sh /stage/usr/libexec/whisper-server
+RUN install -m0755 /usr/bin/tmux /stage/usr/libexec/tmux \
+ && install -Dm0644 /usr/share/doc/tmux/copyright /stage/usr/share/licenses/tmux-LICENSE
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
 COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /stage/usr/libexec/xd-daemon
 COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy /stage/usr/libexec/xd-tls-proxy

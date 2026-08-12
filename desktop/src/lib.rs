@@ -7,4 +7,6 @@ pub mod model;
 mod private_fs;
 pub mod protocol;
 pub mod remote;
+pub mod session_host;
+pub mod session_runtime;
 pub mod theme;

@@ -52,6 +52,10 @@ pub struct AppSettings {
     pub git_writer_model: Option<String>,
     pub build_source: String,
     pub favorite_models: Vec<String>,
+    /// The exact SSH connection command used for remote mode. XD parses this
+    /// into arguments and appends its own terminal session command; it is
+    /// never evaluated by a shell.
+    pub remote_ssh_command: Option<String>,
     pub active_connection: Option<String>,
     /// Last selected chat per daemon connection. `last_chat` remains as a
     /// backwards-compatible fallback for existing local settings files.
@@ -85,6 +89,7 @@ impl Default for AppSettings {
             git_writer_model: None,
             build_source: String::new(),
             favorite_models: Vec::new(),
+            remote_ssh_command: None,
             active_connection: None,
             last_chats: HashMap::new(),
             last_chat: None,
@@ -213,6 +218,7 @@ mod tests {
             git_writer_model: Some("claude-opus-5".into()),
             build_source: "#128".into(),
             favorite_models: vec!["claude/claude-opus-5".into()],
+            remote_ssh_command: Some("ssh dev.example -p 22".into()),
             active_connection: Some("remote/dev.example:4001".into()),
             last_chats: HashMap::from([
                 ("local".into(), "chat-restore".into()),
@@ -275,6 +281,17 @@ mod tests {
             serde_json::from_str(r#"{"allow_all_permissions":true}"#).unwrap();
         let enabled = serde_json::to_value(enabled).unwrap();
         assert_eq!(enabled["allow_all_permissions"], true);
+    }
+
+    #[test]
+    fn remote_ssh_command_is_optional_and_survives_serialization() {
+        let defaults: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.remote_ssh_command, None);
+
+        let configured: AppSettings =
+            serde_json::from_str(r#"{"remote_ssh_command":"ssh zenomc.org -p 22"}"#).unwrap();
+        let saved = serde_json::to_value(configured).unwrap();
+        assert_eq!(saved["remote_ssh_command"], "ssh zenomc.org -p 22");
     }
 
     #[test]

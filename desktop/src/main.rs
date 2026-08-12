@@ -8,7 +8,7 @@ use std::{
     ffi::OsString,
     hash::{Hash, Hasher},
     ops::Range,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -47,7 +47,9 @@ use xd_desktop::{
     },
     markdown,
     model::{AppModel, Attachment, Message, MessagePageDirection, Worktree},
-    remote::{self, CredentialsFile, RemoteBridge, RemoteCredentials, RemoteError, RemoteSession},
+    remote::{self, RemoteError, SshRemoteBridge, SshRemoteSession},
+    session_host::{AgentCommand, SessionHost, SshCommand},
+    session_runtime::{SessionEvent, SessionRuntime},
     theme::ThemeColors,
 };
 
@@ -455,12 +457,6 @@ impl TerminalPanel {
         self.opening_agent = None;
     }
 
-    fn begin_refresh(&mut self) {
-        self.loading = true;
-        self.finish_opening();
-        self.error = None;
-    }
-
     fn selected(&self) -> Option<&TerminalTab> {
         let selected = self.selected.as_deref()?;
         self.sessions.iter().find(|session| session.id == selected)
@@ -506,6 +502,75 @@ impl TerminalPanel {
 
 fn terminal_tab_title(agent: Option<AgentCli>) -> String {
     agent.map(AgentCli::label).unwrap_or("Terminal").to_owned()
+}
+
+fn terminal_runtime_event(event: SessionEvent) -> (&'static str, Value) {
+    match event {
+        SessionEvent::Opened {
+            chat_id,
+            terminal_id,
+            title,
+            agent,
+            columns,
+            rows,
+        } => (
+            "terminal-opened",
+            serde_json::json!({
+                "chat": chat_id,
+                "terminal": terminal_id,
+                "title": title,
+                "agent": agent,
+                "columns": columns,
+                "rows": rows,
+            }),
+        ),
+        SessionEvent::Output {
+            chat_id,
+            terminal_id,
+            data,
+        } => (
+            "terminal-output",
+            serde_json::json!({
+                "chat": chat_id,
+                "terminal": terminal_id,
+                "data": STANDARD.encode(data),
+            }),
+        ),
+        SessionEvent::Resized {
+            chat_id,
+            terminal_id,
+            columns,
+            rows,
+        } => (
+            "terminal-resized",
+            serde_json::json!({
+                "chat": chat_id,
+                "terminal": terminal_id,
+                "columns": columns,
+                "rows": rows,
+            }),
+        ),
+        SessionEvent::Activity {
+            chat_id,
+            terminal_id,
+            working,
+        } => (
+            "terminal-activity",
+            serde_json::json!({
+                "chat": chat_id,
+                "terminal": terminal_id,
+                "working": working,
+                "terminal_working": working,
+            }),
+        ),
+        SessionEvent::Closed {
+            chat_id,
+            terminal_id,
+        } => (
+            "terminal-closed",
+            serde_json::json!({"chat": chat_id, "terminal": terminal_id}),
+        ),
+    }
 }
 
 fn insert_terminal_cursor_highlight(
@@ -652,12 +717,11 @@ fn question_from_event(body: &Value) -> Option<OpenQuestion> {
     })
 }
 
-fn connection_state_key(endpoint: ChatEndpoint, remote: Option<(&str, u16)>) -> String {
+fn connection_state_key(endpoint: ChatEndpoint, remote: Option<&str>) -> String {
     match endpoint {
         ChatEndpoint::Local => "local".into(),
         ChatEndpoint::Remote => {
-            let (host, port) = remote.unwrap_or(("remote", 0));
-            format!("remote/{host}:{port}")
+            format!("remote/{}", remote.unwrap_or("ssh"))
         }
     }
 }
@@ -851,10 +915,7 @@ fn persisted_runtime(saved: Option<&str>, remote_key: Option<&str>) -> ChatEndpo
 
 #[derive(Clone, Default)]
 struct RemotePanel {
-    host: String,
-    port: String,
-    code: String,
-    name: String,
+    command: String,
     submitting: bool,
     error: Option<String>,
 }
@@ -897,10 +958,8 @@ struct XdDesktop {
     reconnect_attempt: u32,
     connecting: bool,
     connection_in_flight: bool,
-    remote_credentials_file: Option<CredentialsFile>,
-    remote_credentials: Option<RemoteCredentials>,
     remote_daemon: Option<DaemonHandle>,
-    remote_bridge: Option<RemoteBridge>,
+    remote_bridge: Option<SshRemoteBridge>,
     remote_state: RemoteState,
     remote_error: Option<String>,
     remote_generation: u64,
@@ -937,10 +996,7 @@ struct XdDesktop {
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
     device_name_input: Entity<ComposerInput>,
-    remote_host_input: Entity<ComposerInput>,
-    remote_port_input: Entity<ComposerInput>,
-    remote_code_input: Entity<ComposerInput>,
-    remote_name_input: Entity<ComposerInput>,
+    remote_ssh_input: Entity<ComposerInput>,
     question_input: Entity<ComposerInput>,
     source_build_input: Entity<ComposerInput>,
     composer: String,
@@ -975,6 +1031,7 @@ struct XdDesktop {
     workspace_defaults: Option<WorkspaceDefaults>,
     diff_panel: Option<DiffPanel>,
     terminal_panel: Option<TerminalPanel>,
+    terminal_runtime: SessionRuntime,
     terminal_panel_cache: HashMap<(ChatEndpoint, String), TerminalPanel>,
     terminal_cache_refresh: HashSet<ChatEndpoint>,
     terminal_cursor_visible: bool,
@@ -1187,55 +1244,16 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let remote_host_input = cx.new(|cx| ComposerInput::new(cx, "Machine address…"));
-        cx.subscribe(&remote_host_input, |this, _, event, cx| match event {
+        let remote_ssh_input = cx.new(|cx| ComposerInput::new(cx, "ssh user@host -p 22"));
+        cx.subscribe(&remote_ssh_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => {
                 if let Some(panel) = &mut this.remote_panel {
-                    panel.host = text.clone();
+                    panel.command = text.clone();
                     panel.error = None;
                 }
                 cx.notify();
             }
-            ComposerEvent::Submit => this.pair_remote_machine(cx),
-            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
-        })
-        .detach();
-        let remote_port_input = cx.new(|cx| ComposerInput::new(cx, "Port…"));
-        cx.subscribe(&remote_port_input, |this, _, event, cx| match event {
-            ComposerEvent::Changed(text) => {
-                if let Some(panel) = &mut this.remote_panel {
-                    panel.port = text.clone();
-                    panel.error = None;
-                }
-                cx.notify();
-            }
-            ComposerEvent::Submit => this.pair_remote_machine(cx),
-            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
-        })
-        .detach();
-        let remote_code_input = cx.new(|cx| ComposerInput::new(cx, "Pairing code…"));
-        cx.subscribe(&remote_code_input, |this, _, event, cx| match event {
-            ComposerEvent::Changed(text) => {
-                if let Some(panel) = &mut this.remote_panel {
-                    panel.code = text.clone();
-                    panel.error = None;
-                }
-                cx.notify();
-            }
-            ComposerEvent::Submit => this.pair_remote_machine(cx),
-            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
-        })
-        .detach();
-        let remote_name_input = cx.new(|cx| ComposerInput::new(cx, "This device name…"));
-        cx.subscribe(&remote_name_input, |this, _, event, cx| match event {
-            ComposerEvent::Changed(text) => {
-                if let Some(panel) = &mut this.remote_panel {
-                    panel.name = text.clone();
-                    panel.error = None;
-                }
-                cx.notify();
-            }
-            ComposerEvent::Submit => this.pair_remote_machine(cx),
+            ComposerEvent::Submit => this.connect_remote_machine(cx),
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
@@ -1275,20 +1293,17 @@ impl XdDesktop {
             target: source_build::parse_target(&settings.build_source),
             ..Default::default()
         };
-        let (remote_credentials_file, remote_credentials, remote_error) =
-            match CredentialsFile::default_path() {
-                Ok(path) => {
-                    let file = CredentialsFile::new(path);
-                    match file.load() {
-                        Ok(credentials) => (Some(file), credentials, None),
-                        Err(error) => (Some(file), None, Some(error.to_string())),
-                    }
-                }
-                Err(error) => (None, None, Some(error.to_string())),
-            };
-        let remote_key = remote_credentials
+        let parsed_remote = settings
+            .remote_ssh_command
+            .as_deref()
+            .map(SshCommand::parse)
+            .transpose();
+        let remote_error = parsed_remote.as_ref().err().cloned();
+        let remote_key = parsed_remote
             .as_ref()
-            .map(|credentials| format!("remote/{}:{}", credentials.host, credentials.port));
+            .ok()
+            .and_then(Option::as_ref)
+            .map(|command| connection_state_key(ChatEndpoint::Remote, Some(command.destination())));
         let active_endpoint =
             persisted_runtime(settings.active_connection.as_deref(), remote_key.as_deref());
         let active_connection = match active_endpoint {
@@ -1308,7 +1323,9 @@ impl XdDesktop {
         let corrected_active_connection =
             settings.active_connection.as_deref() != Some(active_connection.as_str());
         settings.active_connection = Some(active_connection);
+        let remote_configured = settings.remote_ssh_command.is_some();
         let minimal_popup_focus = cx.focus_handle();
+        let (terminal_runtime, terminal_updates) = SessionRuntime::new();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -1353,11 +1370,13 @@ impl XdDesktop {
             reconnect_attempt: 0,
             connecting: false,
             connection_in_flight: false,
-            remote_credentials_file,
-            remote_credentials,
             remote_daemon: None,
             remote_bridge: None,
-            remote_state: RemoteState::Unconfigured,
+            remote_state: if remote_configured {
+                RemoteState::Offline
+            } else {
+                RemoteState::Unconfigured
+            },
             remote_error,
             remote_generation: 0,
             remote_reconnect_attempt: 0,
@@ -1388,10 +1407,7 @@ impl XdDesktop {
             secret_name_input,
             secret_value_input,
             device_name_input,
-            remote_host_input,
-            remote_port_input,
-            remote_code_input,
-            remote_name_input,
+            remote_ssh_input,
             question_input,
             source_build_input,
             composer: String::new(),
@@ -1426,6 +1442,7 @@ impl XdDesktop {
             workspace_defaults: None,
             diff_panel: None,
             terminal_panel: None,
+            terminal_runtime,
             terminal_panel_cache: HashMap::new(),
             terminal_cache_refresh: HashSet::new(),
             terminal_cursor_visible: true,
@@ -1466,6 +1483,7 @@ impl XdDesktop {
             ChatEndpoint::Local => desktop.schedule_connect(Duration::ZERO, cx),
             ChatEndpoint::Remote => desktop.schedule_remote_connect(Duration::ZERO, cx),
         }
+        desktop.listen_for_terminal_runtime(terminal_updates, cx);
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(500)).await;
@@ -1850,7 +1868,7 @@ impl XdDesktop {
 
     fn schedule_remote_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
         if self.active_endpoint != ChatEndpoint::Remote
-            || self.remote_credentials.is_none()
+            || self.settings.remote_ssh_command.is_none()
             || matches!(
                 self.remote_state,
                 RemoteState::Connecting | RemoteState::Connected
@@ -1876,13 +1894,21 @@ impl XdDesktop {
         if self.remote_generation != generation || self.remote_state != RemoteState::Connecting {
             return;
         }
-        let Some(credentials) = self.remote_credentials.clone() else {
+        let Some(command) = self.settings.remote_ssh_command.clone() else {
             self.remote_state = RemoteState::Unconfigured;
             return;
         };
+        let command = match SshCommand::parse(&command) {
+            Ok(command) => command,
+            Err(error) => {
+                self.remote_state = RemoteState::Unconfigured;
+                self.remote_error = Some(error);
+                return;
+            }
+        };
         let connection = cx
             .background_executor()
-            .spawn(async move { remote::connect(&credentials) });
+            .spawn(async move { remote::connect_ssh(&command) });
         cx.spawn(async move |this, cx| {
             let result = connection.await;
             let _ = this.update(cx, |this, cx| {
@@ -1901,7 +1927,7 @@ impl XdDesktop {
 
     fn install_remote_session(
         &mut self,
-        session: RemoteSession,
+        session: SshRemoteSession,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
@@ -2075,22 +2101,10 @@ impl XdDesktop {
         self.remote_daemon = None;
         self.remote_bridge = None;
         self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
-        if message.contains("Unknown device. Pair first.") {
-            if let Some(file) = &self.remote_credentials_file {
-                let _ = file.clear();
-            }
-            self.remote_credentials = None;
-            if self.active_endpoint == ChatEndpoint::Remote {
-                self.disconnect_remote_runtime(cx);
-            }
-            self.remote_state = RemoteState::Unconfigured;
-            self.remote_error = Some("This machine revoked the saved device. Pair again.".into());
-        } else {
-            self.remote_state = RemoteState::Offline;
-            self.remote_error = Some(format!("{message} Retrying automatically…"));
-            self.remote_reconnect_attempt = self.remote_reconnect_attempt.saturating_add(1);
-            self.schedule_remote_connect(reconnect_delay(self.remote_reconnect_attempt), cx);
-        }
+        self.remote_state = RemoteState::Offline;
+        self.remote_error = Some(format!("{message} Retrying automatically…"));
+        self.remote_reconnect_attempt = self.remote_reconnect_attempt.saturating_add(1);
+        self.schedule_remote_connect(reconnect_delay(self.remote_reconnect_attempt), cx);
         if let Some(panel) = &mut self.remote_panel {
             panel.submitting = false;
             panel.error = self.remote_error.clone();
@@ -2101,8 +2115,8 @@ impl XdDesktop {
     }
 
     fn activate_remote_runtime(&mut self, cx: &mut Context<Self>) {
-        if self.remote_credentials.is_none() {
-            self.remote_error = Some("Pair a remote daemon first.".into());
+        if self.settings.remote_ssh_command.is_none() {
+            self.remote_error = Some("Enter an SSH command first.".into());
             cx.notify();
             return;
         }
@@ -2132,7 +2146,7 @@ impl XdDesktop {
         self.remote_generation = self.remote_generation.saturating_add(1);
         self.remote_daemon = None;
         self.remote_bridge = None;
-        self.remote_state = if self.remote_credentials.is_some() {
+        self.remote_state = if self.settings.remote_ssh_command.is_some() {
             RemoteState::Offline
         } else {
             RemoteState::Unconfigured
@@ -3580,6 +3594,13 @@ impl XdDesktop {
                 if self.model.working || !self.model.queue.is_empty() {
                     self.clear_question(cx);
                 }
+                if self
+                    .terminal_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.chat_id == chat_id && panel.sessions.is_empty())
+                {
+                    self.refresh_terminal_sessions(cx);
+                }
             }
             RequestKind::Messages { chat_id, cursor } if self.chat_is_active(&chat_id) => {
                 let direction = match cursor {
@@ -3755,7 +3776,6 @@ impl XdDesktop {
                         && panel.opening_matches_protocol_agent(agent.as_deref())
                 }) =>
             {
-                let mut resize = None;
                 if let Some(panel) = &mut self.terminal_panel {
                     panel.selected = value.get("id").and_then(Value::as_str).map(str::to_owned);
                     panel.finish_opening();
@@ -3764,25 +3784,6 @@ impl XdDesktop {
                     // loading here both lied with "Starting CLI" and disabled
                     // input for the duration of a remote replay transfer.
                     panel.loading = false;
-                    resize = panel
-                        .selected
-                        .clone()
-                        .zip(panel.viewport)
-                        .map(|(terminal_id, (columns, rows))| (terminal_id, columns, rows));
-                }
-                if let Some(daemon) = self.active_daemon().cloned() {
-                    let result = resize
-                        .map(|(terminal_id, columns, rows)| {
-                            daemon.terminal_resize(&terminal_id, columns, rows)
-                        })
-                        .transpose()
-                        .and_then(|_| daemon.terminal_list(&chat_id));
-                    if let Err(error) = result
-                        && let Some(panel) = &mut self.terminal_panel
-                    {
-                        panel.loading = false;
-                        panel.error = Some(error);
-                    }
                 }
             }
             RequestKind::TerminalList { chat_id }
@@ -3855,11 +3856,6 @@ impl XdDesktop {
                     .get("error")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                if value.get("ok").and_then(Value::as_bool) == Some(true)
-                    && let Some(daemon) = self.endpoint_daemon(endpoint)
-                {
-                    let _ = daemon.terminal_list(chat_id);
-                }
                 true
             }
             _ => false,
@@ -4039,6 +4035,9 @@ impl XdDesktop {
             "terminal-closed" => Self::apply_terminal_closed_event(panel, body),
             _ => false,
         };
+        if needs_hydration {
+            panel.loading = false;
+        }
         if active {
             if name == "terminal-output" && changed {
                 self.terminal_cursor_visible = true;
@@ -4052,9 +4051,6 @@ impl XdDesktop {
             ) {
                 self.sync_terminal_input_mode(cx);
             }
-        }
-        if needs_hydration && let Some(daemon) = self.endpoint_daemon(endpoint) {
-            let _ = daemon.terminal_list(&chat_id);
         }
     }
 
@@ -4785,37 +4781,15 @@ impl XdDesktop {
 
     fn open_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
-        let host = self
-            .remote_credentials
-            .as_ref()
-            .map(|credentials| credentials.host.clone())
-            .unwrap_or_default();
-        let port = self
-            .remote_credentials
-            .as_ref()
-            .map(|credentials| credentials.port.to_string())
-            .unwrap_or_else(|| "4001".into());
-        let name = std::env::var("HOSTNAME")
-            .ok()
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| "Desktop".into());
+        let command = self.settings.remote_ssh_command.clone().unwrap_or_default();
         self.remote_panel = Some(RemotePanel {
-            host: host.clone(),
-            port: port.clone(),
-            code: String::new(),
-            name: name.clone(),
+            command: command.clone(),
             submitting: false,
             error: self.remote_error.clone(),
         });
-        self.remote_host_input
-            .update(cx, |input, cx| input.set_text(host, cx));
-        self.remote_port_input
-            .update(cx, |input, cx| input.set_text(port, cx));
-        self.remote_code_input
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.remote_name_input
-            .update(cx, |input, cx| input.set_text(name, cx));
-        let focus = self.remote_host_input.read(cx).focus_handle(cx);
+        self.remote_ssh_input
+            .update(cx, |input, cx| input.set_text(command, cx));
+        let focus = self.remote_ssh_input.read(cx).focus_handle(cx);
         self.focus_minimal_popup(focus, window, cx);
         cx.notify();
     }
@@ -4827,59 +4801,43 @@ impl XdDesktop {
             .is_some_and(|panel| panel.submitting);
         if canceled_pairing {
             self.remote_generation = self.remote_generation.saturating_add(1);
-            self.remote_state = if self.remote_credentials.is_some() {
+            self.remote_state = if self.settings.remote_ssh_command.is_some() {
                 RemoteState::Offline
             } else {
                 RemoteState::Unconfigured
             };
         }
         self.remote_panel = None;
-        if canceled_pairing && self.remote_credentials.is_some() {
+        if canceled_pairing && self.settings.remote_ssh_command.is_some() {
             self.schedule_remote_connect(Duration::ZERO, cx);
         }
         cx.notify();
     }
 
-    fn pair_remote_machine(&mut self, cx: &mut Context<Self>) {
+    fn connect_remote_machine(&mut self, cx: &mut Context<Self>) {
         let Some(panel) = self.remote_panel.clone() else {
             return;
         };
         if panel.submitting {
             return;
         }
-        let port = match panel
-            .port
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|port| *port > 0)
-        {
-            Some(port) => port,
-            None => {
+        let command = match SshCommand::parse(&panel.command) {
+            Ok(command) => command,
+            Err(error) => {
                 if let Some(panel) = &mut self.remote_panel {
-                    panel.error = Some("Remote port must be from 1 to 65535.".into());
+                    panel.error = Some(error);
                 }
                 cx.notify();
                 return;
             }
         };
-        if panel.host.trim().is_empty()
-            || panel.code.split_whitespace().collect::<String>().is_empty()
-            || panel.name.trim().is_empty()
-        {
+        if panel.command.trim().is_empty() {
             if let Some(panel) = &mut self.remote_panel {
-                panel.error = Some("Address, pairing code, and device name are required.".into());
+                panel.error = Some("Enter an SSH command.".into());
             }
             cx.notify();
             return;
         }
-        let Some(credentials_file) = self.remote_credentials_file.clone() else {
-            if let Some(panel) = &mut self.remote_panel {
-                panel.error = Some("The remote credentials path is unavailable.".into());
-            }
-            cx.notify();
-            return;
-        };
         self.remote_generation = self.remote_generation.saturating_add(1);
         let generation = self.remote_generation;
         self.remote_daemon = None;
@@ -4890,12 +4848,19 @@ impl XdDesktop {
             panel.submitting = true;
             panel.error = None;
         }
-        let host = panel.host;
-        let code = panel.code;
-        let name = panel.name;
+        self.settings.remote_ssh_command = Some(panel.command.trim().to_owned());
+        if let Err(error) = self.settings.save() {
+            self.remote_state = RemoteState::Unconfigured;
+            if let Some(panel) = &mut self.remote_panel {
+                panel.submitting = false;
+                panel.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
         let pairing = cx
             .background_executor()
-            .spawn(async move { remote::pair(&host, port, &code, &name) });
+            .spawn(async move { remote::connect_ssh(&command) });
         cx.spawn(async move |this, cx| {
             let result = pairing.await;
             let _ = this.update(cx, |this, cx| {
@@ -4903,24 +4868,13 @@ impl XdDesktop {
                     return;
                 }
                 match result {
-                    Ok((credentials, session)) => match credentials_file.save(&credentials) {
-                        Ok(()) => {
-                            this.remote_credentials = Some(credentials);
-                            this.install_remote_session(session, generation, cx);
-                            this.activate_remote_runtime(cx);
-                            this.remote_panel = None;
-                        }
-                        Err(error) => {
-                            this.remote_state = RemoteState::Offline;
-                            this.remote_error = Some(error.to_string());
-                            if let Some(panel) = &mut this.remote_panel {
-                                panel.submitting = false;
-                                panel.error = this.remote_error.clone();
-                            }
-                        }
-                    },
+                    Ok(session) => {
+                        this.install_remote_session(session, generation, cx);
+                        this.activate_remote_runtime(cx);
+                        this.remote_panel = None;
+                    }
                     Err(error) => {
-                        this.remote_state = if this.remote_credentials.is_some() {
+                        this.remote_state = if this.settings.remote_ssh_command.is_some() {
                             RemoteState::Offline
                         } else {
                             RemoteState::Unconfigured
@@ -5356,7 +5310,6 @@ impl XdDesktop {
                 *cached_endpoint != endpoint || live_chats.contains(chat_id)
             });
 
-        let daemon = self.endpoint_daemon(endpoint).cloned();
         for (chat_id, agent) in chats {
             let active = endpoint == self.active_endpoint
                 && self
@@ -5365,10 +5318,8 @@ impl XdDesktop {
                     .is_some_and(|panel| panel.chat_id == chat_id);
             if active {
                 if refresh_all && let Some(panel) = &mut self.terminal_panel {
-                    panel.begin_refresh();
-                    if let Some(daemon) = &daemon {
-                        let _ = daemon.terminal_list(&chat_id);
-                    }
+                    panel.loading = false;
+                    panel.error = None;
                 }
                 continue;
             }
@@ -5377,29 +5328,23 @@ impl XdDesktop {
             if missing {
                 let mut panel = Self::new_agent_terminal_panel(chat_id.clone(), agent);
                 panel.auto_open = false;
+                panel.loading = false;
                 self.terminal_panel_cache.insert(key.clone(), panel);
             } else if refresh_all && let Some(panel) = self.terminal_panel_cache.get_mut(&key) {
-                panel.begin_refresh();
-            }
-            if (missing || refresh_all)
-                && let Some(daemon) = &daemon
-            {
-                if let Err(error) = daemon.terminal_list(&chat_id)
-                    && let Some(panel) = self.terminal_panel_cache.get_mut(&key)
-                {
-                    panel.loading = false;
-                    panel.error = Some(error);
-                }
+                panel.loading = false;
+                panel.error = None;
             }
         }
     }
 
     fn current_connection_key(&self) -> String {
         let remote = self
-            .remote_credentials
-            .as_ref()
-            .map(|credentials| (credentials.host.as_str(), credentials.port));
-        connection_state_key(self.active_endpoint, remote)
+            .settings
+            .remote_ssh_command
+            .as_deref()
+            .and_then(|command| SshCommand::parse(command).ok())
+            .map(|command| command.destination().to_owned());
+        connection_state_key(self.active_endpoint, remote.as_deref())
     }
 
     fn cached_last_chat(&self) -> Option<String> {
@@ -5453,6 +5398,120 @@ impl XdDesktop {
             .collect();
     }
 
+    fn listen_for_terminal_runtime(
+        &mut self,
+        updates: async_channel::Receiver<SessionEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = updates.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        let (name, body) = terminal_runtime_event(event);
+                        if name == "terminal-activity" {
+                            this.model.apply_event(name, &body);
+                            cx.notify();
+                        } else {
+                            this.handle_terminal_screen_event(
+                                this.active_endpoint,
+                                name,
+                                &body,
+                                cx,
+                            );
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn active_session_host(&self) -> Result<SessionHost, String> {
+        match self.active_endpoint {
+            ChatEndpoint::Local => {
+                let tmux = env::var_os("XD_TMUX_EXECUTABLE")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("tmux"));
+                let runtime = env::var_os("XD_SESSION_RUNTIME")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        env::temp_dir()
+                            .join(xd_desktop::channel::data_name())
+                            .join("sessions")
+                    });
+                std::fs::create_dir_all(&runtime)
+                    .map_err(|error| format!("Cannot prepare terminal sessions: {error}."))?;
+                let configuration = runtime.join("tmux.conf");
+                if !configuration.exists() {
+                    std::fs::write(
+                        &configuration,
+                        "set -g default-terminal screen-256color\nset -sg escape-time 0\nset -g focus-events on\nset -g mouse off\n",
+                    )
+                    .map_err(|error| format!("Cannot configure terminal sessions: {error}."))?;
+                }
+                Ok(SessionHost::local(tmux, runtime))
+            }
+            ChatEndpoint::Remote => {
+                let command = self
+                    .settings
+                    .remote_ssh_command
+                    .as_deref()
+                    .ok_or_else(|| "Configure an SSH connection first.".to_owned())
+                    .and_then(SshCommand::parse)?;
+                Ok(SessionHost::ssh(command, ".local/share/xd/runtime/v1"))
+            }
+        }
+    }
+
+    fn terminal_agent_command(&self, agent: Option<AgentCli>) -> AgentCommand {
+        let remote = self.active_endpoint == ChatEndpoint::Remote;
+        match agent {
+            Some(AgentCli::Codex) => {
+                let program = if remote {
+                    "codex".into()
+                } else {
+                    env::var("XD_CODEX_EXECUTABLE").unwrap_or_else(|_| "codex".into())
+                };
+                let mut arguments = vec![
+                    "--no-alt-screen".to_owned(),
+                    "-c".to_owned(),
+                    "tui.terminal_title=[\"run-state\"]".to_owned(),
+                    "-c".to_owned(),
+                    "tui.terminal_resize_reflow_max_rows=5000".to_owned(),
+                ];
+                if self.settings.allow_all_permissions {
+                    arguments.push("--dangerously-bypass-approvals-and-sandbox".into());
+                }
+                AgentCommand::new(program, arguments)
+            }
+            Some(AgentCli::Claude) => {
+                let executable = if remote {
+                    "claude".into()
+                } else {
+                    env::var("XD_CLAUDE_EXECUTABLE").unwrap_or_else(|_| "claude".into())
+                };
+                let mut arguments = vec!["-u".into(), "TMUX".into(), executable];
+                if self.settings.allow_all_permissions {
+                    arguments.push("--dangerously-skip-permissions".into());
+                }
+                AgentCommand::new("env", arguments)
+            }
+            None => AgentCommand::new(
+                if remote {
+                    "sh".into()
+                } else {
+                    env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+                },
+                ["-l"],
+            ),
+        }
+    }
+
     fn resize_terminal_viewport(&mut self, columns: usize, rows: usize, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.terminal_panel else {
             return;
@@ -5470,10 +5529,7 @@ impl XdDesktop {
         let terminal_id = panel.selected.clone();
         let should_auto_open = panel.should_auto_open();
         if geometry_changed && let Some(terminal_id) = terminal_id {
-            let result = self
-                .active_daemon()
-                .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
-                .and_then(|daemon| daemon.terminal_resize(&terminal_id, columns, rows));
+            let result = self.terminal_runtime.resize(&terminal_id, columns, rows);
             if let Err(error) = result
                 && let Some(panel) = &mut self.terminal_panel
             {
@@ -5496,8 +5552,7 @@ impl XdDesktop {
         else {
             return;
         };
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.terminal_input(&terminal_id, bytes)
+        if let Err(error) = self.terminal_runtime.input(&terminal_id, bytes)
             && let Some(panel) = &mut self.terminal_panel
         {
             panel.error = Some(error);
@@ -5570,8 +5625,7 @@ impl XdDesktop {
     }
 
     fn kill_terminal_id(&mut self, terminal_id: String, cx: &mut Context<Self>) {
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) = daemon.terminal_kill(&terminal_id)
+        if let Err(error) = self.terminal_runtime.kill(&terminal_id)
             && let Some(panel) = &mut self.terminal_panel
         {
             panel.error = Some(error);
@@ -5622,33 +5676,42 @@ impl XdDesktop {
         }
         let (columns, rows) = panel.viewport.unwrap_or((120, 32));
         let chat_id = panel.chat_id.clone();
-        let terminal_colors = self.settings.theme.colors();
         panel.auto_open = false;
         panel.opening = true;
         panel.opening_agent = agent;
         panel.error = None;
-        let result = self
-            .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
-            .and_then(|daemon| match agent {
-                Some(agent) => daemon.terminal_open_agent(
+        let terminal_id = if reuse {
+            format!(
+                "{chat_id}:{}",
+                agent.map(AgentCli::protocol_name).unwrap_or("terminal")
+            )
+        } else {
+            format!(
+                "{chat_id}:{}:{}",
+                agent.map(AgentCli::protocol_name).unwrap_or("terminal"),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )
+        };
+        let title = terminal_tab_title(agent);
+        let workdir = self.model.workdir.clone();
+        let result = workdir
+            .ok_or_else(|| "The session working directory is still loading.".to_owned())
+            .and_then(|workdir| {
+                let host = self.active_session_host()?;
+                let command = self.terminal_agent_command(agent);
+                let process = host.attach(&terminal_id, Path::new(&workdir), &command);
+                self.terminal_runtime.open(
                     &chat_id,
+                    &terminal_id,
+                    &title,
+                    agent.map(AgentCli::protocol_name),
+                    process,
                     columns,
                     rows,
-                    reuse,
-                    agent.protocol_name(),
-                    self.settings.allow_all_permissions,
-                    terminal_colors.text,
-                    terminal_colors.surface,
-                ),
-                None => daemon.terminal_open(
-                    &chat_id,
-                    columns,
-                    rows,
-                    reuse,
-                    terminal_colors.text,
-                    terminal_colors.surface,
-                ),
+                )
             });
         if let Err(error) = result
             && let Some(panel) = &mut self.terminal_panel
@@ -5659,9 +5722,8 @@ impl XdDesktop {
         cx.notify();
     }
 
-    /// Reloads daemon-owned terminal sessions without closing the pane. This
-    /// runs both when the pane is restored and when its connection returns, so
-    /// a stale disconnect error cannot strand an otherwise live terminal.
+    /// Reattaches the selected card to its persistent tmux session. The PTY is
+    /// window-owned, while the command remains alive in tmux between windows.
     fn refresh_terminal_sessions(&mut self, cx: &mut Context<Self>) {
         let Some(chat_id) = self
             .terminal_panel
@@ -5671,20 +5733,15 @@ impl XdDesktop {
         else {
             return;
         };
+        if self.model.workdir.is_none() {
+            self.request_chat(&chat_id);
+            return;
+        }
         if let Some(panel) = &mut self.terminal_panel {
-            panel.begin_refresh();
-        }
-        let result = self
-            .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
-            .and_then(|daemon| daemon.terminal_list(&chat_id));
-        if let Err(error) = result
-            && let Some(panel) = &mut self.terminal_panel
-        {
             panel.loading = false;
-            panel.error = Some(error);
+            panel.error = None;
         }
-        cx.notify();
+        self.start_terminal_session(true, cx);
     }
 
     fn select_terminal(&mut self, terminal_id: String, cx: &mut Context<Self>) {
@@ -5707,8 +5764,7 @@ impl XdDesktop {
             && let Some(session) = panel.selected_mut()
         {
             session.screen.resize(columns, rows);
-            if let Some(daemon) = self.active_daemon().cloned()
-                && let Err(error) = daemon.terminal_resize(&terminal_id, columns, rows)
+            if let Err(error) = self.terminal_runtime.resize(&terminal_id, columns, rows)
                 && let Some(panel) = &mut self.terminal_panel
             {
                 panel.error = Some(error);
@@ -7836,7 +7892,6 @@ impl XdDesktop {
         };
         let connected = self.model.connected;
         let remote_active = self.active_endpoint == ChatEndpoint::Remote;
-        let remote_saved = self.remote_credentials.is_some();
         let runtime_label = if remote_active { "Remote" } else { "Local" };
 
         div()
@@ -8014,8 +8069,6 @@ impl XdDesktop {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if remote_active {
                                     this.disconnect_remote_runtime(cx);
-                                } else if remote_saved {
-                                    this.activate_remote_runtime(cx);
                                 } else {
                                     this.open_remote(window, cx);
                                 }
@@ -9294,11 +9347,8 @@ impl XdDesktop {
                 .into_any_element()
         });
         let remote_overlay = self.remote_panel.clone().map(|panel| {
-            let can_pair = !panel.submitting
-                && !panel.host.trim().is_empty()
-                && !panel.port.trim().is_empty()
-                && !panel.code.trim().is_empty()
-                && !panel.name.trim().is_empty();
+            let can_connect =
+                !panel.submitting && SshCommand::parse(panel.command.trim()).is_ok();
             div()
                 .occlude()
                 .absolute()
@@ -9324,14 +9374,16 @@ impl XdDesktop {
                                 .text_lg()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
-                                .child("Connect to a remote daemon"),
+                                .child("Connect over SSH"),
                         )
                         .child(
                             div()
                                 .mb_2()
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
-                                .child("This replaces the local runtime until you disconnect."),
+                                .child(
+                                    "Enter the SSH command you normally use. This replaces the local runtime until you disconnect.",
+                                ),
                         )
                         .child(
                             div()
@@ -9343,43 +9395,7 @@ impl XdDesktop {
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.background))
-                                .child(self.remote_host_input.clone()),
-                        )
-                        .child(
-                            div()
-                                .h(px(42.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .bg(rgb(colors.background))
-                                .child(self.remote_port_input.clone()),
-                        )
-                        .child(
-                            div()
-                                .h(px(42.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .bg(rgb(colors.background))
-                                .child(self.remote_code_input.clone()),
-                        )
-                        .child(
-                            div()
-                                .h(px(42.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded_lg()
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .bg(rgb(colors.background))
-                                .child(self.remote_name_input.clone()),
+                                .child(self.remote_ssh_input.clone()),
                         )
                         .when_some(panel.error.clone(), |card, error| {
                             card.child(div().text_sm().text_color(rgb(0xd86f7c)).child(error))
@@ -9411,26 +9427,26 @@ impl XdDesktop {
                                         .px_4()
                                         .py_2()
                                         .rounded_lg()
-                                        .bg(rgb(if can_pair {
+                                        .bg(rgb(if can_connect {
                                             colors.accent
                                         } else {
                                             colors.surface_high
                                         }))
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(if can_pair {
+                                        .text_color(rgb(if can_connect {
                                             colors.accent_text
                                         } else {
                                             colors.muted
                                         }))
-                                        .when(can_pair, |button| {
+                                        .when(can_connect, |button| {
                                             button
                                                 .cursor_pointer()
                                                 .hover(|style| style.bg(rgb(colors.accent_hover)))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_pair {
-                                                this.pair_remote_machine(cx);
+                                            if can_connect {
+                                                this.connect_remote_machine(cx);
                                             }
                                         }))
                                         .child(if panel.submitting {
@@ -11200,9 +11216,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_setup_is_one_persisted_ssh_command_without_pairing_fields() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let overlay = production
+            .split_once("let remote_overlay =")
+            .expect("remote overlay")
+            .1
+            .split_once("let workspace_overlay =")
+            .expect("end of remote overlay")
+            .0;
+
+        assert!(overlay.contains("Connect over SSH"));
+        assert!(overlay.contains("self.remote_ssh_input.clone()"));
+        assert!(!overlay.contains("Pairing code"));
+        assert!(!overlay.contains("remote_port_input"));
+        assert!(production.contains("settings.remote_ssh_command = Some"));
+    }
+
     #[gpui::test]
     fn minimal_popup_focus_is_taken_and_restored(cx: &mut gpui::TestAppContext) {
-        let (desktop, mut cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             let terminal_focus = desktop.terminal_input.read(cx).focus_handle(cx);
             window.focus(&terminal_focus);
@@ -11415,41 +11453,6 @@ mod tests {
             assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
             assert_eq!(desktop.model.selected_chat, None);
             assert_eq!(desktop.inactive_model.chats[0].id, "remote-chat");
-        });
-    }
-
-    #[gpui::test]
-    fn revoked_active_remote_falls_back_to_local_without_forgetting_the_error(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
-        desktop.update(cx, |desktop, cx| {
-            let credentials =
-                RemoteCredentials::new("dev.example", 4001, "token", "a".repeat(64)).unwrap();
-            let credentials_path = std::env::temp_dir().join(format!(
-                "xd-revoked-remote-{}-{}.json",
-                std::process::id(),
-                desktop.remote_generation
-            ));
-            desktop.active_endpoint = ChatEndpoint::Remote;
-            desktop.settings.active_connection = Some("remote/dev.example:4001".into());
-            desktop.remote_credentials = Some(credentials);
-            desktop.remote_credentials_file = Some(CredentialsFile::new(credentials_path));
-            desktop.remote_state = RemoteState::Connected;
-
-            desktop.remote_connection_failed(
-                RemoteError::Authentication("Unknown device. Pair first.".into()),
-                cx,
-            );
-
-            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
-            assert_eq!(desktop.settings.active_connection.as_deref(), Some("local"));
-            assert!(desktop.remote_credentials.is_none());
-            assert_eq!(desktop.remote_state, RemoteState::Unconfigured);
-            assert_eq!(
-                desktop.remote_error.as_deref(),
-                Some("This machine revoked the saved device. Pair again.")
-            );
         });
     }
 
@@ -11894,12 +11897,6 @@ mod tests {
             pending_events: Vec::new(),
             error: Some("Terminal disconnected.".into()),
         };
-        panel.opening = true;
-        panel.begin_refresh();
-        assert!(panel.loading);
-        assert!(!panel.opening);
-        assert!(panel.error.is_none());
-
         panel.remove("terminal-one");
         assert_eq!(panel.selected.as_deref(), Some("terminal-two"));
         assert_eq!(
@@ -12738,8 +12735,7 @@ mod tests {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, _| {
             desktop.active_endpoint = ChatEndpoint::Remote;
-            desktop.remote_credentials =
-                Some(RemoteCredentials::new("dev.example", 4001, "token", "a".repeat(64)).unwrap());
+            desktop.settings.remote_ssh_command = Some("ssh dev.example -p 22".into());
             desktop.collapsed_folders = HashSet::from(["folder-remote".into()]);
 
             desktop.persist_collapsed_folders();
@@ -12748,7 +12744,7 @@ mod tests {
                 desktop
                     .settings
                     .collapsed_folder_sets
-                    .get("remote/dev.example:4001"),
+                    .get("remote/dev.example"),
                 Some(&vec!["folder-remote".to_owned()])
             );
 
@@ -12756,7 +12752,7 @@ mod tests {
             assert_eq!(desktop.cached_last_chat().as_deref(), Some("chat-remote"));
 
             desktop.settings.collapsed_folder_sets.insert(
-                "remote/dev.example:4001".into(),
+                "remote/dev.example".into(),
                 vec!["folder-remote".into(), "folder-deleted-on-server".into()],
             );
             desktop.restore_collapsed_folders();
@@ -12777,7 +12773,7 @@ mod tests {
                 desktop
                     .settings
                     .collapsed_folder_sets
-                    .get("remote/dev.example:4001"),
+                    .get("remote/dev.example"),
                 Some(&vec!["folder-remote".to_owned()]),
                 "an authoritative tree can prune stale cached folder ids"
             );

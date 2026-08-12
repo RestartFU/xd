@@ -89,6 +89,7 @@ mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
   "$OUT/libexec/xd-daemon" \
   "$OUT/libexec/xd-tls-proxy" \
+  "$OUT/libexec/tmux" \
   "$OUT/libexec/claude-bin" \
   "$OUT/libexec/claude-code-proxy" \
   "$OUT/libexec/curl-bin" \

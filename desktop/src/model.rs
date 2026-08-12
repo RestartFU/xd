@@ -248,6 +248,7 @@ pub struct AppModel {
     pub context_used: u64,
     pub context_window: u64,
     pub auth_state: String,
+    pub workdir: Option<String>,
     pub commands: Vec<String>,
     pub global_shortcuts: Vec<String>,
     pub workspace_shortcuts: Vec<String>,
@@ -361,6 +362,7 @@ impl AppModel {
             self.context_used = 0;
             self.context_window = 0;
             self.auth_state.clear();
+            self.workdir = None;
             self.commands.clear();
             self.global_shortcuts.clear();
             self.workspace_shortcuts.clear();
@@ -395,6 +397,7 @@ impl AppModel {
         self.context_used = 0;
         self.context_window = 0;
         self.auth_state.clear();
+        self.workdir = None;
         self.commands.clear();
         self.global_shortcuts.clear();
         self.workspace_shortcuts.clear();
@@ -457,6 +460,11 @@ impl AppModel {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
+        self.workdir = body
+            .get("workdir")
+            .and_then(Value::as_str)
+            .filter(|workdir| !workdir.is_empty())
+            .map(str::to_owned);
         if let Some(commands) = body.get("commands").and_then(Value::as_array) {
             self.commands = string_array(commands);
         }
@@ -901,6 +909,7 @@ impl AppModel {
             context_used: 16_948,
             context_window: 272_000,
             auth_state: "signed-in".into(),
+            workdir: None,
             commands: vec!["review".into(), "compact".into()],
             global_shortcuts: Vec::new(),
             workspace_shortcuts: Vec::new(),

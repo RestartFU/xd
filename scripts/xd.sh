@@ -138,6 +138,8 @@ export PATH="$HERE/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 # helper here so neither process can accidentally select a stale host install.
 export XD_DAEMON_EXECUTABLE="$HERE/libexec/xd-daemon"
 export XD_TLS_PROXY_EXECUTABLE="$HERE/libexec/xd-tls-proxy"
+export XD_TMUX_EXECUTABLE="$HERE/libexec/tmux"
+export XD_SESSION_RUNTIME="$RUNTIME/sessions"
 export XD_CODEX_EXECUTABLE="$HERE/libexec/codex-package/bin/codex"
 export XD_CLAUDE_EXECUTABLE="$HERE/libexec/claude"
 export XD_CLAUDE_PROXY_EXECUTABLE="$HERE/libexec/claude-code-proxy"

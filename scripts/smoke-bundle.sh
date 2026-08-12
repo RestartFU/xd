@@ -36,6 +36,7 @@ require_file \
   share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
 require_file libexec/xd-daemon
 require_file libexec/xd-tls-proxy
+require_file libexec/tmux
 require_file libexec/install.sh
 require_file libexec/curl
 require_file libexec/openssl
@@ -132,6 +133,10 @@ env -i \
 "$BUNDLE/lib/ld-linux-x86-64.so.2" \
   --library-path "$BUNDLE/lib" \
   "$BUNDLE/libexec/xd-daemon" --version | grep -E '^xd-daemon [0-9]'
+
+"$BUNDLE/lib/ld-linux-x86-64.so.2" \
+  --library-path "$BUNDLE/lib" \
+  "$BUNDLE/libexec/tmux" -V | grep -E '^tmux [0-9]'
 
 git_clean()
 {
