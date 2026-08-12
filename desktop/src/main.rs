@@ -5731,6 +5731,18 @@ impl XdDesktop {
             return;
         };
         if self.model.workdir.is_none() {
+            // The tree primes an empty panel for every session before its full
+            // chat snapshot (including workdir) has been fetched. Restoring
+            // one of those panels must remain in the loading state so the
+            // viewport cannot turn this normal dependency into a terminal
+            // startup error while the chat request is in flight. A panel that
+            // already has a live terminal can remain usable during hydration.
+            if let Some(panel) = &mut self.terminal_panel
+                && panel.sessions.is_empty()
+            {
+                panel.loading = true;
+                panel.error = None;
+            }
             self.request_chat(&chat_id);
             return;
         }
@@ -7296,10 +7308,13 @@ impl XdDesktop {
             }
             self.sync_terminal_input_mode(cx);
             self.terminal_scroll.scroll_to_bottom();
-            if !restored {
-                self.refresh_terminal_sessions(cx);
-            }
         }
+        // Tree hydration pre-creates empty cached panels, so both a new panel
+        // and a restored panel need the selected chat snapshot before their
+        // terminal can use its working directory. Re-running this for an
+        // already selected panel also makes clicking a loading card retry the
+        // request instead of leaving it stuck forever.
+        self.refresh_terminal_sessions(cx);
         cx.notify();
     }
 
@@ -11315,6 +11330,51 @@ mod tests {
             assert_eq!(panel.selected.as_deref(), Some("terminal-a"));
             assert_eq!(panel.sessions[0].sequence, Some(7));
             assert_eq!(panel.sessions[0].screen.rendered().text, "cached output");
+            desktop.terminal_panel = None;
+            desktop.terminal_panel_cache.clear();
+        });
+    }
+
+    #[gpui::test]
+    fn selecting_a_tree_primed_session_waits_for_its_workdir(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat".into(),
+                folder: "project".into(),
+                title: Some("Session".into()),
+                backend: "codex".into(),
+                branch: None,
+                working: false,
+                terminal_working: false,
+            }];
+
+            // Tree loading primes an empty, non-loading panel before the chat
+            // response carrying workdir has been requested.
+            desktop.prime_terminal_cache(desktop.active_endpoint);
+            assert!(
+                !desktop
+                    .terminal_panel_cache
+                    .get(&(desktop.active_endpoint, "chat".into()))
+                    .unwrap()
+                    .loading
+            );
+
+            desktop.select_minimal_session("project".into(), "chat".into(), AgentCli::Codex, cx);
+
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            assert!(panel.loading);
+            assert_eq!(panel.error, None);
+            assert!(panel.sessions.is_empty());
+
+            // Clicking the same card retries hydration and clears the stale
+            // error produced by older builds instead of preserving it.
+            panel.loading = false;
+            panel.error = Some("The session working directory is still loading.".into());
+            desktop.select_minimal_session("project".into(), "chat".into(), AgentCli::Codex, cx);
+            let panel = desktop.terminal_panel.as_ref().unwrap();
+            assert!(panel.loading);
+            assert_eq!(panel.error, None);
             desktop.terminal_panel = None;
             desktop.terminal_panel_cache.clear();
         });
