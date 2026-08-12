@@ -7872,6 +7872,7 @@ impl XdDesktop {
                 let emphasized = selected || session.working;
                 let project_id = project.id.clone();
                 let chat_id = session.id.clone();
+                let delete_chat_id = session.id.clone();
                 let agent = session.agent;
                 let status_color = if session.working {
                     colors.accent_ink
@@ -7949,13 +7950,42 @@ impl XdDesktop {
                         }))
                         .child(
                             div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_base()
-                                .line_height(px(22.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(colors.text))
-                                .child(session.title),
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .text_base()
+                                        .line_height(px(22.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(colors.text))
+                                        .child(session.title),
+                                )
+                                .child(
+                                    div()
+                                        .id(("minimal-delete-session", instance))
+                                        .size(px(26.0))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_md()
+                                        .text_color(rgb(colors.muted))
+                                        .hover(|style| {
+                                            style.bg(rgb(0x5a252b)).text_color(rgb(0xd86f7c))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.begin_sidebar_delete(
+                                                SidebarTarget::Chat(delete_chat_id.clone()),
+                                                cx,
+                                            );
+                                        }))
+                                        .child(svg().path(TRASH_ICON).size(px(15.0))),
+                                ),
                         )
                         .child(
                             div()
@@ -8197,6 +8227,7 @@ impl XdDesktop {
             .map(|(index, session)| {
                 let project_id = selected_project_id.clone().unwrap_or_default();
                 let chat_id = session.id.clone();
+                let delete_chat_id = session.id.clone();
                 let agent = session.agent;
                 let icon = match agent {
                     AgentCli::Codex => CODEX_ICON,
@@ -8269,6 +8300,26 @@ impl XdDesktop {
                     .when(session.working, |row| {
                         row.child(working_dots(index + projects.len(), colors.accent))
                     })
+                    .child(
+                        div()
+                            .id(("minimal-delete-session", index))
+                            .size(px(32.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .text_color(rgb(colors.muted))
+                            .hover(|style| style.bg(rgb(0x5a252b)).text_color(rgb(0xd86f7c)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.begin_sidebar_delete(
+                                    SidebarTarget::Chat(delete_chat_id.clone()),
+                                    cx,
+                                );
+                            }))
+                            .child(svg().path(TRASH_ICON).size(px(16.0))),
+                    )
                     .child(div().text_lg().text_color(rgb(colors.muted)).child("›"))
             })
             .collect::<Vec<_>>();
@@ -9192,6 +9243,115 @@ impl XdDesktop {
                                             }),
                                     ),
                             ),
+                )
+                .into_any_element(),
+            )
+        });
+        let chat_delete_overlay = self.pending_sidebar_delete.clone().and_then(|target| {
+            let SidebarTarget::Chat(chat_id) = target else {
+                return None;
+            };
+            let session_name = self
+                .model
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .and_then(|chat| chat.title.as_deref())
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("New Session")
+                .to_owned();
+            let submitting = self.sidebar_delete_submitting;
+            Some(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(0x00000099))
+                    .child(
+                        div()
+                            .w(px(450.0))
+                            .p_5()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .rounded_xl()
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .bg(rgb(colors.surface))
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(colors.text))
+                                    .child("Delete session?"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(colors.muted))
+                                    .child(format!(
+                                        "This permanently removes {session_name} and its conversation from xd. Project files are not deleted."
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .mt_2()
+                                    .flex()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .id("minimal-cancel-session-delete")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .text_sm()
+                                            .text_color(rgb(colors.muted))
+                                            .when(!submitting, |button| {
+                                                button.cursor_pointer().hover(|style| {
+                                                    style.bg(rgb(colors.surface_high))
+                                                })
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.cancel_sidebar_delete(cx)
+                                            }))
+                                            .child("Cancel"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("minimal-confirm-session-delete")
+                                            .px_4()
+                                            .py_2()
+                                            .rounded_lg()
+                                            .bg(rgb(if submitting {
+                                                colors.surface_high
+                                            } else {
+                                                0x9f3544
+                                            }))
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(if submitting {
+                                                colors.muted
+                                            } else {
+                                                0xffffff
+                                            }))
+                                            .when(!submitting, |button| {
+                                                button
+                                                    .cursor_pointer()
+                                                    .hover(|style| style.bg(rgb(0xb84252)))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.confirm_sidebar_delete(cx)
+                                            }))
+                                            .child(if submitting {
+                                                "Deleting…"
+                                            } else {
+                                                "Delete session"
+                                            }),
+                                    ),
+                            ),
                     )
                     .into_any_element(),
             )
@@ -9559,6 +9719,7 @@ impl XdDesktop {
             .when_some(workspace_delete_overlay, |root, overlay| {
                 root.child(overlay)
             })
+            .when_some(chat_delete_overlay, |root, overlay| root.child(overlay))
             .when_some(chat_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
             .child(
@@ -11369,6 +11530,55 @@ mod tests {
             "minimal-confirm-project-delete",
             "this.confirm_sidebar_delete(cx)",
             ".when_some(workspace_delete_overlay",
+        ] {
+            assert!(root.contains(behavior), "missing {behavior}");
+        }
+    }
+
+    #[test]
+    fn minimal_sessions_expose_confirmed_delete_flow() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let board = production
+            .split_once("fn render_minimal_session_board(")
+            .expect("shared session board")
+            .1
+            .split_once("fn render_minimal_home(")
+            .expect("end of shared session board")
+            .0;
+        let home = production
+            .split_once("fn render_minimal_home(")
+            .expect("minimal home renderer")
+            .1
+            .split_once("fn render_minimal_cli(")
+            .expect("end of minimal home renderer")
+            .0;
+        for surface in [board, home] {
+            for behavior in [
+                "minimal-delete-session",
+                "this.begin_sidebar_delete(",
+                "SidebarTarget::Chat",
+                "cx.stop_propagation()",
+                "svg().path(TRASH_ICON)",
+            ] {
+                assert!(surface.contains(behavior), "missing {behavior}");
+            }
+        }
+
+        let root = production
+            .split_once("fn render_minimal(")
+            .expect("minimal root renderer")
+            .1;
+        for behavior in [
+            "let chat_delete_overlay =",
+            ".child(\"Delete session?\")",
+            "minimal-cancel-session-delete",
+            "minimal-confirm-session-delete",
+            "this.confirm_sidebar_delete(cx)",
+            ".when_some(chat_delete_overlay",
         ] {
             assert!(root.contains(behavior), "missing {behavior}");
         }
