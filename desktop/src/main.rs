@@ -11359,6 +11359,9 @@ mod tests {
     #[test]
     fn terminal_copy_paste_and_interrupt_shortcuts_follow_shell_conventions() {
         let bindings = include_str!("main.rs");
+        assert!(bindings.contains(
+            "KeyBinding::new(\"shift-enter\", TerminalControlJ, Some(\"TerminalInput\"))"
+        ));
         assert!(
             bindings.contains("KeyBinding::new(\"ctrl-c\", Interrupt, Some(\"TerminalInput\"))")
         );
@@ -11799,6 +11802,7 @@ fn main() {
                 KeyBinding::new("pagedown", TerminalPageDown, Some("TerminalInput")),
                 KeyBinding::new("home", Home, Some("TerminalInput")),
                 KeyBinding::new("end", End, Some("TerminalInput")),
+                KeyBinding::new("shift-enter", TerminalControlJ, Some("TerminalInput")),
                 KeyBinding::new("enter", Submit, Some("TerminalInput")),
                 KeyBinding::new("tab", Tab, Some("TerminalInput")),
                 KeyBinding::new("shift-tab", TerminalShiftTab, Some("TerminalInput")),
