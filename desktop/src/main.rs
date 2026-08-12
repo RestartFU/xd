@@ -3701,7 +3701,11 @@ impl XdDesktop {
                 if let Some(panel) = &mut self.terminal_panel {
                     panel.selected = value.get("id").and_then(Value::as_str).map(str::to_owned);
                     panel.finish_opening();
-                    panel.loading = true;
+                    // The terminal is live as soon as open returns. Keep it
+                    // interactive while terminal-list hydrates scrollback;
+                    // loading here both lied with "Starting CLI" and disabled
+                    // input for the duration of a remote replay transfer.
+                    panel.loading = false;
                     resize = panel
                         .selected
                         .clone()

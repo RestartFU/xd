@@ -576,10 +576,11 @@ impl TerminalSession {
     }
 
     fn snapshot(&self) -> Option<Value> {
-        let state = self.state.lock().ok()?;
+        let mut state = self.state.lock().ok()?;
         if state.closing {
             return None;
         }
+        state.compact_for_transfer();
         let replay = state
             .replay
             .iter()

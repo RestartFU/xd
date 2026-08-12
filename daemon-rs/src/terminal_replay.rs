@@ -4,6 +4,12 @@ use xd_terminal::TerminalScreen;
 
 pub(crate) const HISTORY_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const REPLAY_ITEM_LIMIT: usize = 65_536;
+// A terminal may retain substantially more history in the daemon than should
+// be sent in one protocol reply. Requests and keystrokes share a connection;
+// multi-megabyte terminal-list replies otherwise make a remote CLI appear
+// frozen until all of its scrollback has crossed the network.
+const TRANSFER_LIMIT: usize = 1024 * 1024;
+const TRANSFER_ITEM_LIMIT: usize = 4_096;
 
 pub(crate) fn pasted_text_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     if !bracketed {
@@ -57,6 +63,15 @@ impl TerminalState {
 
     pub(crate) fn bracketed_paste(&self) -> bool {
         self.screen.bracketed_paste()
+    }
+
+    pub(crate) fn compact_for_transfer(&mut self) {
+        if self.replay_bytes > TRANSFER_LIMIT || self.replay.len() > TRANSFER_ITEM_LIMIT {
+            // A pathological viewport can itself exceed the transfer budget.
+            // In that case preserve the reconstructable replay; ordinary CLI
+            // geometries compact to a checkpoint plus a small ANSI fallback.
+            let _ = self.compact_replay(TRANSFER_LIMIT, TRANSFER_ITEM_LIMIT);
+        }
     }
 
     fn compact_replay(&mut self, byte_limit: usize, item_limit: usize) -> bool {
@@ -273,5 +288,26 @@ mod tests {
             RecordOutcome::Closing
         );
         assert_eq!(state.sequence, 0);
+    }
+
+    #[test]
+    fn transfer_compaction_bounds_busy_cli_replies() {
+        let mut state = TerminalState::new(120, 32);
+        for _ in 0..2_000 {
+            assert!(matches!(
+                state.record_output_bounded(vec![b'x'; 1024], HISTORY_LIMIT, REPLAY_ITEM_LIMIT),
+                RecordOutcome::Accepted(_)
+            ));
+        }
+        assert!(state.replay_bytes > TRANSFER_LIMIT);
+
+        state.compact_for_transfer();
+
+        assert!(state.replay_bytes <= TRANSFER_LIMIT);
+        assert!(state.replay.len() <= TRANSFER_ITEM_LIMIT);
+        assert!(matches!(
+            state.replay.back(),
+            Some(ReplayFrame::Checkpoint { .. })
+        ));
     }
 }
