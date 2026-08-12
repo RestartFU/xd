@@ -45,6 +45,9 @@ pub(crate) enum MinimalRoute {
     Projects {
         project_id: Option<String>,
     },
+    Sessions {
+        project_id: Option<String>,
+    },
     Cli {
         project_id: String,
         chat_id: String,
@@ -146,6 +149,12 @@ pub(crate) fn reconcile_route(
                 .filter(|project_id| folders.iter().any(|folder| &folder.id == *project_id))
                 .cloned(),
         },
+        MinimalRoute::Sessions { project_id } => MinimalRoute::Sessions {
+            project_id: project_id
+                .as_ref()
+                .filter(|project_id| folders.iter().any(|folder| &folder.id == *project_id))
+                .cloned(),
+        },
         MinimalRoute::Cli {
             project_id,
             chat_id,
@@ -158,12 +167,22 @@ pub(crate) fn reconcile_route(
                 .iter()
                 .find(|chat| chat.id == *chat_id && chat.folder == *project_id)
             else {
-                return MinimalRoute::Projects {
+                if let Some(chat) = chats.iter().find(|chat| {
+                    chat.folder == *project_id && AgentCli::from_backend(&chat.backend).is_some()
+                }) {
+                    return MinimalRoute::Cli {
+                        project_id: project_id.clone(),
+                        chat_id: chat.id.clone(),
+                        agent: AgentCli::from_backend(&chat.backend)
+                            .expect("a supported session has a CLI"),
+                    };
+                }
+                return MinimalRoute::Sessions {
                     project_id: Some(project_id.clone()),
                 };
             };
             let Some(agent) = AgentCli::from_backend(&chat.backend) else {
-                return MinimalRoute::Projects {
+                return MinimalRoute::Sessions {
                     project_id: Some(project_id.clone()),
                 };
             };
@@ -331,10 +350,21 @@ mod tests {
             }
         );
 
+        chats.push(session("b", "one", "Other session", "codex", false));
+        chats.remove(0);
+        assert_eq!(
+            reconcile_route(&route, &folders, &chats),
+            MinimalRoute::Cli {
+                project_id: "one".into(),
+                chat_id: "b".into(),
+                agent: AgentCli::Codex,
+            }
+        );
+
         chats.clear();
         assert_eq!(
             reconcile_route(&route, &folders, &chats),
-            MinimalRoute::Projects {
+            MinimalRoute::Sessions {
                 project_id: Some("one".into()),
             }
         );

@@ -33,10 +33,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     Animation, AnimationExt, App, Application, AssetSource, Bounds, ClipboardItem, Context,
     CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    KeyBinding, ListAlignment, ListState, MouseButton, Render, ResizeEdge, ScrollHandle,
-    SharedString, StyledText, TextRun, Timer, TitlebarOptions, WeakFocusHandle, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowOptions,
-    canvas, div, point, prelude::*, px, rgb, rgba, size, svg,
+    KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    ResizeEdge, ScrollHandle, SharedString, StyledText, TextRun, Timer, TitlebarOptions,
+    WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px, rgb, rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -778,6 +778,13 @@ struct SidebarEdit {
 }
 
 #[derive(Clone)]
+struct SessionContextMenu {
+    chat_id: String,
+    title: String,
+    position: Point<Pixels>,
+}
+
+#[derive(Clone)]
 struct WorkspaceDefaults {
     folder_id: String,
     workdir: String,
@@ -939,6 +946,7 @@ struct XdDesktop {
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
+    session_context_menu: Option<SessionContextMenu>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -1389,6 +1397,7 @@ impl XdDesktop {
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
+            session_context_menu: None,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -1722,6 +1731,7 @@ impl XdDesktop {
         self.diff_panel = None;
         self.sync_terminal_input_mode(cx);
         self.sidebar_edit = None;
+        self.session_context_menu = None;
         self.pending_sidebar_delete = None;
         self.sidebar_move = None;
         self.creating_workspace = false;
@@ -4466,6 +4476,7 @@ impl XdDesktop {
             || self.remote_panel.is_some()
             || self.creating_workspace
             || self.sidebar_edit.is_some()
+            || self.session_context_menu.is_some()
             || self.pending_sidebar_delete.is_some()
             || self.creating_chat_folder.is_some()
     }
@@ -6315,6 +6326,7 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.session_context_menu = None;
         self.pending_sidebar_delete = None;
         self.sidebar_delete_submitting = false;
         self.sidebar_move = None;
@@ -6339,6 +6351,7 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.session_context_menu = None;
         self.sidebar_edit = None;
         self.sidebar_move = None;
         self.sidebar_move_submitting = false;
@@ -6346,6 +6359,32 @@ impl XdDesktop {
         self.pending_sidebar_delete = Some(target);
         self.sidebar_delete_submitting = false;
         self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        cx.notify();
+    }
+
+    fn open_session_context_menu(
+        &mut self,
+        chat_id: String,
+        title: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = window.bounds().size;
+        let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 196.0).max(8.0));
+        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 112.0).max(8.0));
+        self.session_context_menu = Some(SessionContextMenu {
+            chat_id,
+            title,
+            position: point(px(x), px(y)),
+        });
+        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        cx.notify();
+    }
+
+    fn close_session_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.session_context_menu = None;
+        self.restore_minimal_popup_focus(window);
         cx.notify();
     }
 
@@ -7120,6 +7159,7 @@ impl XdDesktop {
     fn show_minimal_projects(&mut self, cx: &mut Context<Self>) {
         let project_id = match &self.minimal_route {
             MinimalRoute::Projects { project_id } => project_id.clone(),
+            MinimalRoute::Sessions { project_id } => project_id.clone(),
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
         };
         self.minimal_route = MinimalRoute::Projects { project_id };
@@ -7131,13 +7171,27 @@ impl XdDesktop {
     }
 
     fn show_minimal_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let last_chat = self.cached_last_chat();
-        let Some((project_id, chat_id, agent)) =
-            resumable_session(last_chat.as_deref(), &self.model.chats)
-        else {
-            return;
+        let requested_project_id = match &self.minimal_route {
+            MinimalRoute::Projects { project_id } | MinimalRoute::Sessions { project_id } => {
+                project_id.clone()
+            }
+            MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
         };
-        self.open_minimal_session(project_id, chat_id, agent, window, cx);
+        let last_chat = self.cached_last_chat();
+        if let Some((project_id, chat_id, agent)) =
+            resumable_session(last_chat.as_deref(), &self.model.chats)
+        {
+            self.open_minimal_session(project_id, chat_id, agent, window, cx);
+            return;
+        }
+        self.minimal_route = MinimalRoute::Sessions {
+            project_id: requested_project_id
+                .or_else(|| self.model.folders.first().map(|folder| folder.id.clone())),
+        };
+        self.stash_terminal_panel();
+        self.model.selected_chat = None;
+        self.sync_terminal_input_mode(cx);
+        cx.notify();
     }
 
     fn open_minimal_session(
@@ -7220,6 +7274,14 @@ impl XdDesktop {
                 chat_id,
                 agent,
             } => self.select_minimal_session(project_id, chat_id, agent, cx),
+            MinimalRoute::Sessions { .. } => {
+                self.minimal_route = next;
+                self.minimal_new_tab_open = false;
+                self.stash_terminal_panel();
+                self.model.selected_chat = None;
+                self.sync_terminal_input_mode(cx);
+                cx.notify();
+            }
             MinimalRoute::Projects { .. } => {
                 self.minimal_route = next;
                 self.minimal_new_tab_open = false;
@@ -7763,9 +7825,13 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let projects_active = matches!(self.minimal_route, MinimalRoute::Projects { .. });
-        let sessions_active = matches!(self.minimal_route, MinimalRoute::Cli { .. });
+        let sessions_active = matches!(
+            self.minimal_route,
+            MinimalRoute::Sessions { .. } | MinimalRoute::Cli { .. }
+        );
         let create_session_for = match &self.minimal_route {
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
+            MinimalRoute::Sessions { project_id } => project_id.clone(),
             MinimalRoute::Projects { .. } => None,
         };
         let connected = self.model.connected;
@@ -8006,6 +8072,7 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let (project_id, route_agent, cli_active) = match &self.minimal_route {
             MinimalRoute::Projects { project_id } => (project_id.clone(), None, false),
+            MinimalRoute::Sessions { project_id } => (project_id.clone(), None, false),
             MinimalRoute::Cli {
                 project_id, agent, ..
             } => (Some(project_id.clone()), Some(*agent), true),
@@ -8196,7 +8263,8 @@ impl XdDesktop {
                 let emphasized = selected;
                 let project_id = project.id.clone();
                 let chat_id = session.id.clone();
-                let delete_chat_id = session.id.clone();
+                let context_chat_id = session.id.clone();
+                let context_title = session.title.clone();
                 let agent = session.agent;
                 let done = !session.working && self.model.unread_chats.contains(&session.id);
                 let status_color = if session.working {
@@ -8287,50 +8355,31 @@ impl XdDesktop {
                                 cx,
                             );
                         }))
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.open_session_context_menu(
+                                    context_chat_id.clone(),
+                                    context_title.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
                         .child(
-                            div()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .text_base()
-                                        .line_height(px(22.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(colors.text))
-                                        .child(session.title),
-                                )
-                                .child(
-                                    div()
-                                        .id(("minimal-delete-session", instance))
-                                        .size(px(26.0))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_md()
-                                        .text_color(rgb(colors.muted))
-                                        .hover(|style| {
-                                            style.bg(rgb(0x5a252b)).text_color(rgb(0xd86f7c))
-                                        })
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
-                                            this.begin_sidebar_delete(
-                                                SidebarTarget::Chat(delete_chat_id.clone()),
-                                                window,
-                                                cx,
-                                            );
-                                        }))
-                                        .child(
-                                            svg()
-                                                .path(TRASH_ICON)
-                                                .size(px(15.0))
-                                                .text_color(rgb(colors.muted)),
-                                        ),
-                                ),
+                            div().flex().items_start().gap_2().child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .text_base()
+                                    .line_height(px(22.0))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(colors.text))
+                                    .child(session.title),
+                            ),
                         )
                         .child(
                             div()
@@ -8474,6 +8523,7 @@ impl XdDesktop {
         let projects = project_cards(&self.model.folders, &self.model.chats);
         let requested_project_id = match &self.minimal_route {
             MinimalRoute::Projects { project_id } => project_id.as_ref(),
+            MinimalRoute::Sessions { project_id } => project_id.as_ref(),
             MinimalRoute::Cli { project_id, .. } => Some(project_id),
         };
         let selected_project_id = requested_project_id
@@ -8572,7 +8622,8 @@ impl XdDesktop {
             .map(|(index, session)| {
                 let project_id = selected_project_id.clone().unwrap_or_default();
                 let chat_id = session.id.clone();
-                let delete_chat_id = session.id.clone();
+                let context_chat_id = session.id.clone();
+                let context_title = session.title.clone();
                 let agent = session.agent;
                 let done = !session.working && self.model.unread_chats.contains(&session.id);
                 let icon = match agent {
@@ -8618,6 +8669,19 @@ impl XdDesktop {
                             cx,
                         );
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_session_context_menu(
+                                context_chat_id.clone(),
+                                context_title.clone(),
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
                     .child(
                         div()
                             .size(px(38.0))
@@ -8657,32 +8721,6 @@ impl XdDesktop {
                     .when(session.working, |row| {
                         row.child(working_dots(index + projects.len(), colors.accent))
                     })
-                    .child(
-                        div()
-                            .id(("minimal-delete-session", index))
-                            .size(px(32.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .text_color(rgb(colors.muted))
-                            .hover(|style| style.bg(rgb(0x5a252b)).text_color(rgb(0xd86f7c)))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.begin_sidebar_delete(
-                                    SidebarTarget::Chat(delete_chat_id.clone()),
-                                    window,
-                                    cx,
-                                );
-                            }))
-                            .child(
-                                svg()
-                                    .path(TRASH_ICON)
-                                    .size(px(16.0))
-                                    .text_color(rgb(colors.muted)),
-                            ),
-                    )
                     .child(div().text_lg().text_color(rgb(colors.muted)).child("›"))
             })
             .collect::<Vec<_>>();
@@ -8988,6 +9026,38 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    fn render_minimal_empty_sessions(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let toolbar = self.render_minimal_context_toolbar(colors, cx);
+        let board = self.render_minimal_session_board(colors, None, cx);
+
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(colors.background))
+            .child(toolbar)
+            .child(
+                div().flex_1().min_h_0().flex().child(board).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(rgb(colors.muted))
+                        .child("No session selected."),
+                ),
+            )
+            .into_any_element()
+    }
+
     fn render_minimal(
         &mut self,
         custom_titlebar: bool,
@@ -9001,6 +9071,7 @@ impl XdDesktop {
         let route = self.minimal_route.clone();
         let content = match route {
             MinimalRoute::Projects { .. } => self.render_minimal_home(colors, cx),
+            MinimalRoute::Sessions { .. } => self.render_minimal_empty_sessions(colors, cx),
             MinimalRoute::Cli {
                 project_id,
                 chat_id,
@@ -9012,6 +9083,82 @@ impl XdDesktop {
         } else {
             self.render_minimal_product_nav(colors, false, cx)
         };
+        let session_context_overlay = self.session_context_menu.clone().map(|menu| {
+            let rename_chat_id = menu.chat_id.clone();
+            let rename_title = menu.title.clone();
+            let delete_chat_id = menu.chat_id.clone();
+            div()
+                .occlude()
+                .absolute()
+                .inset_0()
+                .track_focus(&minimal_popup_focus)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_session_context_menu(window, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, window, cx| this.close_session_context_menu(window, cx)),
+                )
+                .child(
+                    div()
+                        .occlude()
+                        .absolute()
+                        .left(menu.position.x)
+                        .top(menu.position.y)
+                        .w(px(188.0))
+                        .p_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .bg(rgb(colors.surface))
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .id("minimal-rename-session")
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(colors.text))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.begin_sidebar_edit(
+                                        SidebarTarget::Chat(rename_chat_id.clone()),
+                                        rename_title.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                                .child("Rename session"),
+                        )
+                        .child(
+                            div()
+                                .id("minimal-delete-session")
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(0xd86f7c))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(0x5a252b)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.begin_sidebar_delete(
+                                        SidebarTarget::Chat(delete_chat_id.clone()),
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                                .child("Delete session"),
+                        ),
+                )
+                .into_any_element()
+        });
         let theme_overlay = self.minimal_theme_open.then(|| {
             let allow_all_permissions = self.settings.allow_all_permissions;
             let rows = ThemePreset::ALL
@@ -9427,10 +9574,19 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
-        let workspace_rename_overlay = self.sidebar_edit.clone().and_then(|edit| {
-            if !matches!(&edit.target, SidebarTarget::Folder(_)) {
-                return None;
-            }
+        let sidebar_rename_overlay = self.sidebar_edit.clone().and_then(|edit| {
+            let (heading, cancel_id, save_id) = match &edit.target {
+                SidebarTarget::Folder(_) => (
+                    "Rename project",
+                    "minimal-cancel-project-rename",
+                    "minimal-save-project-rename",
+                ),
+                SidebarTarget::Chat(_) => (
+                    "Rename session",
+                    "minimal-cancel-session-rename",
+                    "minimal-save-session-rename",
+                ),
+            };
             let name = edit.text.trim();
             let can_save = !edit.submitting && !name.is_empty() && name != edit.original;
             Some(
@@ -9459,7 +9615,7 @@ impl XdDesktop {
                                     .text_lg()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
-                                    .child("Rename project"),
+                                    .child(heading),
                             )
                             .child(
                                 div()
@@ -9481,7 +9637,7 @@ impl XdDesktop {
                                     .gap_2()
                                     .child(
                                         div()
-                                            .id("minimal-cancel-project-rename")
+                                            .id(cancel_id)
                                             .px_4()
                                             .py_2()
                                             .rounded_lg()
@@ -9496,7 +9652,7 @@ impl XdDesktop {
                                     )
                                     .child(
                                         div()
-                                            .id("minimal-save-project-rename")
+                                            .id(save_id)
                                             .px_4()
                                             .py_2()
                                             .rounded_lg()
@@ -10085,9 +10241,11 @@ impl XdDesktop {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }))
-            .on_action(cx.listener(|this, _: &CloseSearch, _, cx| {
+            .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
                 if this.remote_panel.is_some() {
                     this.close_remote(cx);
+                } else if this.session_context_menu.is_some() {
+                    this.close_session_context_menu(window, cx);
                 } else if this.pending_sidebar_delete.is_some() {
                     this.cancel_sidebar_delete(cx);
                 } else if this.sidebar_edit.is_some() {
@@ -10102,18 +10260,20 @@ impl XdDesktop {
                 } else if this.minimal_theme_open {
                     this.minimal_theme_open = false;
                     cx.notify();
-                } else if matches!(this.minimal_route, MinimalRoute::Cli { .. }) {
+                } else if matches!(
+                    this.minimal_route,
+                    MinimalRoute::Sessions { .. } | MinimalRoute::Cli { .. }
+                ) {
                     this.show_minimal_projects(cx);
                 }
             }))
             .child(product_nav)
             .child(content)
+            .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_overlay, |root, overlay| root.child(overlay))
-            .when_some(workspace_rename_overlay, |root, overlay| {
-                root.child(overlay)
-            })
+            .when_some(sidebar_rename_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_delete_overlay, |root, overlay| {
                 root.child(overlay)
             })
@@ -10950,11 +11110,12 @@ mod tests {
             .expect("minimal root renderer")
             .1;
         let overlays = [
+            ("let session_context_overlay =", "let theme_overlay ="),
             ("let theme_overlay =", "let remote_overlay ="),
             ("let remote_overlay =", "let workspace_overlay ="),
-            ("let workspace_overlay =", "let workspace_rename_overlay ="),
+            ("let workspace_overlay =", "let sidebar_rename_overlay ="),
             (
-                "let workspace_rename_overlay =",
+                "let sidebar_rename_overlay =",
                 "let workspace_delete_overlay =",
             ),
             (
@@ -10995,6 +11156,10 @@ mod tests {
             ("fn begin_workspace_create(", "fn workspace_create_changed("),
             ("fn begin_chat_create(", "fn chat_create_changed("),
             ("fn begin_sidebar_delete(", "fn cancel_sidebar_delete("),
+            (
+                "fn open_session_context_menu(",
+                "fn close_session_context_menu(",
+            ),
             ("fn open_remote(", "fn close_remote("),
         ] {
             let opener = production
@@ -11437,7 +11602,7 @@ mod tests {
             );
         }
 
-        assert_eq!(count, 3);
+        assert_eq!(count, 1);
     }
 
     #[gpui::test]
@@ -12147,6 +12312,41 @@ mod tests {
     }
 
     #[test]
+    fn chat_cards_offer_rename_and_delete_from_a_right_click_menu() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let board = production
+            .split_once("fn render_minimal_session_board(")
+            .expect("shared session board")
+            .1
+            .split_once("fn render_minimal_home(")
+            .expect("end of shared session board")
+            .0;
+        let home = production
+            .split_once("fn render_minimal_home(")
+            .expect("minimal home renderer")
+            .1
+            .split_once("fn render_minimal_cli(")
+            .expect("end of minimal home renderer")
+            .0;
+
+        for cards in [board, home] {
+            assert!(cards.contains("MouseButton::Right"));
+            assert!(cards.contains("this.open_session_context_menu("));
+            assert!(!cards.contains("minimal-delete-session"));
+        }
+
+        assert!(production.contains(".child(\"Rename session\")"));
+        assert!(production.contains(".child(\"Delete session\")"));
+        assert!(production.contains("SidebarTarget::Chat"));
+        assert!(production.contains("this.begin_sidebar_edit("));
+        assert!(production.contains("this.begin_sidebar_delete("));
+    }
+
+    #[test]
     fn minimal_projects_exposes_workspace_rename_flow() {
         let source = include_str!("main.rs");
         let production = source
@@ -12173,13 +12373,14 @@ mod tests {
             .expect("minimal root renderer")
             .1;
         for behavior in [
-            "let workspace_rename_overlay =",
-            ".child(\"Rename project\")",
+            "let sidebar_rename_overlay =",
+            "\"Rename project\"",
+            ".child(heading)",
             "self.sidebar_edit_input.clone()",
             "minimal-cancel-project-rename",
             "minimal-save-project-rename",
             "this.save_sidebar_edit(cx)",
-            ".when_some(workspace_rename_overlay",
+            ".when_some(sidebar_rename_overlay",
         ] {
             assert!(root.contains(behavior), "missing {behavior}");
         }
@@ -12250,15 +12451,8 @@ mod tests {
             .expect("end of minimal home renderer")
             .0;
         for surface in [board, home] {
-            for behavior in [
-                "minimal-delete-session",
-                "this.begin_sidebar_delete(",
-                "SidebarTarget::Chat",
-                "cx.stop_propagation()",
-                ".path(TRASH_ICON)",
-            ] {
-                assert!(surface.contains(behavior), "missing {behavior}");
-            }
+            assert!(surface.contains("this.open_session_context_menu("));
+            assert!(!surface.contains("minimal-delete-session"));
         }
 
         let root = production
@@ -12267,6 +12461,10 @@ mod tests {
             .1;
         for behavior in [
             "let chat_delete_overlay =",
+            "let session_context_overlay =",
+            ".child(\"Delete session\")",
+            "this.begin_sidebar_delete(",
+            "SidebarTarget::Chat",
             ".child(\"Delete session?\")",
             "minimal-cancel-session-delete",
             "minimal-confirm-session-delete",
