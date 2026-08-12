@@ -32,6 +32,9 @@ public data class ChatSummaryReply(
     val title: String,
     val backend: String,
     val working: Boolean,
+    val branch: String? = null,
+    @SerialName("terminal_working")
+    val terminalWorking: Boolean = false,
 )
 
 @Serializable
@@ -255,6 +258,7 @@ public data class BrowseReadReply(
 public data class TerminalReply(
     val id: String,
     val title: String = "",
+    val agent: String? = null,
     val columns: Int,
     val rows: Int,
     val replay: JsonArray = JsonArray(emptyList()),

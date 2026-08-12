@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.store.ChatSession
+import com.restartfu.xd.XdClient
+import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.terminal.Cell
 import com.restartfu.xd.terminal.ReplayFrame
 import com.restartfu.xd.terminal.TerminalEvent
@@ -38,6 +40,9 @@ public data class TerminalPane(
 class TerminalViewModel(
     private val session: ChatSession,
     private val chatId: String,
+    private val agent: DirectAgent? = null,
+    private val allowAllPermissions: Boolean = false,
+    private val closeSessionOnClear: Boolean = false,
 ) : ViewModel() {
     private val screen = TerminalScreen(COLUMNS, ROWS)
 
@@ -56,9 +61,19 @@ class TerminalViewModel(
         _state.value = TerminalPane(connecting = true)
         viewModelScope.launch {
             try {
-                val existing = session.terminals().firstOrNull()
-                val id = existing?.id
-                    ?: session.openTerminal(columns, rows, reuse = true)
+                val (id, existing) = if (agent == null) {
+                    val shell = session.terminals().firstOrNull { it.agent == null }
+                    (shell?.id ?: session.openTerminal(columns, rows, reuse = true)) to shell
+                } else {
+                    val opened = session.openAgentTerminal(
+                        columns = columns,
+                        rows = rows,
+                        reuse = true,
+                        agent = agent.wire,
+                        allowAllPermissions = allowAllPermissions,
+                    )
+                    opened to session.terminals().firstOrNull { it.id == opened }
+                }
                 // A terminal opened elsewhere already has scrollback. Replay
                 // rebuilds it, resize frames included and in order, so older
                 // output is interpreted at the geometry that produced it.
@@ -157,6 +172,11 @@ class TerminalViewModel(
         viewModelScope.launch { runCatching { session.killTerminal(id) } }
     }
 
+    override fun onCleared() {
+        if (closeSessionOnClear) session.close()
+        super.onCleared()
+    }
+
     class Factory(
         private val session: ChatSession,
         private val chatId: String,
@@ -164,6 +184,23 @@ class TerminalViewModel(
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             TerminalViewModel(session, chatId) as T
+    }
+
+    class DirectFactory(
+        private val client: XdClient,
+        private val chatId: String,
+        private val agent: DirectAgent,
+        private val allowAllPermissions: Boolean,
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T =
+            TerminalViewModel(
+                session = client.openChat(chatId),
+                chatId = chatId,
+                agent = agent,
+                allowAllPermissions = allowAllPermissions,
+                closeSessionOnClear = true,
+            ) as T
     }
 
     private companion object {

@@ -129,6 +129,25 @@ public class ChatSession internal constructor(
         it.decodeReply<TerminalOpenReply>().id
     }
 
+    public suspend fun openAgentTerminal(
+        columns: Int,
+        rows: Int,
+        reuse: Boolean,
+        agent: String,
+        allowAllPermissions: Boolean,
+    ): String = core.read(
+        Ops.terminalOpenAgent(
+            core.chatId,
+            columns,
+            rows,
+            reuse,
+            agent,
+            allowAllPermissions,
+        ),
+    ) {
+        it.decodeReply<TerminalOpenReply>().id
+    }
+
     public suspend fun sendTerminalInput(terminalId: String, data: String): Unit =
         core.call(Ops.terminalInput(terminalId, data))
 

@@ -227,11 +227,13 @@ public object Ops {
     public fun newChat(
         folderId: String,
         title: String? = null,
+        backend: String? = null,
     ): JsonObject = buildJsonObject {
         put("op", "new-chat")
         require(folderId.isNotBlank()) { "Folder id must not be blank" }
         put("folder", folderId)
         if (!title.isNullOrBlank()) put("title", title)
+        if (!backend.isNullOrBlank()) put("backend", backend)
     }
 
     public fun newFolder(
@@ -497,6 +499,27 @@ public object Ops {
         put("columns", columns)
         put("rows", rows)
         put("reuse", reuse)
+    }
+
+    public fun terminalOpenAgent(
+        chatId: String,
+        columns: Int,
+        rows: Int,
+        reuse: Boolean,
+        agent: String,
+        allowAllPermissions: Boolean,
+    ): JsonObject = buildJsonObject {
+        require(columns > 0 && rows > 0) { "A terminal needs a positive size" }
+        require(agent == "codex" || agent == "claude") {
+            "A direct terminal needs codex or claude"
+        }
+        put("op", "terminal-open-agent")
+        put("chat", chatId)
+        put("columns", columns)
+        put("rows", rows)
+        put("reuse", reuse)
+        put("agent", agent)
+        put("allow_all_permissions", allowAllPermissions)
     }
 
     /** [data] is base64: the pty takes bytes, not text. */

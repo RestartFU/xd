@@ -24,6 +24,7 @@ internal class TreeStore(
     private var clearVersion = 0L
     private var snapshotSequence = 0L
     private val workingEvents = mutableMapOf<String, WorkingEvent>()
+    private val terminalWorkingEvents = mutableMapOf<String, WorkingEvent>()
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
 
@@ -32,6 +33,7 @@ internal class TreeStore(
             lifecycleVersion += 1
             clearVersion = lifecycleVersion
             workingEvents.clear()
+            terminalWorkingEvents.clear()
             _state.value = TreeSnapshot()
         }
     }
@@ -52,6 +54,24 @@ internal class TreeStore(
             _state.value = _state.value.copy(
                 chats = _state.value.chats.map { chat ->
                     if (chat.id == chatId) chat.copy(working = working) else chat
+                },
+            )
+        }
+    }
+
+    suspend fun setChatTerminalWorking(
+        chatId: String,
+        working: Boolean,
+        sequence: Long,
+    ) {
+        stateMutex.withLock {
+            if (sequence <= snapshotSequence) return
+            if ((terminalWorkingEvents[chatId]?.sequence ?: Long.MIN_VALUE) >= sequence) return
+            lifecycleVersion += 1
+            terminalWorkingEvents[chatId] = WorkingEvent(sequence, working)
+            _state.value = _state.value.copy(
+                chats = _state.value.chats.map { chat ->
+                    if (chat.id == chatId) chat.copy(terminalWorking = working) else chat
                 },
             )
         }
@@ -82,16 +102,26 @@ internal class TreeStore(
                                 folderId = it.folder,
                                 title = it.title,
                                 backend = it.backend,
+                                branch = it.branch,
                                 working = workingEvents[it.id]
                                     ?.takeIf { event ->
                                         event.sequence > authoritativeSequence
                                     }
                                     ?.working
                                     ?: it.working,
+                                terminalWorking = terminalWorkingEvents[it.id]
+                                    ?.takeIf { event ->
+                                        event.sequence > authoritativeSequence
+                                    }
+                                    ?.working
+                                    ?: it.terminalWorking,
                             )
                         },
                     )
                     workingEvents.entries.removeAll {
+                        it.value.sequence <= authoritativeSequence
+                    }
+                    terminalWorkingEvents.entries.removeAll {
                         it.value.sequence <= authoritativeSequence
                     }
                 }
