@@ -890,8 +890,13 @@ impl Engine {
             Ok(gate) => gate,
             Err(error) => return error_reply(error),
         };
-        let _execution = match gate.lock() {
+        let _execution = match gate.try_lock() {
             Ok(execution) => execution,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return error_reply(
+                    "Stop the daemon-managed turn before opening this chat's direct CLI.",
+                );
+            }
             Err(_) => return error_reply("This session's agent state is unavailable."),
         };
         let Some(store) = self.store.as_ref() else {
@@ -1751,30 +1756,33 @@ mod tests {
         let engine = Arc::new(Engine::transport_only());
         let gate = engine.chat_execution_gate("missing").unwrap();
         let gate = gate.lock().unwrap();
-        let (finished, replies) = std::sync::mpsc::channel();
+        let direct = engine.dispatch(json!({
+            "op": "terminal-open-agent",
+            "chat": "missing",
+            "agent": "codex",
+        }));
+        assert_eq!(direct["ok"], false);
+        assert!(direct["error"].as_str().unwrap().contains("Stop"));
 
-        for request in [
-            json!({"op": "terminal-open-agent", "chat": "missing", "agent": "codex"}),
-            json!({"op": "send", "chat": "missing", "text": "hello"}),
-        ] {
-            let engine = engine.clone();
-            let finished = finished.clone();
-            thread::spawn(move || finished.send(engine.dispatch(request)).unwrap());
-        }
+        let (finished, reply) = std::sync::mpsc::channel();
+        let worker = engine.clone();
+        thread::spawn(move || {
+            finished
+                .send(worker.dispatch(json!({
+                    "op": "send",
+                    "chat": "missing",
+                    "text": "hello",
+                })))
+                .unwrap();
+        });
 
         assert!(matches!(
-            replies.recv_timeout(std::time::Duration::from_millis(50)),
+            reply.recv_timeout(std::time::Duration::from_millis(50)),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)
         ));
         drop(gate);
         assert_eq!(
-            replies
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap()["ok"],
-            false
-        );
-        assert_eq!(
-            replies
+            reply
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap()["ok"],
             false

@@ -35,6 +35,7 @@ const READ_SIZE: usize = 8_192;
 
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    opening: Mutex<()>,
     events: Arc<EventBus>,
     activity: Arc<TerminalActivityState>,
 }
@@ -68,6 +69,7 @@ impl TerminalManager {
     pub fn new(events: Arc<EventBus>) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            opening: Mutex::new(()),
             events,
             activity: Arc::new(TerminalActivityState {
                 epoch: Uuid::new_v4().to_string(),
@@ -126,6 +128,12 @@ impl TerminalManager {
                 .get("allow_all_permissions")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        // Keep the reusable check and process creation single-flight across
+        // clients without reversing the session close path's lock order.
+        let _opening = self
+            .opening
+            .lock()
+            .map_err(|_| "Terminal opening state is unavailable.".to_string())?;
         if reuse
             && let Some(existing) = self
                 .sessions

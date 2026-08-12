@@ -69,6 +69,7 @@ unsafe extern "C" {
 
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    opening: Mutex<()>,
     events: Arc<EventBus>,
     activity: Arc<TerminalActivityState>,
 }
@@ -101,6 +102,7 @@ impl TerminalManager {
     pub fn new(events: Arc<EventBus>) -> Self {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            opening: Mutex::new(()),
             events,
             activity: Arc::new(TerminalActivityState {
                 epoch: Uuid::new_v4().to_string(),
@@ -159,6 +161,15 @@ impl TerminalManager {
                 .get("allow_all_permissions")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+        // Reuse is a check-then-create operation shared by every connected
+        // client. Serialize that short path so a desktop and phone restoring
+        // the same chat cannot both observe an empty map and fork duplicate
+        // CLIs. This gate is separate from `sessions` to preserve the close
+        // path's state -> sessions lock order.
+        let _opening = self
+            .opening
+            .lock()
+            .map_err(|_| "Terminal opening state is unavailable.".to_string())?;
         if reuse
             && let Some(existing) = self
                 .sessions
@@ -1032,6 +1043,40 @@ mod tests {
         assert!(!executable_available(Path::new(
             "/definitely/missing/xd-agent-cli"
         )));
+    }
+
+    #[test]
+    fn concurrent_reuse_opens_only_one_terminal() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let workdir = env::temp_dir();
+        let ids = thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        manager
+                            .open(&json!({"chat": "shared-chat", "reuse": true}), &workdir)
+                            .unwrap()["id"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned()
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert_eq!(
+            manager.list("shared-chat")["terminals"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        manager.kill(&json!({"terminal": ids[0]})).unwrap();
     }
 
     #[test]

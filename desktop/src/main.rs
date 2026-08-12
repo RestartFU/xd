@@ -471,7 +471,7 @@ impl TerminalPanel {
     }
 
     fn should_auto_open(&self) -> bool {
-        !self.has_requested_session() && self.auto_open && !self.opening
+        !self.loading && !self.has_requested_session() && self.auto_open && !self.opening
     }
 
     fn selection_after_refresh(&self, previous: Option<String>) -> Option<String> {
@@ -10927,8 +10927,10 @@ mod tests {
         );
 
         let mut empty = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Codex);
-        // A fast empty terminal-list reply may clear loading before GPUI has
-        // measured the viewport. Auto-open must remain independent of loading.
+        // Measuring the viewport can race the terminal-list reply. Do not
+        // create a duplicate while the daemon may still report an existing
+        // session; an empty reply enables auto-open once it arrives.
+        assert!(!empty.should_auto_open());
         empty.loading = false;
         assert!(empty.should_auto_open());
         empty.opening = true;
@@ -10993,6 +10995,7 @@ mod tests {
             "an uncorrelated terminal event must not complete our pending open"
         );
         panel.finish_opening();
+        panel.loading = false;
         assert!(panel.should_auto_open());
 
         assert!(XdDesktop::apply_terminal_opened_event(
