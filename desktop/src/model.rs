@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -63,7 +63,17 @@ pub struct ChatSummary {
     #[serde(default)]
     pub title: Option<String>,
     pub backend: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default)]
+    pub working: bool,
+    #[serde(default)]
+    pub terminal_working: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalActivityStamp {
+    pub revision: u64,
     pub working: bool,
 }
 
@@ -216,6 +226,8 @@ pub struct AgentBackend {
 pub struct AppModel {
     pub folders: Vec<Folder>,
     pub chats: Vec<ChatSummary>,
+    pub terminal_activity_epoch: Option<String>,
+    pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
     pub unread_chats: HashSet<String>,
     pub messages: Vec<Message>,
@@ -254,6 +266,10 @@ pub struct AppModel {
 struct TreeSnapshot {
     folders: Vec<Folder>,
     chats: Vec<ChatSummary>,
+    #[serde(default)]
+    terminal_activity_epoch: Option<String>,
+    #[serde(default)]
+    terminal_activity_revision: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,7 +299,39 @@ pub struct MessagePageChange {
 
 impl AppModel {
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
-        let snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
+        let mut snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
+        let terminal_activity_revision = self.prepare_terminal_activity_version(
+            snapshot.terminal_activity_epoch.as_deref(),
+            snapshot.terminal_activity_revision,
+        );
+        if let Some(revision) = terminal_activity_revision {
+            for chat in &mut snapshot.chats {
+                if let Some(activity) = self
+                    .terminal_activity_by_chat
+                    .get(chat.id.as_str())
+                    .filter(|activity| activity.revision > revision)
+                    .copied()
+                {
+                    chat.terminal_working = activity.working;
+                } else {
+                    self.terminal_activity_by_chat.insert(
+                        chat.id.clone(),
+                        TerminalActivityStamp {
+                            revision,
+                            working: chat.terminal_working,
+                        },
+                    );
+                }
+            }
+            let snapshot_chats = snapshot
+                .chats
+                .iter()
+                .map(|chat| chat.id.as_str())
+                .collect::<HashSet<_>>();
+            self.terminal_activity_by_chat.retain(|chat_id, activity| {
+                snapshot_chats.contains(chat_id.as_str()) || activity.revision > revision
+            });
+        }
         self.folders = snapshot.folders;
         self.chats = snapshot.chats;
         self.connected = true;
@@ -587,6 +635,33 @@ impl AppModel {
     }
 
     pub fn apply_event(&mut self, name: &str, body: &Value) {
+        if name == "terminal-activity"
+            && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
+            && let Some(working) = body.get("terminal_working").and_then(Value::as_bool)
+        {
+            let revision = self.prepare_terminal_activity_version(
+                body.get("terminal_activity_epoch").and_then(Value::as_str),
+                body.get("terminal_activity_revision")
+                    .and_then(Value::as_u64),
+            );
+            let accept = revision.is_none_or(|revision| {
+                if self
+                    .terminal_activity_by_chat
+                    .get(chat_id)
+                    .is_some_and(|activity| revision < activity.revision)
+                {
+                    return false;
+                }
+                self.terminal_activity_by_chat.insert(
+                    chat_id.to_owned(),
+                    TerminalActivityStamp { revision, working },
+                );
+                true
+            });
+            if accept && let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id) {
+                chat.terminal_working = working;
+            }
+        }
         let chat_working = match name {
             "turn-started" => Some(true),
             "turn-finished" => Some(false),
@@ -659,6 +734,30 @@ impl AppModel {
             "turn-finished" if self.event_is_active(body) => self.stop_working(),
             _ => {}
         }
+    }
+
+    fn prepare_terminal_activity_version(
+        &mut self,
+        epoch: Option<&str>,
+        revision: Option<u64>,
+    ) -> Option<u64> {
+        let (Some(epoch), Some(revision)) = (epoch, revision) else {
+            if self.terminal_activity_epoch.take().is_some() {
+                for chat in &mut self.chats {
+                    chat.terminal_working = false;
+                }
+            }
+            self.terminal_activity_by_chat.clear();
+            return None;
+        };
+        if self.terminal_activity_epoch.as_deref() != Some(epoch) {
+            self.terminal_activity_epoch = Some(epoch.to_owned());
+            self.terminal_activity_by_chat.clear();
+            for chat in &mut self.chats {
+                chat.terminal_working = false;
+            }
+        }
+        Some(revision)
     }
 
     pub fn selected_summary(&self) -> Option<&ChatSummary> {
@@ -742,16 +841,22 @@ impl AppModel {
                     folder: "workspace-xd".into(),
                     title: Some("Rewrite desktop with GPUI".into()),
                     backend: "codex".into(),
+                    branch: Some("main".into()),
                     working: true,
+                    terminal_working: false,
                 },
                 ChatSummary {
                     id: "chat-scroll".into(),
                     folder: "workspace-xd".into(),
                     title: Some("Smooth transcript scrolling".into()),
                     backend: "codex".into(),
+                    branch: Some("xd/smooth-transcript-scrolling".into()),
                     working: false,
+                    terminal_working: false,
                 },
             ],
+            terminal_activity_epoch: None,
+            terminal_activity_by_chat: HashMap::new(),
             selected_chat: Some("chat-gpui".into()),
             unread_chats: HashSet::new(),
             messages: vec![
@@ -899,6 +1004,24 @@ mod tests {
     }
 
     #[test]
+    fn tree_snapshots_preserve_each_chats_branch() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "folders": [{"id":"folder-1", "name":"xd"}],
+                "chats": [{
+                    "id":"chat-1", "folder":"folder-1", "title":"GPUI",
+                    "backend":"codex", "working":false,
+                    "branch":"session/scheming-hawk-jhgk"
+                }]
+            }))
+            .unwrap();
+
+        let serialized = serde_json::to_value(&model.chats[0]).unwrap();
+        assert_eq!(serialized["branch"], "session/scheming-hawk-jhgk");
+    }
+
+    #[test]
     fn queued_events_update_only_the_active_chat_queue() {
         let mut model = AppModel {
             selected_chat: Some("chat-1".into()),
@@ -978,6 +1101,399 @@ mod tests {
     }
 
     #[test]
+    fn terminal_activity_updates_only_the_matching_chat_summary() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [
+                    {
+                        "id": "selected",
+                        "folder": "folder",
+                        "title": "Selected",
+                        "backend": "codex",
+                        "working": true
+                    },
+                    {
+                        "id": "background",
+                        "folder": "folder",
+                        "title": "Background",
+                        "backend": "claude"
+                    }
+                ]
+            }))
+            .unwrap();
+        model.select_chat("selected");
+        model.working = true;
+
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "background",
+                "working": false,
+                "terminal_working": true
+            }),
+        );
+
+        assert!(model.chats[1].terminal_working);
+        assert!(!model.chats[1].working);
+        assert!(!model.chats[0].terminal_working);
+        assert!(model.chats[0].working);
+        assert!(model.working);
+
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "background",
+                "working": true,
+                "terminal_working": false
+            }),
+        );
+
+        assert!(!model.chats[1].terminal_working);
+        assert!(model.working);
+    }
+
+    #[test]
+    fn stale_tree_preserves_newer_terminal_activity_in_the_same_epoch() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 1,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat",
+                    "folder": "folder",
+                    "backend": "codex",
+                    "terminal_working": false
+                }]
+            }))
+            .unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "working": true,
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 2
+            }),
+        );
+
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 1,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat",
+                    "folder": "folder",
+                    "backend": "codex",
+                    "terminal_working": false
+                }]
+            }))
+            .unwrap();
+
+        assert!(model.chats[0].terminal_working);
+
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 2,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat",
+                    "folder": "folder",
+                    "backend": "codex",
+                    "terminal_working": false
+                }]
+            }))
+            .unwrap();
+
+        assert!(!model.chats[0].terminal_working);
+    }
+
+    #[test]
+    fn older_terminal_activity_events_are_ignored_in_the_same_epoch() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 0,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [{"id": "chat", "folder": "folder", "backend": "codex"}]
+            }))
+            .unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 2
+            }),
+        );
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "terminal_working": false,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 1
+            }),
+        );
+
+        assert!(model.chats[0].terminal_working);
+
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "terminal_working": false,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 2
+            }),
+        );
+        assert!(!model.chats[0].terminal_working);
+    }
+
+    #[test]
+    fn terminal_activity_event_revisions_are_scoped_per_chat() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 0,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [
+                    {"id": "chat-a", "folder": "folder", "backend": "codex"},
+                    {"id": "chat-b", "folder": "folder", "backend": "claude"}
+                ]
+            }))
+            .unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat-a",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 2
+            }),
+        );
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat-b",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 1
+            }),
+        );
+
+        assert!(model.chats[0].terminal_working);
+        assert!(model.chats[1].terminal_working);
+    }
+
+    #[test]
+    fn stale_tree_preserves_only_chats_with_newer_activity_events() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 0,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [
+                    {"id": "chat-a", "folder": "folder", "backend": "codex"},
+                    {"id": "chat-b", "folder": "folder", "backend": "claude"}
+                ]
+            }))
+            .unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat-a",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 2
+            }),
+        );
+
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 1,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [
+                    {
+                        "id": "chat-a",
+                        "folder": "folder",
+                        "backend": "codex",
+                        "terminal_working": false
+                    },
+                    {
+                        "id": "chat-b",
+                        "folder": "folder",
+                        "backend": "claude",
+                        "terminal_working": true
+                    }
+                ]
+            }))
+            .unwrap();
+
+        assert!(model.chats[0].terminal_working);
+        assert!(model.chats[1].terminal_working);
+    }
+
+    #[test]
+    fn terminal_activity_received_before_its_chat_row_survives_a_stale_tree() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 0,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": []
+            }))
+            .unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 2
+            }),
+        );
+
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 1,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat",
+                    "folder": "folder",
+                    "backend": "codex",
+                    "terminal_working": false
+                }]
+            }))
+            .unwrap();
+
+        assert!(model.chats[0].terminal_working);
+    }
+
+    #[test]
+    fn a_new_terminal_activity_epoch_accepts_a_lower_revision() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 10,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat",
+                    "folder": "folder",
+                    "backend": "codex",
+                    "terminal_working": true
+                }]
+            }))
+            .unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "terminal_working": false,
+                "terminal_activity_epoch": "daemon-b",
+                "terminal_activity_revision": 1
+            }),
+        );
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-b",
+                "terminal_activity_revision": 0
+            }),
+        );
+
+        assert!(!model.chats[0].terminal_working);
+    }
+
+    #[test]
+    fn a_new_terminal_activity_epoch_clears_other_chats_before_its_tree() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 10,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [
+                    {
+                        "id": "chat-a",
+                        "folder": "folder",
+                        "backend": "codex",
+                        "terminal_working": false
+                    },
+                    {
+                        "id": "chat-b",
+                        "folder": "folder",
+                        "backend": "claude",
+                        "terminal_working": true
+                    }
+                ]
+            }))
+            .unwrap();
+
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat-a",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-b",
+                "terminal_activity_revision": 1
+            }),
+        );
+
+        assert!(model.chats[0].terminal_working);
+        assert!(!model.chats[1].terminal_working);
+    }
+
+    #[test]
+    fn unversioned_terminal_activity_resets_to_legacy_acceptance() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 10,
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat",
+                    "folder": "folder",
+                    "backend": "codex",
+                    "terminal_working": true
+                }]
+            }))
+            .unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat": "chat", "terminal_working": false}),
+        );
+        model.apply_event(
+            "terminal-activity",
+            &json!({
+                "chat": "chat",
+                "terminal_working": true,
+                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_revision": 1
+            }),
+        );
+
+        assert!(model.chats[0].terminal_working);
+    }
+
+    #[test]
     fn background_turns_stay_unread_until_selected() {
         let mut model = AppModel {
             selected_chat: Some("chat-1".into()),
@@ -1021,7 +1537,9 @@ mod tests {
                 folder: "folder-1".into(),
                 title: None,
                 backend: "codex".into(),
+                branch: None,
                 working: false,
+                terminal_working: false,
             }],
             ..Default::default()
         };

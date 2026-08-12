@@ -40,7 +40,43 @@ actions!(
     ]
 );
 
-actions!(terminal_input, [Up, Down, Interrupt, Escape, Tab]);
+actions!(
+    terminal_input,
+    [
+        Up,
+        Down,
+        PageUp,
+        PageDown,
+        Interrupt,
+        EndOfFile,
+        ClearScreen,
+        ReverseSearch,
+        Suspend,
+        ControlA,
+        ControlB,
+        ControlE,
+        ControlF,
+        ControlG,
+        ControlH,
+        ControlI,
+        ControlJ,
+        ControlK,
+        ControlM,
+        ControlN,
+        ControlO,
+        ControlP,
+        ControlQ,
+        ControlS,
+        ControlT,
+        ControlU,
+        ControlW,
+        ControlX,
+        ControlY,
+        Escape,
+        Tab,
+        ShiftTab
+    ]
+);
 
 const CARET_WIDTH: Pixels = px(2.);
 
@@ -57,6 +93,22 @@ fn caret_scroll(current: Pixels, caret: Pixels, text: Pixels, visible: Pixels) -
         scroll = caret - last_column;
     }
     scroll.clamp(px(0.), overflow)
+}
+
+fn terminal_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
+fn terminal_control_byte(letter: u8) -> Option<u8> {
+    let letter = letter.to_ascii_uppercase();
+    letter.is_ascii_uppercase().then_some(letter & 0x1f)
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +132,7 @@ pub struct ComposerInput {
     scroll: Pixels,
     is_selecting: bool,
     terminal: bool,
+    terminal_bracketed_paste: bool,
     concealed: bool,
 }
 
@@ -99,6 +152,7 @@ impl ComposerInput {
             scroll: px(0.),
             is_selecting: false,
             terminal: false,
+            terminal_bracketed_paste: false,
             concealed: false,
         }
     }
@@ -107,6 +161,10 @@ impl ComposerInput {
         let mut input = Self::new(cx, "");
         input.terminal = true;
         input
+    }
+
+    pub fn set_terminal_bracketed_paste(&mut self, enabled: bool) {
+        self.terminal_bracketed_paste = enabled;
     }
 
     pub fn password(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
@@ -182,6 +240,9 @@ impl ComposerInput {
     }
 
     fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\x1bb".to_vec(), cx) {
+            return;
+        }
         let offset = if self.selected_range.is_empty() {
             previous_word_boundary(&self.content, self.cursor_offset())
         } else {
@@ -191,6 +252,9 @@ impl ComposerInput {
     }
 
     fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_bytes(b"\x1bf".to_vec(), cx) {
+            return;
+        }
         let offset = if self.selected_range.is_empty() {
             next_word_boundary(&self.content, self.cursor_offset())
         } else {
@@ -298,20 +362,100 @@ impl ComposerInput {
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal_bytes(b"\x1b[B".to_vec(), cx);
     }
+    fn page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[5~".to_vec(), cx);
+    }
+    fn page_down(&mut self, _: &PageDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[6~".to_vec(), cx);
+    }
     fn interrupt(&mut self, _: &Interrupt, _: &mut Window, cx: &mut Context<Self>) {
-        if self.terminal
-            && let Some(text) = TextSelection::selected(cx)
-        {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            return;
-        }
         self.terminal_bytes(vec![3], cx);
+    }
+    fn end_of_file(&mut self, _: &EndOfFile, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(vec![4], cx);
+    }
+    fn clear_screen(&mut self, _: &ClearScreen, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(vec![12], cx);
+    }
+    fn reverse_search(&mut self, _: &ReverseSearch, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(vec![18], cx);
+    }
+    fn suspend(&mut self, _: &Suspend, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(vec![26], cx);
+    }
+    fn control_a(&mut self, _: &ControlA, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'A', cx);
+    }
+    fn control_b(&mut self, _: &ControlB, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'B', cx);
+    }
+    fn control_e(&mut self, _: &ControlE, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'E', cx);
+    }
+    fn control_f(&mut self, _: &ControlF, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'F', cx);
+    }
+    fn control_g(&mut self, _: &ControlG, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'G', cx);
+    }
+    fn control_h(&mut self, _: &ControlH, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'H', cx);
+    }
+    fn control_i(&mut self, _: &ControlI, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'I', cx);
+    }
+    fn control_j(&mut self, _: &ControlJ, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'J', cx);
+    }
+    fn control_k(&mut self, _: &ControlK, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'K', cx);
+    }
+    fn control_m(&mut self, _: &ControlM, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'M', cx);
+    }
+    fn control_n(&mut self, _: &ControlN, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'N', cx);
+    }
+    fn control_o(&mut self, _: &ControlO, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'O', cx);
+    }
+    fn control_p(&mut self, _: &ControlP, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'P', cx);
+    }
+    fn control_q(&mut self, _: &ControlQ, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'Q', cx);
+    }
+    fn control_s(&mut self, _: &ControlS, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'S', cx);
+    }
+    fn control_t(&mut self, _: &ControlT, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'T', cx);
+    }
+    fn control_u(&mut self, _: &ControlU, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'U', cx);
+    }
+    fn control_w(&mut self, _: &ControlW, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'W', cx);
+    }
+    fn control_x(&mut self, _: &ControlX, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'X', cx);
+    }
+    fn control_y(&mut self, _: &ControlY, _: &mut Window, cx: &mut Context<Self>) {
+        self.control_letter(b'Y', cx);
+    }
+    fn control_letter(&mut self, letter: u8, cx: &mut Context<Self>) {
+        if let Some(byte) = terminal_control_byte(letter) {
+            self.terminal_bytes(vec![byte], cx);
+        }
     }
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal_bytes(vec![27], cx);
     }
     fn tab(&mut self, _: &Tab, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal_bytes(vec![9], cx);
+    }
+    fn shift_tab(&mut self, _: &ShiftTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_bytes(b"\x1b[Z".to_vec(), cx);
     }
 
     fn on_mouse_down(
@@ -351,7 +495,10 @@ impl ComposerInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            if self.terminal_bytes(text.as_bytes().to_vec(), cx) {
+            if self.terminal_bytes(
+                terminal_paste_bytes(&text, self.terminal_bracketed_paste),
+                cx,
+            ) {
                 return;
             }
             self.replace_text_in_range(None, &text.replace(['\r', '\n'], " "), window, cx);
@@ -824,9 +971,36 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::page_up))
+            .on_action(cx.listener(Self::page_down))
             .on_action(cx.listener(Self::interrupt))
+            .on_action(cx.listener(Self::end_of_file))
+            .on_action(cx.listener(Self::clear_screen))
+            .on_action(cx.listener(Self::reverse_search))
+            .on_action(cx.listener(Self::suspend))
+            .on_action(cx.listener(Self::control_a))
+            .on_action(cx.listener(Self::control_b))
+            .on_action(cx.listener(Self::control_e))
+            .on_action(cx.listener(Self::control_f))
+            .on_action(cx.listener(Self::control_g))
+            .on_action(cx.listener(Self::control_h))
+            .on_action(cx.listener(Self::control_i))
+            .on_action(cx.listener(Self::control_j))
+            .on_action(cx.listener(Self::control_k))
+            .on_action(cx.listener(Self::control_m))
+            .on_action(cx.listener(Self::control_n))
+            .on_action(cx.listener(Self::control_o))
+            .on_action(cx.listener(Self::control_p))
+            .on_action(cx.listener(Self::control_q))
+            .on_action(cx.listener(Self::control_s))
+            .on_action(cx.listener(Self::control_t))
+            .on_action(cx.listener(Self::control_u))
+            .on_action(cx.listener(Self::control_w))
+            .on_action(cx.listener(Self::control_x))
+            .on_action(cx.listener(Self::control_y))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::tab))
+            .on_action(cx.listener(Self::shift_tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -853,6 +1027,28 @@ impl Focusable for ComposerInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_paste_uses_bracketed_paste_only_when_requested() {
+        assert_eq!(terminal_paste_bytes("hello\nworld", false), b"hello\nworld");
+        assert_eq!(
+            terminal_paste_bytes("hello\nworld", true),
+            b"\x1b[200~hello\nworld\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn every_ascii_control_letter_has_its_classic_terminal_byte() {
+        for (index, letter) in (b'A'..=b'Z').enumerate() {
+            assert_eq!(terminal_control_byte(letter), Some((index + 1) as u8));
+            assert_eq!(
+                terminal_control_byte(letter.to_ascii_lowercase()),
+                Some((index + 1) as u8)
+            );
+        }
+        assert_eq!(terminal_control_byte(b'@'), None);
+        assert_eq!(terminal_control_byte(b'['), None);
+    }
 
     #[test]
     fn the_caret_stays_inside_a_box_narrower_than_its_text() {

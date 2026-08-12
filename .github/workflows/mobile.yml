@@ -5,6 +5,7 @@ on:
     paths:
       - 'mobile/**'
       - 'daemon-rs/**'
+      - 'terminal-core/**'
       - 'desktop/src/protocol.rs'
       - 'docs/protocol.md'
       - 'scripts/mobile-*.sh'

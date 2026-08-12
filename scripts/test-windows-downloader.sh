@@ -36,7 +36,16 @@ assert_contains scripts/package-windows.ps1 '-d "CabDownloadUrl=$base/$cabPayloa
 assert_contains scripts/package-windows.ps1 '$TestDownloadBase'
 assert_contains scripts/package-windows.ps1 '$cabAsset'
 assert_contains scripts/package-windows.ps1 '$setupAsset'
+assert_contains scripts/package-windows.ps1 "[ValidateSet('dev', 'nightly', 'release')]"
+assert_contains scripts/package-windows.ps1 "'xd-dev-windows-x86_64-msi.payload'"
+assert_contains scripts/package-windows.ps1 "releases/download/dev"
+assert_contains scripts/build-windows.ps1 "[ValidateSet('dev', 'nightly', 'release')]"
+assert_contains scripts/build-windows.ps1 'bin\xd-desktop.exe'
+assert_contains scripts/build-windows.ps1 'com.restartfu.Xd.Dev'
+assert_contains scripts/build-windows.ps1 'XD_DATA_NAME", "xd-dev'
 assert_contains scripts/install.ps1 '$setupAsset'
+assert_contains scripts/install.ps1 "'xd-dev-windows-x86_64-setup.exe'"
+assert_contains scripts/install.ps1 'releases/download/dev'
 assert_contains desktop/src/source_build.rs 'xd-nightly-windows-x86_64-setup.exe'
 assert_contains daemon-rs/src/self_update.rs 'xd-windows-x86_64-setup.exe'
 assert_contains .github/workflows/nightly.yml 'xd-nightly-windows-x86_64-setup.exe'

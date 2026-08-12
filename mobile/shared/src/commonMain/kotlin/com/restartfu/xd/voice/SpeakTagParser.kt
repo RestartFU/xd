@@ -123,7 +123,7 @@ public class SpeakTagParser {
         while (true) {
             val end = sentenceEnd() ?: return
             val said = content.substring(0, end).trim()
-            content.delete(0, end)
+            content.deleteRange(0, end)
             if (said.isNotEmpty()) output.add(said)
         }
     }

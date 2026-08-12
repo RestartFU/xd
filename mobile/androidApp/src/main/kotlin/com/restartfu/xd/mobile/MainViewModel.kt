@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.net.PairResult
+import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.DaemonUpdateReply
@@ -34,6 +35,13 @@ data class ShortcutEditorState(
     val error: String? = null,
 )
 
+data class CreatedDirectSession(
+    val projectId: String,
+    val chatId: String,
+    val agent: DirectAgent,
+    val title: String,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val client: XdClient = (application as XdApplication).client
     private val _pairing = MutableStateFlow(false)
@@ -42,6 +50,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _creatingWorkspace = MutableStateFlow(false)
     private val _moving = MutableStateFlow(false)
     private val _createdChat = MutableStateFlow<String?>(null)
+    private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
     private val _error = MutableStateFlow<String?>(null)
@@ -49,6 +58,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
     val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
+    val createdDirectSession: StateFlow<CreatedDirectSession?> =
+        _createdDirectSession.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val moving: StateFlow<Boolean> = _moving.asStateFlow()
@@ -116,6 +127,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _creatingChat.value = false
             }
         }
+    }
+
+    fun createDirectSession(
+        folderId: String,
+        title: String,
+        agent: DirectAgent,
+    ) {
+        if (_creatingChat.value) return
+        _creatingChat.value = true
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                val chatId = client.createChat(
+                    folderId = folderId,
+                    title = title.takeIf(String::isNotBlank),
+                    backend = agent.wire,
+                )
+                _createdDirectSession.value = CreatedDirectSession(
+                    folderId,
+                    chatId,
+                    agent,
+                    title.takeIf(String::isNotBlank) ?: "New Session",
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not create a session"
+            } finally {
+                _creatingChat.value = false
+            }
+        }
+    }
+
+    fun consumeCreatedDirectSession(session: CreatedDirectSession) {
+        if (_createdDirectSession.value == session) _createdDirectSession.value = null
     }
 
     fun createWorkspace(name: String, repository: String? = null) {

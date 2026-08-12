@@ -2,6 +2,7 @@ package com.restartfu.xd.mobile.ui
 
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
 /**
@@ -124,3 +125,71 @@ public fun xdColors(accent: AccentPreset = AccentPreset.BLUE): ColorScheme =
 
 /** The default desktop-matching palette for callers that do not need settings. */
 public val XdColors: ColorScheme = xdColors()
+
+/** The same three complete palettes exposed by the minimal desktop. */
+public enum class MinimalThemePreset(
+    val key: String,
+    val label: String,
+    val preview: Color,
+) {
+    DARK("dark", "Dark", Color(0xFF202020)),
+    LIGHT("light", "Light", Color(0xFFF7F7F5)),
+    WARM("warm", "Warm", Color(0xFF201711)),
+    ;
+
+    public companion object {
+        public fun fromKey(key: String?): MinimalThemePreset =
+            entries.firstOrNull { it.key == key } ?: DARK
+    }
+}
+
+public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
+    MinimalThemePreset.DARK -> darkColorScheme(
+        primary = Color(0xFFF07A55),
+        onPrimary = Color(0xFF1B0E09),
+        primaryContainer = Color(0xFF2B201C),
+        onPrimaryContainer = Color(0xFFF1F1F1),
+        background = Color(0xFF11110F),
+        onBackground = Color(0xFFF1F1F1),
+        surface = Color(0xFF202020),
+        onSurface = Color(0xFFF1F1F1),
+        surfaceContainerLow = Color(0xFF181818),
+        surfaceContainerHigh = Color(0xFF282826),
+        onSurfaceVariant = Color(0xFFA0A0A0),
+        outline = Color(0xFF704333),
+        outlineVariant = Color(0xFF303030),
+        error = Color(0xFFC2524A),
+    )
+    MinimalThemePreset.LIGHT -> lightColorScheme(
+        primary = Color(0xFFE96A43),
+        onPrimary = Color(0xFF2A1008),
+        primaryContainer = Color(0xFFFDF0EB),
+        onPrimaryContainer = Color(0xFF202020),
+        background = Color(0xFFF7F7F5),
+        onBackground = Color(0xFF202020),
+        surface = Color(0xFFFAFAFA),
+        onSurface = Color(0xFF202020),
+        surfaceContainerLow = Color(0xFFFFFFFF),
+        surfaceContainerHigh = Color(0xFFF3F3F1),
+        onSurfaceVariant = Color(0xFF6F6F6F),
+        outline = Color(0xFFF1D2CB),
+        outlineVariant = Color(0xFFEBEBEB),
+        error = Color(0xFFB34238),
+    )
+    MinimalThemePreset.WARM -> darkColorScheme(
+        primary = Color(0xFFEE7650),
+        onPrimary = Color(0xFF1C0F08),
+        primaryContainer = Color(0xFF352219),
+        onPrimaryContainer = Color(0xFFF7EEE7),
+        background = Color(0xFF17110D),
+        onBackground = Color(0xFFF7EEE7),
+        surface = Color(0xFF201711),
+        onSurface = Color(0xFFF7EEE7),
+        surfaceContainerLow = Color(0xFF100B08),
+        surfaceContainerHigh = Color(0xFF2C2018),
+        onSurfaceVariant = Color(0xFFBBA89A),
+        outline = Color(0xFF764733),
+        outlineVariant = Color(0xFF49362A),
+        error = Color(0xFFE05E55),
+    )
+}

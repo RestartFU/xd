@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::{EventBus, private_fs::executable_file};
 
 const NIGHTLY_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/nightly";
+const DEV_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/dev";
 const STABLE_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/latest";
 const MAX_RELEASE_BYTES: u64 = 256 * 1024;
 const INSTALL_OUTPUT_LIMIT: usize = 16 * 1024;
@@ -38,6 +39,7 @@ struct SelfUpdateInner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UpdateChannel {
+    Dev,
     Nightly,
     Release,
 }
@@ -45,6 +47,7 @@ enum UpdateChannel {
 impl UpdateChannel {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Dev => "dev",
             Self::Nightly => "nightly",
             Self::Release => "release",
         }
@@ -52,6 +55,7 @@ impl UpdateChannel {
 
     fn feed_name(self) -> &'static str {
         match self {
+            Self::Dev => "development release feed",
             Self::Nightly => "nightly release feed",
             Self::Release => "release feed",
         }
@@ -59,6 +63,7 @@ impl UpdateChannel {
 
     fn release_url(self) -> &'static str {
         match self {
+            Self::Dev => DEV_RELEASE_URL,
             Self::Nightly => NIGHTLY_RELEASE_URL,
             Self::Release => STABLE_RELEASE_URL,
         }
@@ -315,15 +320,20 @@ fn snapshot_value(
 }
 
 fn update_channel() -> UpdateChannel {
-    match env::var("XD_UPDATE_CHANNEL").as_deref() {
-        Ok("release") => UpdateChannel::Release,
+    update_channel_from(env::var("XD_UPDATE_CHANNEL").ok().as_deref())
+}
+
+fn update_channel_from(channel: Option<&str>) -> UpdateChannel {
+    match channel {
+        Some("dev") => UpdateChannel::Dev,
+        Some("release") => UpdateChannel::Release,
         _ => UpdateChannel::Nightly,
     }
 }
 
 fn current_version(channel: UpdateChannel) -> String {
     match channel {
-        UpdateChannel::Nightly => option_env!("XD_COMMIT")
+        UpdateChannel::Dev | UpdateChannel::Nightly => option_env!("XD_COMMIT")
             .filter(|version| !version.is_empty())
             .unwrap_or(env!("CARGO_PKG_VERSION")),
         UpdateChannel::Release => env!("CARGO_PKG_VERSION"),
@@ -355,7 +365,7 @@ fn latest_release(channel: UpdateChannel) -> Result<String, String> {
 
 fn release_identity(channel: UpdateChannel, release: &Value) -> Result<String, String> {
     let field = match channel {
-        UpdateChannel::Nightly => "target_commitish",
+        UpdateChannel::Dev | UpdateChannel::Nightly => "target_commitish",
         UpdateChannel::Release => "tag_name",
     };
     release
@@ -363,15 +373,15 @@ fn release_identity(channel: UpdateChannel, release: &Value) -> Result<String, S
         .and_then(Value::as_str)
         .filter(|target| !target.is_empty() && target.len() <= 128)
         .map(|identity| match channel {
-            UpdateChannel::Nightly => identity.to_owned(),
+            UpdateChannel::Dev | UpdateChannel::Nightly => identity.to_owned(),
             UpdateChannel::Release => identity.strip_prefix('v').unwrap_or(identity).to_owned(),
         })
         .ok_or_else(|| format!("The {} did not identify its build.", channel.feed_name()))
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 enum InstallerMode {
+    #[cfg(any(unix, test))]
     Install,
     #[cfg(any(windows, test))]
     Stage(PathBuf),
@@ -393,11 +403,7 @@ fn stage_windows_update(installer: &Path, channel: UpdateChannel) -> Result<Stag
             "Cannot create the update staging directory: {error}"
         ));
     }
-    let asset = if channel == UpdateChannel::Release {
-        "xd-windows-x86_64-setup.exe"
-    } else {
-        "xd-nightly-windows-x86_64-setup.exe"
-    };
+    let asset = windows_setup_asset(channel);
     let setup = directory.join(asset);
     let checksum = directory.join(format!("{asset}.sha256"));
     let result = run_installer_process(
@@ -469,12 +475,27 @@ fn regular_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
+#[cfg(any(windows, test))]
+fn windows_setup_asset(channel: UpdateChannel) -> &'static str {
+    match channel {
+        UpdateChannel::Dev => "xd-dev-windows-x86_64-setup.exe",
+        UpdateChannel::Nightly => "xd-nightly-windows-x86_64-setup.exe",
+        UpdateChannel::Release => "xd-windows-x86_64-setup.exe",
+    }
+}
+
 #[cfg(unix)]
 fn installer_command(installer: &Path, channel: UpdateChannel, _mode: InstallerMode) -> Command {
     let mut command = Command::new("sh");
     command.arg(installer);
-    if channel == UpdateChannel::Release {
-        command.arg("--release");
+    match channel {
+        UpdateChannel::Dev => {
+            command.arg("--dev");
+        }
+        UpdateChannel::Nightly => {}
+        UpdateChannel::Release => {
+            command.arg("--release");
+        }
     }
     command
 }
@@ -522,10 +543,12 @@ fn windows_installer_arguments(
     .collect::<Vec<_>>();
     arguments.push(installer.as_os_str().to_owned());
     match channel {
+        UpdateChannel::Dev => arguments.push("-Dev".into()),
         UpdateChannel::Release => arguments.push("-Release".into()),
         UpdateChannel::Nightly => {}
     }
     match mode {
+        #[cfg(any(unix, test))]
         InstallerMode::Install => {
             arguments.push("-Quiet".into());
             arguments.push("-InApp".into());
@@ -579,8 +602,10 @@ fn windows_handoff_arguments(
     .map(OsString::from)
     .collect::<Vec<_>>();
     arguments.push(handoff.installer.as_os_str().to_owned());
-    if channel == UpdateChannel::Release {
-        arguments.push("-Release".into());
+    match channel {
+        UpdateChannel::Dev => arguments.push("-Dev".into()),
+        UpdateChannel::Nightly => {}
+        UpdateChannel::Release => arguments.push("-Release".into()),
     }
     for (flag, value) in [
         ("-SetupPath", handoff.setup),
@@ -676,14 +701,16 @@ fn install_location_for_executable(executable: &Path, home: &Path) -> Option<Ins
     }
     let parent = libexec.parent()?;
     let linux_parent = home.join(".local/opt");
-    let linux_layout = matches!(parent.file_name()?.to_str()?, "xd" | "xd-nightly")
-        && parent.parent() == Some(linux_parent.as_path());
+    let linux_layout = matches!(
+        parent.file_name()?.to_str()?,
+        "xd" | "xd-nightly" | "xd-dev"
+    ) && parent.parent() == Some(linux_parent.as_path());
     let applications = home.join("Applications");
     let macos_layout = parent.file_name()?.to_str()? == "Resources"
         && parent.parent()?.file_name()?.to_str()? == "Contents"
         && matches!(
             parent.parent()?.parent()?.file_name()?.to_str()?,
-            "xd.app" | "xd-nightly.app"
+            "xd.app" | "xd-nightly.app" | "xd-dev.app"
         )
         && parent.parent()?.parent()?.parent() == Some(applications.as_path());
     let recognized = linux_layout || macos_layout;
@@ -709,7 +736,7 @@ fn windows_install_location_for_executable(
         return None;
     }
     let product = bin.parent()?;
-    if !matches_path_name(product, &["xd", "xd-nightly"]) {
+    if !matches_path_name(product, &["xd", "xd-nightly", "xd-dev"]) {
         return None;
     }
     let manufacturer = product.parent()?;
@@ -809,6 +836,32 @@ mod tests {
     }
 
     #[test]
+    fn dev_releases_use_their_own_feed_and_commit_identity() {
+        let release = json!({"tag_name": "dev", "target_commitish": "dev-commit"});
+        assert_eq!(UpdateChannel::Dev.as_str(), "dev");
+        assert_eq!(
+            UpdateChannel::Dev.release_url(),
+            "https://api.github.com/repos/RestartFU/xd/releases/tags/dev"
+        );
+        assert_eq!(
+            release_identity(UpdateChannel::Dev, &release).unwrap(),
+            "dev-commit"
+        );
+        assert_eq!(update_channel_from(Some("dev")), UpdateChannel::Dev);
+        assert_eq!(
+            snapshot_value(
+                "dev-commit",
+                UpdateChannel::Dev,
+                true,
+                "idle",
+                Some("dev-commit"),
+                None,
+            )["available"],
+            false
+        );
+    }
+
+    #[test]
     fn stable_release_feed_errors_do_not_repeat_release() {
         assert_eq!(
             release_identity(UpdateChannel::Release, &json!({})).unwrap_err(),
@@ -826,12 +879,14 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn recognizes_linux_and_macos_release_layouts_only() {
+    fn recognizes_linux_and_macos_installed_layouts_only() {
         for executable in [
             "/home/person/.local/opt/xd/libexec/xd-daemon",
             "/home/person/.local/opt/xd-nightly/libexec/xd-daemon",
+            "/home/person/.local/opt/xd-dev/libexec/xd-daemon",
             "/Users/person/Applications/xd.app/Contents/Resources/libexec/xd-daemon",
             "/Users/person/Applications/xd-nightly.app/Contents/Resources/libexec/xd-daemon",
+            "/Users/person/Applications/xd-dev.app/Contents/Resources/libexec/xd-daemon",
         ] {
             let home = if executable.starts_with("/Users/") {
                 Path::new("/Users/person")
@@ -861,11 +916,12 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_windows_release_layouts_only() {
+    fn recognizes_windows_installed_layouts_only() {
         let program_files = Path::new("/Program Files");
         for executable in [
             "/Program Files/RestartFU/xd/bin/xd-daemon.exe",
             "/Program Files/RestartFU/xd-nightly/bin/xd-daemon.exe",
+            "/Program Files/RestartFU/xd-dev/bin/xd-daemon.exe",
             "/Program Files/RestartFU/XD/bin/XD-DAEMON.EXE",
         ] {
             let location =
@@ -948,6 +1004,26 @@ mod tests {
             )),
             nightly_expected
         );
+
+        let dev = strings(windows_installer_arguments(
+            installer,
+            UpdateChannel::Dev,
+            InstallerMode::Install,
+        ));
+        assert!(dev.contains(&"-Dev".to_owned()));
+        assert!(!dev.contains(&"-Release".to_owned()));
+        assert_eq!(
+            windows_setup_asset(UpdateChannel::Dev),
+            "xd-dev-windows-x86_64-setup.exe"
+        );
+        assert_eq!(
+            windows_setup_asset(UpdateChannel::Nightly),
+            "xd-nightly-windows-x86_64-setup.exe"
+        );
+        assert_eq!(
+            windows_setup_asset(UpdateChannel::Release),
+            "xd-windows-x86_64-setup.exe"
+        );
     }
 
     #[test]
@@ -985,6 +1061,38 @@ mod tests {
         let nightly = strings(windows_handoff_arguments(&handoff, UpdateChannel::Nightly));
         assert!(!nightly.contains(&"-Release".to_owned()));
         assert_eq!(nightly.len() + 1, release.len());
+
+        let dev = strings(windows_handoff_arguments(&handoff, UpdateChannel::Dev));
+        assert!(dev.contains(&"-Dev".to_owned()));
+        assert!(!dev.contains(&"-Release".to_owned()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_installer_arguments_select_dev_without_changing_other_channels() {
+        let arguments = |channel| {
+            installer_command(
+                Path::new("/opt/xd/install.sh"),
+                channel,
+                InstallerMode::Install,
+            )
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            arguments(UpdateChannel::Release),
+            vec!["/opt/xd/install.sh", "--release"]
+        );
+        assert_eq!(
+            arguments(UpdateChannel::Nightly),
+            vec!["/opt/xd/install.sh"]
+        );
+        assert_eq!(
+            arguments(UpdateChannel::Dev),
+            vec!["/opt/xd/install.sh", "--dev"]
+        );
     }
 
     #[test]

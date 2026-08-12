@@ -1,7 +1,6 @@
 package com.restartfu.xd.mobile
 
 import android.app.Activity
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,17 +23,10 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.NavType
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
-import androidx.navigation.navArgument
-import com.restartfu.xd.mobile.ui.ChatScreen
 import com.restartfu.xd.mobile.ui.FatalScreen
+import com.restartfu.xd.mobile.ui.MinimalMobileApp
 import com.restartfu.xd.mobile.ui.PairScreen
-import com.restartfu.xd.mobile.ui.TreeScreen
-import com.restartfu.xd.mobile.ui.xdColors
+import com.restartfu.xd.mobile.ui.minimalColors
 import com.restartfu.xd.net.Link
 
 class MainActivity : ComponentActivity() {
@@ -46,8 +38,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            val accent by settings.accent.collectAsStateWithLifecycle()
-            MaterialTheme(colorScheme = xdColors(accent)) {
+            val theme by settings.theme.collectAsStateWithLifecycle()
+            MaterialTheme(colorScheme = minimalColors(theme)) {
                 Compact {
                     Surface(Modifier.fillMaxSize()) {
                         XdMobileApp(model, settings)
@@ -59,7 +51,7 @@ class MainActivity : ComponentActivity() {
 }
 
 /**
- * Draws the app slightly smaller so more of a transcript, tree or diff fits.
+ * Draws the app slightly smaller so more projects, sessions, and terminal fit.
  *
  * Scaling density rather than the type ramp shrinks padding, icons and row
  * heights along with the text; making only the text smaller would leave the
@@ -124,40 +116,6 @@ private fun XdMobileApp(
     } else if (link is Link.Fatal) {
         FatalScreen(link as Link.Fatal, operationError, model::forget)
     } else {
-        ConnectedNavigation(model, link, settings)
-    }
-}
-
-@Composable
-private fun ConnectedNavigation(
-    model: MainViewModel,
-    link: Link,
-    settings: MobileSettings,
-) {
-    val navigation = rememberNavController()
-    NavHost(navigation, startDestination = "tree") {
-        composable("tree") {
-            TreeScreen(
-                model = model,
-                link = link,
-                settings = settings,
-                openChat = { navigation.navigate("chat/${Uri.encode(it)}") },
-            )
-        }
-        composable(
-            route = "chat/{chatId}",
-            arguments = listOf(navArgument("chatId") { type = NavType.StringType }),
-        ) { entry ->
-            val chatId = entry.arguments?.getString("chatId").orEmpty()
-            val chatModel: ChatViewModel = viewModel(
-                key = chatId,
-                factory = ChatViewModel.Factory(model.client, chatId),
-            )
-            ChatScreen(
-                model = chatModel,
-                settings = settings,
-                goBack = navigation::popBackStack,
-            )
-        }
+        MinimalMobileApp(model, link, settings)
     }
 }

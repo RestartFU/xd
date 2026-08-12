@@ -52,5 +52,8 @@ class TreeStoreTest {
 
         store.setChatWorking("chat", working = true, sequence = 3)
         assertTrue(store.state.value.chats.single().working)
+
+        store.setChatTerminalWorking("chat", working = true, sequence = 4)
+        assertTrue(store.state.value.chats.single().terminalWorking)
     }
 }

@@ -5,12 +5,14 @@
 #
 #   irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
 #
-# Pass -Release when invoking a downloaded script file to install the newest
-# tagged release. The path parameters let CI exercise the offline MSI path.
+# Pass -Dev for the isolated rolling development build, or -Release for the
+# newest tagged release. The path parameters let CI exercise the offline MSI
+# path.
 
 [CmdletBinding()]
 param(
     [switch] $Release,
+    [switch] $Dev,
     [string] $SetupPath,
     [string] $SetupChecksumPath,
     [string] $MsiPath,
@@ -29,16 +31,23 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repository = 'RestartFU/xd'
-$channel = if ($Release) { 'release' } else { 'nightly' }
-$installName = if ($Release) { 'xd' } else { 'xd-nightly' }
+if ($Release -and $Dev) {
+    throw '-Release and -Dev cannot be used together.'
+}
+$channel = if ($Release) { 'release' } elseif ($Dev) { 'dev' } else { 'nightly' }
+$installName = if ($Release) { 'xd' } elseif ($Dev) { 'xd-dev' } else { 'xd-nightly' }
 $setupAsset = if ($Release) {
     'xd-windows-x86_64-setup.exe'
+} elseif ($Dev) {
+    'xd-dev-windows-x86_64-setup.exe'
 } else {
     'xd-nightly-windows-x86_64-setup.exe'
 }
 $cabAsset = 'xd1.cab'
 $baseUri = if ($Release) {
     "https://github.com/$repository/releases/latest/download"
+} elseif ($Dev) {
+    "https://github.com/$repository/releases/download/dev"
 } else {
     "https://github.com/$repository/releases/download/nightly"
 }

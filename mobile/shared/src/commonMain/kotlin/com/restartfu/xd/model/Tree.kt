@@ -12,6 +12,8 @@ public data class ChatSummary(
     val title: String,
     val backend: String,
     val working: Boolean,
+    val branch: String? = null,
+    val terminalWorking: Boolean = false,
 )
 
 public data class TreeSnapshot(

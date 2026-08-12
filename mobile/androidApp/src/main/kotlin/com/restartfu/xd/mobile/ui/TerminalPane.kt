@@ -68,10 +68,6 @@ private val PALETTE = listOf(
     Color(0xFF61AFEF), Color(0xFFC678DD), Color(0xFF56B6C2), Color(0xFFE6E6EC),
 )
 
-// .xd-terminal on the desktop.
-private val BACKGROUND = Color(0xFF0A0A0C)
-private val FOREGROUND = Color(0xFFF2F2F4)
-
 /**
  * Keys a soft keyboard has no way to send, and a shell cannot do without.
  * Ctrl is sticky: it applies to the next character typed.
@@ -86,10 +82,15 @@ private val KEY_BAR = listOf(
 )
 
 @Composable
-internal fun TerminalPaneContent(model: TerminalViewModel) {
+internal fun TerminalPaneContent(
+    model: TerminalViewModel,
+    showSessionBar: Boolean = true,
+) {
     val state by model.state.collectAsStateWithLifecycle()
     val focus = remember { FocusRequester() }
     var control by remember { mutableStateOf(false) }
+    val terminalBackground = MaterialTheme.colorScheme.surface
+    val terminalForeground = MaterialTheme.colorScheme.onSurface
 
     // The IME is driven through a field the reader never sees. Android
     // delivers typed characters as text edits rather than key events, so
@@ -101,9 +102,9 @@ internal fun TerminalPaneContent(model: TerminalViewModel) {
     Column(
         Modifier
             .fillMaxSize()
-            .background(BACKGROUND),
+            .background(terminalBackground),
     ) {
-        Row(
+        if (showSessionBar) Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -163,10 +164,12 @@ internal fun TerminalPaneContent(model: TerminalViewModel) {
                     state.rows.forEachIndexed { index, row ->
                         val caret = if (index == state.cursorRow) state.cursorColumn else -1
                         Text(
-                            remember(row, caret) { row.render(caret) },
+                            remember(row, caret, terminalForeground, terminalBackground) {
+                                row.render(caret, terminalForeground, terminalBackground)
+                            },
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall,
-                            color = FOREGROUND,
+                            color = terminalForeground,
                             softWrap = false,
                         )
                     }
@@ -289,18 +292,22 @@ private fun typed(
     else -> null
 }
 
-private fun List<Cell>.render(caret: Int): AnnotatedString = buildAnnotatedString {
+private fun List<Cell>.render(
+    caret: Int,
+    defaultForeground: Color,
+    defaultBackground: Color,
+): AnnotatedString = buildAnnotatedString {
     val trailing = indexOfLast { it.char != ' ' || it.background != null } + 1
     val visible = maxOf(trailing, if (caret >= 0) caret + 1 else 0)
     for (column in 0 until visible) {
         val cell = getOrNull(column) ?: Cell()
-        val foreground = cell.foreground?.let(::colour) ?: FOREGROUND
+        val foreground = cell.foreground?.let(::colour) ?: defaultForeground
         val background = cell.background?.let(::colour) ?: Color.Unspecified
         // The caret is drawn as a block, the way a terminal draws it.
         val inverse = cell.inverse != (column == caret)
         withStyle(
             SpanStyle(
-                color = if (inverse) background.orElse(BACKGROUND) else foreground,
+                color = if (inverse) background.orElse(defaultBackground) else foreground,
                 background = if (inverse) foreground else background,
                 fontWeight = if (cell.bold) FontWeight.Bold else null,
             ),

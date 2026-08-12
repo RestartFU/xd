@@ -3,7 +3,7 @@
 # Build and validate the complete native Rust/GPUI Windows x86_64 payload.
 #
 #   ./scripts/build-windows.ps1 -OutputDirectory windows-dist
-#       [-Profile nightly|release]
+#       [-Profile dev|nightly|release]
 
 # Run from a native x86_64 Windows PowerShell with Rust, CMake, and 7-Zip.
 # The resulting tree is self-contained and is consumed by package-windows.ps1.
@@ -13,7 +13,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $OutputDirectory,
 
-    [ValidateSet('nightly', 'release')]
+    [ValidateSet('dev', 'nightly', 'release')]
     [string] $Profile = 'nightly'
 )
 
@@ -87,7 +87,7 @@ if ((Test-Path -LiteralPath $outputPath) -and
     (Get-ChildItem -LiteralPath $outputPath -Force | Select-Object -First 1)) {
     throw "Output directory must be empty: $outputPath"
 }
-foreach ($command in @('cargo', 'cmake', 'git', 'tar')) {
+foreach ($command in @('cargo', 'cmake', 'git', 'rustc', 'tar')) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "$command is required."
     }
@@ -136,7 +136,9 @@ try {
     try {
         $commit = (& git rev-parse HEAD 2>$null)
         if ($LASTEXITCODE -ne 0) { $commit = '' }
-        $env:XD_BUILD_PROFILE = $Profile
+        # Dev is prerelease code like nightly. A tiny launcher below supplies
+        # its third runtime identity without changing desktop source files.
+        $env:XD_BUILD_PROFILE = if ($Profile -eq 'dev') { 'nightly' } else { $Profile }
         $env:XD_COMMIT = $commit
         & cargo build --locked --release --manifest-path desktop/Cargo.toml
         Assert-LastExitCode 'desktop build'
@@ -148,8 +150,46 @@ try {
         Pop-Location
     }
 
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'desktop\target\release\xd-desktop.exe') `
-        -Destination (Join-Path $outputPath 'bin\xd.exe')
+    $desktopSource = Join-Path $repositoryRoot 'desktop\target\release\xd-desktop.exe'
+    if ($Profile -eq 'dev') {
+        Copy-Item -LiteralPath $desktopSource `
+            -Destination (Join-Path $outputPath 'bin\xd-desktop.exe')
+
+        # Windows has no shell launcher around the native executable. Build a
+        # no-console shim that gives dev its own app id and data directory,
+        # then forwards every argument and exit status to the actual desktop.
+        $launcherSource = Join-Path $workDirectory 'xd-dev-launcher.rs'
+        @'
+#![windows_subsystem = "windows"]
+
+use std::{env, process::{self, Command}};
+
+fn main() {
+    env::set_var("XD_APP_ID", "com.restartfu.Xd.Dev");
+    env::set_var("XD_DATA_NAME", "xd-dev");
+    env::set_var("XD_UPDATE_CHANNEL", "dev");
+
+    let executable = env::current_exe().unwrap_or_else(|error| {
+        eprintln!("xd-dev: cannot locate its launcher: {error}");
+        process::exit(1);
+    });
+    let desktop = executable.with_file_name("xd-desktop.exe");
+    match Command::new(desktop).args(env::args_os().skip(1)).status() {
+        Ok(status) => process::exit(status.code().unwrap_or(1)),
+        Err(error) => {
+            eprintln!("xd-dev: cannot start the desktop: {error}");
+            process::exit(1);
+        }
+    }
+}
+'@ | Set-Content -LiteralPath $launcherSource -Encoding utf8
+        & rustc --edition 2021 -C opt-level=s $launcherSource `
+            -o (Join-Path $outputPath 'bin\xd.exe')
+        Assert-LastExitCode 'dev launcher build'
+    } else {
+        Copy-Item -LiteralPath $desktopSource `
+            -Destination (Join-Path $outputPath 'bin\xd.exe')
+    }
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'daemon-rs\target\release\xd-daemon.exe') `
         -Destination (Join-Path $outputPath 'bin\xd-daemon.exe')
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'tls-proxy-rs\target\release\xd-tls-proxy.exe') `
@@ -236,6 +276,9 @@ try {
         'git\mingw64\libexec\git-core\git-remote-https.exe',
         'git\mingw64\etc\ssl\certs\ca-bundle.crt'
     )
+    if ($Profile -eq 'dev') {
+        $required += 'bin\xd-desktop.exe'
+    }
     foreach ($relativePath in $required) {
         if (-not (Test-Path -LiteralPath (Join-Path $outputPath $relativePath))) {
             throw "Windows payload is missing $relativePath."

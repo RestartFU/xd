@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+pub use xd_desktop::theme::ThemePreset;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -20,50 +21,6 @@ pub enum AccentPreset {
     Red,
 }
 
-impl AccentPreset {
-    pub const ALL: [Self; 6] = [
-        Self::Blue,
-        Self::Purple,
-        Self::Green,
-        Self::Orange,
-        Self::Pink,
-        Self::Red,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Blue => "Blue",
-            Self::Purple => "Purple",
-            Self::Green => "Green",
-            Self::Orange => "Orange",
-            Self::Pink => "Pink",
-            Self::Red => "Red",
-        }
-    }
-
-    pub fn color(self) -> u32 {
-        match self {
-            Self::Blue => 0x6b8cff,
-            Self::Purple => 0xa77bff,
-            Self::Green => 0x42b883,
-            Self::Orange => 0xe98949,
-            Self::Pink => 0xe66da8,
-            Self::Red => 0xe56870,
-        }
-    }
-
-    pub fn hover_color(self) -> u32 {
-        match self {
-            Self::Blue => 0x7b98ff,
-            Self::Purple => 0xb38cff,
-            Self::Green => 0x52c493,
-            Self::Orange => 0xf19a5f,
-            Self::Pink => 0xee7db5,
-            Self::Red => 0xed7880,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GitWriter {
@@ -74,16 +31,6 @@ pub enum GitWriter {
 }
 
 impl GitWriter {
-    pub const ALL: [Self; 3] = [Self::Chat, Self::Claude, Self::Codex];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Chat => "Use chat model",
-            Self::Claude => "Claude Code",
-            Self::Codex => "Codex",
-        }
-    }
-
     pub fn backend(self) -> Option<&'static str> {
         match self {
             Self::Chat => None,
@@ -96,9 +43,11 @@ impl GitWriter {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
+    pub theme: ThemePreset,
     pub accent: AccentPreset,
     pub notifications: bool,
     pub speech: bool,
+    pub allow_all_permissions: bool,
     pub git_writer: GitWriter,
     pub git_writer_model: Option<String>,
     pub build_source: String,
@@ -127,9 +76,11 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            theme: ThemePreset::Dark,
             accent: AccentPreset::Blue,
             notifications: true,
             speech: false,
+            allow_all_permissions: false,
             git_writer: GitWriter::Chat,
             git_writer_model: None,
             build_source: String::new(),
@@ -239,6 +190,7 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xd_desktop::theme::ThemePreset;
 
     #[test]
     fn settings_round_trip_and_unknown_fields_are_ignored() {
@@ -252,9 +204,11 @@ mod tests {
         ));
         let path = directory.join("settings.json");
         let settings = AppSettings {
+            theme: ThemePreset::Warm,
             accent: AccentPreset::Purple,
             notifications: false,
             speech: true,
+            allow_all_permissions: true,
             git_writer: GitWriter::Claude,
             git_writer_model: Some("claude-opus-5".into()),
             build_source: "#128".into(),
@@ -302,6 +256,25 @@ mod tests {
         .unwrap();
         assert_eq!(load_from(&path).unwrap().accent, AccentPreset::Green);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn settings_without_a_theme_use_the_dark_default() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"accent":"green","notifications":true}"#).unwrap();
+
+        assert_eq!(settings.theme, ThemePreset::Dark);
+    }
+
+    #[test]
+    fn all_permissions_is_safe_by_default_and_survives_serialization() {
+        let defaults = serde_json::to_value(AppSettings::default()).unwrap();
+        assert_eq!(defaults["allow_all_permissions"], false);
+
+        let enabled: AppSettings =
+            serde_json::from_str(r#"{"allow_all_permissions":true}"#).unwrap();
+        let enabled = serde_json::to_value(enabled).unwrap();
+        assert_eq!(enabled["allow_all_permissions"], true);
     }
 
     #[test]

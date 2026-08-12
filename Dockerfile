@@ -37,17 +37,35 @@ RUN rustup component add rustfmt \
 ARG BUILD_JOBS=1
 ENV CARGO_BUILD_JOBS=$BUILD_JOBS
 
+FROM gpui-toolchain AS terminal-core-source
+
+WORKDIR /src/terminal-core
+COPY terminal-core/Cargo.toml terminal-core/Cargo.lock ./
+RUN mkdir -p src \
+ && touch src/lib.rs \
+ && cargo fetch --locked \
+ && rm -rf src
+COPY terminal-core/src ./src
+
+FROM terminal-core-source AS terminal-core-tests
+
+RUN cargo fmt --check \
+ && cargo test --locked \
+ && touch /terminal-core-tests-passed
+
 FROM gpui-toolchain AS gpui-desktop-source
 
 WORKDIR /src/desktop
 COPY desktop/Cargo.toml desktop/Cargo.lock ./
 COPY desktop/build.rs ./build.rs
-RUN mkdir -p src \
- && touch src/lib.rs \
+COPY terminal-core/Cargo.toml /src/terminal-core/Cargo.toml
+RUN mkdir -p src /src/terminal-core/src \
+ && touch src/lib.rs /src/terminal-core/src/lib.rs \
  && cargo fetch --locked \
- && rm -rf src
+ && rm -rf src /src/terminal-core/src
 COPY desktop/assets ./assets
 COPY data/fonts /src/data/fonts
+COPY terminal-core/src /src/terminal-core/src
 COPY desktop/src ./src
 
 FROM gpui-desktop-source AS gpui-desktop-tests
@@ -79,10 +97,12 @@ FROM gpui-toolchain AS rust-daemon-source
 
 WORKDIR /src/daemon-rs
 COPY daemon-rs/Cargo.toml daemon-rs/Cargo.lock ./
-RUN mkdir -p src \
- && touch src/lib.rs \
+COPY terminal-core/Cargo.toml /src/terminal-core/Cargo.toml
+RUN mkdir -p src /src/terminal-core/src \
+ && touch src/lib.rs /src/terminal-core/src/lib.rs \
  && cargo fetch --locked \
- && rm -rf src
+ && rm -rf src /src/terminal-core/src
+COPY terminal-core/src /src/terminal-core/src
 COPY daemon-rs/src ./src
 COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl tests/fixtures/claude-stream.jsonl /src/tests/fixtures/
 
@@ -243,6 +263,7 @@ RUN set -eux; \
 
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS gpui-desktop-check
 
+COPY --from=terminal-core-tests /terminal-core-tests-passed /terminal-core-tests-passed
 COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
 COPY --from=gpui-desktop-windows-check /gpui-windows-check-passed /gpui-windows-check-passed
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop

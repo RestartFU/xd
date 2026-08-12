@@ -1,8 +1,9 @@
 #!/bin/sh
 #
-# Install a native macOS nightly or stable release without root access.
+# Install a native macOS dev, nightly, or stable release without root access.
 #
 #   curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
+#   curl -fsSL https://github.com/RestartFU/xd/releases/download/dev/install-macos.sh | sh -s -- --dev
 #   curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
 
 set -eu
@@ -17,6 +18,7 @@ die () { printf 'install-macos: %s\n' "$*" >&2; exit 1; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --dev) CHANNEL=dev ;;
     --release|--stable) CHANNEL=release ;;
     --from) [ "$#" -ge 2 ] || die "--from needs an app bundle."
             SOURCE=$2; shift ;;
@@ -33,17 +35,26 @@ case "$(uname -m)" in
   *) die "unsupported architecture: $(uname -m)." ;;
 esac
 
-if [ "$CHANNEL" = release ]; then
-  NAME=xd
-  APP_ID=com.restartfu.Xd
-  ASSET=xd-macos-$ARCH.zip
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  NAME=xd-nightly
-  APP_ID=com.restartfu.Xd.Nightly
-  ASSET=xd-nightly-macos-$ARCH.zip
-  BASE="https://github.com/$REPO/releases/download/nightly"
-fi
+case "$CHANNEL" in
+  dev)
+    NAME=xd-dev
+    APP_ID=com.restartfu.Xd.Dev
+    ASSET=xd-dev-macos-$ARCH.zip
+    BASE="https://github.com/$REPO/releases/download/dev"
+    ;;
+  nightly)
+    NAME=xd-nightly
+    APP_ID=com.restartfu.Xd.Nightly
+    ASSET=xd-nightly-macos-$ARCH.zip
+    BASE="https://github.com/$REPO/releases/download/nightly"
+    ;;
+  release)
+    NAME=xd
+    APP_ID=com.restartfu.Xd
+    ASSET=xd-macos-$ARCH.zip
+    BASE="https://github.com/$REPO/releases/latest/download"
+    ;;
+esac
 
 APP="$HOME/Applications/$NAME.app"
 BIN="$HOME/.local/bin/$NAME"

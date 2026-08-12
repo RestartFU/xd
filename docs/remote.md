@@ -111,10 +111,11 @@ Opening the terminal pane first attaches to sessions the daemon already owns;
 the plus button explicitly creates another. Input and resize intents travel
 over the authenticated TLS connection, while pty output is broadcast as
 base64-encoded terminal events. The daemon retains a bounded output history so
-a device joining later can reconstruct the screen before consuming live output;
-because raw terminal state can only be replayed from its beginning, a runaway
-session that exceeds the hard replay limit is closed instead of serving a
-corrupt tail. Rows and columns are canonical daemon state too: a resize is
+a device joining later can reconstruct the screen before consuming live output.
+When history reaches its bound, the daemon compacts it into a versioned emulator
+checkpoint plus a safe ANSI fallback for older clients; it never serves an
+arbitrary byte tail or closes the live session just because replay filled. Rows
+and columns are canonical daemon state too: a resize is
 broadcast in order before later output, so every attached emulator interprets
 cursor movement and wrapping against the same geometry. Replay retains those
 resize frames between output frames, so a late device interprets older output

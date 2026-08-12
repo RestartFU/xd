@@ -1,13 +1,17 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     ffi::CString,
     fs::File,
     io::{Read, Write},
     os::fd::{AsRawFd, FromRawFd},
     os::raw::{c_char, c_int, c_void},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -16,16 +20,22 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::EventBus;
+use crate::{
+    EventBus,
+    terminal_activity::TerminalActivityParser,
+    terminal_agent::TerminalAgent,
+    terminal_query::TerminalQueryResponder,
+    terminal_replay::{
+        HISTORY_LIMIT, REPLAY_ITEM_LIMIT, RecordOutcome, ReplayFrame, TerminalState,
+    },
+};
 
 const DEFAULT_COLUMNS: u16 = 80;
 const DEFAULT_ROWS: u16 = 24;
-const MAX_GEOMETRY: u16 = 1_000;
-const HISTORY_LIMIT: usize = 16 * 1024 * 1024;
-const REPLAY_ITEM_LIMIT: usize = 65_536;
+const MAX_COLUMNS: u16 = 500;
+const MAX_ROWS: u16 = 200;
 const INPUT_LIMIT: usize = 1024 * 1024;
 const READ_SIZE: usize = 8_192;
-const LIMIT_NOTICE: &[u8] = b"\r\n[xd: terminal closed after exceeding its replay limit]\r\n";
 const SIGHUP: c_int = 1;
 const SIGKILL: c_int = 9;
 const WNOHANG: c_int = 1;
@@ -49,7 +59,8 @@ unsafe extern "C" {
     fn ioctl(fd: c_int, request: usize, ...) -> c_int;
     fn chdir(path: *const c_char) -> c_int;
     fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
-    fn execl(path: *const c_char, argument: *const c_char, ...) -> c_int;
+    fn unsetenv(name: *const c_char) -> c_int;
+    fn execlp(file: *const c_char, argument: *const c_char, ...) -> c_int;
     fn _exit(status: c_int) -> !;
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
@@ -58,34 +69,31 @@ unsafe extern "C" {
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
     events: Arc<EventBus>,
+    activity: Arc<TerminalActivityState>,
+}
+
+struct TerminalActivityState {
+    epoch: String,
+    revision: AtomicU64,
+    gate: Mutex<()>,
+}
+
+pub(crate) struct TerminalActivitySnapshot {
+    pub(crate) epoch: String,
+    pub(crate) revision: u64,
+    pub(crate) working_chats: HashSet<String>,
 }
 
 struct TerminalSession {
     id: String,
     chat_id: String,
     title: String,
+    agent: Option<TerminalAgent>,
+    allow_all_permissions: bool,
     pid: c_int,
     writer: Mutex<Option<File>>,
     state: Mutex<TerminalState>,
-}
-
-struct TerminalState {
-    columns: u16,
-    rows: u16,
-    replay: Vec<ReplayFrame>,
-    replay_bytes: usize,
-    closing: bool,
-}
-
-enum ReplayFrame {
-    Output(Vec<u8>),
-    Resize { columns: u16, rows: u16 },
-}
-
-enum RecordOutcome {
-    Accepted,
-    Closing,
-    Full,
+    activity: Arc<TerminalActivityState>,
 }
 
 impl TerminalManager {
@@ -93,6 +101,11 @@ impl TerminalManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             events,
+            activity: Arc::new(TerminalActivityState {
+                epoch: Uuid::new_v4().to_string(),
+                revision: AtomicU64::new(0),
+                gate: Mutex::new(()),
+            }),
         }
     }
 
@@ -113,25 +126,65 @@ impl TerminalManager {
     }
 
     pub fn open(&self, request: &Value, workdir: &Path) -> Result<Value, String> {
+        self.open_session(request, workdir, None, &[])
+    }
+
+    pub fn open_agent(
+        &self,
+        request: &Value,
+        workdir: &Path,
+        agent: TerminalAgent,
+        environment: &[(String, String)],
+    ) -> Result<Value, String> {
+        self.open_session(request, workdir, Some(agent), environment)
+    }
+
+    fn open_session(
+        &self,
+        request: &Value,
+        workdir: &Path,
+        agent: Option<TerminalAgent>,
+        environment: &[(String, String)],
+    ) -> Result<Value, String> {
         let chat_id = text(request, "chat", "terminal-open needs a chat id")?;
-        let columns = geometry(request, "columns", DEFAULT_COLUMNS)?;
-        let rows = geometry(request, "rows", DEFAULT_ROWS)?;
+        let columns = geometry(request, "columns", DEFAULT_COLUMNS, MAX_COLUMNS)?;
+        let rows = geometry(request, "rows", DEFAULT_ROWS, MAX_ROWS)?;
         let reuse = request
             .get("reuse")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let allow_all_permissions = agent.is_some()
+            && request
+                .get("allow_all_permissions")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         if reuse
             && let Some(existing) = self
                 .sessions
                 .lock()
                 .map_err(|_| "Terminal state is unavailable.".to_string())?
                 .values()
-                .find(|session| session.chat_id == chat_id && !session.is_closing())
+                .find(|session| {
+                    session.chat_id == chat_id
+                        && session.agent == agent
+                        && session.allow_all_permissions == allow_all_permissions
+                        && !session.is_closing()
+                })
         {
             return Ok(json!({"ok": true, "id": existing.id}));
         }
+        let queries = TerminalQueryResponder::from_request(request);
 
-        let (session, reader) = TerminalSession::spawn(chat_id, workdir, columns, rows)?;
+        let (session, reader) = TerminalSession::spawn(
+            chat_id,
+            workdir,
+            columns,
+            rows,
+            agent,
+            allow_all_permissions,
+            environment,
+            self.activity.clone(),
+        )?;
         let id = session.id.clone();
         self.sessions
             .lock()
@@ -142,10 +195,19 @@ impl TerminalManager {
             "chat": chat_id,
             "terminal": id,
             "title": session.title,
+            "agent": session.agent.map(TerminalAgent::wire_name),
             "columns": columns,
             "rows": rows,
+            "working": false,
+            "sequence": 0,
         }));
-        start_reader(session, reader, self.sessions.clone(), self.events.clone());
+        start_reader(
+            session,
+            reader,
+            self.sessions.clone(),
+            self.events.clone(),
+            queries,
+        );
         Ok(json!({"ok": true, "id": id}))
     }
 
@@ -175,19 +237,17 @@ impl TerminalManager {
 
     pub fn resize(&self, request: &Value) -> Result<Value, String> {
         let session = self.session(text(request, "terminal", "A terminal id is required.")?)?;
-        let columns = geometry(request, "columns", DEFAULT_COLUMNS)?;
-        let rows = geometry(request, "rows", DEFAULT_ROWS)?;
-        {
-            let state = session
-                .state
-                .lock()
-                .map_err(|_| "Terminal state is unavailable.".to_string())?;
-            if state.closing {
-                return Err("The terminal is closed.".into());
-            }
-            if state.columns == columns && state.rows == rows {
-                return Ok(json!({"ok": true, "changed": false}));
-            }
+        let columns = geometry(request, "columns", DEFAULT_COLUMNS, MAX_COLUMNS)?;
+        let rows = geometry(request, "rows", DEFAULT_ROWS, MAX_ROWS)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_string())?;
+        if state.closing {
+            return Err("The terminal is closed.".into());
+        }
+        if state.columns == columns && state.rows == rows {
+            return Ok(json!({"ok": true, "changed": false}));
         }
         let writer = session
             .writer
@@ -210,45 +270,88 @@ impl TerminalManager {
             ));
         }
         drop(writer);
-        {
-            let mut state = session
-                .state
-                .lock()
-                .map_err(|_| "Terminal state is unavailable.".to_string())?;
-            if state.closing {
-                return Err("The terminal is closed.".into());
-            }
-            if state.replay.len() >= REPLAY_ITEM_LIMIT {
-                return Err("The terminal replay is full.".into());
-            }
-            state.columns = columns;
-            state.rows = rows;
-            if !matches!(
-                state.replay.last(),
-                Some(ReplayFrame::Resize { columns: old_columns, rows: old_rows })
-                    if *old_columns == columns && *old_rows == rows
-            ) {
-                state.replay.push(ReplayFrame::Resize { columns, rows });
-            }
+        let outcome = state.record_resize_bounded(columns, rows, REPLAY_ITEM_LIMIT);
+        if let RecordOutcome::Accepted(sequence) = outcome {
+            self.events.publish(json!({
+                "event": "terminal-resized",
+                "chat": session.chat_id,
+                "terminal": session.id,
+                "columns": columns,
+                "rows": rows,
+                "sequence": sequence,
+            }));
         }
-        self.events.publish(json!({
-            "event": "terminal-resized",
-            "chat": session.chat_id,
-            "terminal": session.id,
-            "columns": columns,
-            "rows": rows,
-        }));
-        Ok(json!({"ok": true, "changed": true}))
+        match outcome {
+            RecordOutcome::Accepted(_) => Ok(json!({"ok": true, "changed": true})),
+            RecordOutcome::Unchanged => Ok(json!({"ok": true, "changed": false})),
+            RecordOutcome::Closing => Err("The terminal is closed.".into()),
+        }
     }
 
     pub fn kill(&self, request: &Value) -> Result<Value, String> {
         let terminal = text(request, "terminal", "A terminal id is required.")?;
-        if let Ok(sessions) = self.sessions.lock()
-            && let Some(session) = sessions.get(terminal)
-        {
-            session.begin_close();
+        let session = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| sessions.get(terminal).cloned());
+        if let Some(session) = session {
+            close_session(&session, &self.sessions, &self.events);
         }
         Ok(json!({"ok": true}))
+    }
+
+    pub fn kill_chat(&self, chat_id: &str) {
+        let sessions = self
+            .sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .filter(|session| session.chat_id == chat_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for session in sessions {
+            close_session(&session, &self.sessions, &self.events);
+        }
+    }
+
+    pub fn has_agent_session(&self, chat_id: &str) -> bool {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions.values().any(|session| {
+                    session.chat_id == chat_id && session.agent.is_some() && !session.is_closing()
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub fn working_chats(&self) -> HashSet<String> {
+        self.activity_snapshot().working_chats
+    }
+
+    pub(crate) fn activity_snapshot(&self) -> TerminalActivitySnapshot {
+        let _activity = self
+            .activity
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            let before = self.activity.revision.load(Ordering::Acquire);
+            let working_chats = working_chats(&self.sessions);
+            let after = self.activity.revision.load(Ordering::Acquire);
+            if before == after {
+                return TerminalActivitySnapshot {
+                    epoch: self.activity.epoch.clone(),
+                    revision: after,
+                    working_chats,
+                };
+            }
+        }
     }
 
     fn session(&self, id: &str) -> Result<Arc<TerminalSession>, String> {
@@ -269,7 +372,7 @@ impl Drop for TerminalManager {
             .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         for session in sessions {
-            session.begin_close();
+            close_session(&session, &self.sessions, &self.events);
         }
     }
 }
@@ -280,22 +383,57 @@ impl TerminalSession {
         workdir: &Path,
         columns: u16,
         rows: u16,
+        agent: Option<TerminalAgent>,
+        allow_all_permissions: bool,
+        environment: &[(String, String)],
+        activity: Arc<TerminalActivityState>,
     ) -> Result<(Arc<Self>, File), String> {
         if !workdir.is_dir() {
             return Err(format!("{} is not a directory.", workdir.display()));
         }
-        let shell = env::var_os("SHELL")
-            .map(PathBuf::from)
-            .filter(|shell| shell.is_file())
-            .unwrap_or_else(|| PathBuf::from("/bin/sh"));
-        let shell = CString::new(shell.as_os_str().as_encoded_bytes())
-            .map_err(|_| "The configured shell path is invalid.".to_string())?;
+        let executable = agent.map(TerminalAgent::executable).unwrap_or_else(|| {
+            env::var_os("SHELL")
+                .map(PathBuf::from)
+                .filter(|shell| shell.is_file())
+                .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+        });
+        if let Some(agent) = agent
+            && !executable_available(&executable)
+        {
+            return Err(format!(
+                "{} is not installed or is unavailable on the daemon machine.",
+                agent.title()
+            ));
+        }
+        let executable = CString::new(executable.as_os_str().as_encoded_bytes())
+            .map_err(|_| "The terminal executable path is invalid.".to_string())?;
+        let title = agent
+            .map(TerminalAgent::title)
+            .unwrap_or("Terminal")
+            .to_owned();
         let workdir = CString::new(workdir.as_os_str().as_encoded_bytes())
             .map_err(|_| "The terminal working directory is invalid.".to_string())?;
         let term = c"TERM";
         let term_value = c"xterm-256color";
         let colorterm = c"COLORTERM";
         let colorterm_value = c"truecolor";
+        let codex_no_alt_screen = c"--no-alt-screen";
+        let codex_config = c"-c";
+        let codex_terminal_title = c"tui.terminal_title=[\"run-state\"]";
+        let codex_resize_reflow = c"tui.terminal_resize_reflow_max_rows=5000";
+        let codex_all_permissions = c"--dangerously-bypass-approvals-and-sandbox";
+        let claude_all_permissions = c"--dangerously-skip-permissions";
+        let environment = environment
+            .iter()
+            .map(|(name, value)| {
+                Ok((
+                    CString::new(name.as_bytes())
+                        .map_err(|_| "A terminal environment name is invalid.".to_string())?,
+                    CString::new(value.as_bytes())
+                        .map_err(|_| "A terminal environment value is invalid.".to_string())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let size = WinSize {
             rows,
             columns,
@@ -320,7 +458,66 @@ impl TerminalSession {
                 }
                 setenv(term.as_ptr(), term_value.as_ptr(), 1);
                 setenv(colorterm.as_ptr(), colorterm_value.as_ptr(), 1);
-                execl(shell.as_ptr(), shell.as_ptr(), std::ptr::null::<c_char>());
+                for (name, value) in &environment {
+                    setenv(name.as_ptr(), value.as_ptr(), 1);
+                }
+                if agent == Some(TerminalAgent::Claude) {
+                    for name in [
+                        c"WT_SESSION",
+                        c"TMUX",
+                        c"TMUX_PANE",
+                        c"STY",
+                        c"ZELLIJ",
+                        c"ZELLIJ_SESSION_NAME",
+                        c"TERM_PROGRAM",
+                        c"TERM_PROGRAM_VERSION",
+                    ] {
+                        unsetenv(name.as_ptr());
+                    }
+                    setenv(c"ConEmuANSI".as_ptr(), c"ON".as_ptr(), 1);
+                }
+                match agent {
+                    Some(TerminalAgent::Codex) if allow_all_permissions => {
+                        execlp(
+                            executable.as_ptr(),
+                            executable.as_ptr(),
+                            codex_no_alt_screen.as_ptr(),
+                            codex_config.as_ptr(),
+                            codex_terminal_title.as_ptr(),
+                            codex_config.as_ptr(),
+                            codex_resize_reflow.as_ptr(),
+                            codex_all_permissions.as_ptr(),
+                            std::ptr::null::<c_char>(),
+                        );
+                    }
+                    Some(TerminalAgent::Codex) => {
+                        execlp(
+                            executable.as_ptr(),
+                            executable.as_ptr(),
+                            codex_no_alt_screen.as_ptr(),
+                            codex_config.as_ptr(),
+                            codex_terminal_title.as_ptr(),
+                            codex_config.as_ptr(),
+                            codex_resize_reflow.as_ptr(),
+                            std::ptr::null::<c_char>(),
+                        );
+                    }
+                    Some(TerminalAgent::Claude) if allow_all_permissions => {
+                        execlp(
+                            executable.as_ptr(),
+                            executable.as_ptr(),
+                            claude_all_permissions.as_ptr(),
+                            std::ptr::null::<c_char>(),
+                        );
+                    }
+                    _ => {
+                        execlp(
+                            executable.as_ptr(),
+                            executable.as_ptr(),
+                            std::ptr::null::<c_char>(),
+                        );
+                    }
+                }
                 _exit(127);
             }
         }
@@ -329,24 +526,16 @@ impl TerminalSession {
         let reader = writer
             .try_clone()
             .map_err(|error| format!("Cannot prepare terminal output: {error}."))?;
-        let title = Path::new(workdir.to_str().unwrap_or_default())
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("Terminal")
-            .to_owned();
         let session = Arc::new(Self {
             id: Uuid::new_v4().to_string(),
             chat_id: chat_id.to_owned(),
             title,
+            agent,
+            allow_all_permissions,
             pid,
             writer: Mutex::new(Some(writer)),
-            state: Mutex::new(TerminalState {
-                columns,
-                rows,
-                replay: vec![ReplayFrame::Resize { columns, rows }],
-                replay_bytes: 0,
-                closing: false,
-            }),
+            activity,
+            state: Mutex::new(TerminalState::new(columns, rows)),
         });
         Ok((session, reader))
     }
@@ -364,13 +553,20 @@ impl TerminalSession {
                 ReplayFrame::Resize { columns, rows } => {
                     json!({"columns": columns, "rows": rows})
                 }
+                ReplayFrame::Checkpoint { exact, fallback } => json!({
+                    "checkpoint": STANDARD.encode(exact),
+                    "data": STANDARD.encode(fallback),
+                }),
             })
             .collect::<Vec<_>>();
         Some(json!({
             "id": self.id,
             "title": self.title,
+            "agent": self.agent.map(TerminalAgent::wire_name),
             "columns": state.columns,
             "rows": state.rows,
+            "working": state.working,
+            "sequence": state.sequence,
             "replay": replay,
         }))
     }
@@ -379,22 +575,46 @@ impl TerminalSession {
         self.state.lock().map(|state| state.closing).unwrap_or(true)
     }
 
-    fn begin_close(&self) {
-        let should_close = self
-            .state
+    fn contributes_working(&self) -> bool {
+        self.agent.is_some()
+            && self
+                .state
+                .lock()
+                .map(|state| state.working && !state.closing)
+                .unwrap_or(false)
+    }
+
+    fn set_working_state(&self, working: bool) -> bool {
+        self.state
             .lock()
             .map(|mut state| {
-                if state.closing {
+                if state.closing || state.working == working {
                     false
                 } else {
-                    state.closing = true;
+                    state.working = working;
                     true
                 }
             })
-            .unwrap_or(false);
-        if !should_close {
-            return;
-        }
+            .unwrap_or(false)
+    }
+
+    fn begin_close_state(&self) -> bool {
+        self.state
+            .lock()
+            .map(|mut state| {
+                if !state.closing {
+                    state.closing = true;
+                    state.working = false;
+                    state.sequence = state.sequence.saturating_add(1);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    fn close_resources(&self) {
         if let Ok(mut writer) = self.writer.lock() {
             writer.take();
         }
@@ -423,68 +643,182 @@ impl TerminalSession {
     }
 }
 
+fn executable_available(executable: &Path) -> bool {
+    let is_executable_file = |path: &Path| {
+        path.metadata()
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    if executable.is_absolute() || executable.components().count() > 1 {
+        return is_executable_file(executable);
+    }
+    env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
+        .any(|directory| is_executable_file(&directory.join(executable)))
+}
+
+fn working_chats(sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>) -> HashSet<String> {
+    sessions
+        .lock()
+        .map(|sessions| {
+            sessions
+                .values()
+                .filter(|session| session.contributes_working())
+                .map(|session| session.chat_id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn chat_terminal_working(
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    chat_id: &str,
+) -> bool {
+    sessions
+        .lock()
+        .map(|sessions| {
+            sessions
+                .values()
+                .any(|session| session.chat_id == chat_id && session.contributes_working())
+        })
+        .unwrap_or(false)
+}
+
+fn publish_activity_locked(
+    events: &EventBus,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    session: &TerminalSession,
+    working: bool,
+    revision: u64,
+) {
+    let terminal_working = chat_terminal_working(sessions, &session.chat_id);
+    events.publish(json!({
+        "event": "terminal-activity",
+        "chat": session.chat_id,
+        "terminal": session.id,
+        "working": working,
+        "terminal_working": terminal_working,
+        "terminal_activity_epoch": session.activity.epoch,
+        "terminal_activity_revision": revision,
+    }));
+}
+
+fn transition_activity(
+    events: &EventBus,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    session: &TerminalSession,
+    working: bool,
+) {
+    let _activity = session
+        .activity
+        .gate
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !session.set_working_state(working) {
+        return;
+    }
+    let revision = session.activity.revision.fetch_add(1, Ordering::AcqRel) + 1;
+    publish_activity_locked(events, sessions, session, working, revision);
+}
+
+fn close_session(
+    session: &TerminalSession,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    events: &EventBus,
+) {
+    let closed = {
+        let _activity = session
+            .activity
+            .gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !session.begin_close_state() {
+            false
+        } else {
+            if let Ok(mut sessions) = sessions.lock() {
+                sessions.remove(&session.id);
+            }
+            let revision = session.activity.revision.fetch_add(1, Ordering::AcqRel) + 1;
+            publish_activity_locked(events, sessions, session, false, revision);
+            true
+        }
+    };
+    if closed {
+        session.close_resources();
+    }
+}
+
 fn start_reader(
     session: Arc<TerminalSession>,
     mut reader: File,
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
     events: Arc<EventBus>,
+    mut queries: TerminalQueryResponder,
 ) {
     thread::Builder::new()
         .name(format!("xd-terminal-{}", session.id))
         .spawn(move || {
             let mut buffer = [0_u8; READ_SIZE];
+            let mut activity = TerminalActivityParser::default();
             loop {
                 let count = match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
                 let data = buffer[..count].to_vec();
+                let activity_updates = activity.feed(&data);
+                let replies = queries.feed(&data);
+                if !replies.is_empty()
+                    && let Ok(mut writer) = session.writer.lock()
+                    && let Some(writer) = writer.as_mut()
+                {
+                    let _ = writer.write_all(&replies);
+                    let _ = writer.flush();
+                }
                 let outcome = session
                     .state
                     .lock()
-                    .map(|mut state| {
-                        if state.closing {
-                            RecordOutcome::Closing
-                        } else if data.len() > HISTORY_LIMIT.saturating_sub(state.replay_bytes)
-                            || state.replay.len() >= REPLAY_ITEM_LIMIT
-                        {
-                            RecordOutcome::Full
-                        } else {
-                            state.replay_bytes += data.len();
-                            state.replay.push(ReplayFrame::Output(data.clone()));
-                            RecordOutcome::Accepted
+                    .map_or(RecordOutcome::Closing, |mut state| {
+                        let outcome = state.record_output_bounded(
+                            data.clone(),
+                            HISTORY_LIMIT,
+                            REPLAY_ITEM_LIMIT,
+                        );
+                        if let RecordOutcome::Accepted(sequence) = outcome {
+                            events.publish(json!({
+                                "event": "terminal-output",
+                                "chat": session.chat_id,
+                                "terminal": session.id,
+                                "data": STANDARD.encode(&data),
+                                "sequence": sequence,
+                            }));
                         }
-                    })
-                    .unwrap_or(RecordOutcome::Closing);
+                        outcome
+                    });
                 match outcome {
-                    RecordOutcome::Closing => break,
-                    RecordOutcome::Full => {
-                        events.publish(json!({
-                            "event": "terminal-output",
-                            "chat": session.chat_id,
-                            "terminal": session.id,
-                            "data": STANDARD.encode(LIMIT_NOTICE),
-                        }));
-                        session.begin_close();
-                        break;
+                    RecordOutcome::Accepted(_) => {
+                        for working in activity_updates {
+                            transition_activity(&events, &sessions, &session, working);
+                        }
                     }
-                    RecordOutcome::Accepted => {}
+                    RecordOutcome::Unchanged => {
+                        unreachable!("terminal output always changes state")
+                    }
+                    RecordOutcome::Closing => break,
                 }
-                events.publish(json!({
-                    "event": "terminal-output",
-                    "chat": session.chat_id,
-                    "terminal": session.id,
-                    "data": STANDARD.encode(&data),
-                }));
             }
-            session.begin_close();
-            if let Ok(mut sessions) = sessions.lock() {
-                sessions.remove(&session.id);
-            }
+            close_session(&session, &sessions, &events);
+            let sequence = session
+                .state
+                .lock()
+                .map(|state| state.sequence)
+                .unwrap_or_default();
             events.publish(json!({
                 "event": "terminal-closed",
                 "chat": session.chat_id,
                 "terminal": session.id,
+                "sequence": sequence,
             }));
         })
         .expect("terminal reader thread should start");
@@ -498,14 +832,14 @@ fn text<'a>(request: &'a Value, key: &str, message: &str) -> Result<&'a str, Str
         .ok_or_else(|| message.to_owned())
 }
 
-fn geometry(request: &Value, key: &str, default: u16) -> Result<u16, String> {
+fn geometry(request: &Value, key: &str, default: u16, maximum: u16) -> Result<u16, String> {
     let Some(value) = request.get(key) else {
         return Ok(default);
     };
     let value = value
         .as_u64()
-        .filter(|value| (1..=u64::from(MAX_GEOMETRY)).contains(value))
-        .ok_or_else(|| format!("Terminal {key} must be between 1 and {MAX_GEOMETRY}."))?;
+        .filter(|value| (1..=u64::from(maximum)).contains(value))
+        .ok_or_else(|| format!("Terminal {key} must be between 1 and {maximum}."))?;
     Ok(value as u16)
 }
 
@@ -516,22 +850,485 @@ fn error(message: impl Into<String>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::{
+        fs,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            mpsc::{Receiver, sync_channel},
+        },
+        time::Instant,
+    };
+
+    use crate::local_socket::UnixStream;
+
+    static NEXT_AGENT_TEST: AtomicU64 = AtomicU64::new(1);
+    static AGENT_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn terminal_output(manager: &TerminalManager, chat_id: &str) -> Vec<u8> {
+        manager.list(chat_id)["terminals"]
+            .as_array()
+            .and_then(|terminals| terminals.first())
+            .and_then(|terminal| terminal["replay"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|frame| frame["data"].as_str())
+            .filter_map(|data| STANDARD.decode(data).ok())
+            .flatten()
+            .collect()
+    }
+
+    fn wait_for_output(manager: &TerminalManager, chat_id: &str, expected: &str) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let output = terminal_output(manager, chat_id);
+            if String::from_utf8_lossy(&output).contains(expected) {
+                return output;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "terminal output never contained {expected:?}: {:?}",
+                String::from_utf8_lossy(&output)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_activity(manager: &TerminalManager, chat_id: &str, working: bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let listed = manager.list(chat_id);
+            let activity = listed["terminals"]
+                .as_array()
+                .and_then(|terminals| terminals.first())
+                .and_then(|terminal| terminal["working"].as_bool());
+            if activity == Some(working) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "terminal activity never became {working}: {listed}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn fake_agent_output(
+        agent: TerminalAgent,
+        variable: &str,
+        chat_id: &str,
+        allow_all_permissions: bool,
+    ) -> Vec<u8> {
+        let _environment = AGENT_ENV_LOCK.lock().unwrap();
+        let directory = env::temp_dir().join(format!(
+            "xd-terminal-agent-{}-{}",
+            std::process::id(),
+            NEXT_AGENT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("agent.sh");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf 'xd-argv'\nfor argument in \"$@\"; do printf '<%s>' \"$argument\"; done\nprintf '\\nxd-conemu:%s\\n' \"${ConEmuANSI:-}\"\nprintf 'xd-topology:%s:%s:%s:%s:%s:%s\\n' \"${WT_SESSION:-}\" \"${TMUX:-}\" \"${TMUX_PANE:-}\" \"${STY:-}\" \"${ZELLIJ:-}\" \"${TERM_PROGRAM:-}\"\nprintf '\\033]0;Working\\007'\nsleep 5\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let previous = env::var_os(variable);
+        // SAFETY: direct-agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var(variable, &executable) };
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let topology = [
+            ("WT_SESSION".to_owned(), "xd-wt".to_owned()),
+            ("TMUX".to_owned(), "xd-tmux".to_owned()),
+            ("TMUX_PANE".to_owned(), "xd-pane".to_owned()),
+            ("STY".to_owned(), "xd-screen".to_owned()),
+            ("ZELLIJ".to_owned(), "xd-zellij".to_owned()),
+            ("TERM_PROGRAM".to_owned(), "xd-terminal".to_owned()),
+        ];
+        let opened = manager.open_agent(
+            &json!({
+                "chat": chat_id,
+                "allow_all_permissions": allow_all_permissions,
+            }),
+            &directory,
+            agent,
+            &topology,
+        );
+        match previous {
+            Some(previous) => {
+                // SAFETY: direct-agent executable overrides are serialized by AGENT_ENV_LOCK.
+                unsafe { env::set_var(variable, previous) };
+            }
+            None => {
+                // SAFETY: direct-agent executable overrides are serialized by AGENT_ENV_LOCK.
+                unsafe { env::remove_var(variable) };
+            }
+        }
+        let opened = opened.unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+        let output = wait_for_output(&manager, chat_id, "xd-conemu:");
+        wait_for_activity(&manager, chat_id, true);
+        assert!(manager.working_chats().contains(chat_id));
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+        output
+    }
+
+    fn next_activity(receiver: &Receiver<Value>, terminal: &str, working: bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let event = next_terminal_activity(receiver, deadline);
+            if event["event"] == "terminal-activity"
+                && event["terminal"] == terminal
+                && event["working"] == working
+            {
+                return event;
+            }
+        }
+    }
+
+    fn next_terminal_activity(receiver: &Receiver<Value>, deadline: Instant) -> Value {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = receiver
+                .recv_timeout(remaining)
+                .expect("terminal activity event was not published");
+            if event["event"] == "terminal-activity" {
+                return event;
+            }
+        }
+    }
+
+    #[test]
+    fn direct_cli_preflight_checks_paths_before_forking() {
+        assert!(executable_available(Path::new("/bin/sh")));
+        assert!(executable_available(Path::new("sh")));
+        assert!(!executable_available(Path::new(
+            "/definitely/missing/xd-agent-cli"
+        )));
+    }
+
+    #[test]
+    fn codex_sessions_preserve_scrollback_and_request_semantic_terminal_titles() {
+        let output = fake_agent_output(
+            TerminalAgent::Codex,
+            "XD_CODEX_EXECUTABLE",
+            "codex-activity",
+            false,
+        );
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("<--no-alt-screen>"), "{output}");
+        assert!(output.contains("<-c>"), "{output}");
+        assert!(
+            output.contains("<tui.terminal_title=[\"run-state\"]>"),
+            "{output}"
+        );
+        assert!(
+            output.contains("<tui.terminal_resize_reflow_max_rows=5000>"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn claude_sessions_advertise_terminal_progress_support() {
+        let output = fake_agent_output(
+            TerminalAgent::Claude,
+            "XD_CLAUDE_EXECUTABLE",
+            "claude-activity",
+            false,
+        );
+        let output = String::from_utf8_lossy(&output);
+
+        assert!(output.contains("xd-conemu:ON"), "{output}");
+        assert!(output.contains("xd-topology::::::"), "{output}");
+    }
+
+    #[test]
+    fn all_permissions_use_each_agents_explicit_command_line_flag() {
+        let codex = fake_agent_output(
+            TerminalAgent::Codex,
+            "XD_CODEX_EXECUTABLE",
+            "codex-all-permissions",
+            true,
+        );
+        let codex = String::from_utf8_lossy(&codex);
+        assert!(
+            codex.contains("<--dangerously-bypass-approvals-and-sandbox>"),
+            "{codex}"
+        );
+
+        let claude = fake_agent_output(
+            TerminalAgent::Claude,
+            "XD_CLAUDE_EXECUTABLE",
+            "claude-all-permissions",
+            true,
+        );
+        let claude = String::from_utf8_lossy(&claude);
+        assert!(
+            claude.contains("<--dangerously-skip-permissions>"),
+            "{claude}"
+        );
+    }
+
+    #[test]
+    fn codex_terminal_titles_drive_activity_snapshots() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(&json!({"chat": "codex-title"}), Path::new("/tmp"))
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(b"printf '\\033]0;Working\\007'\n")
+            }))
+            .unwrap();
+        wait_for_activity(&manager, "codex-title", true);
+
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(b"printf '\\033]0;Ready\\007'\n")
+            }))
+            .unwrap();
+        wait_for_activity(&manager, "codex-title", false);
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+    }
+
+    #[test]
+    fn claude_progress_sequences_drive_activity_snapshots() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(&json!({"chat": "claude-progress"}), Path::new("/tmp"))
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(b"printf '\\033]9;4;3;\\007'\n")
+            }))
+            .unwrap();
+        wait_for_activity(&manager, "claude-progress", true);
+
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(b"printf '\\033]9;4;0;\\007'\n")
+            }))
+            .unwrap();
+        wait_for_activity(&manager, "claude-progress", false);
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+    }
+
+    #[test]
+    fn activity_events_include_shell_excluding_aggregate_and_close_state() {
+        let events = Arc::new(EventBus::default());
+        let (sender, receiver) = sync_channel(32);
+        let (connection, peer) = UnixStream::pair().unwrap();
+        let subscriber = events.subscribe(sender, connection).unwrap();
+        let manager = TerminalManager::new(events.clone());
+        let opened = manager
+            .open(&json!({"chat": "shell-activity"}), Path::new("/tmp"))
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(b"printf '\\033]0;Working\\007'\n")
+            }))
+            .unwrap();
+        let active = next_activity(&receiver, terminal, true);
+        assert_eq!(active["chat"], "shell-activity");
+        assert_eq!(active["terminal_working"], false);
+        let epoch = active["terminal_activity_epoch"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let revision = active["terminal_activity_revision"].as_u64().unwrap();
+        assert!(manager.working_chats().is_empty());
+
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+        let closed = next_activity(&receiver, terminal, false);
+        assert_eq!(closed["terminal_working"], false);
+        assert_eq!(closed["terminal_activity_epoch"], epoch);
+        assert!(closed["terminal_activity_revision"].as_u64().unwrap() > revision);
+        events.unsubscribe(subscriber);
+        drop(peer);
+    }
+
+    #[test]
+    fn agent_activity_aggregates_across_terminals_in_the_same_chat() {
+        let _environment = AGENT_ENV_LOCK.lock().unwrap();
+        let directory = env::temp_dir().join(format!(
+            "xd-terminal-agent-aggregate-{}-{}",
+            std::process::id(),
+            NEXT_AGENT_TEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("agent.sh");
+        fs::write(&executable, "#!/bin/sh\nexec /bin/sh\n").unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+        let previous = env::var_os("XD_CODEX_EXECUTABLE");
+        // SAFETY: direct-agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CODEX_EXECUTABLE", &executable) };
+
+        let events = Arc::new(EventBus::default());
+        let (sender, receiver) = sync_channel(64);
+        let (connection, peer) = UnixStream::pair().unwrap();
+        let subscriber = events.subscribe(sender, connection).unwrap();
+        let manager = TerminalManager::new(events.clone());
+        let first = manager
+            .open_agent(
+                &json!({"chat": "shared-chat", "reuse": false}),
+                &directory,
+                TerminalAgent::Codex,
+                &[],
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let second = manager
+            .open_agent(
+                &json!({"chat": "shared-chat", "reuse": false}),
+                &directory,
+                TerminalAgent::Codex,
+                &[],
+            )
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        match previous {
+            Some(previous) => {
+                // SAFETY: direct-agent executable overrides are serialized by AGENT_ENV_LOCK.
+                unsafe { env::set_var("XD_CODEX_EXECUTABLE", previous) };
+            }
+            None => {
+                // SAFETY: direct-agent executable overrides are serialized by AGENT_ENV_LOCK.
+                unsafe { env::remove_var("XD_CODEX_EXECUTABLE") };
+            }
+        }
+
+        thread::scope(|scope| {
+            for (terminal, title) in [(&first, "Working"), (&second, "Thinking")] {
+                let manager = &manager;
+                scope.spawn(move || {
+                    manager
+                        .input(&json!({
+                            "terminal": terminal,
+                            "data": STANDARD.encode(format!(
+                                "printf '\\033]0;{title}\\007'\n"
+                            ))
+                        }))
+                        .unwrap();
+                });
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let active_first = next_terminal_activity(&receiver, deadline);
+        let active_second = next_terminal_activity(&receiver, deadline);
+        assert_eq!(active_first["terminal_working"], true);
+        assert_eq!(active_second["terminal_working"], true);
+        let epoch = active_first["terminal_activity_epoch"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(active_second["terminal_activity_epoch"], epoch);
+        let mut revision = active_first["terminal_activity_revision"].as_u64().unwrap();
+        let next_revision = active_second["terminal_activity_revision"]
+            .as_u64()
+            .unwrap();
+        assert!(next_revision > revision);
+        revision = next_revision;
+
+        let emit = |terminal: &str, title: &str| {
+            manager
+                .input(&json!({
+                    "terminal": terminal,
+                    "data": STANDARD.encode(format!("printf '\\033]0;{title}\\007'\n"))
+                }))
+                .unwrap();
+        };
+        emit(&first, "Ready");
+        let first_idle = next_activity(&receiver, &first, false);
+        assert_eq!(first_idle["terminal_working"], true);
+        assert_eq!(first_idle["terminal_activity_epoch"], epoch);
+        let next_revision = first_idle["terminal_activity_revision"].as_u64().unwrap();
+        assert!(next_revision > revision);
+        revision = next_revision;
+        manager.kill(&json!({"terminal": first})).unwrap();
+        let first_closed = next_activity(&receiver, &first, false);
+        assert_eq!(first_closed["terminal_working"], true);
+        let next_revision = first_closed["terminal_activity_revision"].as_u64().unwrap();
+        assert!(next_revision > revision);
+        revision = next_revision;
+        assert!(manager.working_chats().contains("shared-chat"));
+        emit(&second, "Ready");
+        let second_idle = next_activity(&receiver, &second, false);
+        assert_eq!(second_idle["terminal_working"], false);
+        assert!(second_idle["terminal_activity_revision"].as_u64().unwrap() > revision);
+        assert!(!manager.working_chats().contains("shared-chat"));
+
+        manager.kill(&json!({"terminal": second})).unwrap();
+        events.unsubscribe(subscriber);
+        drop(peer);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn terminal_activity_epochs_are_per_manager_and_start_at_revision_zero() {
+        let first = TerminalManager::new(Arc::new(EventBus::default())).activity_snapshot();
+        let second = TerminalManager::new(Arc::new(EventBus::default())).activity_snapshot();
+
+        assert!(!first.epoch.is_empty());
+        assert_ne!(first.epoch, second.epoch);
+        assert_eq!(first.revision, 0);
+        assert_eq!(second.revision, 0);
+        assert!(first.working_chats.is_empty());
+    }
+
+    #[test]
+    fn legacy_terminal_open_ignores_agent_fields() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(
+                &json!({"chat": "shell-chat", "agent": "not-an-agent"}),
+                Path::new("/tmp"),
+            )
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+        let snapshot = &manager.list("shell-chat")["terminals"][0];
+
+        assert!(snapshot["agent"].is_null());
+        assert_eq!(snapshot["title"], "Terminal");
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+    }
 
     #[test]
     fn pty_output_is_replayed_and_input_is_bounded() {
         let manager = TerminalManager::new(Arc::new(EventBus::default()));
         let opened = manager
-            .open(
+            .open_session(
                 &json!({"chat": "chat-1", "columns": 92, "rows": 31}),
                 Path::new("/tmp"),
+                None,
+                &[("XD_DIRECT_CLI_TEST".into(), "xd-pty-ready".into())],
             )
             .unwrap();
         let terminal = opened["id"].as_str().unwrap();
         manager
             .input(&json!({
                 "terminal": terminal,
-                "data": STANDARD.encode(b"printf 'xd-pty-ready\\n'\n"),
+                "data": STANDARD.encode(b"printf '%s\\n' \"$XD_DIRECT_CLI_TEST\"\n"),
             }))
             .unwrap();
 
@@ -566,6 +1363,92 @@ mod tests {
     }
 
     #[test]
+    fn output_and_resize_sequences_are_monotonic_snapshot_boundaries() {
+        let mut state = TerminalState::new(80, 24);
+
+        assert!(matches!(
+            state.record_output_bounded(b"one".to_vec(), 64, 8),
+            RecordOutcome::Accepted(1)
+        ));
+        assert!(matches!(
+            state.record_resize_bounded(100, 30, 8),
+            RecordOutcome::Accepted(2)
+        ));
+        assert!(matches!(
+            state.record_output_bounded(b"two".to_vec(), 64, 8),
+            RecordOutcome::Accepted(3)
+        ));
+        assert_eq!(state.sequence, 3);
+    }
+
+    #[test]
+    fn pty_terminal_queries_are_answered_without_a_connected_ui() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(&json!({"chat": "query-chat"}), Path::new("/tmp"))
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+        manager
+            .input(&json!({
+                "terminal": terminal,
+                "data": STANDARD.encode(
+                    b"stty raw -echo; printf '\\033[5n'; reply=$(dd bs=1 count=4 2>/dev/null); stty sane; printf '\\nxd-query-reply:%s\\n' \"$reply\"\n"
+                ),
+            }))
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let output = manager.list("query-chat")["terminals"]
+                .as_array()
+                .and_then(|terminals| terminals.first())
+                .and_then(|terminal| terminal["replay"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|frame| frame["data"].as_str())
+                .filter_map(|data| STANDARD.decode(data).ok())
+                .flatten()
+                .collect::<Vec<_>>();
+            if output
+                .windows(b"xd-query-reply:\x1b[0n".len())
+                .any(|window| window == b"xd-query-reply:\x1b[0n")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the PTY child never received xd's terminal-query reply: {:?}",
+                String::from_utf8_lossy(&output)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        manager.kill(&json!({"terminal": terminal})).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_chat_closes_all_of_its_terminals() {
+        let manager = TerminalManager::new(Arc::new(EventBus::default()));
+        let opened = manager
+            .open(&json!({"chat": "deleted-chat"}), Path::new("/tmp"))
+            .unwrap();
+        let terminal = opened["id"].as_str().unwrap();
+
+        manager.kill_chat("deleted-chat");
+
+        assert!(
+            manager
+                .input(&json!({"terminal": terminal, "data": STANDARD.encode(b"x")}))
+                .is_err()
+        );
+        assert!(
+            manager.list("deleted-chat")["terminals"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn geometry_and_base64_are_validated_before_touching_a_session() {
         let manager = TerminalManager::new(Arc::new(EventBus::default()));
         assert!(
@@ -573,6 +1456,24 @@ mod tests {
                 .open(&json!({"chat": "chat-1", "columns": 0}), Path::new("/tmp"))
                 .unwrap_err()
                 .contains("columns")
+        );
+        assert!(
+            manager
+                .open(
+                    &json!({"chat": "chat-1", "columns": MAX_COLUMNS + 1}),
+                    Path::new("/tmp"),
+                )
+                .unwrap_err()
+                .contains("columns")
+        );
+        assert!(
+            manager
+                .open(
+                    &json!({"chat": "chat-1", "rows": MAX_ROWS + 1}),
+                    Path::new("/tmp"),
+                )
+                .unwrap_err()
+                .contains("rows")
         );
         assert!(
             manager

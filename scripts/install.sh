@@ -1,21 +1,21 @@
 #!/bin/sh
 #
-# Installs xd on Linux, from the prebuilt bundle:
+# Installs xd on Linux, from a prebuilt bundle:
 #
 #   curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install.sh | sh
+#   curl -fsSL https://github.com/RestartFU/xd/releases/download/dev/install.sh | sh -s -- --dev
 #
-# "sh -s -- --release" installs the newest tagged release instead of the
-# nightly; the two live side by side. "sh -s -- --from DIR" installs a bundle
-# that is already built, which is how the nightly installs a branch it built
-# from source: nothing is downloaded, and the rest of this -- the paths, the
-# command, the icon, the menu entry -- is the same as for a download, because
-# it is the same script. It takes itself away again with:
+# "sh -s -- --release" installs the newest tagged release and "--dev" installs
+# the rolling development build. All three live side by side. "--from DIR"
+# installs a bundle already built on this machine; the remaining paths, icon,
+# menu entry, and service handling stay identical to a downloaded install. It
+# takes itself away again with:
 #
 #   curl -fsSL .../install.sh | sh -s -- --uninstall
 #
 # Published beside the bundle it installs, from the same commit, so the two can
-# never be from different builds. The tag is rolling: that link is always the
-# most recent nightly.
+# never be from different builds. The dev and nightly tags are rolling: their
+# links always select the most recent build on that channel.
 #
 # Nothing is compiled and nothing is needed on the machine: the bundle carries
 # its own GTK, glib, Git and everything under them, so it runs on any glibc
@@ -46,12 +46,11 @@ say () { printf '%s\n' "$*"; }
 die () { printf 'install: %s\n' "$*" >&2; exit 1; }
 
 # The nightly by default, since it is the one that is always there. --release
-# takes the newest tagged release instead; the two install side by side and
-# neither touches the other's chats.
+# selects the newest tagged release and --dev selects the rolling development
+# build; none touches another channel's chats.
 CHANNEL=nightly
 
-# A bundle already on this machine, from --from: a build of a branch, which is
-# a nightly and installs to the nightly's paths.
+# A bundle already on this machine, from --from.
 SOURCE=
 UNINSTALL=no
 
@@ -61,6 +60,7 @@ SERVICE_WANTED=yes
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --dev) CHANNEL=dev ;;
     --release|--stable) CHANNEL=release ;;
     --from) [ "$#" -ge 2 ] || die "--from needs a directory."
             SOURCE=$2; shift ;;
@@ -71,17 +71,29 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-if [ "$CHANNEL" = release ]; then
-  NAME=xd
-  APP_ID=com.restartfu.Xd
-  ASSET=xd-linux-x86_64.tar.gz
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  NAME=xd-nightly
-  APP_ID=com.restartfu.Xd.Nightly
-  ASSET=xd-nightly-linux-x86_64.tar.gz
-  BASE="https://github.com/$REPO/releases/download/$CHANNEL"
-fi
+case "$CHANNEL" in
+  dev)
+    NAME=xd-dev
+    DISPLAY_NAME='xd (Dev)'
+    APP_ID=com.restartfu.Xd.Dev
+    ASSET=xd-dev-linux-x86_64.tar.gz
+    BASE="https://github.com/$REPO/releases/download/dev"
+    ;;
+  nightly)
+    NAME=xd-nightly
+    DISPLAY_NAME='xd (Nightly)'
+    APP_ID=com.restartfu.Xd.Nightly
+    ASSET=xd-nightly-linux-x86_64.tar.gz
+    BASE="https://github.com/$REPO/releases/download/nightly"
+    ;;
+  release)
+    NAME=xd
+    DISPLAY_NAME=xd
+    APP_ID=com.restartfu.Xd
+    ASSET=xd-linux-x86_64.tar.gz
+    BASE="https://github.com/$REPO/releases/latest/download"
+    ;;
+esac
 
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -96,6 +108,19 @@ SERVICE="$CONFIG_HOME/systemd/user/$SERVICE_NAME"
 # environment, so a unit that worked it out for itself could end up serving a
 # different directory than the one this script just reported.
 SOCKET="$DATA_HOME/$NAME/daemon.sock"
+
+validate_bundle () {
+  bundle=$1
+  [ -x "$bundle/xd.sh" ] || die "$bundle is not a built bundle."
+
+  if [ "$CHANNEL" = dev ]; then
+    [ "$(sed -n '1p' "$bundle/share/xd/profile" 2>/dev/null || true)" = dev ] \
+      || die "the build in $bundle is not an $NAME build; build it with PROFILE=dev."
+  else
+    [ -f "$bundle/share/applications/$APP_ID.desktop" ] \
+      || die "the build in $bundle is not a $NAME build; build it with PROFILE=$CHANNEL."
+  fi
+}
 
 # --- systemd, if this machine uses it ---------------------------------------
 
@@ -184,13 +209,10 @@ if [ -n "$SOURCE" ]; then
   # Already built, here on this machine. Copied into the staging directory
   # rather than moved, so a failure later leaves the build where it was and
   # the same one line below installs either kind.
-  [ -x "$SOURCE/xd.sh" ] || die "$SOURCE is not a built bundle."
-
-  # And it is a build of what is being installed. A bundle built as the
-  # default profile carries the release's application id, and installing it to
-  # the nightly's paths would leave a copy that answers to neither.
-  [ -f "$SOURCE/share/applications/$APP_ID.desktop" ] \
-    || die "the build in $SOURCE is not a $NAME build; build it with PROFILE=$CHANNEL."
+  # And it is a build of what is being installed. A bundle built for another
+  # profile would otherwise be placed at paths where its launcher cannot give
+  # it the identity the installer promises.
+  validate_bundle "$SOURCE"
 
   say "Installing the build in $SOURCE…"
   cp -a "$SOURCE" "$WORK/$NAME"
@@ -240,7 +262,7 @@ else
 
   say "Unpacking…"
   tar -xzf "$WORK/$ASSET" -C "$WORK"
-  [ -x "$WORK/$NAME/xd.sh" ] || die "the archive is not what was expected."
+  validate_bundle "$WORK/$NAME"
 fi
 
 # --- install ----------------------------------------------------------------
@@ -279,8 +301,15 @@ ICON_THEME="$DATA_HOME/icons/hicolor"
 ICON_DIR="$ICON_THEME/scalable/apps"
 
 mkdir -p "$ICON_DIR"
-if [ -f "$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg" ]; then
-  cp -f "$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg" "$ICON_DIR/$APP_ID.svg"
+ICON_SOURCE="$OPT/share/icons/hicolor/scalable/apps/$APP_ID.svg"
+if [ "$CHANNEL" = dev ] && [ ! -f "$ICON_SOURCE" ]; then
+  # The Linux dev bundle reuses the nightly Docker payload, but publishes and
+  # installs it under a separate identity. Re-home the common artwork without
+  # exposing or replacing the nightly icon in the user's icon theme.
+  ICON_SOURCE="$OPT/share/icons/hicolor/scalable/apps/com.restartfu.Xd.Nightly.svg"
+fi
+if [ -f "$ICON_SOURCE" ]; then
+  cp -f "$ICON_SOURCE" "$ICON_DIR/$APP_ID.svg"
 fi
 
 if [ -f "$OPT/share/applications/$APP_ID.desktop" ]; then
@@ -290,7 +319,7 @@ if [ -f "$OPT/share/applications/$APP_ID.desktop" ]; then
 else
   cat > "$DESKTOP" <<EOF
 [Desktop Entry]
-Name=xd (Nightly)
+Name=$DISPLAY_NAME
 Comment=Workspace-organized AI conversations
 Exec=$BIN
 Icon=$APP_ID
@@ -339,7 +368,7 @@ if [ "$SERVICE_WANTED" = yes ] && have_systemd; then
   else
     cat > "$SERVICE" <<EOF
 [Unit]
-Description=$NAME daemon
+Description=$DISPLAY_NAME daemon
 Documentation=https://github.com/$REPO
 StartLimitIntervalSec=60
 StartLimitBurst=3

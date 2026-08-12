@@ -19,6 +19,12 @@ fi
 HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 case "$(basename "$HERE")" in
+  xd-dev)
+    export XD_APP_ID=com.restartfu.Xd.Dev
+    export XD_DATA_NAME=xd-dev
+    export XD_UPDATE_CHANNEL=dev
+    export XD_SETTINGS_PATH="${XDG_CONFIG_HOME:-${HOME}/.config}/xd-dev/settings.json"
+    ;;
   xd-nightly)
     export XD_APP_ID=com.restartfu.Xd.Nightly
     export XD_DATA_NAME=xd-nightly
@@ -33,8 +39,8 @@ case "$(basename "$HERE")" in
     ;;
 esac
 
-# Per bundle, not just per user: a nightly and a release installed side by side
-# would otherwise rewrite each other's caches while both are running.
+# Per bundle, not just per user: dev, nightly, and release installs side by
+# side would otherwise rewrite each other's caches while they are running.
 RUNTIME="${XDG_RUNTIME_DIR:-/tmp}/xd-$(id -u)/$(basename "$HERE")"
 mkdir -p "$RUNTIME"
 

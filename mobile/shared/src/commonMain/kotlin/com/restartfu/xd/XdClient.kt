@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import com.restartfu.xd.terminal.TerminalEvent
 import com.restartfu.xd.terminal.TerminalWire
@@ -104,6 +105,13 @@ public class XdClient(
                         working = eventName == "turn-started",
                         sequence = event.sequence,
                     )
+                }
+                if (chatId != null && eventName == "terminal-activity") {
+                    val working = (event.value["terminal_working"] as? JsonPrimitive)
+                        ?.booleanOrNull
+                    if (working != null) {
+                        treeStore.setChatTerminalWorking(chatId, working, event.sequence)
+                    }
                 }
                 sessions.value.values.forEach { entry ->
                     // Preserve wire order: text/tool transitions are not
@@ -236,8 +244,9 @@ public class XdClient(
     public suspend fun createChat(
         folderId: String,
         title: String?,
+        backend: String? = null,
     ): String {
-        val value = actor.call(Ops.newChat(folderId, title))
+        val value = actor.call(Ops.newChat(folderId, title, backend))
         return actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
             reply.id?.takeIf(String::isNotBlank)
