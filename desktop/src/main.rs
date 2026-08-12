@@ -112,6 +112,7 @@ const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
 const TRASH_ICON: &str = "icons/trash.svg";
+const DONE_STATUS_COLOR: u32 = 0x43a047;
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
 const MAX_ATTACHMENTS: usize = 4;
@@ -8197,8 +8198,11 @@ impl XdDesktop {
                 let chat_id = session.id.clone();
                 let delete_chat_id = session.id.clone();
                 let agent = session.agent;
+                let done = !session.working && self.model.unread_chats.contains(&session.id);
                 let status_color = if session.working {
                     colors.accent_ink
+                } else if done {
+                    DONE_STATUS_COLOR
                 } else {
                     colors.muted
                 };
@@ -8214,6 +8218,18 @@ impl XdDesktop {
                         .child(session_status_icon(status_color))
                         .child("Working")
                         .child(working_dots(instance, status_color))
+                        .into_any_element()
+                } else if done {
+                    div()
+                        .mt_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(status_color))
+                        .child(session_status_icon(status_color))
+                        .child("Done")
                         .into_any_element()
                 } else {
                     div()
@@ -8558,9 +8574,21 @@ impl XdDesktop {
                 let chat_id = session.id.clone();
                 let delete_chat_id = session.id.clone();
                 let agent = session.agent;
+                let done = !session.working && self.model.unread_chats.contains(&session.id);
                 let icon = match agent {
                     AgentCli::Codex => CODEX_ICON,
                     AgentCli::Claude => CLAUDE_ICON,
+                };
+                let status = if session.working {
+                    div().child("Working").into_any_element()
+                } else if done {
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(DONE_STATUS_COLOR))
+                        .child("Done")
+                        .into_any_element()
+                } else {
+                    div().child("Idle").into_any_element()
                 };
                 div()
                     .id(("minimal-session", index))
@@ -8623,7 +8651,7 @@ impl XdDesktop {
                                     .text_color(rgb(colors.muted))
                                     .child(format!("{} CLI", agent.label()))
                                     .child("·")
-                                    .child(if session.working { "Working" } else { "Idle" }),
+                                    .child(status),
                             ),
                     )
                     .when(session.working, |row| {
@@ -12057,6 +12085,33 @@ mod tests {
         assert!(!home.contains("self.render_minimal_session_board("));
         assert!(cli.contains("self.render_minimal_session_board("));
         assert!(!cli.contains("minimal-cli-session-list"));
+    }
+
+    #[test]
+    fn completed_unread_sessions_render_done_until_they_are_viewed() {
+        let source = include_str!("main.rs");
+        let board = source
+            .split_once("fn render_minimal_session_board(")
+            .expect("shared session board")
+            .1
+            .split_once("fn render_minimal_home(")
+            .expect("end of shared session board")
+            .0;
+
+        assert!(board.contains("self.model.unread_chats.contains(&session.id)"));
+        assert!(board.contains(".child(\"Done\")"));
+        assert!(board.contains("DONE_STATUS_COLOR"));
+
+        let home = source
+            .split_once("fn render_minimal_home(")
+            .expect("projects home")
+            .1
+            .split_once("fn render_minimal_cli(")
+            .expect("end of projects home")
+            .0;
+        assert!(home.contains("self.model.unread_chats.contains(&session.id)"));
+        assert!(home.contains(".child(\"Done\")"));
+        assert!(home.contains("DONE_STATUS_COLOR"));
     }
 
     #[test]
