@@ -32,11 +32,11 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     Animation, AnimationExt, App, Application, AssetSource, Bounds, ClipboardItem, Context,
-    CursorStyle, Decorations, Entity, Focusable, FontWeight, HighlightStyle, KeyBinding,
-    ListAlignment, ListState, MouseButton, Render, ResizeEdge, ScrollHandle, SharedString,
-    StyledText, TextRun, Timer, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px, rgb,
-    rgba, size, svg,
+    CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle,
+    KeyBinding, ListAlignment, ListState, MouseButton, Render, ResizeEdge, ScrollHandle,
+    SharedString, StyledText, TextRun, Timer, TitlebarOptions, WeakFocusHandle, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowDecorations, WindowOptions,
+    canvas, div, point, prelude::*, px, rgb, rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -858,6 +858,9 @@ struct XdDesktop {
     minimal_route: MinimalRoute,
     minimal_theme_open: bool,
     minimal_new_tab_open: bool,
+    minimal_popup_focus: FocusHandle,
+    minimal_popup_previous_focus: Option<WeakFocusHandle>,
+    minimal_popup_focus_captured: bool,
     minimal_new_session_agent: AgentCli,
     pending_minimal_session: Option<(String, String)>,
     settings: AppSettings,
@@ -963,6 +966,8 @@ struct XdDesktop {
     workspace_defaults: Option<WorkspaceDefaults>,
     diff_panel: Option<DiffPanel>,
     terminal_panel: Option<TerminalPanel>,
+    terminal_panel_cache: HashMap<(ChatEndpoint, String), TerminalPanel>,
+    terminal_cache_refresh: HashSet<ChatEndpoint>,
     terminal_cursor_visible: bool,
     diff_generation: u64,
     /// The working directory as a folding tree, in the sidebar.
@@ -1294,6 +1299,7 @@ impl XdDesktop {
         let corrected_active_connection =
             settings.active_connection.as_deref() != Some(active_connection.as_str());
         settings.active_connection = Some(active_connection);
+        let minimal_popup_focus = cx.focus_handle();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -1307,6 +1313,9 @@ impl XdDesktop {
             minimal_route: MinimalRoute::default(),
             minimal_theme_open: false,
             minimal_new_tab_open: false,
+            minimal_popup_focus,
+            minimal_popup_previous_focus: None,
+            minimal_popup_focus_captured: false,
             minimal_new_session_agent: AgentCli::Codex,
             pending_minimal_session: None,
             settings,
@@ -1407,6 +1416,8 @@ impl XdDesktop {
             workspace_defaults: None,
             diff_panel: None,
             terminal_panel: None,
+            terminal_panel_cache: HashMap::new(),
+            terminal_cache_refresh: HashSet::new(),
             terminal_cursor_visible: true,
             diff_generation: 0,
             file_tree: files::FileTree::default(),
@@ -1692,6 +1703,7 @@ impl XdDesktop {
         if endpoint == self.active_endpoint {
             return;
         }
+        self.stash_terminal_panel();
         self.sync_draft();
         self.draft_generation = self.draft_generation.saturating_add(1);
         self.cancel_voice(false, cx);
@@ -1707,7 +1719,6 @@ impl XdDesktop {
         self.pending_speech = None;
         self.speech_output.stop();
         self.diff_panel = None;
-        self.terminal_panel = None;
         self.sync_terminal_input_mode(cx);
         self.sidebar_edit = None;
         self.pending_sidebar_delete = None;
@@ -1945,6 +1956,7 @@ impl XdDesktop {
                 if self.remote_generation != generation {
                     return;
                 }
+                self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
                 self.remote_daemon = None;
                 self.remote_bridge = None;
                 let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
@@ -2001,9 +2013,14 @@ impl XdDesktop {
                     }
                 } else {
                     let value = Value::Object(body);
+                    let tree = matches!(&kind, RequestKind::Tree);
                     if !self.handle_workspace_create_reply(ChatEndpoint::Remote, &kind, &value, cx)
+                        && !self.handle_cached_terminal_reply(ChatEndpoint::Remote, &kind, &value)
                     {
                         Self::apply_passive_reply(&mut self.inactive_model, &kind, value);
+                        if tree {
+                            self.prime_terminal_cache(ChatEndpoint::Remote);
+                        }
                     }
                 }
             }
@@ -2021,6 +2038,14 @@ impl XdDesktop {
                     if name == "folder-clone" {
                         self.handle_folder_clone_event(ChatEndpoint::Remote, &body);
                     } else {
+                        if Self::is_terminal_screen_event(&name) {
+                            self.handle_terminal_screen_event(
+                                ChatEndpoint::Remote,
+                                &name,
+                                &body,
+                                cx,
+                            );
+                        }
                         Self::apply_passive_event(&mut self.inactive_model, &name, &body);
                     }
                     if name == "turn-finished"
@@ -2137,6 +2162,7 @@ impl XdDesktop {
                     if self.connection_generation != generation {
                         return;
                     }
+                    self.terminal_cache_refresh.insert(ChatEndpoint::Local);
                     self.daemon = None;
                     self.inactive_model.connected = false;
                     self.inactive_model.connection_error = Some(format!("{message} Reconnecting…"));
@@ -2153,13 +2179,21 @@ impl XdDesktop {
                         self.handle_reply(kind, body, attachments, cx);
                     } else {
                         let value = Value::Object(body);
+                        let tree = matches!(&kind, RequestKind::Tree);
                         if !self.handle_workspace_create_reply(
                             ChatEndpoint::Local,
                             &kind,
                             &value,
                             cx,
+                        ) && !self.handle_cached_terminal_reply(
+                            ChatEndpoint::Local,
+                            &kind,
+                            &value,
                         ) {
                             Self::apply_passive_reply(&mut self.inactive_model, &kind, value);
+                            if tree {
+                                self.prime_terminal_cache(ChatEndpoint::Local);
+                            }
                         }
                     }
                 }
@@ -2175,6 +2209,14 @@ impl XdDesktop {
                         if name == "folder-clone" {
                             self.handle_folder_clone_event(ChatEndpoint::Local, &body);
                         } else {
+                            if Self::is_terminal_screen_event(&name) {
+                                self.handle_terminal_screen_event(
+                                    ChatEndpoint::Local,
+                                    &name,
+                                    &body,
+                                    cx,
+                                );
+                            }
                             Self::apply_passive_event(&mut self.inactive_model, &name, &body);
                         }
                         if name == "turn-finished"
@@ -2203,6 +2245,7 @@ impl XdDesktop {
                 if self.connection_generation != generation {
                     return;
                 }
+                self.terminal_cache_refresh.insert(ChatEndpoint::Local);
                 #[cfg(windows)]
                 if self.restarting_for_update {
                     cx.quit();
@@ -2295,6 +2338,9 @@ impl XdDesktop {
     ) {
         let value = Value::Object(body);
         if self.handle_workspace_create_reply(self.active_endpoint, &kind, &value, cx) {
+            return;
+        }
+        if self.handle_cached_terminal_reply(self.active_endpoint, &kind, &value) {
             return;
         }
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -2890,6 +2936,7 @@ impl XdDesktop {
                     self.close_secrets(cx);
                 }
                 self.reconcile_minimal_navigation(cx);
+                self.prime_terminal_cache(self.active_endpoint);
             }
             RequestKind::AgentCatalog => {
                 if let Err(error) = self.model.apply_agent_catalog(&value) {
@@ -3741,6 +3788,73 @@ impl XdDesktop {
         }
     }
 
+    fn handle_cached_terminal_reply(
+        &mut self,
+        endpoint: ChatEndpoint,
+        kind: &RequestKind,
+        value: &Value,
+    ) -> bool {
+        match kind {
+            RequestKind::TerminalList { chat_id } => {
+                if endpoint == self.active_endpoint
+                    && self
+                        .terminal_panel
+                        .as_ref()
+                        .is_some_and(|panel| &panel.chat_id == chat_id)
+                {
+                    return false;
+                }
+                let Some(panel) = self
+                    .terminal_panel_cache
+                    .get_mut(&(endpoint, chat_id.clone()))
+                else {
+                    return false;
+                };
+                if value.get("ok").and_then(Value::as_bool) == Some(true) {
+                    Self::merge_terminal_list(panel, value);
+                } else {
+                    panel.loading = false;
+                    panel.error = value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                true
+            }
+            RequestKind::TerminalOpen { chat_id, agent, .. } => {
+                if endpoint == self.active_endpoint
+                    && self.terminal_panel.as_ref().is_some_and(|panel| {
+                        &panel.chat_id == chat_id
+                            && panel.opening_matches_protocol_agent(agent.as_deref())
+                    })
+                {
+                    return false;
+                }
+                let Some(panel) = self
+                    .terminal_panel_cache
+                    .get_mut(&(endpoint, chat_id.clone()))
+                    .filter(|panel| panel.opening_matches_protocol_agent(agent.as_deref()))
+                else {
+                    return false;
+                };
+                panel.selected = value.get("id").and_then(Value::as_str).map(str::to_owned);
+                panel.finish_opening();
+                panel.loading = false;
+                panel.error = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                if value.get("ok").and_then(Value::as_bool) == Some(true)
+                    && let Some(daemon) = self.endpoint_daemon(endpoint)
+                {
+                    let _ = daemon.terminal_list(chat_id);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_workspace_create_reply(
         &mut self,
         endpoint: ChatEndpoint,
@@ -3850,6 +3964,89 @@ impl XdDesktop {
         }
     }
 
+    fn is_terminal_screen_event(name: &str) -> bool {
+        matches!(
+            name,
+            "terminal-opened" | "terminal-output" | "terminal-resized" | "terminal-closed"
+        )
+    }
+
+    fn handle_terminal_screen_event(
+        &mut self,
+        endpoint: ChatEndpoint,
+        name: &str,
+        body: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
+            return;
+        };
+        let active = endpoint == self.active_endpoint
+            && self
+                .terminal_panel
+                .as_ref()
+                .is_some_and(|panel| panel.chat_id == chat_id);
+        let terminal_id = body.get("terminal").and_then(Value::as_str);
+        let follow_output = active
+            && self
+                .terminal_panel
+                .as_ref()
+                .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
+            && terminal_scroll_is_at_bottom(&self.terminal_scroll);
+        let agent = self
+            .endpoint_model(endpoint)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| AgentCli::from_backend(&chat.backend));
+        let key = (endpoint, chat_id.clone());
+        let needs_hydration = !active && !self.terminal_panel_cache.contains_key(&key);
+        let panel = if active {
+            self.terminal_panel.as_mut().expect("active panel checked")
+        } else {
+            self.terminal_panel_cache.entry(key).or_insert_with(|| {
+                let mut panel = agent
+                    .map(|agent| Self::new_agent_terminal_panel(chat_id.clone(), agent))
+                    .unwrap_or_else(|| Self::new_terminal_panel(chat_id.clone()));
+                panel.auto_open = false;
+                panel
+            })
+        };
+        if panel.loading {
+            panel.pending_events.push(match name {
+                "terminal-opened" => PendingTerminalEvent::Opened(body.clone()),
+                "terminal-output" => PendingTerminalEvent::Output(body.clone()),
+                "terminal-resized" => PendingTerminalEvent::Resized(body.clone()),
+                "terminal-closed" => PendingTerminalEvent::Closed(body.clone()),
+                _ => return,
+            });
+        }
+        let changed = match name {
+            "terminal-opened" => Self::apply_terminal_opened_event(panel, body),
+            "terminal-output" => Self::apply_terminal_output_event(panel, body),
+            "terminal-resized" => Self::apply_terminal_resized_event(panel, body),
+            "terminal-closed" => Self::apply_terminal_closed_event(panel, body),
+            _ => false,
+        };
+        if active {
+            if name == "terminal-output" && changed {
+                self.terminal_cursor_visible = true;
+            }
+            if changed && (name == "terminal-opened" || follow_output) {
+                self.terminal_scroll.scroll_to_bottom();
+            }
+            if matches!(
+                name,
+                "terminal-opened" | "terminal-output" | "terminal-closed"
+            ) {
+                self.sync_terminal_input_mode(cx);
+            }
+        }
+        if needs_hydration && let Some(daemon) = self.endpoint_daemon(endpoint) {
+            let _ = daemon.terminal_list(&chat_id);
+        }
+    }
+
     fn handle_event(
         &mut self,
         name: &str,
@@ -3857,6 +4054,9 @@ impl XdDesktop {
         attachments: Option<Vec<Attachment>>,
         cx: &mut Context<Self>,
     ) {
+        if Self::is_terminal_screen_event(name) {
+            self.handle_terminal_screen_event(self.active_endpoint, name, &body, cx);
+        }
         if name == "turn-started" && !self.event_is_active(&body) {
             self.model.apply_event(name, &body);
         }
@@ -3892,70 +4092,7 @@ impl XdDesktop {
                     self.schedule_workflow_refresh(marker, cx);
                 }
             }
-            "terminal-opened" if self.event_is_active(&body) => {
-                if let Some(panel) = &mut self.terminal_panel {
-                    if panel.loading {
-                        panel
-                            .pending_events
-                            .push(PendingTerminalEvent::Opened(body.clone()));
-                    }
-                    if Self::apply_terminal_opened_event(panel, &body) {
-                        self.terminal_scroll.scroll_to_bottom();
-                    }
-                }
-                self.sync_terminal_input_mode(cx);
-            }
-            "terminal-output" if self.event_is_active(&body) => {
-                let terminal_id = body.get("terminal").and_then(Value::as_str);
-                let follow_output = self
-                    .terminal_panel
-                    .as_ref()
-                    .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
-                    && terminal_scroll_is_at_bottom(&self.terminal_scroll);
-                if let Some(panel) = &mut self.terminal_panel {
-                    if panel.loading {
-                        panel
-                            .pending_events
-                            .push(PendingTerminalEvent::Output(body.clone()));
-                    }
-                    if Self::apply_terminal_output_event(panel, &body) {
-                        self.terminal_cursor_visible = true;
-                        if follow_output {
-                            self.terminal_scroll.scroll_to_bottom();
-                        }
-                    }
-                }
-                self.sync_terminal_input_mode(cx);
-            }
-            "terminal-resized" if self.event_is_active(&body) => {
-                let terminal_id = body.get("terminal").and_then(Value::as_str);
-                let follow_output = self
-                    .terminal_panel
-                    .as_ref()
-                    .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
-                    && terminal_scroll_is_at_bottom(&self.terminal_scroll);
-                if let Some(panel) = &mut self.terminal_panel {
-                    if panel.loading {
-                        panel
-                            .pending_events
-                            .push(PendingTerminalEvent::Resized(body.clone()));
-                    }
-                    if Self::apply_terminal_resized_event(panel, &body) && follow_output {
-                        self.terminal_scroll.scroll_to_bottom();
-                    }
-                }
-            }
-            "terminal-closed" if self.event_is_active(&body) => {
-                if let Some(panel) = &mut self.terminal_panel {
-                    if panel.loading {
-                        panel
-                            .pending_events
-                            .push(PendingTerminalEvent::Closed(body.clone()));
-                    }
-                    Self::apply_terminal_closed_event(panel, &body);
-                }
-                self.sync_terminal_input_mode(cx);
-            }
+            "terminal-opened" | "terminal-output" | "terminal-resized" | "terminal-closed" => {}
             "git-draft-finished" if self.event_is_active(&body) => {
                 let kind = body.get("kind").and_then(Value::as_str).unwrap_or_default();
                 let expected = match kind {
@@ -4322,7 +4459,49 @@ impl XdDesktop {
         }
     }
 
-    fn begin_workspace_create(&mut self, cx: &mut Context<Self>) {
+    fn minimal_popup_is_open(&self) -> bool {
+        self.minimal_theme_open
+            || self.minimal_new_tab_open
+            || self.remote_panel.is_some()
+            || self.creating_workspace
+            || self.sidebar_edit.is_some()
+            || self.pending_sidebar_delete.is_some()
+            || self.creating_chat_folder.is_some()
+    }
+
+    fn focus_minimal_popup(
+        &mut self,
+        focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.minimal_popup_focus_captured {
+            self.minimal_popup_previous_focus = window.focused(cx).map(|focus| focus.downgrade());
+            self.minimal_popup_focus_captured = true;
+        }
+        window.focus(&focus);
+    }
+
+    fn restore_minimal_popup_focus(&mut self, window: &mut Window) {
+        if self.minimal_popup_is_open() {
+            return;
+        }
+        if !self.minimal_popup_focus_captured {
+            return;
+        }
+        self.minimal_popup_focus_captured = false;
+        if let Some(focus) = self
+            .minimal_popup_previous_focus
+            .take()
+            .and_then(|focus| focus.upgrade())
+        {
+            window.focus(&focus);
+        } else {
+            window.blur();
+        }
+    }
+
+    fn begin_workspace_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.creating_workspace = true;
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
@@ -4334,6 +4513,8 @@ impl XdDesktop {
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.workspace_clone_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
+        let focus = self.workspace_create_input.read(cx).focus_handle(cx);
+        self.focus_minimal_popup(focus, window, cx);
         cx.notify();
     }
 
@@ -4467,7 +4648,12 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn begin_chat_create(&mut self, folder_id: String, cx: &mut Context<Self>) {
+    fn begin_chat_create(
+        &mut self,
+        folder_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.creating_chat_folder = Some(folder_id.clone());
         // Naming a chat up front is busywork: the title is renamed later or
         // never. Open on the name the chat would have had anyway, selected, so
@@ -4489,6 +4675,8 @@ impl XdDesktop {
             self.chat_create_worktrees_loading = false;
             self.model.connection_error = Some(error);
         }
+        let focus = self.chat_create_input.read(cx).focus_handle(cx);
+        self.focus_minimal_popup(focus, window, cx);
         cx.notify();
     }
 
@@ -4616,7 +4804,7 @@ impl XdDesktop {
         self.remote_name_input
             .update(cx, |input, cx| input.set_text(name, cx));
         let focus = self.remote_host_input.read(cx).focus_handle(cx);
-        window.focus(&focus);
+        self.focus_minimal_popup(focus, window, cx);
         cx.notify();
     }
 
@@ -5115,6 +5303,85 @@ impl XdDesktop {
         }
     }
 
+    fn stash_terminal_panel(&mut self) {
+        let Some(panel) = self.terminal_panel.take() else {
+            return;
+        };
+        self.terminal_panel_cache
+            .insert((self.active_endpoint, panel.chat_id.clone()), panel);
+    }
+
+    fn restore_terminal_panel(&mut self, chat_id: &str, agent: AgentCli) -> bool {
+        let Some(mut panel) = self
+            .terminal_panel_cache
+            .remove(&(self.active_endpoint, chat_id.to_owned()))
+        else {
+            return false;
+        };
+        panel.agent = Some(agent);
+        panel.allow_agent_tabs = true;
+        panel.auto_open = !panel.has_requested_session();
+        self.terminal_panel = Some(panel);
+        true
+    }
+
+    fn prime_terminal_cache(&mut self, endpoint: ChatEndpoint) {
+        let refresh_all = self.terminal_cache_refresh.remove(&endpoint);
+        let chats = self
+            .endpoint_model(endpoint)
+            .chats
+            .iter()
+            .filter_map(|chat| {
+                AgentCli::from_backend(&chat.backend).map(|agent| (chat.id.clone(), agent))
+            })
+            .collect::<Vec<_>>();
+        let live_chats = chats
+            .iter()
+            .map(|(chat_id, _)| chat_id.clone())
+            .collect::<HashSet<_>>();
+        self.terminal_panel_cache
+            .retain(|(cached_endpoint, chat_id), _| {
+                *cached_endpoint != endpoint || live_chats.contains(chat_id)
+            });
+
+        let daemon = self.endpoint_daemon(endpoint).cloned();
+        for (chat_id, agent) in chats {
+            let active = endpoint == self.active_endpoint
+                && self
+                    .terminal_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.chat_id == chat_id);
+            if active {
+                if refresh_all && let Some(panel) = &mut self.terminal_panel {
+                    panel.begin_refresh();
+                    if let Some(daemon) = &daemon {
+                        let _ = daemon.terminal_list(&chat_id);
+                    }
+                }
+                continue;
+            }
+            let key = (endpoint, chat_id.clone());
+            let missing = !self.terminal_panel_cache.contains_key(&key);
+            if missing {
+                let mut panel = Self::new_agent_terminal_panel(chat_id.clone(), agent);
+                panel.auto_open = false;
+                self.terminal_panel_cache.insert(key.clone(), panel);
+            } else if refresh_all && let Some(panel) = self.terminal_panel_cache.get_mut(&key) {
+                panel.begin_refresh();
+            }
+            if (missing || refresh_all)
+                && let Some(daemon) = &daemon
+            {
+                if let Err(error) = daemon.terminal_list(&chat_id)
+                    && let Some(panel) = self.terminal_panel_cache.get_mut(&key)
+                {
+                    panel.loading = false;
+                    panel.error = Some(error);
+                }
+            }
+        }
+    }
+
     fn current_connection_key(&self) -> String {
         let remote = self
             .remote_credentials
@@ -5305,8 +5572,14 @@ impl XdDesktop {
         self.start_terminal_session_as(reuse, agent, cx);
     }
 
-    fn toggle_minimal_new_tab_menu(&mut self, cx: &mut Context<Self>) {
+    fn toggle_minimal_new_tab_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.minimal_new_tab_open = !self.minimal_new_tab_open;
+        if self.minimal_new_tab_open {
+            self.minimal_theme_open = false;
+            self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        } else {
+            self.restore_minimal_popup_focus(window);
+        }
         cx.notify();
     }
 
@@ -5317,6 +5590,7 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         self.minimal_new_tab_open = false;
+        self.restore_minimal_popup_focus(window);
         self.start_terminal_session_as(false, agent, cx);
         let focus = self.terminal_input.read(cx).focus_handle(cx);
         window.focus(&focus);
@@ -5562,6 +5836,15 @@ impl XdDesktop {
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
+        let should_auto_open = Self::merge_terminal_list(panel, value);
+        self.terminal_scroll.scroll_to_bottom();
+        if should_auto_open {
+            self.start_terminal_session(true, cx);
+        }
+        self.sync_terminal_input_mode(cx);
+    }
+
+    fn merge_terminal_list(panel: &mut TerminalPanel, value: &Value) -> bool {
         panel.loading = false;
         panel.error = None;
         let pending_events = std::mem::take(&mut panel.pending_events);
@@ -5614,12 +5897,7 @@ impl XdDesktop {
         if panel.has_requested_session() {
             panel.auto_open = false;
         }
-        let should_auto_open = panel.should_auto_open();
-        self.terminal_scroll.scroll_to_bottom();
-        if should_auto_open {
-            self.start_terminal_session(true, cx);
-        }
-        self.sync_terminal_input_mode(cx);
+        panel.should_auto_open()
     }
 
     fn terminal_tab_from_snapshot(terminal: &Value) -> Option<TerminalTab> {
@@ -6033,6 +6311,7 @@ impl XdDesktop {
         &mut self,
         target: SidebarTarget,
         current: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.pending_sidebar_delete = None;
@@ -6048,16 +6327,24 @@ impl XdDesktop {
         });
         self.sidebar_edit_input
             .update(cx, |input, cx| input.set_text(current, cx));
+        let focus = self.sidebar_edit_input.read(cx).focus_handle(cx);
+        self.focus_minimal_popup(focus, window, cx);
         cx.notify();
     }
 
-    fn begin_sidebar_delete(&mut self, target: SidebarTarget, cx: &mut Context<Self>) {
+    fn begin_sidebar_delete(
+        &mut self,
+        target: SidebarTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar_edit = None;
         self.sidebar_move = None;
         self.sidebar_move_submitting = false;
         self.sidebar_move_destination = None;
         self.pending_sidebar_delete = Some(target);
         self.sidebar_delete_submitting = false;
+        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         cx.notify();
     }
 
@@ -6836,7 +7123,7 @@ impl XdDesktop {
         };
         self.minimal_route = MinimalRoute::Projects { project_id };
         self.minimal_new_tab_open = false;
-        self.terminal_panel = None;
+        self.stash_terminal_panel();
         self.model.selected_chat = None;
         self.sync_terminal_input_mode(cx);
         cx.notify();
@@ -6894,9 +7181,16 @@ impl XdDesktop {
             agent,
         };
         if !same_panel {
-            self.terminal_panel = Some(Self::new_agent_terminal_panel(chat_id, agent));
+            self.stash_terminal_panel();
+            let restored = self.restore_terminal_panel(&chat_id, agent);
+            if !restored {
+                self.terminal_panel = Some(Self::new_agent_terminal_panel(chat_id, agent));
+            }
             self.sync_terminal_input_mode(cx);
-            self.refresh_terminal_sessions(cx);
+            self.terminal_scroll.scroll_to_bottom();
+            if !restored {
+                self.refresh_terminal_sessions(cx);
+            }
         }
         cx.notify();
     }
@@ -6928,7 +7222,7 @@ impl XdDesktop {
             MinimalRoute::Projects { .. } => {
                 self.minimal_route = next;
                 self.minimal_new_tab_open = false;
-                self.terminal_panel = None;
+                self.stash_terminal_panel();
                 self.model.selected_chat = None;
                 cx.notify();
             }
@@ -6972,6 +7266,17 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn toggle_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.minimal_theme_open = !self.minimal_theme_open;
+        if self.minimal_theme_open {
+            self.minimal_new_tab_open = false;
+            self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        } else {
+            self.restore_minimal_popup_focus(window);
+        }
+        cx.notify();
+    }
+
     fn toggle_minimal_all_permissions(&mut self, cx: &mut Context<Self>) {
         self.settings.allow_all_permissions = !self.settings.allow_all_permissions;
         if let Err(error) = self.settings.save() {
@@ -6988,6 +7293,7 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let terminal_input = self.terminal_input.clone();
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
+        let minimal_popup_focus = self.minimal_popup_focus.clone();
         let desktop = cx.entity();
         let Some(panel) = self.terminal_panel.as_ref() else {
             return div()
@@ -7090,7 +7396,7 @@ impl XdDesktop {
         } else {
             output.into_any_element()
         };
-        let active = selected_id.is_some() && !panel.loading;
+        let active = selected_id.is_some();
         let tabs = panel
             .sessions
             .iter()
@@ -7220,13 +7526,13 @@ impl XdDesktop {
                             .rounded_md()
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.toggle_minimal_new_tab_menu(cx)),
-                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_minimal_new_tab_menu(window, cx)
+                            }))
                             .child(plus_icon(colors.text)),
                     ),
             )
-            .when(panel.loading, |pane| {
+            .when(panel.loading && panel.sessions.is_empty(), |pane| {
                 pane.child(
                     div()
                         .absolute()
@@ -7266,7 +7572,20 @@ impl XdDesktop {
             .when(self.minimal_new_tab_open, |pane| {
                 pane.child(
                     div()
+                        .id("minimal-new-tab-shield")
+                        .occlude()
+                        .absolute()
+                        .inset_0()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.minimal_new_tab_open = false;
+                            this.restore_minimal_popup_focus(window);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
                         .id("minimal-new-tab-menu")
+                        .occlude()
                         .absolute()
                         .top(px(38.0))
                         .right(px(8.0))
@@ -7279,6 +7598,7 @@ impl XdDesktop {
                         .shadow_lg()
                         .flex()
                         .flex_col()
+                        .track_focus(&minimal_popup_focus)
                         .child(
                             div()
                                 .id("minimal-new-shell-tab")
@@ -7589,11 +7909,11 @@ impl XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(colors.accent_hover)))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(project_id) = create_session_for.clone() {
-                                    this.begin_chat_create(project_id, cx);
+                                    this.begin_chat_create(project_id, window, cx);
                                 } else {
-                                    this.begin_workspace_create(cx);
+                                    this.begin_workspace_create(window, cx);
                                 }
                             }))
                             .child(plus_icon(colors.accent_text)),
@@ -7658,9 +7978,8 @@ impl XdDesktop {
                                     .text_color(rgb(colors.text))
                             })
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.minimal_theme_open = !this.minimal_theme_open;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_minimal_theme_popup(window, cx)
                             }))
                             .child("⚙"),
                     ),
@@ -7981,14 +8300,20 @@ impl XdDesktop {
                                         .hover(|style| {
                                             style.bg(rgb(0x5a252b)).text_color(rgb(0xd86f7c))
                                         })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
                                             this.begin_sidebar_delete(
                                                 SidebarTarget::Chat(delete_chat_id.clone()),
+                                                window,
                                                 cx,
                                             );
                                         }))
-                                        .child(svg().path(TRASH_ICON).size(px(15.0))),
+                                        .child(
+                                            svg()
+                                                .path(TRASH_ICON)
+                                                .size(px(15.0))
+                                                .text_color(rgb(colors.muted)),
+                                        ),
                                 ),
                         )
                         .child(
@@ -8057,9 +8382,9 @@ impl XdDesktop {
                         .rounded_md()
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(colors.border)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
-                            this.begin_chat_create(create_project.clone(), cx);
+                            this.begin_chat_create(create_project.clone(), window, cx);
                         }))
                         .child(plus_icon(colors.text)),
                 );
@@ -8315,14 +8640,20 @@ impl XdDesktop {
                             .rounded_md()
                             .text_color(rgb(colors.muted))
                             .hover(|style| style.bg(rgb(0x5a252b)).text_color(rgb(0xd86f7c)))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.begin_sidebar_delete(
                                     SidebarTarget::Chat(delete_chat_id.clone()),
+                                    window,
                                     cx,
                                 );
                             }))
-                            .child(svg().path(TRASH_ICON).size(px(16.0))),
+                            .child(
+                                svg()
+                                    .path(TRASH_ICON)
+                                    .size(px(16.0))
+                                    .text_color(rgb(colors.muted)),
+                            ),
                     )
                     .child(div().text_lg().text_color(rgb(colors.muted)).child("›"))
             })
@@ -8371,7 +8702,9 @@ impl XdDesktop {
                             .rounded_md()
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(cx.listener(|this, _, _, cx| this.begin_workspace_create(cx)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.begin_workspace_create(window, cx)
+                            }))
                             .child(plus_icon(colors.text)),
                     ),
             )
@@ -8451,13 +8784,9 @@ impl XdDesktop {
                                                     this.begin_sidebar_edit(
                                                         SidebarTarget::Folder(folder_id.clone()),
                                                         project_name.clone(),
+                                                        window,
                                                         cx,
                                                     );
-                                                    let focus = this
-                                                        .sidebar_edit_input
-                                                        .read(cx)
-                                                        .focus_handle(cx);
-                                                    window.focus(&focus);
                                                 },
                                             ))
                                             .child("✎"),
@@ -8482,13 +8811,19 @@ impl XdDesktop {
                                             .text_color(rgb(0xd86f7c))
                                             .cursor_pointer()
                                             .hover(|style| style.bg(rgb(0x5a252b)))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                            .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.begin_sidebar_delete(
                                                     SidebarTarget::Folder(folder_id.clone()),
+                                                    window,
                                                     cx,
                                                 );
                                             }))
-                                            .child(svg().path(TRASH_ICON).size(px(17.0))),
+                                            .child(
+                                                svg()
+                                                    .path(TRASH_ICON)
+                                                    .size(px(17.0))
+                                                    .text_color(rgb(0xd86f7c)),
+                                            ),
                                     )
                                 },
                             ),
@@ -8523,8 +8858,8 @@ impl XdDesktop {
                                         .text_color(rgb(colors.accent_text))
                                         .cursor_pointer()
                                         .hover(|style| style.bg(rgb(colors.accent_hover)))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.begin_chat_create(folder_id.clone(), cx);
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.begin_chat_create(folder_id.clone(), window, cx);
                                         }))
                                         .child(plus_icon(colors.accent_text))
                                         .child("New session"),
@@ -8631,6 +8966,9 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        self.restore_minimal_popup_focus(window);
+        let minimal_popup_open = self.minimal_popup_is_open();
+        let minimal_popup_focus = self.minimal_popup_focus.clone();
         let colors = self.settings.theme.colors();
         let route = self.minimal_route.clone();
         let content = match route {
@@ -8685,80 +9023,96 @@ impl XdDesktop {
                 })
                 .collect::<Vec<_>>();
             div()
+                .occlude()
                 .absolute()
-                .top(px(68.0))
-                .right(px(22.0))
-                .w(px(300.0))
-                .p_2()
-                .rounded_xl()
-                .border_1()
-                .border_color(rgb(colors.border))
-                .bg(rgb(colors.surface))
-                .shadow_lg()
+                .inset_0()
+                .track_focus(&minimal_popup_focus)
                 .child(
                     div()
-                        .px_3()
-                        .pt_2()
-                        .pb_1()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(colors.muted))
-                        .child("Appearance"),
-                )
-                .children(rows)
-                .child(div().mx_2().my_2().h(px(1.0)).bg(rgb(colors.border)))
-                .child(
-                    div()
-                        .id("minimal-all-permissions")
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.toggle_minimal_all_permissions(cx)),
-                        )
+                        .occlude()
+                        .absolute()
+                        .top(px(68.0))
+                        .right(px(22.0))
+                        .w(px(300.0))
+                        .p_2()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .bg(rgb(colors.surface))
+                        .shadow_lg()
                         .child(
                             div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(colors.text))
-                                        .child("All permissions"),
-                                )
-                                .child(div().mt_1().text_xs().text_color(rgb(colors.muted)).child(
-                                    "New Codex and Claude tabs skip approvals and sandboxing.",
-                                )),
+                                .px_3()
+                                .pt_2()
+                                .pb_1()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(colors.muted))
+                                .child("Appearance"),
                         )
+                        .children(rows)
+                        .child(div().mx_2().my_2().h(px(1.0)).bg(rgb(colors.border)))
                         .child(
                             div()
-                                .w(px(38.0))
-                                .h(px(22.0))
-                                .flex_none()
-                                .rounded_full()
-                                .bg(rgb(if allow_all_permissions {
-                                    colors.accent
-                                } else {
-                                    colors.surface_high
+                                .id("minimal-all-permissions")
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_minimal_all_permissions(cx)
                                 }))
                                 .child(
                                     div()
-                                        .mt(px(3.0))
-                                        .ml(px(if allow_all_permissions { 19.0 } else { 3.0 }))
-                                        .size(px(16.0))
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(colors.text))
+                                                .child("All permissions"),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt_1()
+                                                .text_xs()
+                                                .text_color(rgb(colors.muted))
+                                                .child("New Codex and Claude tabs skip approvals and sandboxing."),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .w(px(38.0))
+                                        .h(px(22.0))
+                                        .flex_none()
                                         .rounded_full()
                                         .bg(rgb(if allow_all_permissions {
-                                            colors.accent_text
+                                            colors.accent
                                         } else {
-                                            colors.muted
-                                        })),
+                                            colors.surface_high
+                                        }))
+                                        .child(
+                                            div()
+                                                .mt(px(3.0))
+                                                .ml(px(if allow_all_permissions {
+                                                    19.0
+                                                } else {
+                                                    3.0
+                                                }))
+                                                .size(px(16.0))
+                                                .rounded_full()
+                                                .bg(rgb(if allow_all_permissions {
+                                                    colors.accent_text
+                                                } else {
+                                                    colors.muted
+                                                })),
+                                        ),
                                 ),
                         ),
                 )
@@ -8771,8 +9125,10 @@ impl XdDesktop {
                 && !panel.code.trim().is_empty()
                 && !panel.name.trim().is_empty();
             div()
+                .occlude()
                 .absolute()
                 .inset_0()
+                .track_focus(&minimal_popup_focus)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -8916,8 +9272,10 @@ impl XdDesktop {
             let can_save =
                 !self.workspace_create_submitting && !self.workspace_create_name.trim().is_empty();
             div()
+                .occlude()
                 .absolute()
                 .inset_0()
+                .track_focus(&minimal_popup_focus)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -9049,8 +9407,10 @@ impl XdDesktop {
             let can_save = !edit.submitting && !name.is_empty() && name != edit.original;
             Some(
                 div()
+                    .occlude()
                     .absolute()
                     .inset_0()
+                    .track_focus(&minimal_popup_focus)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -9158,8 +9518,10 @@ impl XdDesktop {
             let submitting = self.sidebar_delete_submitting;
             Some(
                 div()
+                    .occlude()
                     .absolute()
                     .inset_0()
+                    .track_focus(&minimal_popup_focus)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -9267,8 +9629,10 @@ impl XdDesktop {
             let submitting = self.sidebar_delete_submitting;
             Some(
                 div()
+                    .occlude()
                     .absolute()
                     .inset_0()
+                    .track_focus(&minimal_popup_focus)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -9367,8 +9731,10 @@ impl XdDesktop {
             let selected_worktree = self.chat_create_worktree.clone();
             let can_create_worktree = self.chat_create_can_new_worktree;
             div()
+                .occlude()
                 .absolute()
                 .inset_0()
+                .track_focus(&minimal_popup_focus)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -9726,54 +10092,62 @@ impl XdDesktop {
             .when_some(chat_delete_overlay, |root, overlay| root.child(overlay))
             .when_some(chat_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
-            .child(
-                div()
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(6.0))
-                    .right(px(6.0))
-                    .h(px(6.0))
-                    .cursor(CursorStyle::ResizeUpDown)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_resize(ResizeEdge::Top)
-                    }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(0.0))
-                    .left(px(6.0))
-                    .right(px(6.0))
-                    .h(px(6.0))
-                    .cursor(CursorStyle::ResizeUpDown)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_resize(ResizeEdge::Bottom)
-                    }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(6.0))
-                    .bottom(px(6.0))
-                    .left(px(0.0))
-                    .w(px(6.0))
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_resize(ResizeEdge::Left)
-                    }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(px(6.0))
-                    .right(px(0.0))
-                    .bottom(px(6.0))
-                    .w(px(6.0))
-                    .cursor(CursorStyle::ResizeLeftRight)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_resize(ResizeEdge::Right)
-                    }),
-            )
+            .when(!minimal_popup_open, |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .left(px(6.0))
+                        .right(px(6.0))
+                        .h(px(6.0))
+                        .cursor(CursorStyle::ResizeUpDown)
+                        .on_mouse_down(MouseButton::Left, |_, window, _| {
+                            window.start_window_resize(ResizeEdge::Top)
+                        }),
+                )
+            })
+            .when(!minimal_popup_open, |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .bottom(px(0.0))
+                        .left(px(6.0))
+                        .right(px(6.0))
+                        .h(px(6.0))
+                        .cursor(CursorStyle::ResizeUpDown)
+                        .on_mouse_down(MouseButton::Left, |_, window, _| {
+                            window.start_window_resize(ResizeEdge::Bottom)
+                        }),
+                )
+            })
+            .when(!minimal_popup_open, |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top(px(6.0))
+                        .bottom(px(6.0))
+                        .left(px(0.0))
+                        .w(px(6.0))
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(MouseButton::Left, |_, window, _| {
+                            window.start_window_resize(ResizeEdge::Left)
+                        }),
+                )
+            })
+            .when(!minimal_popup_open, |root| {
+                root.child(
+                    div()
+                        .absolute()
+                        .top(px(6.0))
+                        .right(px(0.0))
+                        .bottom(px(6.0))
+                        .w(px(6.0))
+                        .cursor(CursorStyle::ResizeLeftRight)
+                        .on_mouse_down(MouseButton::Left, |_, window, _| {
+                            window.start_window_resize(ResizeEdge::Right)
+                        }),
+                )
+            })
             .into_any_element()
     }
 }
@@ -10479,7 +10853,7 @@ mod tests {
             ".child(\"Sessions\")",
             "this.show_minimal_projects(cx)",
             "this.show_minimal_sessions(window, cx)",
-            "this.begin_workspace_create(cx)",
+            "this.begin_workspace_create(window, cx)",
             "minimal-runtime",
             "minimal-theme",
         ] {
@@ -10534,6 +10908,230 @@ mod tests {
         ] {
             assert!(settings.contains(behavior), "missing {behavior}");
         }
+    }
+
+    #[test]
+    fn minimal_popups_occlude_the_surfaces_behind_them() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let render = production
+            .split_once("fn render_minimal(")
+            .expect("minimal root renderer")
+            .1;
+        let overlays = [
+            ("let theme_overlay =", "let remote_overlay ="),
+            ("let remote_overlay =", "let workspace_overlay ="),
+            ("let workspace_overlay =", "let workspace_rename_overlay ="),
+            (
+                "let workspace_rename_overlay =",
+                "let workspace_delete_overlay =",
+            ),
+            (
+                "let workspace_delete_overlay =",
+                "let chat_delete_overlay =",
+            ),
+            ("let chat_delete_overlay =", "let chat_overlay ="),
+            ("let chat_overlay =", "let error_banner ="),
+        ];
+
+        for (start, end) in overlays {
+            let overlay = render
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing {end}"))
+                .0;
+            assert!(
+                overlay.contains(".occlude()"),
+                "{start} must block pointer events from reaching content behind it"
+            );
+        }
+    }
+
+    #[test]
+    fn minimal_popups_take_keyboard_focus_from_the_surface_behind_them() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+
+        assert!(production.contains("minimal_popup_focus: FocusHandle"));
+        assert!(production.contains("minimal_popup_previous_focus: Option<WeakFocusHandle>"));
+
+        for (start, end) in [
+            ("fn begin_workspace_create(", "fn workspace_create_changed("),
+            ("fn begin_chat_create(", "fn chat_create_changed("),
+            ("fn begin_sidebar_delete(", "fn cancel_sidebar_delete("),
+            ("fn open_remote(", "fn close_remote("),
+        ] {
+            let opener = production
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing {end}"))
+                .0;
+            assert!(
+                opener.contains("window: &mut Window"),
+                "{start} must receive the window so it can move focus"
+            );
+            assert!(
+                opener.contains("focus_minimal_popup("),
+                "{start} must take focus away from the terminal or composer behind it"
+            );
+        }
+
+        let render = production
+            .split_once("fn render_minimal(")
+            .expect("minimal root renderer")
+            .1;
+        let theme_overlay = render
+            .split_once("let theme_overlay =")
+            .expect("theme overlay")
+            .1
+            .split_once("let remote_overlay =")
+            .expect("end of theme overlay")
+            .0;
+        assert!(
+            theme_overlay.contains(".inset_0()"),
+            "the settings popover needs a full-window pointer shield"
+        );
+        assert!(
+            theme_overlay.contains(".track_focus(&minimal_popup_focus)"),
+            "the settings popover needs a focused modal scope"
+        );
+    }
+
+    #[gpui::test]
+    fn minimal_popup_focus_is_taken_and_restored(cx: &mut gpui::TestAppContext) {
+        let (desktop, mut cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            let terminal_focus = desktop.terminal_input.read(cx).focus_handle(cx);
+            window.focus(&terminal_focus);
+
+            desktop.begin_workspace_create(window, cx);
+            let workspace_focus = desktop.workspace_create_input.read(cx).focus_handle(cx);
+            assert!(workspace_focus.is_focused(window));
+            assert!(!terminal_focus.is_focused(window));
+
+            desktop.cancel_workspace_create(cx);
+            desktop.restore_minimal_popup_focus(window);
+            assert!(terminal_focus.is_focused(window));
+
+            window.blur();
+            desktop.begin_sidebar_delete(SidebarTarget::Chat("chat".into()), window, cx);
+            assert!(desktop.minimal_popup_focus.is_focused(window));
+            desktop.cancel_sidebar_delete(cx);
+            desktop.restore_minimal_popup_focus(window);
+            assert!(window.focused(cx).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn switching_sessions_reuses_the_hydrated_terminal_panel(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.chats = vec![
+                ChatSummary {
+                    id: "chat-a".into(),
+                    folder: "project".into(),
+                    title: Some("A".into()),
+                    backend: "codex".into(),
+                    branch: None,
+                    working: false,
+                    terminal_working: false,
+                },
+                ChatSummary {
+                    id: "chat-b".into(),
+                    folder: "project".into(),
+                    title: Some("B".into()),
+                    backend: "claude".into(),
+                    branch: None,
+                    working: false,
+                    terminal_working: false,
+                },
+            ];
+            desktop.model.selected_chat = Some("chat-a".into());
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "project".into(),
+                chat_id: "chat-a".into(),
+                agent: AgentCli::Codex,
+            };
+
+            let mut screen = TerminalScreen::new(80, 24);
+            screen.feed(b"cached output");
+            let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
+            panel.loading = false;
+            panel.auto_open = false;
+            panel.selected = Some("terminal-a".into());
+            panel.sessions.push(TerminalTab {
+                id: "terminal-a".into(),
+                title: "Codex".into(),
+                agent: Some(AgentCli::Codex),
+                sequence: Some(7),
+                screen,
+            });
+            desktop.terminal_panel = Some(panel);
+
+            desktop.select_minimal_session("project".into(), "chat-b".into(), AgentCli::Claude, cx);
+            desktop.select_minimal_session("project".into(), "chat-a".into(), AgentCli::Codex, cx);
+
+            let panel = desktop.terminal_panel.as_ref().expect("restored panel");
+            assert_eq!(panel.chat_id, "chat-a");
+            assert!(!panel.loading);
+            assert_eq!(panel.selected.as_deref(), Some("terminal-a"));
+            assert_eq!(panel.sessions[0].sequence, Some(7));
+            assert_eq!(panel.sessions[0].screen.rendered().text, "cached output");
+            desktop.terminal_panel = None;
+            desktop.terminal_panel_cache.clear();
+        });
+    }
+
+    #[gpui::test]
+    fn background_terminal_output_keeps_a_cached_session_current(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("chat-b".into());
+            let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
+            panel.loading = false;
+            panel.auto_open = false;
+            panel.selected = Some("terminal-a".into());
+            panel.sessions.push(TerminalTab {
+                id: "terminal-a".into(),
+                title: "Codex".into(),
+                agent: Some(AgentCli::Codex),
+                sequence: Some(7),
+                screen: TerminalScreen::new(80, 24),
+            });
+            desktop
+                .terminal_panel_cache
+                .insert((ChatEndpoint::Local, "chat-a".into()), panel);
+
+            desktop.handle_event(
+                "terminal-output",
+                serde_json::json!({
+                    "chat": "chat-a",
+                    "terminal": "terminal-a",
+                    "sequence": 8,
+                    "data": STANDARD.encode(b"live output"),
+                }),
+                None,
+                cx,
+            );
+
+            let panel = desktop
+                .terminal_panel_cache
+                .get(&(ChatEndpoint::Local, "chat-a".into()))
+                .expect("cached panel");
+            assert_eq!(panel.sessions[0].sequence, Some(8));
+            assert_eq!(panel.sessions[0].screen.rendered().text, "live output");
+            desktop.terminal_panel_cache.clear();
+        });
     }
 
     #[test]
@@ -10791,6 +11389,27 @@ mod tests {
                 .unwrap_or_else(|| panic!("the composer action icon {path} is embedded"));
             assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
         }
+    }
+
+    #[test]
+    fn every_trash_icon_has_an_explicit_resting_color() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let mut count = 0;
+
+        for (index, _) in production.match_indices(".path(TRASH_ICON)") {
+            count += 1;
+            let style = &production[index..production.len().min(index + 160)];
+            assert!(
+                style.contains(".text_color("),
+                "trash icon {count} needs its own color because SVG styles do not inherit from the button"
+            );
+        }
+
+        assert_eq!(count, 3);
     }
 
     #[gpui::test]
@@ -11235,7 +11854,7 @@ mod tests {
             assert!(terminal.contains(id), "missing {label} tab choice");
             assert!(terminal.contains(&format!(".child(\"{label}\")")));
         }
-        assert!(terminal.contains("this.toggle_minimal_new_tab_menu(cx)"));
+        assert!(terminal.contains("this.toggle_minimal_new_tab_menu(window, cx)"));
         assert!(terminal.contains("this.open_minimal_terminal_tab(None, window, cx)"));
         assert!(terminal.contains("Some(AgentCli::Codex)"));
         assert!(terminal.contains("Some(AgentCli::Claude)"));
@@ -11529,7 +12148,7 @@ mod tests {
             "minimal-delete-project",
             "this.begin_sidebar_delete(",
             "SidebarTarget::Folder",
-            ".child(svg().path(TRASH_ICON)",
+            ".path(TRASH_ICON)",
         ] {
             assert!(home.contains(behavior), "missing {behavior}");
         }
@@ -11581,7 +12200,7 @@ mod tests {
                 "this.begin_sidebar_delete(",
                 "SidebarTarget::Chat",
                 "cx.stop_propagation()",
-                "svg().path(TRASH_ICON)",
+                ".path(TRASH_ICON)",
             ] {
                 assert!(surface.contains(behavior), "missing {behavior}");
             }
