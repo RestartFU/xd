@@ -158,7 +158,6 @@ DESKTOP_PROFILE=$PROFILE
 XD_BUILD_PROFILE="$DESKTOP_PROFILE" XD_COMMIT="$COMMIT" \
   cargo build --locked --release --manifest-path desktop/Cargo.toml
 XD_COMMIT="$COMMIT" cargo build --locked --release --manifest-path daemon-rs/Cargo.toml
-cargo build --release --manifest-path tls-proxy-rs/Cargo.toml
 
 APP="$OUT/$BUNDLE_NAME.app"
 rm -rf "$APP"
@@ -172,10 +171,8 @@ install -m0755 desktop/target/release/xd-desktop \
   "$APP/Contents/MacOS/xd-desktop"
 install -m0755 installer/macos/xd-rust-launcher.sh \
   "$APP/Contents/MacOS/xd"
-install -m0755 daemon-rs/target/release/xd-daemon \
-  "$APP/Contents/Resources/libexec/xd-daemon"
-install -m0755 tls-proxy-rs/target/release/xd-tls-proxy \
-  "$APP/Contents/Resources/libexec/xd-tls-proxy"
+install -m0755 daemon-rs/target/release/xd-host \
+  "$APP/Contents/Resources/libexec/xd-host"
 install -m0755 scripts/install-macos.sh \
   "$APP/Contents/Resources/libexec/install.sh"
 install -m0755 "$CLAUDE_BINARY" \

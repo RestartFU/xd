@@ -1,4 +1,8 @@
-# Remote wire protocol
+# Legacy mobile wire protocol
+
+> This documents the experimental mobile client's previous paired TLS
+> transport. The desktop no longer exposes this transport: local mode owns an
+> `xd-host stdio` child and remote mode runs that child over SSH.
 
 This document is the normative contract between `xd serve` and every remote
 client. The Rust daemon in `daemon-rs/src/lib.rs` owns framing and dispatch for
@@ -15,8 +19,8 @@ members unless a later protocol version explicitly says otherwise.
 - TCP port 4001 by default.
 - TLS begins immediately after the TCP connection. There is no plaintext mode
   and no upgrade handshake.
-- The TLS helper creates and persists a self-signed certificate
-  (`tls-proxy-rs/src/main.rs`). During pairing a client accepts the presented
+- The legacy TLS layer created and persisted a self-signed certificate. During
+  pairing a client accepted the presented
   leaf and persists it alongside the issued token. Every later connection must
   require that exact leaf.
 - Application data is UTF-8 JSON Lines: one JSON object followed by `LF`

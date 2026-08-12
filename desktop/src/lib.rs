@@ -4,7 +4,6 @@ pub mod daemon;
 pub mod local_socket;
 pub mod markdown;
 pub mod model;
-mod private_fs;
 pub mod protocol;
 pub mod remote;
 pub mod session_host;

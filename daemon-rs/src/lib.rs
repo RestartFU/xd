@@ -138,7 +138,7 @@ pub(crate) struct EventBus {
 
 struct Subscriber {
     sender: SyncSender<Value>,
-    connection: UnixStream,
+    connection: Option<UnixStream>,
     authenticated: Arc<AtomicBool>,
 }
 
@@ -1176,10 +1176,25 @@ impl Engine {
         transport: Transport,
     ) -> Result<u64, String> {
         let authenticated = Arc::new(AtomicBool::new(transport == Transport::Local));
+        let owner =
+            self.events
+                .subscribe_with_auth(sender, Some(connection), authenticated.clone())?;
+        if let Err(error) = self.pairing.register(owner, transport, authenticated) {
+            self.events.unsubscribe(owner);
+            return Err(error);
+        }
+        Ok(owner)
+    }
+
+    fn subscribe_stdio(&self, sender: SyncSender<Value>) -> Result<u64, String> {
+        let authenticated = Arc::new(AtomicBool::new(true));
         let owner = self
             .events
-            .subscribe_with_auth(sender, connection, authenticated.clone())?;
-        if let Err(error) = self.pairing.register(owner, transport, authenticated) {
+            .subscribe_with_auth(sender, None, authenticated.clone())?;
+        if let Err(error) = self
+            .pairing
+            .register(owner, Transport::Local, authenticated)
+        {
             self.events.unsubscribe(owner);
             return Err(error);
         }
@@ -1196,13 +1211,13 @@ impl Engine {
 impl EventBus {
     #[cfg(test)]
     fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
-        self.subscribe_with_auth(sender, connection, Arc::new(AtomicBool::new(true)))
+        self.subscribe_with_auth(sender, Some(connection), Arc::new(AtomicBool::new(true)))
     }
 
     fn subscribe_with_auth(
         &self,
         sender: SyncSender<Value>,
-        connection: UnixStream,
+        connection: Option<UnixStream>,
         authenticated: Arc<AtomicBool>,
     ) -> Result<u64, String> {
         // Zero is reserved for direct/local dispatches that do not own a socket.
@@ -1242,7 +1257,9 @@ impl EventBus {
                 match subscriber.sender.try_send(event.clone()) {
                     Ok(()) => true,
                     Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                        let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
+                        if let Some(connection) = &subscriber.connection {
+                            let _ = connection.shutdown(std::net::Shutdown::Both);
+                        }
                         false
                     }
                 }
@@ -1263,7 +1280,9 @@ impl EventBus {
             .is_some_and(|subscriber| match subscriber.sender.try_send(event) {
                 Ok(()) => false,
                 Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                    let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
+                    if let Some(connection) = &subscriber.connection {
+                        let _ = connection.shutdown(std::net::Shutdown::Both);
+                    }
                     true
                 }
             });
@@ -1277,7 +1296,9 @@ impl EventBus {
             && let Some(subscriber) = subscribers.remove(&subscriber_id)
         {
             subscriber.authenticated.store(false, Ordering::Release);
-            let _ = subscriber.connection.shutdown(std::net::Shutdown::Both);
+            if let Some(connection) = &subscriber.connection {
+                let _ = connection.shutdown(std::net::Shutdown::Both);
+            }
         }
     }
 }
@@ -1479,8 +1500,34 @@ fn serve_connection_with_engine(
     result.and(writer_result)
 }
 
+/// Serve one desktop connection over stdin/stdout. The process owns no socket
+/// and exits when its controlling desktop or SSH connection closes.
+pub fn serve_stdio(
+    engine: Engine,
+    reader: impl Read,
+    writer: impl Write + Send,
+) -> std::io::Result<()> {
+    let engine = Arc::new(engine);
+    let mut reader = BufReader::new(reader);
+    let (outbound, frames) = sync_channel(256);
+    let subscriber = engine
+        .subscribe_stdio(outbound.clone())
+        .map_err(std::io::Error::other)?;
+    let writer = thread::scope(|scope| {
+        let writer = scope.spawn(move || write_frames(writer, frames));
+        let result = read_requests(&mut reader, &engine, subscriber, &outbound);
+        engine.unsubscribe(subscriber);
+        drop(outbound);
+        let writer_result = writer
+            .join()
+            .map_err(|_| std::io::Error::other("host writer panicked"))?;
+        result.and(writer_result)
+    });
+    writer
+}
+
 fn read_requests(
-    reader: &mut BufReader<UnixStream>,
+    reader: &mut impl BufRead,
     engine: &Engine,
     subscriber: u64,
     outbound: &SyncSender<Value>,
@@ -1523,7 +1570,7 @@ fn read_requests(
 }
 
 fn write_frames(
-    mut stream: UnixStream,
+    mut stream: impl Write,
     frames: std::sync::mpsc::Receiver<Value>,
 ) -> std::io::Result<()> {
     while let Ok(frame) = frames.recv() {

@@ -64,7 +64,7 @@ irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
 
 The Linux and macOS installers require no root access; Windows uses the normal
 Windows Installer elevation prompt. The bundles include the GPUI desktop, Rust
-daemon, Codex, Claude Code, local Whisper speech input, and their native
+desktop, stdio host, Codex, Claude Code, local Whisper speech input, and their native
 runtime helpers.
 
 Stable data lives in `~/.local/share/xd` on Linux and
@@ -82,8 +82,8 @@ either app does not delete its chats or workspaces.
 - Supports existing checkouts and isolated Git worktrees.
 - Streams Markdown responses, tool calls, inline file diffs, images, and voice
   messages.
-- Supports local use and paired clients over the same daemon protocol,
-  including an Android client that pairs with a running `xd serve`.
+- Supports either local use or a remote machine over the SSH command you
+  configure. Remote hosts do not listen for xd connections.
 - Searches all stored messages with `Ctrl+K`.
 
 ## Build and test
@@ -121,5 +121,5 @@ Native Windows builds require Rust, CMake, 7-Zip, the Windows SDK, and .NET:
 Mobile builds use their own Docker image and also require nothing beyond
 Docker. See [mobile development](docs/mobile.md).
 
-The Linux desktop lives in `desktop/`, the daemon in `daemon-rs/`, and the
-private remote TLS helper in `tls-proxy-rs/`.
+The Linux desktop lives in `desktop/`; the short-lived state host lives in
+`daemon-rs/` while that source directory is being renamed.

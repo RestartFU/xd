@@ -1,31 +1,18 @@
 use std::{
     env,
-    io::{BufRead, BufReader, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::Arc,
-    time::Duration,
 };
 
-use serde_json::{Value, json};
+use xd_daemon::{Engine, StateStore, serve_stdio};
 
-mod remote_proxy;
-
-use remote_proxy::RemoteProxy;
-use xd_daemon::{Engine, LocalServer, StateStore, local_socket::UnixStream, remote_socket_path};
-
-struct Options {
-    socket: PathBuf,
+struct HostOptions {
     database: PathBuf,
     workspaces: PathBuf,
-    bind: String,
-    port: u16,
-    pair: bool,
 }
 
 enum CliCommand {
-    Serve(Options),
-    Pair(Options),
+    Stdio(HostOptions),
     RecordAgentSession {
         database: PathBuf,
         chat: String,
@@ -39,239 +26,76 @@ enum CliCommand {
 fn main() -> ExitCode {
     match arguments(env::args().skip(1)) {
         Ok(CliCommand::Version) => {
-            println!("xd-daemon {}", version_string());
+            println!("xd-host {}", version_string());
             ExitCode::SUCCESS
         }
         Ok(CliCommand::Help) => {
             println!("{}", usage());
             ExitCode::SUCCESS
         }
-        Ok(CliCommand::Serve(options)) => match serve(options) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("xd-daemon: {error}");
-                ExitCode::FAILURE
-            }
-        },
-        Ok(CliCommand::Pair(options)) => match pair(options) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("xd-daemon: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        Ok(CliCommand::Stdio(options)) => finish(host_stdio(options)),
         Ok(CliCommand::RecordAgentSession {
             database,
             chat,
             backend,
             notification,
-        }) => {
-            match StateStore::record_agent_notification(&database, &chat, &backend, &notification) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(error) => {
-                    eprintln!("xd-daemon: cannot record agent session: {error}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
+        }) => finish(
+            StateStore::record_agent_notification(&database, &chat, &backend, &notification)
+                .map_err(|error| format!("cannot record agent session: {error}")),
+        ),
         Err(error) => {
-            eprintln!("xd-daemon: {error}");
+            eprintln!("xd-host: {error}");
             eprintln!("{}", usage());
             ExitCode::FAILURE
         }
     }
 }
 
-fn serve(options: Options) -> Result<(), String> {
-    if options.pair && pair_with_running_daemon(&options)? {
-        return Ok(());
+fn finish(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("xd-host: {error}");
+            ExitCode::FAILURE
+        }
     }
-    refuse_live_daemon(&options.socket)?;
+}
+
+fn host_stdio(options: HostOptions) -> Result<(), String> {
     let store = StateStore::open(&options.database, &options.workspaces)
         .map_err(|error| error.to_string())?;
-    match store.recover_interrupted_turns() {
-        Ok(chats) if !chats.is_empty() => eprintln!(
-            "xd-daemon serve: released {} chat(s) left working by an earlier daemon",
-            chats.len()
-        ),
-        Ok(_) => {}
-        Err(error) => eprintln!("xd-daemon serve: cannot release interrupted chats: {error}"),
+    if let Err(error) = store.recover_interrupted_turns() {
+        eprintln!("xd-host: cannot release interrupted chats: {error}");
     }
-    let saved_listener = store.remote_listener().map_err(|error| error.to_string())?;
     let data_directory = options
         .database
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| "--database must have a parent directory".to_owned())?;
-    let proxy = Arc::new(RemoteProxy::new(
-        remote_socket_path(&options.socket),
-        data_directory.clone(),
-    ));
-    let pairing_endpoint = if options.pair {
-        let endpoint = proxy.listen(&options.bind, options.port)?;
-        store
-            .save_remote_listener(&options.bind, endpoint.port)
-            .map_err(|error| error.to_string())?;
-        Some(endpoint)
-    } else {
-        None
-    };
     let engine = Engine::with_store_and_data(store, Some(data_directory));
-    let listener = proxy.clone();
-    engine.set_peer_listener(move |bind, port| listener.listen(bind, port))?;
-    let pairing_code = options
-        .pair
-        .then(|| engine.arm_pairing(Duration::from_secs(5 * 60)));
-    let server = LocalServer::bind_with_engine(&options.socket, engine)
-        .map_err(|error| error.to_string())?;
-    if let Some(endpoint) = pairing_endpoint {
-        println!(
-            "xd-daemon serve: {}, listening on {}, workspaces at {}",
-            version_string(),
-            endpoint.port,
-            options.workspaces.display()
-        );
-        println!(
-            "pairing code (5 minutes, one use): {}",
-            pairing_code.as_deref().unwrap_or_default()
-        );
-        std::io::stdout()
-            .flush()
-            .map_err(|error| format!("cannot print the pairing code: {error}"))?;
-    } else if let Some((bind, port)) = saved_listener
-        && let Err(error) = proxy.listen(&bind, port)
-    {
-        eprintln!("xd-daemon: cannot restore remote listener: {error}");
-    }
-    server.run().map_err(|error| error.to_string())
-}
-
-fn pair(options: Options) -> Result<(), String> {
-    if pair_with_running_daemon(&options)? {
-        Ok(())
-    } else {
-        Err(format!(
-            "no xd daemon is listening on {}",
-            options.socket.display()
-        ))
-    }
-}
-
-fn refuse_live_daemon(socket: &Path) -> Result<(), String> {
-    match UnixStream::connect(socket) {
-        Ok(_) => Err(format!(
-            "an xd daemon is already listening on {}",
-            socket.display()
-        )),
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::NotFound | ErrorKind::ConnectionRefused
-            ) =>
-        {
-            Ok(())
-        }
-        Err(error) => Err(format!(
-            "cannot check whether an xd daemon is already using {}: {error}",
-            socket.display()
-        )),
-    }
-}
-
-fn pair_with_running_daemon(options: &Options) -> Result<bool, String> {
-    let mut stream = match UnixStream::connect(&options.socket) {
-        Ok(stream) => stream,
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::NotFound | ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Ok(false);
-        }
-        Err(error) => return Err(format!("cannot connect to the running daemon: {error}")),
-    };
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| format!("cannot configure the daemon connection: {error}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| format!("cannot configure the daemon connection: {error}"))?;
-    writeln!(
-        stream,
-        "{}",
-        json!({"op": "peer-pairing", "bind": options.bind, "port": options.port})
-    )
-    .map_err(|error| format!("cannot request a pairing code: {error}"))?;
-    let mut response = String::new();
-    BufReader::new(stream)
-        .take(64 * 1024 + 1)
-        .read_line(&mut response)
-        .map_err(|error| format!("cannot read the pairing response: {error}"))?;
-    if response.len() > 64 * 1024 {
-        return Err("the running daemon returned an oversized pairing response".into());
-    }
-    let response: Value = serde_json::from_str(&response)
-        .map_err(|error| format!("the running daemon returned invalid JSON: {error}"))?;
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return Err(response
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("the running daemon refused pairing")
-            .to_owned());
-    }
-    let host = response
-        .get("host")
-        .and_then(Value::as_str)
-        .filter(|host| !host.is_empty())
-        .ok_or("the running daemon returned no pairing host")?;
-    let port = response
-        .get("port")
-        .and_then(Value::as_u64)
-        .and_then(|port| u16::try_from(port).ok())
-        .filter(|port| *port > 0)
-        .ok_or("the running daemon returned no pairing port")?;
-    let code = response
-        .get("code")
-        .and_then(Value::as_str)
-        .filter(|code| !code.is_empty())
-        .ok_or("the running daemon returned no pairing code")?;
-    println!("xd-daemon serve: attached to running daemon at {host}:{port}");
-    println!("pairing code (5 minutes, one use): {code}");
-    Ok(true)
+    serve_stdio(engine, std::io::stdin(), std::io::stdout()).map_err(|error| error.to_string())
 }
 
 fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, String> {
     let mut arguments = arguments.into_iter();
-    let pair_command = match arguments.next().as_deref() {
-        Some("--version" | "-v") if arguments.next().is_none() => return Ok(CliCommand::Version),
-        Some("--help" | "-h") if arguments.next().is_none() => return Ok(CliCommand::Help),
-        Some("serve") => false,
-        Some("pair") => true,
-        Some("record-agent-session") => return record_agent_session_arguments(arguments),
-        _ => return Err("expected the serve or pair command".into()),
-    };
-    let mut socket = None;
+    match arguments.next().as_deref() {
+        Some("stdio") => host_arguments(arguments).map(CliCommand::Stdio),
+        Some("record-agent-session") => record_agent_session_arguments(arguments),
+        Some("--version" | "-v") if arguments.next().is_none() => Ok(CliCommand::Version),
+        Some("--help" | "-h") if arguments.next().is_none() => Ok(CliCommand::Help),
+        Some("serve" | "pair") => {
+            Err("socket serving and pairing were removed; connect with SSH".into())
+        }
+        _ => Err("expected the stdio command".into()),
+    }
+}
+
+fn host_arguments(mut arguments: impl Iterator<Item = String>) -> Result<HostOptions, String> {
+    let mut data = None;
     let mut database = None;
     let mut workspaces = None;
-    let mut data = None;
-    let mut bind = "::".to_owned();
-    let mut port = 4001;
-    let mut pair = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--help" | "-h" => return Ok(CliCommand::Help),
-            "--pair" => pair = true,
-            "--bind" => bind = arguments.next().ok_or("--bind needs an address")?,
-            _ if argument.starts_with("--bind=") => {
-                bind = argument["--bind=".len()..].to_owned();
-            }
-            "--port" => {
-                port = parse_port(&arguments.next().ok_or("--port needs a number")?)?;
-            }
-            _ if argument.starts_with("--port=") => {
-                port = parse_port(&argument["--port=".len()..])?;
-            }
             "--data" => {
                 data = Some(PathBuf::from(
                     arguments.next().ok_or("--data needs a directory")?,
@@ -279,14 +103,6 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
             }
             _ if argument.starts_with("--data=") => {
                 data = Some(PathBuf::from(&argument["--data=".len()..]));
-            }
-            "--socket" => {
-                socket = Some(PathBuf::from(
-                    arguments.next().ok_or("--socket needs a path")?,
-                ));
-            }
-            _ if argument.starts_with("--socket=") => {
-                socket = Some(PathBuf::from(&argument["--socket=".len()..]));
             }
             "--database" => {
                 database = Some(PathBuf::from(
@@ -296,7 +112,7 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
             _ if argument.starts_with("--database=") => {
                 database = Some(PathBuf::from(&argument["--database=".len()..]));
             }
-            "--workspaces" => {
+            "--workspaces" | "--root" => {
                 workspaces = Some(PathBuf::from(
                     arguments.next().ok_or("--workspaces needs a path")?,
                 ));
@@ -304,46 +120,22 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
             _ if argument.starts_with("--workspaces=") => {
                 workspaces = Some(PathBuf::from(&argument["--workspaces=".len()..]));
             }
-            "--root" => {
-                workspaces = Some(PathBuf::from(
-                    arguments.next().ok_or("--root needs a path")?,
-                ));
-            }
             _ if argument.starts_with("--root=") => {
                 workspaces = Some(PathBuf::from(&argument["--root=".len()..]));
             }
-            _ => return Err(format!("unknown argument {argument}")),
+            _ => return Err(format!("unknown stdio argument {argument}")),
         }
     }
-    if data.is_some() && (socket.is_some() || database.is_some() || workspaces.is_some()) {
-        return Err(
-            "--data cannot be combined with --socket, --database, --workspaces, or --root".into(),
-        );
+    if data.is_some() && (database.is_some() || workspaces.is_some()) {
+        return Err("--data cannot be combined with --database, --workspaces, or --root".into());
     }
     if let Some(data) = data {
-        socket = Some(data.join("daemon.sock"));
         database = Some(data.join("chats.db"));
         workspaces = Some(data.join("Workspaces"));
     }
-    let socket = socket.ok_or_else(|| "--socket or --data is required".to_string())?;
-    let data_directory = socket
-        .parent()
-        .ok_or_else(|| "--socket must have a parent directory".to_string())?;
-    if bind.is_empty() {
-        return Err("--bind cannot be empty".into());
-    }
-    let options = Options {
-        database: database.unwrap_or_else(|| data_directory.join("chats.db")),
-        workspaces: workspaces.unwrap_or_else(|| data_directory.join("Workspaces")),
-        socket,
-        bind,
-        port,
-        pair: pair || pair_command,
-    };
-    Ok(if pair_command {
-        CliCommand::Pair(options)
-    } else {
-        CliCommand::Serve(options)
+    Ok(HostOptions {
+        database: database.ok_or("stdio needs --data or --database")?,
+        workspaces: workspaces.ok_or("stdio needs --data or --workspaces")?,
     })
 }
 
@@ -359,7 +151,7 @@ fn record_agent_session_arguments(
             "--database" => {
                 database = Some(PathBuf::from(
                     arguments.next().ok_or("--database needs a path")?,
-                ))
+                ));
             }
             _ if argument.starts_with("--database=") => {
                 database = Some(PathBuf::from(&argument["--database=".len()..]));
@@ -388,10 +180,6 @@ fn record_agent_session_arguments(
     })
 }
 
-fn parse_port(value: &str) -> Result<u16, String> {
-    value.parse().map_err(|_| format!("invalid port: {value}"))
-}
-
 fn version_string() -> String {
     option_env!("XD_COMMIT")
         .filter(|commit| !commit.is_empty() && *commit != "development")
@@ -406,84 +194,23 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-daemon (serve | pair) (--socket PATH | --data DIR) [options]\n\
+    "usage: xd-host stdio --data DIR\n\
      \n\
-     options:\n\
-       --data DIR         adopt one xd data root atomically\n\
-       --database FILE    chat database beside the socket by default\n\
-       --workspaces DIR   workspace root beside the socket by default\n\
-       --root DIR         alias for --workspaces\n\
-       --pair             listen remotely and print a five-minute pairing code\n\
-       --bind ADDRESS     remote TLS bind address (default ::)\n\
-       --port PORT        remote TLS port (default 4001)\n\
-       -h, --help         show this help\n\
-       -v, --version      show the daemon version"
+     The host reads JSON frames from stdin and writes replies/events to stdout.\n\
+     It opens no socket and exits when its desktop or SSH connection closes."
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::{fs, thread};
-    use xd_daemon::local_socket::UnixListener;
 
     #[test]
-    fn parses_the_compatible_serve_command() {
-        let CliCommand::Serve(options) =
-            arguments(["serve".into(), "--socket".into(), "/tmp/xd.sock".into()]).unwrap()
+    fn parses_stdio_host_without_a_socket_or_listener_options() {
+        let CliCommand::Stdio(options) =
+            arguments(["stdio".into(), "--data=/state/xd-nightly".into()]).unwrap()
         else {
-            panic!("expected serve options");
+            panic!("expected stdio host options");
         };
-        assert_eq!(options.socket, PathBuf::from("/tmp/xd.sock"));
-        assert_eq!(options.database, PathBuf::from("/tmp/chats.db"));
-        assert_eq!(options.workspaces, PathBuf::from("/tmp/Workspaces"));
-        assert_eq!(options.bind, "::");
-        assert_eq!(options.port, 4001);
-        assert!(!options.pair);
-
-        let CliCommand::Serve(options) = arguments([
-            "serve".into(),
-            "--socket=/tmp/xd.sock".into(),
-            "--database=/state/xd.db".into(),
-            "--root=/work".into(),
-            "--bind=127.0.0.1".into(),
-            "--port=0".into(),
-            "--pair".into(),
-        ])
-        .unwrap() else {
-            panic!("expected serve options");
-        };
-        assert_eq!(options.database, PathBuf::from("/state/xd.db"));
-        assert_eq!(options.workspaces, PathBuf::from("/work"));
-        assert_eq!(options.bind, "127.0.0.1");
-        assert_eq!(options.port, 0);
-        assert!(options.pair);
-        assert!(matches!(
-            arguments(["--version".into()]).unwrap(),
-            CliCommand::Version
-        ));
-        assert!(matches!(
-            arguments(["serve".into(), "--help".into()]).unwrap(),
-            CliCommand::Help
-        ));
-        assert!(
-            arguments([
-                "serve".into(),
-                "--socket=/tmp/xd.sock".into(),
-                "--port=65536".into(),
-            ])
-            .is_err()
-        );
-
-        let CliCommand::Serve(options) =
-            arguments(["serve".into(), "--data=/state/xd-nightly".into()]).unwrap()
-        else {
-            panic!("expected serve options");
-        };
-        assert_eq!(
-            options.socket,
-            PathBuf::from("/state/xd-nightly/daemon.sock")
-        );
         assert_eq!(
             options.database,
             PathBuf::from("/state/xd-nightly/chats.db")
@@ -492,148 +219,29 @@ mod tests {
             options.workspaces,
             PathBuf::from("/state/xd-nightly/Workspaces")
         );
-        assert!(
-            arguments([
-                "serve".into(),
-                "--data=/state/xd-nightly".into(),
-                "--socket=/tmp/other.sock".into(),
-            ])
-            .is_err()
-        );
-        assert!(arguments(["serve".into()]).is_err());
+        assert!(arguments(["stdio".into(), "--bind=::".into()]).is_err());
+        assert!(arguments(["stdio".into(), "--socket=/tmp/xd.sock".into()]).is_err());
     }
 
     #[test]
-    fn parses_pair_as_an_existing_daemon_only_command() {
-        let CliCommand::Pair(options) = arguments([
-            "pair".into(),
-            "--socket=/tmp/xd.sock".into(),
-            "--bind=127.0.0.1".into(),
-            "--port=4444".into(),
-        ])
-        .unwrap() else {
-            panic!("expected pair options");
-        };
-        assert_eq!(options.socket, PathBuf::from("/tmp/xd.sock"));
-        assert_eq!(options.bind, "127.0.0.1");
-        assert_eq!(options.port, 4444);
-        assert!(options.pair);
+    fn rejects_removed_socket_server_commands() {
+        assert!(arguments(["serve".into(), "--socket=/tmp/xd.sock".into()]).is_err());
+        assert!(arguments(["pair".into(), "--port=4444".into()]).is_err());
     }
 
     #[test]
     fn parses_the_internal_agent_session_recorder_command() {
-        let CliCommand::RecordAgentSession {
-            database,
-            chat,
-            backend,
-            notification,
-        } = arguments([
+        let CliCommand::RecordAgentSession { chat, backend, .. } = arguments([
             "record-agent-session".into(),
             "--database=/state/chats.db".into(),
             "--chat=chat-1".into(),
             "--backend=codex".into(),
-            r#"{"type":"agent-turn-complete","thread-id":"thread-1"}"#.into(),
+            r#"{"type":"agent-turn-complete"}"#.into(),
         ])
-        .unwrap()
-        else {
-            panic!("expected the recorder command");
+        .unwrap() else {
+            panic!("expected recorder command");
         };
-        assert_eq!(database, PathBuf::from("/state/chats.db"));
         assert_eq!(chat, "chat-1");
         assert_eq!(backend, "codex");
-        assert!(notification.contains("thread-1"));
-    }
-
-    /// A scratch directory whose name is short enough that a socket inside it
-    /// still fits.
-    ///
-    /// `sun_path` is 104 bytes on macOS, and a temp directory there is already
-    /// half of that: `/var/folders/` plus two hashed components. A name built
-    /// from the test's own thread name spends the rest of the budget and the
-    /// bind fails with `SUN_LEN`, which says nothing about what was too long.
-    fn scratch(tag: &str) -> PathBuf {
-        static NEXT: AtomicU32 = AtomicU32::new(0);
-
-        let directory = env::temp_dir().join(format!(
-            "xd-{tag}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
-        directory
-    }
-
-    #[test]
-    fn refuses_a_live_socket_before_opening_state() {
-        let directory = scratch("cli-live");
-        let socket = directory.join("daemon.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-
-        let error = refuse_live_daemon(&socket).unwrap_err();
-        assert!(error.contains("already listening"));
-        assert!(!directory.join("chats.db").exists());
-
-        drop(listener);
-        let _ = fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn pairing_attaches_to_an_already_running_daemon() {
-        let directory = scratch("cli-pair");
-        let socket = directory.join("daemon.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut request)
-                .unwrap();
-            let request: Value = serde_json::from_str(&request).unwrap();
-            assert_eq!(request["op"], "peer-pairing");
-            assert_eq!(request["bind"], "127.0.0.1");
-            assert_eq!(request["port"], 4444);
-            writeln!(
-                stream,
-                "{}",
-                json!({
-                    "ok": true,
-                    "host": "127.0.0.1",
-                    "port": 4444,
-                    "code": "ABCD-EFGH"
-                })
-            )
-            .unwrap();
-        });
-        let options = Options {
-            socket,
-            database: directory.join("chats.db"),
-            workspaces: directory.join("Workspaces"),
-            bind: "127.0.0.1".into(),
-            port: 4444,
-            pair: true,
-        };
-        pair(options).unwrap();
-        server.join().unwrap();
-        let _ = fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn pair_never_starts_a_daemon_when_none_is_running() {
-        let directory = scratch("cli-no-pair");
-        let socket = directory.join("daemon.sock");
-        let error = pair(Options {
-            socket,
-            database: directory.join("chats.db"),
-            workspaces: directory.join("Workspaces"),
-            bind: "127.0.0.1".into(),
-            port: 4444,
-            pair: true,
-        })
-        .unwrap_err();
-        assert!(error.contains("no xd daemon is listening"));
-        assert!(!directory.join("chats.db").exists());
-        assert!(!directory.join("Workspaces").exists());
-        let _ = fs::remove_dir_all(directory);
     }
 }

@@ -231,8 +231,10 @@ impl SessionHost {
                 remote_runtime,
             } => {
                 let runtime = format!("$HOME/{remote_runtime}");
+                let data_name = crate::channel::data_name();
                 let remote = format!(
-                    "TMUX=\"{runtime}/tmux\"; [ -x \"$TMUX\" ] || TMUX=tmux; exec \"$TMUX\" -S \"{runtime}/tmux.sock\" -f \"{runtime}/tmux.conf\" new-session -A -s {} -c {} {}",
+                    "RUNTIME=\"{runtime}\"; mkdir -p \"$RUNTIME\" || exit; CONF=\"$RUNTIME/tmux.conf\"; [ -f \"$CONF\" ] || printf '%s\\n' 'set -g default-terminal screen-256color' 'set -sg escape-time 0' 'set -g focus-events on' 'set -g mouse off' > \"$CONF\"; TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"; [ -x \"$TMUX\" ] || TMUX=tmux; exec \"$TMUX\" -S \"$RUNTIME/tmux.sock\" -f \"$CONF\" new-session -A -s {} -c {} {}",
+                    data_name.to_string_lossy(),
                     shell_quote(&session),
                     shell_quote(&workdir.to_string_lossy()),
                     shell_quote(&agent.shell_command()),
@@ -389,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_sessions_use_ssh_tty_allocation_and_the_uploaded_private_runtime() {
+    fn remote_sessions_use_ssh_and_the_tmux_shipped_with_the_remote_install() {
         let host = SessionHost::ssh(
             SshCommand::parse("ssh zenomc.org -p 22").unwrap(),
             ".local/share/xd/runtime/v1",
@@ -402,22 +404,16 @@ mod tests {
 
         assert_eq!(spec.program, PathBuf::from("ssh"));
         assert_eq!(
-            spec.arguments,
-            [
-                "-p",
-                "22",
-                "-tt",
-                "--",
-                "zenomc.org",
-                concat!(
-                    "TMUX=\"$HOME/.local/share/xd/runtime/v1/tmux\"; ",
-                    "[ -x \"$TMUX\" ] || TMUX=tmux; exec \"$TMUX\" ",
-                    "-S \"$HOME/.local/share/xd/runtime/v1/tmux.sock\" ",
-                    "-f \"$HOME/.local/share/xd/runtime/v1/tmux.conf\" ",
-                    "new-session -A -s 'xd-f2c795031a96bd79' -c '/srv/project' ",
-                    "'exec '\"'\"'claude'\"'\"' '\"'\"'--resume'\"'\"' '\"'\"'session-1'\"'\"''"
-                ),
-            ]
+            &spec.arguments[..5],
+            ["-p", "22", "-tt", "--", "zenomc.org"]
         );
+        let remote = &spec.arguments[5];
+        assert!(remote.contains("mkdir -p \"$RUNTIME\""));
+        assert!(remote.contains(&format!(
+            "TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"",
+            crate::channel::data_name().to_string_lossy()
+        )));
+        assert!(remote.contains("-S \"$RUNTIME/tmux.sock\" -f \"$CONF\""));
+        assert!(remote.contains("new-session -A -s 'xd-f2c795031a96bd79'"));
     }
 }

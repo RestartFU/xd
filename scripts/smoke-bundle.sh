@@ -34,8 +34,7 @@ require_file \
   share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 require_file \
   share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
-require_file libexec/xd-daemon
-require_file libexec/xd-tls-proxy
+require_file libexec/xd-host
 require_file libexec/tmux
 require_file libexec/install.sh
 require_file libexec/curl
@@ -71,22 +70,6 @@ require_file lib/libvulkan.so.1
 require_file lib/libvulkan_lvp.so
 require_file etc/vulkan/libvulkan_lvp.json.in
 
-# The unit is named for the profile's command, so match rather than spell it:
-# one unit, and an ExecStart= the installer can rewrite into an absolute path.
-unit=$(find "$BUNDLE/share/systemd/user" -maxdepth 1 -type f -name '*.service')
-test "$(printf '%s\n' "$unit" | grep -c .)" = 1 || {
-  echo "bundle smoke: expected exactly one systemd user unit, got: $unit" >&2
-  exit 1
-}
-grep -q '^ExecStart=' "$unit" || {
-  echo "bundle smoke: $unit has no ExecStart= for the installer to rewrite" >&2
-  exit 1
-}
-grep -q '^WantedBy=default.target$' "$unit" || {
-  echo "bundle smoke: $unit would not be started by a user manager" >&2
-  exit 1
-}
-
 svg_loader=$(find "$BUNDLE/lib/gdk-pixbuf-2.0" -type f \
   -name 'libpixbufloader*svg*.so' -print -quit)
 test -n "$svg_loader" || {
@@ -108,31 +91,9 @@ env -i \
   XDG_CONFIG_HOME="$WORK/launcher-home/config" \
   "$BUNDLE/xd.sh" --version | grep -E '^xd [0-9]'
 
-# `xd serve` is a headless public mode. Keep it away from GPUI so it works on
-# servers with neither a display nor a GPU and continues to reach the daemon.
-env -i \
-  HOME="$WORK/launcher-home" \
-  PATH="${PATH:-/usr/bin:/bin}" \
-  XDG_RUNTIME_DIR="$WORK/launcher-runtime" \
-  XDG_DATA_HOME="$WORK/launcher-home/data" \
-  XDG_CACHE_HOME="$WORK/launcher-home/cache" \
-  XDG_CONFIG_HOME="$WORK/launcher-home/config" \
-  "$BUNDLE/xd.sh" serve --help | grep -F 'usage: xd-daemon (serve | pair)'
-
-# The pairing shorthand must take the same headless route. `--help` makes the
-# daemon validate and print the command without starting a long-lived server.
-env -i \
-  HOME="$WORK/launcher-home" \
-  PATH="${PATH:-/usr/bin:/bin}" \
-  XDG_RUNTIME_DIR="$WORK/launcher-runtime" \
-  XDG_DATA_HOME="$WORK/launcher-home/data" \
-  XDG_CACHE_HOME="$WORK/launcher-home/cache" \
-  XDG_CONFIG_HOME="$WORK/launcher-home/config" \
-  "$BUNDLE/xd.sh" pair --help | grep -F 'usage: xd-daemon (serve | pair)'
-
 "$BUNDLE/lib/ld-linux-x86-64.so.2" \
   --library-path "$BUNDLE/lib" \
-  "$BUNDLE/libexec/xd-daemon" --version | grep -E '^xd-daemon [0-9]'
+  "$BUNDLE/libexec/xd-host" --version | grep -E '^xd-host [0-9]'
 
 "$BUNDLE/lib/ld-linux-x86-64.so.2" \
   --library-path "$BUNDLE/lib" \

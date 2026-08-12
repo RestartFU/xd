@@ -87,8 +87,7 @@ QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
 # enough. NSS modules are added by hand: they are opened by name, never linked.
 mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
-  "$OUT/libexec/xd-daemon" \
-  "$OUT/libexec/xd-tls-proxy" \
+  "$OUT/libexec/xd-host" \
   "$OUT/libexec/tmux" \
   "$OUT/libexec/claude-bin" \
   "$OUT/libexec/claude-code-proxy" \
@@ -155,9 +154,8 @@ cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
 mkdir -p "$OUT/share/locale-data"
 cp -a /usr/lib/locale/C.utf8 "$OUT/share/locale-data/"
 
-# --- TLS --------------------------------------------------------------------
-# GIO loads TLS from a module, not from itself; without this the daemon's
-# sockets exist but cannot speak TLS on any machine.
+# --- GLib networking --------------------------------------------------------
+# GIO loads HTTPS support from a module, not from itself.
 mkdir -p "$OUT/lib/gio/modules"
 cp -a "$ARCH_DIR"/gio/modules/libgiognutls.so "$OUT/lib/gio/modules/" 2>/dev/null || \
   cp -a /usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so "$OUT/lib/gio/modules/"
@@ -262,8 +260,6 @@ cp /etc/ssl/openssl.cnf "$OUT/etc/ssl/openssl.cnf"
 # --- desktop metadata + launcher -------------------------------------------
 mkdir -p "$OUT/share/applications"
 cp -a "$STAGE/usr/share/applications/." "$OUT/share/applications/" 2>/dev/null || true
-mkdir -p "$OUT/share/systemd/user"
-cp -a "$STAGE/usr/share/systemd/user/." "$OUT/share/systemd/user/" 2>/dev/null || true
 mkdir -p "$OUT/share/licenses"
 cp -a "$STAGE/usr/share/licenses/." "$OUT/share/licenses/"
 

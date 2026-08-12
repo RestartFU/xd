@@ -237,7 +237,7 @@ impl SelfUpdate {
                     thread::sleep(Duration::from_millis(250));
                     use std::os::unix::process::CommandExt;
                     let error = Command::new(location.daemon).args(arguments).exec();
-                    eprintln!("xd-daemon: cannot restart after update: {error}");
+                    eprintln!("xd-host: cannot restart after update: {error}");
                 })
                 .map(|_| ())
                 .map_err(|error| format!("Cannot schedule the daemon restart: {error}"))
@@ -692,7 +692,7 @@ fn install_location() -> Option<InstallLocation> {
 
 #[cfg(not(windows))]
 fn install_location_for_executable(executable: &Path, home: &Path) -> Option<InstallLocation> {
-    if executable.file_name()?.to_str()? != "xd-daemon" {
+    if executable.file_name()?.to_str()? != "xd-host" {
         return None;
     }
     let libexec = executable.parent()?;
@@ -719,7 +719,7 @@ fn install_location_for_executable(executable: &Path, home: &Path) -> Option<Ins
     }
     Some(InstallLocation {
         installer: libexec.join("install.sh"),
-        daemon: libexec.join("xd-daemon"),
+        daemon: libexec.join("xd-host"),
     })
 }
 
@@ -728,7 +728,7 @@ fn windows_install_location_for_executable(
     executable: &Path,
     program_files: &Path,
 ) -> Option<InstallLocation> {
-    if !path_name_is(executable, "xd-daemon.exe") {
+    if !path_name_is(executable, "xd-host.exe") {
         return None;
     }
     let bin = executable.parent()?;
@@ -881,12 +881,12 @@ mod tests {
     #[test]
     fn recognizes_linux_and_macos_installed_layouts_only() {
         for executable in [
-            "/home/person/.local/opt/xd/libexec/xd-daemon",
-            "/home/person/.local/opt/xd-nightly/libexec/xd-daemon",
-            "/home/person/.local/opt/xd-dev/libexec/xd-daemon",
-            "/Users/person/Applications/xd.app/Contents/Resources/libexec/xd-daemon",
-            "/Users/person/Applications/xd-nightly.app/Contents/Resources/libexec/xd-daemon",
-            "/Users/person/Applications/xd-dev.app/Contents/Resources/libexec/xd-daemon",
+            "/home/person/.local/opt/xd/libexec/xd-host",
+            "/home/person/.local/opt/xd-nightly/libexec/xd-host",
+            "/home/person/.local/opt/xd-dev/libexec/xd-host",
+            "/Users/person/Applications/xd.app/Contents/Resources/libexec/xd-host",
+            "/Users/person/Applications/xd-nightly.app/Contents/Resources/libexec/xd-host",
+            "/Users/person/Applications/xd-dev.app/Contents/Resources/libexec/xd-host",
         ] {
             let home = if executable.starts_with("/Users/") {
                 Path::new("/Users/person")
@@ -902,11 +902,11 @@ mod tests {
         }
 
         for executable in [
-            "/tmp/xd-daemon",
+            "/tmp/xd-host",
             "/tmp/xd/libexec/not-the-daemon",
-            "/tmp/source/xd/libexec/xd-daemon",
-            "/Users/person/Applications/other.app/Contents/Resources/libexec/xd-daemon",
-            "/Users/person/Applications/xd.app/Contents/MacOS/xd-daemon",
+            "/tmp/source/xd/libexec/xd-host",
+            "/Users/person/Applications/other.app/Contents/Resources/libexec/xd-host",
+            "/Users/person/Applications/xd.app/Contents/MacOS/xd-host",
         ] {
             assert!(
                 install_location_for_executable(Path::new(executable), Path::new("/tmp/home"))
@@ -919,10 +919,10 @@ mod tests {
     fn recognizes_windows_installed_layouts_only() {
         let program_files = Path::new("/Program Files");
         for executable in [
-            "/Program Files/RestartFU/xd/bin/xd-daemon.exe",
-            "/Program Files/RestartFU/xd-nightly/bin/xd-daemon.exe",
-            "/Program Files/RestartFU/xd-dev/bin/xd-daemon.exe",
-            "/Program Files/RestartFU/XD/bin/XD-DAEMON.EXE",
+            "/Program Files/RestartFU/xd/bin/xd-host.exe",
+            "/Program Files/RestartFU/xd-nightly/bin/xd-host.exe",
+            "/Program Files/RestartFU/xd-dev/bin/xd-host.exe",
+            "/Program Files/RestartFU/XD/bin/XD-HOST.EXE",
         ] {
             let location =
                 windows_install_location_for_executable(Path::new(executable), program_files)
@@ -935,11 +935,11 @@ mod tests {
         }
 
         for executable in [
-            "/Program Files/RestartFU/other/bin/xd-daemon.exe",
-            "/Program Files/Other/xd/bin/xd-daemon.exe",
-            "/Program Files/RestartFU/xd/libexec/xd-daemon.exe",
-            "/Program Files/RestartFU/xd/bin/xd-daemon",
-            "/tmp/RestartFU/xd/bin/xd-daemon.exe",
+            "/Program Files/RestartFU/other/bin/xd-host.exe",
+            "/Program Files/Other/xd/bin/xd-host.exe",
+            "/Program Files/RestartFU/xd/libexec/xd-host.exe",
+            "/Program Files/RestartFU/xd/bin/xd-host",
+            "/tmp/RestartFU/xd/bin/xd-host.exe",
         ] {
             assert!(
                 windows_install_location_for_executable(Path::new(executable), program_files)

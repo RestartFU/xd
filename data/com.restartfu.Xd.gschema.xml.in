@@ -72,40 +72,6 @@
       </description>
     </key>
 
-    <key name="remote-host" type="s">
-      <default>''</default>
-      <summary>Remote daemon address</summary>
-      <description>
-        Host running "xd serve", shown in the sidebar as a root of its own.
-        Empty means this machine only.
-      </description>
-    </key>
-
-    <key name="remote-port" type="i">
-      <default>4001</default>
-      <summary>Remote daemon port</summary>
-    </key>
-
-    <key name="remote-token" type="s">
-      <default>''</default>
-      <summary>Device token for the remote daemon</summary>
-      <description>
-        What pairing handed back. It does not expire, and it is what the daemon
-        accepts this device on, so it is worth as much as a password; the daemon
-        can revoke it from its own side.
-      </description>
-    </key>
-
-    <key name="remote-certificate" type="s">
-      <default>''</default>
-      <summary>The remote daemon's pinned certificate</summary>
-      <description>
-        The self-signed certificate offered when this device paired, in PEM.
-        Every connection afterwards must present the same one, the way SSH
-        remembers a host key.
-      </description>
-    </key>
-
     <key name="window-width" type="i">
       <default>1100</default>
       <summary>Window width</summary>

@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn direct_agent_arguments_start_and_resume_backend_sessions() {
         let recorder = SessionRecorder::new(
-            Path::new("/opt/xd/xd-daemon"),
+            Path::new("/opt/xd/xd-host"),
             Path::new("/state/xd/chats.db"),
             "chat-1",
             "codex",
@@ -183,7 +183,7 @@ mod tests {
             ]
         );
         assert!(codex_new.iter().any(|argument| {
-            argument.starts_with("notify=[\"/opt/xd/xd-daemon\",\"record-agent-session\"")
+            argument.starts_with("notify=[\"/opt/xd/xd-host\",\"record-agent-session\"")
                 && argument.contains("\"/state/xd/chats.db\"")
                 && argument.contains("\"chat-1\"")
                 && argument.contains("\"codex\"")

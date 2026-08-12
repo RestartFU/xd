@@ -60,7 +60,7 @@ major="${BASH_REMATCH[1]}"
 minor="${BASH_REMATCH[2]}"
 patch="${BASH_REMATCH[3]}"
 
-for manifest in daemon-rs/Cargo.toml tls-proxy-rs/Cargo.toml; do
+for manifest in daemon-rs/Cargo.toml; do
   grep -m1 -qx "version = \"$current\"" "$manifest" \
     || { printf '%s version mismatch\n' "$manifest" >&2; exit 1; }
 done
@@ -68,7 +68,7 @@ done
 grep -A1 -m1 '^name = "xd-desktop"$' desktop/Cargo.lock \
   | grep -qx "version = \"$current\"" \
   || { printf 'desktop/Cargo.lock version mismatch\n' >&2; exit 1; }
-grep -A1 -m1 '^name = "xd-daemon"$' daemon-rs/Cargo.lock \
+grep -A1 -m1 '^name = "xd-host"$' daemon-rs/Cargo.lock \
   | grep -qx "version = \"$current\"" \
   || { printf 'daemon-rs/Cargo.lock version mismatch\n' >&2; exit 1; }
 
@@ -99,8 +99,7 @@ rewrite () {
 # dependencies and are not ours to move.
 for manifest in \
   desktop/Cargo.toml \
-  daemon-rs/Cargo.toml \
-  tls-proxy-rs/Cargo.toml
+  daemon-rs/Cargo.toml
 do
   rewrite "$manifest" -v current="$current" -v to="$to" '
     !moved && $0 == "version = \"" current "\"" {
@@ -114,7 +113,7 @@ done
 
 # A lockfile states the same version again under the package that has it,
 # inside the block that names it.
-for package in xd-desktop:desktop/Cargo.lock xd-daemon:daemon-rs/Cargo.lock; do
+for package in xd-desktop:desktop/Cargo.lock xd-host:daemon-rs/Cargo.lock; do
   rewrite "${package#*:}" \
     -v package="${package%%:*}" -v current="$current" -v to="$to" '
     $0 == "name = \"" package "\"" { inside = 1 }

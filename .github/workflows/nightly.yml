@@ -96,7 +96,6 @@ jobs:
             desktop/target
             daemon-rs/target
             terminal-core/target
-            tls-proxy-rs/target
           key: >-
             cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
             hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
@@ -162,7 +161,6 @@ jobs:
             desktop/target
             daemon-rs/target
             terminal-core/target
-            tls-proxy-rs/target
           key: >-
             cargo-${{ runner.os }}-x86_64-1.95.0-${{
             hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
@@ -312,13 +310,9 @@ jobs:
           ./xd-nightly/xd.sh
           \`\`\`
 
-          Android:
-
-          Install \`xd-nightly-android.apk\` on a phone that can reach the
-          machine running the daemon, then pair it from the desktop's Devices
-          settings.
-          It is a test build signed with a per-build key, so uninstall the
-          previous one before installing a newer APK.
+          Android is included as an experimental legacy client build. The
+          current remote desktop uses the configured SSH command with no
+          pairing service or listening port.
 
           Linux and macOS are self-contained. The Windows setup downloads its
           verified payload and installs beside a release.

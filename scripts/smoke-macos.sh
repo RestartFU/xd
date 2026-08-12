@@ -10,8 +10,7 @@ APP="${1:?macOS app bundle}"
 }
 [ -x "$APP/Contents/MacOS/xd" ]
 [ -x "$APP/Contents/MacOS/xd-desktop" ]
-[ -x "$APP/Contents/Resources/libexec/xd-daemon" ]
-[ -x "$APP/Contents/Resources/libexec/xd-tls-proxy" ]
+[ -x "$APP/Contents/Resources/libexec/xd-host" ]
 [ -x "$APP/Contents/Resources/libexec/install.sh" ]
 [ -x "$APP/Contents/Resources/libexec/codex-package/bin/codex" ]
 [ -x "$APP/Contents/Resources/libexec/claude" ]
@@ -36,8 +35,7 @@ codesign --verify --deep --strict "$APP"
 expected=$(uname -m)
 for binary in \
   "$APP/Contents/MacOS/xd-desktop" \
-  "$APP/Contents/Resources/libexec/xd-daemon" \
-  "$APP/Contents/Resources/libexec/xd-tls-proxy" \
+  "$APP/Contents/Resources/libexec/xd-host" \
   "$APP/Contents/Resources/libexec/claude" \
   "$APP/Contents/Resources/libexec/claude-code-proxy" \
   "$APP/Contents/Resources/libexec/whisper-server-bin"; do

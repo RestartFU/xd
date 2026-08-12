@@ -36,7 +36,7 @@ fn daemon_update_channel(configured: Option<OsString>, nightly_build: bool) -> O
     }
 }
 
-pub fn configure_daemon(command: &mut Command, _launcher: &Path) {
+pub fn configure_host(command: &mut Command, _launcher: &Path) {
     command.env("XD_DATA_NAME", data_name()).env(
         "XD_UPDATE_CHANNEL",
         daemon_update_channel(env::var_os("XD_UPDATE_CHANNEL"), nightly()),
@@ -47,7 +47,6 @@ pub fn configure_daemon(command: &mut Command, _launcher: &Path) {
     #[cfg(windows)]
     if let Some(bin) = _launcher.parent() {
         command
-            .env("XD_TLS_PROXY_EXECUTABLE", bin.join("xd-tls-proxy.exe"))
             .env(
                 "XD_CODEX_EXECUTABLE",
                 bin.join("codex-package/bin/codex.exe"),
@@ -95,7 +94,7 @@ mod tests {
     }
 
     #[test]
-    fn background_daemons_use_the_windows_no_console_flag() {
+    fn background_hosts_use_the_windows_no_console_flag() {
         assert_eq!(background_creation_flags(true), 0x0800_0000);
         assert_eq!(background_creation_flags(false), 0);
     }

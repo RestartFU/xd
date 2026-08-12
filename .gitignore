@@ -5,8 +5,6 @@
 /desktop/target/
 /daemon-rs/target/
 /terminal-core/target/
-/tls-proxy-rs/target/
-/tls-proxy-rs/Cargo.lock
 /.payload-cache/
 *.o
 *.swp

@@ -1,4 +1,8 @@
-# Mobile development
+# Legacy mobile development
+
+> The current desktop remote transport is SSH-only and has no pairing server.
+> This document describes the experimental mobile client's previous paired TLS
+> protocol while mobile transport is being redesigned.
 
 The mobile client is a separate Gradle project under `mobile/`. It is a client
 of `xd serve`, not a port of the GTK application or the agent subprocesses.

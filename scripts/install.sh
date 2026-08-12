@@ -8,7 +8,7 @@
 # "sh -s -- --release" installs the newest tagged release and "--dev" installs
 # the rolling development build. All three live side by side. "--from DIR"
 # installs a bundle already built on this machine; the remaining paths, icon,
-# menu entry, and service handling stay identical to a downloaded install. It
+# menu entry stay identical to a downloaded install. It
 # takes itself away again with:
 #
 #   curl -fsSL .../install.sh | sh -s -- --uninstall
@@ -26,14 +26,6 @@
 #   ~/.local/bin/xd-nightly           the command
 #   ~/.local/share/applications/…     the entry in the app menu
 #   ~/.local/share/icons/…            its icon
-#   ~/.config/systemd/user/…          the daemon's unit, where systemd runs
-#
-# The unit is a *user* unit, like everything else here: no root, and it is the
-# person's daemon rather than the machine's. It is written but not enabled --
-# what runs at login is the machine owner's call, not an installer's:
-#
-#   systemctl --user enable --now xd-nightly   hands the daemon to systemd
-#   sh -s -- --no-service                      skips the unit altogether
 #
 # Chats and workspaces live in ~/.local/share/xd-nightly and are never touched
 # by installing, upgrading or uninstalling.
@@ -54,10 +46,6 @@ CHANNEL=nightly
 SOURCE=
 UNINSTALL=no
 
-# Whether to write the unit at all. It is never enabled from here, so this only
-# decides between a unit waiting to be turned on and no unit on the machine.
-SERVICE_WANTED=yes
-
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dev) CHANNEL=dev ;;
@@ -66,7 +54,7 @@ while [ "$#" -gt 0 ]; do
             SOURCE=$2; shift ;;
     --from=*) SOURCE=${1#--from=} ;;
     --uninstall) UNINSTALL=yes ;;
-    --no-service) SERVICE_WANTED=no ;;
+    --no-service) : ;; # accepted for compatibility; there is no service now
   esac
   shift
 done
@@ -103,12 +91,6 @@ DESKTOP="$DATA_HOME/applications/$APP_ID.desktop"
 SERVICE_NAME="$NAME.service"
 SERVICE="$CONFIG_HOME/systemd/user/$SERVICE_NAME"
 
-# The socket the window looks for, resolved here rather than left to the
-# daemon. A login shell's XDG_DATA_HOME is not part of the user manager's
-# environment, so a unit that worked it out for itself could end up serving a
-# different directory than the one this script just reported.
-SOCKET="$DATA_HOME/$NAME/daemon.sock"
-
 validate_bundle () {
   bundle=$1
   [ -x "$bundle/xd.sh" ] || die "$bundle is not a built bundle."
@@ -139,8 +121,7 @@ have_user_manager () {
 }
 
 uninstall () {
-  # Before the files it runs: a unit left enabled would keep restarting a
-  # daemon whose bundle is being deleted out from under it.
+  # Clean up the user service left by pre-SSH releases before deleting files.
   if have_user_manager; then
     systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
   fi
@@ -169,20 +150,14 @@ case "$(uname -m)" in
   *) die "only x86_64 is published so far; found $(uname -m)." ;;
 esac
 
-# A daemon under the unit is a process out of this bundle, so the check below
-# would refuse every upgrade on a machine where it is turned on. Stopping it
-# first is this script's own business -- it wrote the unit -- and unlike a
-# window, a daemon holds no unsent input.
-#
-# Whether it comes back at the end is decided by whether it was running:
-# restoring an upgrade is this script's business too, but switching a service
-# off, or on, is not.
-SERVICE_WAS_ACTIVE=no
-if have_user_manager && [ -f "$SERVICE" ]; then
-  if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-    SERVICE_WAS_ACTIVE=yes
-  fi
-  systemctl --user stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+# Remove the service installed by older builds. Current xd has no daemon: its
+# local host belongs to the window and remote mode is an SSH stdio process.
+if have_user_manager; then
+  systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
+fi
+rm -f "$SERVICE"
+if have_user_manager; then
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
 fi
 
 # Replacing a running bundle leaves its old GtkApplication registered with the
@@ -347,71 +322,6 @@ fi
 
 touch "$ICON_DIR" "$ICON_THEME" "$DATA_HOME/applications" 2>/dev/null || true
 
-# --- the daemon's unit ------------------------------------------------------
-
-# Written, never enabled. What runs at a person's login is their decision, and
-# an installer that quietly adds one has taken it from them; the window goes on
-# starting the daemon itself until somebody turns the unit on.
-#
-# Only where systemd is actually the init system -- everywhere else there is
-# nothing that would ever read this file.
-SERVICE_STATE=none
-if [ "$SERVICE_WANTED" = yes ] && have_systemd; then
-  mkdir -p "$(dirname "$SERVICE")"
-
-  # ExecStart is rewritten rather than templated at build time for the same
-  # reason Exec= is in the entry above: the bundle does not know where it will
-  # be installed, and --socket pins both ends to one daemon.
-  if [ -f "$OPT/share/systemd/user/$SERVICE_NAME" ]; then
-    sed -e "s|^ExecStart=.*|ExecStart=$BIN serve --socket $SOCKET|" \
-        "$OPT/share/systemd/user/$SERVICE_NAME" > "$SERVICE"
-  else
-    cat > "$SERVICE" <<EOF
-[Unit]
-Description=$DISPLAY_NAME daemon
-Documentation=https://github.com/$REPO
-StartLimitIntervalSec=60
-StartLimitBurst=3
-
-[Service]
-ExecStart=$BIN serve --socket $SOCKET
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-EOF
-  fi
-  chmod 644 "$SERVICE"
-
-  # The daemon keeps its database in there and would create it anyway; making
-  # it here means the unit never starts against a directory that is not the
-  # one this script just reported.
-  mkdir -p "$DATA_HOME/$NAME"
-
-  # systemd may be the init system while this script still has no user manager
-  # to talk to -- an ssh session without lingering, a chroot. The unit is worth
-  # writing either way: the next graphical login has a manager that reads it.
-  SERVICE_STATE=written
-  if have_user_manager; then
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-    if [ "$SERVICE_WAS_ACTIVE" = yes ]; then
-      # Back on because it was on. This restores an upgrade; it does not enable
-      # anything, and a machine installing for the first time stays untouched.
-      if systemctl --user start "$SERVICE_NAME" >/dev/null 2>&1; then
-        SERVICE_STATE=running
-      else
-        SERVICE_STATE=failed
-      fi
-    fi
-  fi
-elif [ "$SERVICE_WAS_ACTIVE" = yes ]; then
-  # --no-service asks this script to leave the unit alone, not to leave a
-  # running daemon down: it was stopped above only so the bundle underneath it
-  # could be replaced.
-  systemctl --user start "$SERVICE_NAME" >/dev/null 2>&1 || true
-fi
-
 # --- say what happened ------------------------------------------------------
 
 # Asked of the thing that was just installed rather than of the download, so
@@ -424,34 +334,8 @@ say "Installed $VERSION."
 say "  app       $OPT"
 say "  command   $BIN"
 say "  data      $DATA_HOME/$NAME"
-case "$SERVICE_STATE" in
-  written|running|failed) say "  service   $SERVICE" ;;
-esac
 say ""
 say "Run it from the app menu, or with: $NAME"
-
-case "$SERVICE_STATE" in
-  written)
-    say ""
-    say "A systemd unit for its daemon is installed, and switched off: the"
-    say "window starts the daemon itself, the way it always has. Turn the unit"
-    say "on to keep paired devices reachable and turns running with the window"
-    say "closed:"
-    say "  systemctl --user enable --now $SERVICE_NAME"
-    ;;
-  running)
-    say ""
-    say "Its daemon is back under systemd, where this upgrade found it:"
-    say "  systemctl --user status $SERVICE_NAME"
-    ;;
-  failed)
-    say ""
-    say "Its daemon was running under systemd before this upgrade and did not"
-    say "come back; the window will start one itself in the meantime. To see"
-    say "why:"
-    say "  systemctl --user status $SERVICE_NAME"
-    ;;
-esac
 
 case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;

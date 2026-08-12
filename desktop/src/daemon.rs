@@ -1,13 +1,11 @@
 use std::{
     collections::HashMap,
     env,
-    ffi::OsString,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex, mpsc},
     thread,
-    time::Duration,
 };
 
 use async_channel::{Receiver, Sender};
@@ -279,14 +277,14 @@ pub enum DaemonUpdate {
 
 #[derive(Debug, Error)]
 pub enum ConnectError {
-    #[error("no xd daemon socket was found (looked in {0})")]
+    #[error("no legacy xd socket was found (looked in {0})")]
     NotFound(String),
-    #[error("could not connect to xd daemon at {path}: {source}")]
+    #[error("could not connect to legacy xd socket at {path}: {source}")]
     Connect {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("could not start the xd Rust daemon ({0})")]
+    #[error("could not start the xd state host ({0})")]
     Start(String),
 }
 
@@ -300,51 +298,11 @@ pub struct DaemonHandle {
     commands: mpsc::Sender<Command>,
 }
 
-pub struct StartedDaemon {
+pub struct StartedHost {
     child: Child,
 }
 
-/// Run a public headless command through the daemon binary bundled with the
-/// desktop client. Keep the old public CLI's no-argument data defaults even
-/// though `xd-daemon` requires an explicit socket when invoked directly.
-pub fn run_headless(arguments: Vec<OsString>) -> Result<i32, String> {
-    let arguments = headless_arguments(arguments, socket_candidates().into_iter().next());
-    let mut failures = Vec::new();
-    for launcher in launcher_candidates() {
-        let mut command = ProcessCommand::new(&launcher);
-        command.args(&arguments);
-        channel::configure_daemon(&mut command, &launcher);
-        match command.status() {
-            Ok(status) => return Ok(status.code().unwrap_or(1)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                failures.push(format!("{} is not installed", launcher.display()));
-            }
-            Err(error) => {
-                failures.push(format!("cannot launch {}: {error}", launcher.display()));
-            }
-        }
-    }
-    Err(failures.join("; "))
-}
-
-fn headless_arguments(
-    mut arguments: Vec<OsString>,
-    default_socket: Option<PathBuf>,
-) -> Vec<OsString> {
-    let has_socket = arguments.iter().any(|argument| {
-        argument == "--socket"
-            || argument == "--data"
-            || argument.to_string_lossy().starts_with("--socket=")
-            || argument.to_string_lossy().starts_with("--data=")
-    });
-    if !has_socket && let Some(socket) = default_socket {
-        arguments.push("--socket".into());
-        arguments.push(socket.into_os_string());
-    }
-    arguments
-}
-
-impl Drop for StartedDaemon {
+impl Drop for StartedHost {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -352,64 +310,66 @@ impl Drop for StartedDaemon {
 }
 
 impl DaemonHandle {
-    pub fn connect_or_start()
-    -> Result<(Self, Receiver<DaemonUpdate>, Option<StartedDaemon>), ConnectError> {
-        if let Ok((daemon, updates)) = Self::connect_discovered() {
-            return Ok((daemon, updates, None));
-        }
-
+    pub fn start_local() -> Result<(Self, Receiver<DaemonUpdate>, StartedHost), ConnectError> {
         let mut failures = Vec::new();
-        for (path, launcher) in startup_candidates() {
-            let socket = path.to_string_lossy().into_owned();
+        let data = data_root();
+        for launcher in launcher_candidates() {
             let mut command = ProcessCommand::new(&launcher);
             command
-                .args(["serve", "--socket", &socket])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .arg("stdio")
+                .arg("--data")
+                .arg(&data)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null());
-            channel::configure_daemon(&mut command, &launcher);
-            let mut child = match command.spawn() {
-                Ok(child) => child,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    failures.push(format!("{} is not installed", launcher.display()));
-                    continue;
-                }
-                Err(error) => {
-                    failures.push(format!("cannot launch {}: {error}", launcher.display()));
-                    continue;
-                }
-            };
-
-            for _ in 0..50 {
-                if let Ok((daemon, updates)) = Self::connect(path.clone()) {
-                    return Ok((daemon, updates, Some(StartedDaemon { child })));
-                }
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        failures.push(format!("{} exited with {status}", launcher.display()));
-                        break;
-                    }
-                    Ok(None) => thread::sleep(Duration::from_millis(100)),
-                    Err(error) => {
-                        failures.push(format!("cannot inspect {}: {error}", launcher.display()));
-                        break;
-                    }
-                }
+            channel::configure_host(&mut command, &launcher);
+            match Self::connect_command(command, data.clone()) {
+                Ok(connection) => return Ok(connection),
+                Err(error) => failures.push(format!("{}: {error}", launcher.display())),
             }
-
-            if let Ok((daemon, updates)) = Self::connect(path.clone()) {
-                return Ok((daemon, updates, Some(StartedDaemon { child })));
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            failures.push(format!(
-                "{} did not open {} within five seconds",
-                launcher.display(),
-                path.display()
-            ));
         }
 
         Err(ConnectError::Start(failures.join("; ")))
+    }
+
+    pub fn connect_command(
+        mut command: ProcessCommand,
+        identity: PathBuf,
+    ) -> Result<(Self, Receiver<DaemonUpdate>, StartedHost), ConnectError> {
+        let mut child = command
+            .spawn()
+            .map_err(|error| ConnectError::Start(error.to_string()))?;
+        let writer = child
+            .stdin
+            .take()
+            .ok_or_else(|| ConnectError::Start("host stdin is unavailable".into()))?;
+        let reader = child
+            .stdout
+            .take()
+            .ok_or_else(|| ConnectError::Start("host stdout is unavailable".into()))?;
+        let (handle, updates) = Self::connect_io(reader, writer, identity);
+        Ok((handle, updates, StartedHost { child }))
+    }
+
+    fn connect_io(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        identity: PathBuf,
+    ) -> (Self, Receiver<DaemonUpdate>) {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (update_tx, update_rx) = async_channel::bounded(1024);
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+
+        spawn_writer(writer, command_rx, update_tx.clone(), pending.clone());
+        spawn_reader(reader, update_tx.clone(), pending);
+        let _ = update_tx.try_send(DaemonUpdate::Connected { path: identity });
+
+        (
+            Self {
+                commands: command_tx,
+            },
+            update_rx,
+        )
     }
 
     pub fn connect_discovered() -> Result<(Self, Receiver<DaemonUpdate>), ConnectError> {
@@ -444,20 +404,7 @@ impl DaemonHandle {
             path: path.clone(),
             source,
         })?;
-        let (command_tx, command_rx) = mpsc::channel();
-        let (update_tx, update_rx) = async_channel::bounded(1024);
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-
-        spawn_writer(stream, command_rx, update_tx.clone(), pending.clone());
-        spawn_reader(reader, update_tx.clone(), pending);
-        let _ = update_tx.try_send(DaemonUpdate::Connected { path });
-
-        Ok((
-            Self {
-                commands: command_tx,
-            },
-            update_rx,
-        ))
+        Ok(Self::connect_io(reader, stream, path))
     }
 
     pub fn tree(&self) -> Result<(), String> {
@@ -1577,18 +1524,18 @@ impl DaemonHandle {
     fn send(&self, kind: RequestKind, body: Value) -> Result<(), String> {
         self.commands
             .send(Command { kind, body })
-            .map_err(|_| "the xd daemon connection is closed".to_owned())
+            .map_err(|_| "the xd state connection is closed".to_owned())
     }
 }
 
 fn spawn_writer(
-    mut stream: UnixStream,
+    mut stream: impl Write + Send + 'static,
     commands: mpsc::Receiver<Command>,
     updates: Sender<DaemonUpdate>,
     pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
 ) {
     thread::Builder::new()
-        .name("xd-daemon-writer".into())
+        .name("xd-host-writer".into())
         .spawn(move || {
             let mut codec = ProtocolCodec::new();
             while let Ok(command) = commands.recv() {
@@ -1602,28 +1549,28 @@ fn spawn_writer(
                 if let Ok(mut requests) = pending.lock() {
                     requests.insert(request_id, command.kind);
                 } else {
-                    disconnect(&updates, "daemon request state is unavailable".into());
+                    disconnect(&updates, "host request state is unavailable".into());
                     return;
                 }
                 if let Err(error) = stream.write_all(&encoded) {
                     if let Ok(mut requests) = pending.lock() {
                         requests.remove(&request_id);
                     }
-                    disconnect(&updates, format!("could not write to xd daemon: {error}"));
+                    disconnect(&updates, format!("could not write to xd host: {error}"));
                     return;
                 }
             }
         })
-        .expect("spawn xd daemon writer");
+        .expect("spawn xd host writer");
 }
 
 fn spawn_reader(
-    stream: UnixStream,
+    stream: impl Read + Send + 'static,
     updates: Sender<DaemonUpdate>,
     pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
 ) {
     thread::Builder::new()
-        .name("xd-daemon-reader".into())
+        .name("xd-host-reader".into())
         .spawn(move || {
             let mut reader = BufReader::new(stream);
             loop {
@@ -1634,18 +1581,18 @@ fn spawn_reader(
                     .read_until(b'\n', &mut line);
                 match read {
                     Ok(0) => {
-                        disconnect(&updates, "xd daemon closed the connection".into());
+                        disconnect(&updates, "xd host closed the connection".into());
                         return;
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        disconnect(&updates, format!("could not read from xd daemon: {error}"));
+                        disconnect(&updates, format!("could not read from xd host: {error}"));
                         return;
                     }
                 }
 
                 if line.len() <= AUTHENTICATED_FRAME_LIMIT && line.last() != Some(&b'\n') {
-                    disconnect(&updates, "xd daemon closed while sending a response".into());
+                    disconnect(&updates, "xd host closed while sending a response".into());
                     return;
                 }
 
@@ -1698,7 +1645,7 @@ fn spawn_reader(
                 }
             }
         })
-        .expect("spawn xd daemon reader");
+        .expect("spawn xd host reader");
 }
 
 fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachment>> {
@@ -1763,21 +1710,16 @@ fn socket_candidates_for(
     vec![data_home.join(data_name).join("daemon.sock")]
 }
 
-fn startup_candidates() -> Vec<(PathBuf, PathBuf)> {
-    let launchers = launcher_candidates();
+fn data_root() -> PathBuf {
     socket_candidates()
         .into_iter()
-        .flat_map(|path| {
-            launchers
-                .iter()
-                .cloned()
-                .map(move |launcher| (path.clone(), launcher))
-        })
-        .collect()
+        .next()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn launcher_candidates() -> Vec<PathBuf> {
-    if let Some(path) = env::var_os("XD_DAEMON_EXECUTABLE").filter(|path| !path.is_empty()) {
+    if let Some(path) = env::var_os("XD_HOST_EXECUTABLE").filter(|path| !path.is_empty()) {
         return vec![PathBuf::from(path)];
     }
     let mut candidates = Vec::new();
@@ -1785,18 +1727,18 @@ fn launcher_candidates() -> Vec<PathBuf> {
         && let Some(parent) = current.parent()
     {
         let sibling = parent.join(if cfg!(windows) {
-            "xd-daemon.exe"
+            "xd-host.exe"
         } else {
-            "xd-daemon"
+            "xd-host"
         });
         if sibling.is_file() {
             candidates.push(sibling);
         }
     }
     candidates.push(PathBuf::from(if cfg!(windows) {
-        "xd-daemon.exe"
+        "xd-host.exe"
     } else {
-        "xd-daemon"
+        "xd-host"
     }));
     candidates
 }
@@ -1962,7 +1904,7 @@ mod tests {
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             DaemonUpdate::Disconnected { message }
-                if message == "xd daemon closed while sending a response"
+                if message == "xd host closed while sending a response"
         ));
 
         server.join().unwrap();
@@ -2651,51 +2593,6 @@ mod tests {
         assert_eq!(
             socket_candidates_for(PathBuf::from("/data"), None, Some("preview".into())),
             vec![PathBuf::from("/data/preview/daemon.sock")]
-        );
-    }
-
-    #[test]
-    fn public_headless_commands_get_a_default_socket_without_overriding_paths() {
-        assert_eq!(
-            headless_arguments(
-                vec!["serve".into(), "--pair".into()],
-                Some(PathBuf::from("/data/xd/daemon.sock")),
-            ),
-            vec![
-                OsString::from("serve"),
-                OsString::from("--pair"),
-                OsString::from("--socket"),
-                OsString::from("/data/xd/daemon.sock"),
-            ]
-        );
-        assert_eq!(
-            headless_arguments(
-                vec!["serve".into(), "--data=/srv/xd".into()],
-                Some(PathBuf::from("/data/xd/daemon.sock")),
-            ),
-            vec![OsString::from("serve"), OsString::from("--data=/srv/xd")]
-        );
-        assert_eq!(
-            headless_arguments(
-                vec!["serve".into(), "--socket".into(), "/run/xd.sock".into(),],
-                Some(PathBuf::from("/data/xd/daemon.sock")),
-            ),
-            vec![
-                OsString::from("serve"),
-                OsString::from("--socket"),
-                OsString::from("/run/xd.sock"),
-            ]
-        );
-        assert_eq!(
-            headless_arguments(
-                vec!["pair".into()],
-                Some(PathBuf::from("/data/xd/daemon.sock")),
-            ),
-            vec![
-                OsString::from("pair"),
-                OsString::from("--socket"),
-                OsString::from("/data/xd/daemon.sock"),
-            ]
         );
     }
 

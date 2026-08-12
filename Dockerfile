@@ -129,42 +129,7 @@ ARG XD_COMMIT=$COMMIT
 ENV XD_COMMIT=$XD_COMMIT
 
 RUN cargo build --locked --release \
- && test -x target/release/xd-daemon
-
-# The remote TLS terminator is dependency-isolated from the daemon so the
-# existing desktop and daemon lockfiles remain untouched during the rewrite.
-# Direct dependency versions are exact; this helper's generated lockfile is
-# intentionally not part of the feature branch.
-FROM gpui-toolchain AS rust-tls-proxy-source
-
-WORKDIR /src/tls-proxy-rs
-COPY tls-proxy-rs/Cargo.toml ./
-RUN mkdir -p src \
- && touch src/main.rs \
- && cargo fetch \
- && rm -rf src
-COPY tls-proxy-rs/src ./src
-
-FROM rust-tls-proxy-source AS rust-tls-proxy-tests
-
-RUN cargo fmt --check \
- && cargo test \
- && touch /rust-tls-proxy-tests-passed
-
-FROM rust-tls-proxy-source AS rust-tls-proxy-windows-check
-
-RUN apt-get update \
- && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
- && rm -rf /var/lib/apt/lists/* \
- && rustup target add x86_64-pc-windows-gnu
-
-RUN cargo check --target x86_64-pc-windows-gnu \
- && touch /rust-tls-proxy-windows-check-passed
-
-FROM rust-tls-proxy-source AS rust-tls-proxy-release
-
-RUN cargo build --release \
- && test -x target/release/xd-tls-proxy
+ && test -x target/release/xd-host
 
 # --- local speech engine ---------------------------------------------------
 #
@@ -269,10 +234,7 @@ COPY --from=gpui-desktop-windows-check /gpui-windows-check-passed /gpui-windows-
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
 COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
 COPY --from=rust-daemon-windows-check /rust-daemon-windows-check-passed /rust-daemon-windows-check-passed
-COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /xd-daemon
-COPY --from=rust-tls-proxy-tests /rust-tls-proxy-tests-passed /rust-tls-proxy-tests-passed
-COPY --from=rust-tls-proxy-windows-check /rust-tls-proxy-windows-check-passed /rust-tls-proxy-windows-check-passed
-COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy /xd-tls-proxy
+COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-host /xd-host
 COPY --from=agent-binaries /agents/codex-package /codex-package
 COPY --from=agent-binaries /agents/claude-bin /claude
 COPY --from=agent-binaries /agents/claude-code-proxy /claude-code-proxy
@@ -351,8 +313,7 @@ COPY scripts/whisper-server.sh /stage/usr/libexec/whisper-server
 RUN install -m0755 /usr/bin/tmux /stage/usr/libexec/tmux \
  && install -Dm0644 /usr/share/doc/tmux/copyright /stage/usr/share/licenses/tmux-LICENSE
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
-COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-daemon /stage/usr/libexec/xd-daemon
-COPY --from=rust-tls-proxy-release /src/tls-proxy-rs/target/release/xd-tls-proxy /stage/usr/libexec/xd-tls-proxy
+COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-host /stage/usr/libexec/xd-host
 COPY --from=agent-binaries /agents/ /stage/usr/libexec/
 COPY --from=voice-build /voice/libexec/ /stage/usr/libexec/
 COPY --from=voice-build /voice/lib/ /stage/usr/lib/
@@ -375,7 +336,6 @@ RUN set -eux; \
       /stage/usr/share/fonts/xd \
       /stage/usr/share/glib-2.0/schemas \
       /stage/usr/share/licenses/xd \
-      /stage/usr/share/systemd/user \
       /stage/usr/share/icons/hicolor/scalable/apps \
       /stage/usr/share/icons/hicolor/symbolic/apps; \
     install -m0644 \
@@ -389,10 +349,6 @@ RUN set -eux; \
       -e "s|@APP_NAME@|$app_name|g" \
       data/com.restartfu.Xd.desktop.in \
       > "/stage/usr/share/applications/$app_id.desktop"; \
-    sed \
-      -e "s|@APP_NAME@|$app_name|g" \
-      data/xd.service.in \
-      > "/stage/usr/share/systemd/user/$data_name.service"; \
     sed \
       -e "s|@APP_ID@|$app_id|g" \
       -e "s|@SETTINGS_PATH@|$settings_path|g" \

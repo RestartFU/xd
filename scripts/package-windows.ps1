@@ -36,8 +36,7 @@ $toolDirectory = Join-Path $repositoryRoot ".build-cache\wix-$wixVersion"
 
 foreach ($relativePath in @(
     'bin\xd.exe',
-    'bin\xd-daemon.exe',
-    'bin\xd-tls-proxy.exe',
+    'bin\xd-host.exe',
     'bin\install.ps1',
     'bin\codex-package\bin\codex.exe',
     'bin\claude.exe',

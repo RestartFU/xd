@@ -1006,7 +1006,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "xd-daemon"
+name = "xd-host"
 version = "0.1.0"
 dependencies = [
  "base64",

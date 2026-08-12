@@ -5,7 +5,6 @@ use std::{
     borrow::Cow,
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
     env,
-    ffi::OsString,
     hash::{Hash, Hasher},
     ops::Range,
     path::{Path, PathBuf},
@@ -43,7 +42,7 @@ use serde_json::Value;
 use xd_desktop::{
     activity,
     daemon::{
-        DaemonHandle, DaemonUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedDaemon,
+        DaemonHandle, DaemonUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost,
     },
     markdown,
     model::{AppModel, Attachment, Message, MessagePageDirection, Worktree},
@@ -951,7 +950,7 @@ struct XdDesktop {
     speech_output: SpeechOutput,
     pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
-    _started_daemon: Option<StartedDaemon>,
+    _started_host: Option<StartedHost>,
     #[cfg(windows)]
     restarting_for_update: bool,
     connection_generation: u64,
@@ -1363,7 +1362,7 @@ impl XdDesktop {
             speech_output: SpeechOutput::default(),
             pending_speech: None,
             daemon: None,
-            _started_daemon: None,
+            _started_host: None,
             #[cfg(windows)]
             restarting_for_update: false,
             connection_generation: 0,
@@ -1805,7 +1804,7 @@ impl XdDesktop {
         self.connection_in_flight = true;
         let connection = cx
             .background_executor()
-            .spawn(async { DaemonHandle::connect_or_start() });
+            .spawn(async { DaemonHandle::start_local() });
         cx.spawn(async move |this, cx| {
             let result = connection.await;
             let _ = this.update(cx, |this, cx| {
@@ -1815,11 +1814,9 @@ impl XdDesktop {
                 this.connecting = false;
                 this.connection_in_flight = false;
                 match result {
-                    Ok((daemon, updates, started_daemon)) => {
+                    Ok((daemon, updates, started_host)) => {
                         this.daemon = Some(daemon);
-                        if started_daemon.is_some() {
-                            this._started_daemon = started_daemon;
-                        }
+                        this._started_host = Some(started_host);
                         this.reconnect_attempt = 0;
                         this.endpoint_model_mut(ChatEndpoint::Local)
                             .connection_error = None;
@@ -2331,7 +2328,7 @@ impl XdDesktop {
                 }
                 if let Some(panel) = &mut self.self_update_panel {
                     panel.busy = false;
-                    panel.error = Some("The daemon disconnected. Reconnecting…".into());
+                    panel.error = Some("The state connection closed. Reconnecting…".into());
                 }
                 if self.auth_open {
                     self.cli_versions_loading = false;
@@ -2407,7 +2404,7 @@ impl XdDesktop {
                     value
                         .get("error")
                         .and_then(Value::as_str)
-                        .unwrap_or("The xd daemon rejected the request.")
+                        .unwrap_or("The xd host rejected the request.")
                         .to_owned(),
                 );
             }
@@ -2690,7 +2687,7 @@ impl XdDesktop {
                         value
                             .get("error")
                             .and_then(Value::as_str)
-                            .unwrap_or("The daemon could not check the speech model.")
+                            .unwrap_or("The host could not check the speech model.")
                             .to_owned(),
                         cx,
                     );
@@ -2700,7 +2697,7 @@ impl XdDesktop {
                         value
                             .get("error")
                             .and_then(Value::as_str)
-                            .unwrap_or("The daemon rejected voice input.")
+                            .unwrap_or("The host rejected voice input.")
                             .to_owned(),
                         cx,
                     );
@@ -2777,7 +2774,7 @@ impl XdDesktop {
                             value
                                 .get("error")
                                 .and_then(Value::as_str)
-                                .unwrap_or("The daemon update request failed.")
+                                .unwrap_or("The host update request failed.")
                                 .to_owned(),
                         );
                     }
@@ -3547,7 +3544,7 @@ impl XdDesktop {
             } => {
                 let Some(chat_id) = value.get("id").and_then(Value::as_str) else {
                     self.chat_create_submitting = false;
-                    self.model.connection_error = Some("The daemon returned no chat id.".into());
+                    self.model.connection_error = Some("The host returned no chat id.".into());
                     return;
                 };
                 if self.creating_chat_folder.as_deref() == Some(folder_id.as_str())
@@ -3891,7 +3888,7 @@ impl XdDesktop {
                 value
                     .get("error")
                     .and_then(Value::as_str)
-                    .unwrap_or("The xd daemon rejected the workspace.")
+                    .unwrap_or("The xd host rejected the workspace.")
                     .to_owned(),
             );
             return true;
@@ -3899,7 +3896,7 @@ impl XdDesktop {
         let Some(folder_id) = value.get("id").and_then(Value::as_str) else {
             self.pending_clone_requests.remove(&endpoint);
             self.endpoint_model_mut(endpoint).connection_error =
-                Some("The daemon returned no workspace id.".into());
+                Some("The host returned no workspace id.".into());
             return true;
         };
         if form_matches {
@@ -4349,7 +4346,7 @@ impl XdDesktop {
             }
             Err(error) => {
                 panel.busy = false;
-                panel.error = Some(format!("Invalid daemon update response: {error}"));
+                panel.error = Some(format!("Invalid host update response: {error}"));
             }
         }
     }
@@ -4563,7 +4560,7 @@ impl XdDesktop {
         let generation = self.tree_generation;
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| daemon.file_tree_list(&chat_id, &path, generation));
         if let Err(error) = result {
             self.file_tree.set_failed(&path);
@@ -4591,7 +4588,7 @@ impl XdDesktop {
         let generation = self.tree_generation;
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| {
                 daemon.file_tab_write(&chat_id, &path, &original, &sending, generation)
             });
@@ -4621,7 +4618,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| daemon.new_folder(name, repo.as_deref(), repo_url.as_deref()));
         match result {
             Ok(()) => {
@@ -4677,7 +4674,7 @@ impl XdDesktop {
         });
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| daemon.folder_settings(&folder_id));
         if let Err(error) = result {
             self.chat_create_worktrees_loading = false;
@@ -4728,7 +4725,7 @@ impl XdDesktop {
         let context = optional_trimmed(&self.workspace_context_text).map(str::to_owned);
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| daemon.set_folder_context(&folder_id, context.as_deref()));
         match result {
             Ok(()) => {
@@ -4795,11 +4792,11 @@ impl XdDesktop {
     }
 
     fn close_remote(&mut self, cx: &mut Context<Self>) {
-        let canceled_pairing = self
+        let canceled_connection = self
             .remote_panel
             .as_ref()
             .is_some_and(|panel| panel.submitting);
-        if canceled_pairing {
+        if canceled_connection {
             self.remote_generation = self.remote_generation.saturating_add(1);
             self.remote_state = if self.settings.remote_ssh_command.is_some() {
                 RemoteState::Offline
@@ -4808,7 +4805,7 @@ impl XdDesktop {
             };
         }
         self.remote_panel = None;
-        if canceled_pairing && self.settings.remote_ssh_command.is_some() {
+        if canceled_connection && self.settings.remote_ssh_command.is_some() {
             self.schedule_remote_connect(Duration::ZERO, cx);
         }
         cx.notify();
@@ -4858,11 +4855,11 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        let pairing = cx
+        let connection = cx
             .background_executor()
             .spawn(async move { remote::connect_ssh(&command) });
         cx.spawn(async move |this, cx| {
-            let result = pairing.await;
+            let result = connection.await;
             let _ = this.update(cx, |this, cx| {
                 if this.remote_generation != generation || this.remote_panel.is_none() {
                     return;
@@ -4906,7 +4903,7 @@ impl XdDesktop {
             None => {
                 if let Some(panel) = &mut self.devices_panel {
                     panel.loading = false;
-                    panel.error = Some("xd is not connected to a daemon.".into());
+                    panel.error = Some("xd is not connected to a host.".into());
                 }
             }
         }
@@ -4946,7 +4943,7 @@ impl XdDesktop {
             },
             None => {
                 if let Some(panel) = &mut self.devices_panel {
-                    panel.error = Some("xd is not connected to a daemon.".into());
+                    panel.error = Some("xd is not connected to a host.".into());
                 }
             }
         }
@@ -4991,7 +4988,7 @@ impl XdDesktop {
             },
             None => {
                 if let Some(current) = &mut self.secrets_panel {
-                    current.error = Some("xd is not connected to a daemon.".into());
+                    current.error = Some("xd is not connected to a host.".into());
                 }
             }
         }
@@ -5029,7 +5026,7 @@ impl XdDesktop {
             return;
         };
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a host.".into());
             return;
         };
         if let Err(error) = daemon.voice_model(&chat_id) {
@@ -5055,7 +5052,7 @@ impl XdDesktop {
         let chat_id = self.voice_input.chat_id.clone();
         let token = self.voice_input.token.clone();
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.fail_voice("xd is not connected to a daemon.".into(), cx);
+            self.fail_voice("xd is not connected to a host.".into(), cx);
             return;
         };
         if let Err(error) = daemon.voice_action("voice-stream-start", &chat_id, &token, None) {
@@ -5096,7 +5093,7 @@ impl XdDesktop {
         }
         let chat_id = self.voice_input.chat_id.clone();
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.fail_voice("xd is not connected to a daemon.".into(), cx);
+            self.fail_voice("xd is not connected to a host.".into(), cx);
             return;
         };
         match event {
@@ -5603,7 +5600,7 @@ impl XdDesktop {
         };
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| daemon.terminal_paste_image(&terminal_id, &attachment));
         if let Err(error) = result
             && let Some(panel) = &mut self.terminal_panel
@@ -6054,7 +6051,7 @@ impl XdDesktop {
         let generation = self.diff_generation;
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| {
                 daemon.file_browse_write(&chat_id, &path, &original, &content, generation)
             });
@@ -6113,7 +6110,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| daemon.git_commit(&chat_id, &message, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -6195,7 +6192,7 @@ impl XdDesktop {
                 if let Some(diff) = &mut self.diff_panel {
                     diff.loading = false;
                     diff.status_loading = false;
-                    diff.error = Some("xd is not connected to a daemon.".into());
+                    diff.error = Some("xd is not connected to a host.".into());
                 }
             }
         }
@@ -6352,7 +6349,7 @@ impl XdDesktop {
         if let Some((read, base)) = request {
             let result = self
                 .active_daemon()
-                .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+                .ok_or_else(|| "xd is not connected to a host.".to_owned())
                 .and_then(|daemon| {
                     daemon.diff_read(
                         &chat_id,
@@ -6461,7 +6458,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| match &target {
                 SidebarTarget::Folder(folder_id) => daemon.trash_folder(folder_id),
                 SidebarTarget::Chat(chat_id) => daemon.delete_chat(chat_id),
@@ -6527,7 +6524,7 @@ impl XdDesktop {
                 self.cancel_sidebar_edit(cx);
             }
             Some(Err(error)) => self.model.connection_error = Some(error),
-            None => self.model.connection_error = Some("xd is not connected to a daemon.".into()),
+            None => self.model.connection_error = Some("xd is not connected to a host.".into()),
         }
         cx.notify();
     }
@@ -6599,7 +6596,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| daemon.messages(chat_id, cursor));
         if let Err(error) = result {
             self.model.connection_error = Some(error);
@@ -6635,7 +6632,7 @@ impl XdDesktop {
         }
         let result = self
             .active_daemon()
-            .ok_or_else(|| "The xd daemon is offline.".to_owned())
+            .ok_or_else(|| "The xd host is offline.".to_owned())
             .and_then(|daemon| daemon.workflow_status(&marker));
         if let Err(error) = result {
             Arc::make_mut(&mut self.workflow_pending).remove(&marker);
@@ -6729,7 +6726,7 @@ impl XdDesktop {
             return;
         }
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a host.".into());
             return;
         };
         if let Err(error) = daemon.send_message(
@@ -6857,7 +6854,7 @@ impl XdDesktop {
             return false;
         };
         let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd is not connected to a daemon.".into());
+            self.model.connection_error = Some("xd is not connected to a host.".into());
             return false;
         };
         if let Err(error) = daemon.send_message(
@@ -7362,7 +7359,7 @@ impl XdDesktop {
         let agent = self.minimal_new_session_agent.protocol_name();
         let result = self
             .active_daemon()
-            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|daemon| {
                 daemon.new_chat_with_backend_in_worktree(&folder_id, &title, agent, &worktree)
             });
@@ -9423,7 +9420,7 @@ impl XdDesktop {
                                 )
                                 .child(
                                     div()
-                                        .id("minimal-pair-remote")
+                                        .id("minimal-connect-remote")
                                         .px_4()
                                         .py_2()
                                         .rounded_lg()
@@ -12779,35 +12776,6 @@ mod tests {
             );
         });
     }
-
-    #[test]
-    fn pair_shortcuts_select_the_headless_pairing_command() {
-        assert_eq!(
-            headless_arguments(vec!["pair".into()]),
-            Some(vec![OsString::from("pair")])
-        );
-        assert_eq!(
-            headless_arguments(vec!["--pair".into()]),
-            Some(vec![OsString::from("pair")])
-        );
-        assert_eq!(
-            headless_arguments(vec!["pair".into(), "--port=4002".into()]),
-            Some(vec![OsString::from("pair"), OsString::from("--port=4002"),])
-        );
-        assert_eq!(headless_arguments(vec!["settings".into()]), None);
-    }
-}
-
-fn headless_arguments(mut arguments: Vec<OsString>) -> Option<Vec<OsString>> {
-    match arguments.first().and_then(|argument| argument.to_str()) {
-        Some("serve") => Some(arguments),
-        Some("pair") => Some(arguments),
-        Some("--pair") => {
-            arguments[0] = "pair".into();
-            Some(arguments)
-        }
-        _ => None,
-    }
 }
 
 fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
@@ -12824,15 +12792,6 @@ fn main() {
     {
         println!("xd {}", desktop_version());
         return;
-    }
-    if let Some(arguments) = headless_arguments(arguments) {
-        match xd_desktop::daemon::run_headless(arguments) {
-            Ok(status) => std::process::exit(status),
-            Err(error) => {
-                eprintln!("xd: {error}");
-                std::process::exit(1);
-            }
-        }
     }
     Application::new()
         .with_assets(EmbeddedIcons)

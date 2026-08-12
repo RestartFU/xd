@@ -1,30 +1,15 @@
 use std::{
-    env, fs,
-    io::{self, Read},
-    path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-    thread,
-    time::{Duration, Instant},
+    path::PathBuf,
+    process::{Command, Stdio},
 };
 
 use thiserror::Error;
 
 use crate::{
     channel,
-    daemon::{DaemonHandle, DaemonUpdate},
-    private_fs::{
-        create_private_directory, secure_directory, socket_is_private, socket_path_exists,
-    },
+    daemon::{DaemonHandle, DaemonUpdate, StartedHost},
     session_host::SshCommand,
 };
-
-const STDERR_LIMIT: usize = 8 * 1024;
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
-static TEMPORARY_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Error)]
 pub enum RemoteError {
@@ -32,12 +17,10 @@ pub enum RemoteError {
     Bridge(String),
 }
 
-/// The SSH process only forwards a private remote Unix socket. Authentication,
-/// host verification, proxy jumps, and keys all remain OpenSSH's job.
+/// Owns the SSH stdio process. Dropping it closes the remote host immediately;
+/// there is no listener or background service on either machine.
 pub struct SshRemoteBridge {
-    child: Child,
-    socket: PathBuf,
-    directory: PathBuf,
+    _host: StartedHost,
 }
 
 pub struct SshRemoteSession {
@@ -60,17 +43,20 @@ impl SshRemoteSession {
 
 pub fn connect_ssh(command: &SshCommand) -> Result<SshRemoteSession, RemoteError> {
     let home = probe_remote_home(command)?;
-    let remote_socket = PathBuf::from(home)
-        .join(".local/share")
-        .join(channel::data_name())
-        .join("daemon.sock");
-    let bridge = SshRemoteBridge::launch(command, &remote_socket)?;
-    let (daemon, updates) = DaemonHandle::connect(bridge.socket().to_owned())
+    let arguments = host_arguments(command, home.to_string_lossy().as_ref());
+    let mut process = Command::new(command.program());
+    process
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    channel::configure_background(&mut process);
+    let (daemon, updates, host) = DaemonHandle::connect_command(process, home)
         .map_err(|error| RemoteError::Bridge(error.to_string()))?;
     Ok(SshRemoteSession {
         daemon,
         updates,
-        bridge,
+        bridge: SshRemoteBridge { _host: host },
     })
 }
 
@@ -95,16 +81,17 @@ fn home_probe_arguments(command: &SshCommand) -> Vec<String> {
     arguments
 }
 
-fn forward_arguments(command: &SshCommand, local: &Path, remote: &Path) -> Vec<String> {
+fn host_arguments(command: &SshCommand, home: &str) -> Vec<String> {
     let mut arguments = ssh_base_arguments(command);
+    let name = channel::data_name();
+    let name = name.to_string_lossy();
     arguments.extend([
-        "-o".into(),
-        "ExitOnForwardFailure=yes".into(),
-        "-N".into(),
-        "-L".into(),
-        format!("{}:{}", local.display(), remote.display()),
         "--".into(),
         command.destination().into(),
+        format!("{home}/.local/opt/{name}/libexec/xd-host"),
+        "stdio".into(),
+        "--data".into(),
+        format!("{home}/.local/share/{name}"),
     ]);
     arguments
 }
@@ -134,169 +121,12 @@ fn probe_remote_home(command: &SshCommand) -> Result<PathBuf, RemoteError> {
     Ok(PathBuf::from(home))
 }
 
-impl SshRemoteBridge {
-    fn launch(command: &SshCommand, remote_socket: &Path) -> Result<Self, RemoteError> {
-        let directory = private_bridge_directory()?;
-        let socket = directory.join("daemon.sock");
-        let mut process = Command::new(command.program());
-        process
-            .args(forward_arguments(command, &socket, remote_socket))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        channel::configure_background(&mut process);
-        let mut child = process
-            .spawn()
-            .map_err(|error| RemoteError::Bridge(format!("cannot launch SSH: {error}")))?;
-        let errors = Arc::new(Mutex::new(Vec::new()));
-        if let Some(stderr) = child.stderr.take() {
-            drain_bounded(stderr, errors.clone());
-        }
-        let deadline = Instant::now() + STARTUP_TIMEOUT;
-        loop {
-            if socket_path_exists(&socket) {
-                break;
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let message = format!("SSH exited with {}", status_text(status));
-                    stop_child(&mut child);
-                    let _ = fs::remove_dir(&directory);
-                    return Err(RemoteError::Bridge(with_stderr(message, &errors)));
-                }
-                Ok(None) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(25));
-                }
-                Ok(None) => {
-                    stop_child(&mut child);
-                    let _ = fs::remove_dir(&directory);
-                    return Err(RemoteError::Bridge(with_stderr(
-                        "SSH forwarding timed out".into(),
-                        &errors,
-                    )));
-                }
-                Err(error) => {
-                    stop_child(&mut child);
-                    let _ = fs::remove_dir(&directory);
-                    return Err(RemoteError::Bridge(format!("cannot inspect SSH: {error}")));
-                }
-            }
-        }
-        if !socket_is_private(&socket) {
-            stop_child(&mut child);
-            let _ = fs::remove_file(&socket);
-            let _ = fs::remove_dir(&directory);
-            return Err(RemoteError::Bridge(
-                "SSH did not create a private local socket".into(),
-            ));
-        }
-        Ok(Self {
-            child,
-            socket,
-            directory,
-        })
-    }
-
-    pub fn socket(&self) -> &Path {
-        &self.socket
-    }
-}
-
-impl Drop for SshRemoteBridge {
-    fn drop(&mut self) {
-        stop_child(&mut self.child);
-        if socket_path_exists(&self.socket) {
-            let _ = fs::remove_file(&self.socket);
-        }
-        let _ = fs::remove_dir(&self.directory);
-    }
-}
-
-fn private_bridge_directory() -> Result<PathBuf, RemoteError> {
-    let parent = env::var_os("XD_REMOTE_BRIDGE_DIR")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
-        .unwrap_or_else(env::temp_dir)
-        .join("xd");
-    fs::create_dir_all(&parent).map_err(|error| RemoteError::Bridge(error.to_string()))?;
-    secure_directory(&parent).map_err(|error| RemoteError::Bridge(error.to_string()))?;
-    for _ in 0..32 {
-        let directory = parent.join(format!(
-            "remote-{}-{}",
-            std::process::id(),
-            TEMPORARY_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ));
-        match create_private_directory(&directory) {
-            Ok(()) => return Ok(directory),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(RemoteError::Bridge(error.to_string())),
-        }
-    }
-    Err(RemoteError::Bridge(
-        "cannot allocate a private local SSH directory".into(),
-    ))
-}
-
-fn drain_bounded(mut stderr: impl Read + Send + 'static, destination: Arc<Mutex<Vec<u8>>>) {
-    let _ = thread::Builder::new()
-        .name("xd-ssh-errors".into())
-        .spawn(move || {
-            let mut buffer = [0_u8; 1024];
-            loop {
-                let count = match stderr.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => count,
-                };
-                if let Ok(mut destination) = destination.lock() {
-                    destination.extend_from_slice(&buffer[..count]);
-                    if destination.len() > STDERR_LIMIT {
-                        let excess = destination.len() - STDERR_LIMIT;
-                        destination.drain(..excess);
-                    }
-                }
-            }
-        });
-}
-
-fn with_stderr(message: String, stderr: &Arc<Mutex<Vec<u8>>>) -> String {
-    let detail = stderr
-        .lock()
-        .ok()
-        .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_owned())
-        .unwrap_or_default();
-    if detail.is_empty() {
-        message
-    } else {
-        format!("{message}: {detail}")
-    }
-}
-
-fn stop_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn status_text(status: std::process::ExitStatus) -> String {
-    if let Some(code) = status.code() {
-        return code.to_string();
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(signal) = status.signal() {
-            return format!("signal {signal}");
-        }
-    }
-    "an unknown status".into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn ssh_transport_uses_the_entered_connection_and_a_private_unix_forward() {
+    fn ssh_transport_runs_the_host_over_stdio_without_a_socket_forward() {
         let command = SshCommand::parse(
             r#"ssh zenomc.org -p 22 -i "keys/zeno mc" -o ServerAliveInterval=15"#,
         )
@@ -319,30 +149,27 @@ mod tests {
                 "printf '%s' \"$HOME\"",
             ]
         );
+        let name = channel::data_name();
+        let name = name.to_string_lossy();
         assert_eq!(
-            forward_arguments(
-                &command,
-                Path::new("/tmp/xd/daemon.sock"),
-                Path::new("/home/zeno/.local/share/xd-nightly/daemon.sock"),
-            ),
+            host_arguments(&command, "/home/zeno"),
             vec![
-                "-p",
-                "22",
-                "-i",
-                "keys/zeno mc",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-N",
-                "-L",
-                "/tmp/xd/daemon.sock:/home/zeno/.local/share/xd-nightly/daemon.sock",
-                "--",
-                "zenomc.org",
+                "-p".into(),
+                "22".into(),
+                "-i".into(),
+                "keys/zeno mc".into(),
+                "-o".into(),
+                "ServerAliveInterval=15".into(),
+                "-o".into(),
+                "BatchMode=yes".into(),
+                "-o".into(),
+                "ConnectTimeout=10".into(),
+                "--".into(),
+                "zenomc.org".into(),
+                format!("/home/zeno/.local/opt/{name}/libexec/xd-host"),
+                "stdio".into(),
+                "--data".into(),
+                format!("/home/zeno/.local/share/{name}"),
             ]
         );
     }

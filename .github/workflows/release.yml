@@ -126,8 +126,7 @@ jobs:
                 desktop/Cargo.toml \
                 desktop/Cargo.lock \
                 daemon-rs/Cargo.toml \
-                daemon-rs/Cargo.lock \
-                tls-proxy-rs/Cargo.toml
+                daemon-rs/Cargo.lock
               git commit -m "chore: release $tag" \
                 -m "Co-authored-by: Codex <codex@openai.com>"
               git tag -a "$tag" -m "xd $tag"
@@ -230,7 +229,6 @@ jobs:
             desktop/target
             daemon-rs/target
             terminal-core/target
-            tls-proxy-rs/target
           key: >-
             cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
             hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
@@ -299,7 +297,6 @@ jobs:
             desktop/target
             daemon-rs/target
             terminal-core/target
-            tls-proxy-rs/target
           key: >-
             cargo-${{ runner.os }}-x86_64-1.95.0-${{
             hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}

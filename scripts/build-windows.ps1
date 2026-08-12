@@ -143,9 +143,7 @@ try {
         & cargo build --locked --release --manifest-path desktop/Cargo.toml
         Assert-LastExitCode 'desktop build'
         & cargo build --locked --release --manifest-path daemon-rs/Cargo.toml
-        Assert-LastExitCode 'daemon build'
-        & cargo build --release --manifest-path tls-proxy-rs/Cargo.toml
-        Assert-LastExitCode 'TLS helper build'
+        Assert-LastExitCode 'host build'
     } finally {
         Pop-Location
     }
@@ -190,10 +188,8 @@ fn main() {
         Copy-Item -LiteralPath $desktopSource `
             -Destination (Join-Path $outputPath 'bin\xd.exe')
     }
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'daemon-rs\target\release\xd-daemon.exe') `
-        -Destination (Join-Path $outputPath 'bin\xd-daemon.exe')
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'tls-proxy-rs\target\release\xd-tls-proxy.exe') `
-        -Destination (Join-Path $outputPath 'bin\xd-tls-proxy.exe')
+    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'daemon-rs\target\release\xd-host.exe') `
+        -Destination (Join-Path $outputPath 'bin\xd-host.exe')
     Copy-Item -LiteralPath $claudeBinary `
         -Destination (Join-Path $outputPath 'bin\claude.exe')
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'data\fonts\DMSans-Variable.ttf') `
@@ -265,8 +261,7 @@ fn main() {
 
     $required = @(
         'bin\xd.exe',
-        'bin\xd-daemon.exe',
-        'bin\xd-tls-proxy.exe',
+        'bin\xd-host.exe',
         'bin\install.ps1',
         'bin\codex-package\bin\codex.exe',
         'bin\claude.exe',
