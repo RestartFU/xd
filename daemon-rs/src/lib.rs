@@ -56,7 +56,7 @@ use storage::SendDisposition;
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
-use terminal_agent::TerminalAgent;
+use terminal_agent::{AgentSession, SessionRecorder, TerminalAgent};
 use voice::VoiceService;
 use workflow::WorkflowStatuses;
 
@@ -923,9 +923,56 @@ impl Engine {
             Ok(secrets) => secrets.environment,
             Err(error) => return error_reply(error),
         };
-        self.terminals
-            .open_agent(request, &workdir, agent, &environment)
-            .unwrap_or_else(error_reply)
+        let backend = agent.wire_name();
+        // Direct terminals die with the daemon, but their CLI conversation is
+        // durable. Reuse its backend id when the client restores this chat.
+        let session_id = match store.session_id(chat_id, backend) {
+            Ok(session_id) => session_id,
+            Err(error) => return error_reply(error),
+        };
+        let new_session_id = if session_id.is_none() && agent == TerminalAgent::Claude {
+            // Claude accepts a caller-selected UUID for a new conversation,
+            // which lets us persist the association before it starts.
+            Some(uuid::Uuid::new_v4().to_string())
+        } else {
+            None
+        };
+        if let Some(session_id) = new_session_id.as_deref()
+            && let Err(error) = store.set_session(chat_id, backend, session_id)
+        {
+            return error_reply(error);
+        }
+        let session = match (session_id.as_deref(), new_session_id.as_deref()) {
+            (Some(session_id), _) => Some(AgentSession::Resume(session_id)),
+            (_, Some(session_id)) => Some(AgentSession::New(session_id)),
+            _ => None,
+        };
+        let daemon_executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(error) => {
+                return error_reply(format!(
+                    "Cannot locate the daemon executable for session recording: {error}"
+                ));
+            }
+        };
+        let recorder =
+            SessionRecorder::new(&daemon_executable, store.database_path(), chat_id, backend);
+        match self.terminals.open_agent(
+            request,
+            &workdir,
+            agent,
+            session,
+            (agent == TerminalAgent::Codex).then_some(&recorder),
+            &environment,
+        ) {
+            Ok(reply) => reply,
+            Err(error) => {
+                if let Some(session_id) = new_session_id.as_deref() {
+                    let _ = store.clear_session_if(chat_id, backend, session_id);
+                }
+                error_reply(error)
+            }
+        }
     }
 
     fn chat_execution_gate(&self, chat_id: &str) -> Result<Arc<Mutex<()>>, String> {

@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::{
     EventBus,
     terminal_activity::TerminalActivityParser,
-    terminal_agent::TerminalAgent,
+    terminal_agent::{AgentSession, SessionRecorder, TerminalAgent},
     terminal_query::TerminalQueryResponder,
     terminal_replay::{
         HISTORY_LIMIT, REPLAY_ITEM_LIMIT, RecordOutcome, ReplayFrame, TerminalState,
@@ -61,7 +61,7 @@ unsafe extern "C" {
     fn chdir(path: *const c_char) -> c_int;
     fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
     fn unsetenv(name: *const c_char) -> c_int;
-    fn execlp(file: *const c_char, argument: *const c_char, ...) -> c_int;
+    fn execvp(file: *const c_char, arguments: *const *const c_char) -> c_int;
     fn _exit(status: c_int) -> !;
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
@@ -129,7 +129,7 @@ impl TerminalManager {
     }
 
     pub fn open(&self, request: &Value, workdir: &Path) -> Result<Value, String> {
-        self.open_session(request, workdir, None, &[])
+        self.open_session(request, workdir, None, None, None, &[])
     }
 
     pub fn open_agent(
@@ -137,9 +137,18 @@ impl TerminalManager {
         request: &Value,
         workdir: &Path,
         agent: TerminalAgent,
+        session: Option<AgentSession<'_>>,
+        recorder: Option<&SessionRecorder>,
         environment: &[(String, String)],
     ) -> Result<Value, String> {
-        self.open_session(request, workdir, Some(agent), environment)
+        self.open_session(
+            request,
+            workdir,
+            Some(agent),
+            session,
+            recorder,
+            environment,
+        )
     }
 
     fn open_session(
@@ -147,6 +156,8 @@ impl TerminalManager {
         request: &Value,
         workdir: &Path,
         agent: Option<TerminalAgent>,
+        agent_session: Option<AgentSession<'_>>,
+        recorder: Option<&SessionRecorder>,
         environment: &[(String, String)],
     ) -> Result<Value, String> {
         let chat_id = text(request, "chat", "terminal-open needs a chat id")?;
@@ -193,6 +204,8 @@ impl TerminalManager {
             columns,
             rows,
             agent,
+            agent_session,
+            recorder,
             allow_all_permissions,
             environment,
             self.activity.clone(),
@@ -419,6 +432,8 @@ impl TerminalSession {
         columns: u16,
         rows: u16,
         agent: Option<TerminalAgent>,
+        agent_session: Option<AgentSession<'_>>,
+        recorder: Option<&SessionRecorder>,
         allow_all_permissions: bool,
         environment: &[(String, String)],
         activity: Arc<TerminalActivityState>,
@@ -442,6 +457,20 @@ impl TerminalSession {
         }
         let executable = CString::new(executable.as_os_str().as_encoded_bytes())
             .map_err(|_| "The terminal executable path is invalid.".to_string())?;
+        let agent_arguments = agent
+            .map(|agent| agent.arguments(allow_all_permissions, agent_session, recorder))
+            .transpose()?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|argument| {
+                CString::new(argument)
+                    .map_err(|_| "A terminal agent argument is invalid.".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut argument_pointers = Vec::with_capacity(agent_arguments.len() + 2);
+        argument_pointers.push(executable.as_ptr());
+        argument_pointers.extend(agent_arguments.iter().map(|argument| argument.as_ptr()));
+        argument_pointers.push(std::ptr::null());
         let title = agent
             .map(TerminalAgent::title)
             .unwrap_or("Terminal")
@@ -452,12 +481,6 @@ impl TerminalSession {
         let term_value = c"xterm-256color";
         let colorterm = c"COLORTERM";
         let colorterm_value = c"truecolor";
-        let codex_no_alt_screen = c"--no-alt-screen";
-        let codex_config = c"-c";
-        let codex_terminal_title = c"tui.terminal_title=[\"run-state\"]";
-        let codex_resize_reflow = c"tui.terminal_resize_reflow_max_rows=5000";
-        let codex_all_permissions = c"--dangerously-bypass-approvals-and-sandbox";
-        let claude_all_permissions = c"--dangerously-skip-permissions";
         let environment = environment
             .iter()
             .map(|(name, value)| {
@@ -511,48 +534,7 @@ impl TerminalSession {
                     }
                     setenv(c"ConEmuANSI".as_ptr(), c"ON".as_ptr(), 1);
                 }
-                match agent {
-                    Some(TerminalAgent::Codex) if allow_all_permissions => {
-                        execlp(
-                            executable.as_ptr(),
-                            executable.as_ptr(),
-                            codex_no_alt_screen.as_ptr(),
-                            codex_config.as_ptr(),
-                            codex_terminal_title.as_ptr(),
-                            codex_config.as_ptr(),
-                            codex_resize_reflow.as_ptr(),
-                            codex_all_permissions.as_ptr(),
-                            std::ptr::null::<c_char>(),
-                        );
-                    }
-                    Some(TerminalAgent::Codex) => {
-                        execlp(
-                            executable.as_ptr(),
-                            executable.as_ptr(),
-                            codex_no_alt_screen.as_ptr(),
-                            codex_config.as_ptr(),
-                            codex_terminal_title.as_ptr(),
-                            codex_config.as_ptr(),
-                            codex_resize_reflow.as_ptr(),
-                            std::ptr::null::<c_char>(),
-                        );
-                    }
-                    Some(TerminalAgent::Claude) if allow_all_permissions => {
-                        execlp(
-                            executable.as_ptr(),
-                            executable.as_ptr(),
-                            claude_all_permissions.as_ptr(),
-                            std::ptr::null::<c_char>(),
-                        );
-                    }
-                    _ => {
-                        execlp(
-                            executable.as_ptr(),
-                            executable.as_ptr(),
-                            std::ptr::null::<c_char>(),
-                        );
-                    }
-                }
+                execvp(executable.as_ptr(), argument_pointers.as_ptr());
                 _exit(127);
             }
         }
@@ -990,6 +972,8 @@ mod tests {
             }),
             &directory,
             agent,
+            None,
+            None,
             &topology,
         );
         match previous {
@@ -1260,6 +1244,8 @@ mod tests {
                 &json!({"chat": "shared-chat", "reuse": false}),
                 &directory,
                 TerminalAgent::Codex,
+                None,
+                None,
                 &[],
             )
             .unwrap()["id"]
@@ -1271,6 +1257,8 @@ mod tests {
                 &json!({"chat": "shared-chat", "reuse": false}),
                 &directory,
                 TerminalAgent::Codex,
+                None,
+                None,
                 &[],
             )
             .unwrap()["id"]
@@ -1390,6 +1378,8 @@ mod tests {
             .open_session(
                 &json!({"chat": "chat-1", "columns": 92, "rows": 31}),
                 Path::new("/tmp"),
+                None,
+                None,
                 None,
                 &[("XD_DIRECT_CLI_TEST".into(), "xd-pty-ready".into())],
             )

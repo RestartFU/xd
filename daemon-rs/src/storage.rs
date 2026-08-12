@@ -92,6 +92,7 @@ pub enum StorageError {
 
 pub struct StateStore {
     database: Mutex<Connection>,
+    database_path: PathBuf,
     workspace_root: PathBuf,
     paste_root: PathBuf,
 }
@@ -284,6 +285,7 @@ impl StateStore {
         }
         Ok(Self {
             database: Mutex::new(database),
+            database_path: database_path.to_owned(),
             workspace_root: workspace_root.into(),
             paste_root: database_path
                 .parent()
@@ -1417,6 +1419,86 @@ impl StateStore {
         session_id: &str,
     ) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
+             ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
+            params![chat_id, backend, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn database_path(&self) -> &Path {
+        &self.database_path
+    }
+
+    pub(crate) fn session_id(
+        &self,
+        chat_id: &str,
+        backend: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database
+            .query_row(
+                "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = ?",
+                params![chat_id, backend],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(StorageError::from)
+    }
+
+    pub(crate) fn clear_session_if(
+        &self,
+        chat_id: &str,
+        backend: &str,
+        session_id: &str,
+    ) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "DELETE FROM chat_sessions WHERE chat_id = ? AND backend = ? AND session_id = ?",
+            params![chat_id, backend, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_agent_notification(
+        database_path: &Path,
+        chat_id: &str,
+        backend: &str,
+        notification: &str,
+    ) -> Result<(), StorageError> {
+        if backend != "codex" {
+            return Err(StorageError::InvalidRequest(
+                "Only Codex completion notifications contain a generated session id.".into(),
+            ));
+        }
+        let notification: Value = serde_json::from_str(notification).map_err(|_| {
+            StorageError::InvalidRequest("The agent session notification is invalid.".into())
+        })?;
+        if notification.get("type").and_then(Value::as_str) != Some("agent-turn-complete") {
+            return Err(StorageError::InvalidRequest(
+                "The agent session notification has an unsupported type.".into(),
+            ));
+        }
+        let session_id = notification
+            .get("thread-id")
+            .and_then(Value::as_str)
+            .filter(|session_id| !session_id.is_empty() && session_id.len() <= 256)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest(
+                    "The agent session notification has no valid thread id.".into(),
+                )
+            })?;
+        let database =
+            Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(
+                |source| StorageError::Open {
+                    path: database_path.to_owned(),
+                    source,
+                },
+            )?;
+        database.busy_timeout(Duration::from_secs(5))?;
+        database.pragma_update(None, "foreign_keys", true)?;
         database.execute(
             "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
              ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
@@ -5970,6 +6052,44 @@ mod tests {
         assert_eq!(turn.access, "edit");
         assert_eq!(turn.session_id.as_deref(), Some("claude-session"));
         assert_eq!(turn.label, "Claude Opus 5 · Extra high");
+    }
+
+    #[test]
+    fn records_and_reads_a_direct_codex_session_from_its_notification() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Direct"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store.new_chat(&json!({"folder": folder})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        StateStore::record_agent_notification(
+            &fixture.database,
+            &chat,
+            "codex",
+            r#"{"type":"agent-turn-complete","thread-id":"thread-direct"}"#,
+        )
+        .unwrap();
+
+        drop(store);
+        let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(
+            reopened.session_id(&chat, "codex").unwrap().as_deref(),
+            Some("thread-direct")
+        );
+        assert!(
+            StateStore::record_agent_notification(
+                &fixture.database,
+                &chat,
+                "codex",
+                r#"{"type":"approval-requested","thread-id":"wrong"}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]

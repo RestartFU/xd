@@ -26,6 +26,12 @@ struct Options {
 enum CliCommand {
     Serve(Options),
     Pair(Options),
+    RecordAgentSession {
+        database: PathBuf,
+        chat: String,
+        backend: String,
+        notification: String,
+    },
     Version,
     Help,
 }
@@ -54,6 +60,20 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Ok(CliCommand::RecordAgentSession {
+            database,
+            chat,
+            backend,
+            notification,
+        }) => {
+            match StateStore::record_agent_notification(&database, &chat, &backend, &notification) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("xd-daemon: cannot record agent session: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Err(error) => {
             eprintln!("xd-daemon: {error}");
             eprintln!("{}", usage());
@@ -228,6 +248,7 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
         Some("--help" | "-h") if arguments.next().is_none() => return Ok(CliCommand::Help),
         Some("serve") => false,
         Some("pair") => true,
+        Some("record-agent-session") => return record_agent_session_arguments(arguments),
         _ => return Err("expected the serve or pair command".into()),
     };
     let mut socket = None;
@@ -323,6 +344,47 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
         CliCommand::Pair(options)
     } else {
         CliCommand::Serve(options)
+    })
+}
+
+fn record_agent_session_arguments(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<CliCommand, String> {
+    let mut database = None;
+    let mut chat = None;
+    let mut backend = None;
+    let mut notification = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--database" => {
+                database = Some(PathBuf::from(
+                    arguments.next().ok_or("--database needs a path")?,
+                ))
+            }
+            _ if argument.starts_with("--database=") => {
+                database = Some(PathBuf::from(&argument["--database=".len()..]));
+            }
+            "--chat" => chat = Some(arguments.next().ok_or("--chat needs an id")?),
+            _ if argument.starts_with("--chat=") => {
+                chat = Some(argument["--chat=".len()..].to_owned());
+            }
+            "--backend" => backend = Some(arguments.next().ok_or("--backend needs a name")?),
+            _ if argument.starts_with("--backend=") => {
+                backend = Some(argument["--backend=".len()..].to_owned());
+            }
+            _ if notification.is_none() => notification = Some(argument),
+            _ => return Err("record-agent-session received extra arguments".into()),
+        }
+    }
+    Ok(CliCommand::RecordAgentSession {
+        database: database.ok_or("record-agent-session needs --database")?,
+        chat: chat
+            .filter(|chat| !chat.is_empty())
+            .ok_or("record-agent-session needs --chat")?,
+        backend: backend
+            .filter(|backend| !backend.is_empty())
+            .ok_or("record-agent-session needs --backend")?,
+        notification: notification.ok_or("record-agent-session needs a notification")?,
     })
 }
 
@@ -456,6 +518,30 @@ mod tests {
         assert_eq!(options.bind, "127.0.0.1");
         assert_eq!(options.port, 4444);
         assert!(options.pair);
+    }
+
+    #[test]
+    fn parses_the_internal_agent_session_recorder_command() {
+        let CliCommand::RecordAgentSession {
+            database,
+            chat,
+            backend,
+            notification,
+        } = arguments([
+            "record-agent-session".into(),
+            "--database=/state/chats.db".into(),
+            "--chat=chat-1".into(),
+            "--backend=codex".into(),
+            r#"{"type":"agent-turn-complete","thread-id":"thread-1"}"#.into(),
+        ])
+        .unwrap()
+        else {
+            panic!("expected the recorder command");
+        };
+        assert_eq!(database, PathBuf::from("/state/chats.db"));
+        assert_eq!(chat, "chat-1");
+        assert_eq!(backend, "codex");
+        assert!(notification.contains("thread-1"));
     }
 
     /// A scratch directory whose name is short enough that a socket inside it

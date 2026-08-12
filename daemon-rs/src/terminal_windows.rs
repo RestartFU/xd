@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::{
     EventBus,
     terminal_activity::TerminalActivityParser,
-    terminal_agent::TerminalAgent,
+    terminal_agent::{AgentSession, SessionRecorder, TerminalAgent},
     terminal_query::TerminalQueryResponder,
     terminal_replay::{
         HISTORY_LIMIT, REPLAY_ITEM_LIMIT, RecordOutcome, ReplayFrame, TerminalState,
@@ -96,7 +96,7 @@ impl TerminalManager {
     }
 
     pub fn open(&self, request: &Value, workdir: &Path) -> Result<Value, String> {
-        self.open_session(request, workdir, None, &[])
+        self.open_session(request, workdir, None, None, None, &[])
     }
 
     pub fn open_agent(
@@ -104,9 +104,18 @@ impl TerminalManager {
         request: &Value,
         workdir: &Path,
         agent: TerminalAgent,
+        session: Option<AgentSession<'_>>,
+        recorder: Option<&SessionRecorder>,
         environment: &[(String, String)],
     ) -> Result<Value, String> {
-        self.open_session(request, workdir, Some(agent), environment)
+        self.open_session(
+            request,
+            workdir,
+            Some(agent),
+            session,
+            recorder,
+            environment,
+        )
     }
 
     fn open_session(
@@ -114,6 +123,8 @@ impl TerminalManager {
         request: &Value,
         workdir: &Path,
         agent: Option<TerminalAgent>,
+        agent_session: Option<AgentSession<'_>>,
+        recorder: Option<&SessionRecorder>,
         environment: &[(String, String)],
     ) -> Result<Value, String> {
         let chat_id = text(request, "chat", "terminal-open needs a chat id")?;
@@ -157,6 +168,8 @@ impl TerminalManager {
             columns,
             rows,
             agent,
+            agent_session,
+            recorder,
             allow_all_permissions,
             environment,
             self.activity.clone(),
@@ -370,6 +383,8 @@ impl TerminalSession {
         columns: u16,
         rows: u16,
         agent: Option<TerminalAgent>,
+        agent_session: Option<AgentSession<'_>>,
+        recorder: Option<&SessionRecorder>,
         allow_all_permissions: bool,
         environment: &[(String, String)],
         activity: Arc<TerminalActivityState>,
@@ -384,7 +399,14 @@ impl TerminalSession {
             .map(|agent| CommandBuilder::new(agent.executable()))
             .unwrap_or_else(terminal_command);
         command.cwd(workdir.as_os_str());
-        configure_command(&mut command, agent, allow_all_permissions, environment);
+        configure_command(
+            &mut command,
+            agent,
+            agent_session,
+            recorder,
+            allow_all_permissions,
+            environment,
+        )?;
         let mut child = pair
             .slave
             .spawn_command(command)
@@ -519,45 +541,37 @@ impl TerminalSession {
 fn configure_command(
     command: &mut CommandBuilder,
     agent: Option<TerminalAgent>,
+    agent_session: Option<AgentSession<'_>>,
+    recorder: Option<&SessionRecorder>,
     allow_all_permissions: bool,
     environment: &[(String, String)],
-) {
+) -> Result<(), String> {
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     for (name, value) in environment {
         command.env(name, value);
     }
-    match agent {
-        Some(TerminalAgent::Codex) => {
-            command.arg("--no-alt-screen");
-            command.arg("-c");
-            command.arg("tui.terminal_title=[\"run-state\"]");
-            command.arg("-c");
-            command.arg("tui.terminal_resize_reflow_max_rows=5000");
-            if allow_all_permissions {
-                command.arg("--dangerously-bypass-approvals-and-sandbox");
-            }
+    if let Some(agent) = agent {
+        for argument in agent.arguments(allow_all_permissions, agent_session, recorder)? {
+            command.arg(argument);
         }
-        Some(TerminalAgent::Claude) => {
-            for name in [
-                "WT_SESSION",
-                "TMUX",
-                "TMUX_PANE",
-                "STY",
-                "ZELLIJ",
-                "ZELLIJ_SESSION_NAME",
-                "TERM_PROGRAM",
-                "TERM_PROGRAM_VERSION",
-            ] {
-                command.env_remove(name);
-            }
-            command.env("ConEmuANSI", "ON");
-            if allow_all_permissions {
-                command.arg("--dangerously-skip-permissions");
-            }
-        }
-        None => {}
     }
+    if agent == Some(TerminalAgent::Claude) {
+        for name in [
+            "WT_SESSION",
+            "TMUX",
+            "TMUX_PANE",
+            "STY",
+            "ZELLIJ",
+            "ZELLIJ_SESSION_NAME",
+            "TERM_PROGRAM",
+            "TERM_PROGRAM_VERSION",
+        ] {
+            command.env_remove(name);
+        }
+        command.env("ConEmuANSI", "ON");
+    }
+    Ok(())
 }
 
 fn terminal_command() -> CommandBuilder {
@@ -799,7 +813,15 @@ mod tests {
             ("ConEmuANSI".to_owned(), "OFF".to_owned()),
         ];
         let mut codex = CommandBuilder::new("codex.exe");
-        configure_command(&mut codex, Some(TerminalAgent::Codex), true, &topology);
+        configure_command(
+            &mut codex,
+            Some(TerminalAgent::Codex),
+            None,
+            None,
+            true,
+            &topology,
+        )
+        .unwrap();
         let arguments = codex
             .get_argv()
             .iter()
@@ -819,7 +841,15 @@ mod tests {
         );
 
         let mut claude = CommandBuilder::new("claude.exe");
-        configure_command(&mut claude, Some(TerminalAgent::Claude), true, &topology);
+        configure_command(
+            &mut claude,
+            Some(TerminalAgent::Claude),
+            None,
+            None,
+            true,
+            &topology,
+        )
+        .unwrap();
         assert!(
             claude
                 .get_argv()
