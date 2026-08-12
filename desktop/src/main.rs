@@ -7813,8 +7813,7 @@ impl XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(colors.selected_surface)))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                let focus = this.terminal_input.read(cx).focus_handle(cx);
-                                window.focus(&focus);
+                                this.open_minimal_terminal_tab(None, window, cx);
                             }))
                             .child(">_"),
                     )
@@ -10330,6 +10329,7 @@ mod tests {
             "minimal-context-toolbar",
             "minimal-session-agent",
             "minimal-context-terminal",
+            "this.open_minimal_terminal_tab(None, window, cx)",
             "this.send_terminal_input(&[3], cx)",
             ".child(\"Stop\")",
         ] {
