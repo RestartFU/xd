@@ -1019,14 +1019,14 @@ impl XdDesktop {
         cx.subscribe(&sidebar_edit_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.sidebar_edit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_sidebar_edit(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "Workspace name…"));
         cx.subscribe(&workspace_create_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_create_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let workspace_repo_input =
@@ -1034,7 +1034,7 @@ impl XdDesktop {
         cx.subscribe(&workspace_repo_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_repo_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let workspace_clone_input =
@@ -1042,14 +1042,14 @@ impl XdDesktop {
         cx.subscribe(&workspace_clone_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_clone_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let chat_create_input = cx.new(|cx| ComposerInput::new(cx, "Chat title…"));
         cx.subscribe(&chat_create_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.chat_create_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_minimal_chat_create(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let workspace_context_input =
@@ -1057,7 +1057,7 @@ impl XdDesktop {
         cx.subscribe(&workspace_context_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_context_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_context(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let workspace_workdir_input =
@@ -1080,7 +1080,7 @@ impl XdDesktop {
         cx.subscribe(&git_commit_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.git_commit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.commit_changes(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let file_editor = cx.new(FileEditor::new);
@@ -1114,10 +1114,12 @@ impl XdDesktop {
         })
         .detach();
         let terminal_input = cx.new(ComposerInput::terminal);
-        cx.subscribe(&terminal_input, |this, _, event, cx| {
-            if let ComposerEvent::Bytes(bytes) = event {
-                this.send_terminal_input(bytes, cx);
+        cx.subscribe(&terminal_input, |this, _, event, cx| match event {
+            ComposerEvent::Bytes(bytes) => this.send_terminal_input(bytes, cx),
+            ComposerEvent::PasteImage { format, bytes } => {
+                this.paste_terminal_image(*format, bytes, cx)
             }
+            ComposerEvent::Changed(_) | ComposerEvent::Submit => {}
         })
         .detach();
         let auth_input = cx.new(|cx| ComposerInput::new(cx, "Paste authorization code…"));
@@ -1127,7 +1129,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.submit_auth_input(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let secret_name_input = cx.new(|cx| ComposerInput::new(cx, "ENVIRONMENT_VARIABLE"));
@@ -1140,7 +1142,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.save_secret(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let secret_value_input =
@@ -1154,7 +1156,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.save_secret(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let device_name_input = cx.new(|cx| ComposerInput::new(cx, "Device name…"));
@@ -1167,7 +1169,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.save_device_name(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let remote_host_input = cx.new(|cx| ComposerInput::new(cx, "Machine address…"));
@@ -1180,7 +1182,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.pair_remote_machine(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let remote_port_input = cx.new(|cx| ComposerInput::new(cx, "Port…"));
@@ -1193,7 +1195,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.pair_remote_machine(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let remote_code_input = cx.new(|cx| ComposerInput::new(cx, "Pairing code…"));
@@ -1206,7 +1208,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.pair_remote_machine(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let remote_name_input = cx.new(|cx| ComposerInput::new(cx, "This device name…"));
@@ -1219,7 +1221,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.pair_remote_machine(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let question_input = cx.new(|cx| ComposerInput::new(cx, "Type your answer…"));
@@ -1229,7 +1231,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.send_question_input(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let mut settings = AppSettings::load();
@@ -1247,7 +1249,7 @@ impl XdDesktop {
                 cx.notify();
             }
             ComposerEvent::Submit => this.start_source_build(cx),
-            ComposerEvent::Bytes(_) => {}
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         source_build_input.update(cx, |input, cx| {
@@ -5212,6 +5214,59 @@ impl XdDesktop {
         };
         if let Some(daemon) = self.active_daemon().cloned()
             && let Err(error) = daemon.terminal_input(&terminal_id, bytes)
+            && let Some(panel) = &mut self.terminal_panel
+        {
+            panel.error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn paste_terminal_image(
+        &mut self,
+        format: gpui::ImageFormat,
+        bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal_id) = self
+            .terminal_panel
+            .as_ref()
+            .and_then(|panel| panel.selected.clone())
+        else {
+            return;
+        };
+        if format != gpui::ImageFormat::Png {
+            self.model.connection_error = Some(
+                "That clipboard image is not available as PNG. Save it as PNG and paste it again."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            self.model.connection_error = Some("That image is larger than 10 MiB.".into());
+            cx.notify();
+            return;
+        }
+        let name = format!(
+            "paste-{}.png",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        let attachment = match Attachment::from_png(name, bytes.to_vec()) {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                self.model.connection_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let result = self
+            .active_daemon()
+            .ok_or_else(|| "xd is not connected to a daemon.".to_owned())
+            .and_then(|daemon| daemon.terminal_paste_image(&terminal_id, &attachment));
+        if let Err(error) = result
             && let Some(panel) = &mut self.terminal_panel
         {
             panel.error = Some(error);
@@ -11359,6 +11414,8 @@ mod tests {
     #[test]
     fn terminal_copy_paste_and_interrupt_shortcuts_follow_shell_conventions() {
         let bindings = include_str!("main.rs");
+        assert!(bindings.contains("ComposerEvent::PasteImage { format, bytes } =>"));
+        assert!(bindings.contains("this.paste_terminal_image(*format, bytes, cx)"));
         assert!(bindings.contains(
             "KeyBinding::new(\"shift-enter\", TerminalControlJ, Some(\"TerminalInput\"))"
         ));

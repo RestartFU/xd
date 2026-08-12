@@ -1250,6 +1250,27 @@ impl DaemonHandle {
         )
     }
 
+    pub fn terminal_paste_image(
+        &self,
+        terminal_id: &str,
+        attachment: &Attachment,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::TerminalInput {
+                terminal_id: terminal_id.to_owned(),
+            },
+            json!({
+                "op": "terminal-paste-image",
+                "terminal": terminal_id,
+                "attachments": [{
+                    "name": attachment.name,
+                    "mime": attachment.mime,
+                    "data": attachment.data,
+                }],
+            }),
+        )
+    }
+
     pub fn terminal_resize(
         &self,
         terminal_id: &str,

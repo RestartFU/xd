@@ -1360,6 +1360,27 @@ impl StateStore {
         Ok(materialized)
     }
 
+    pub(crate) fn materialize_terminal_image(
+        &self,
+        request: &Value,
+    ) -> Result<PathBuf, StorageError> {
+        if request
+            .get("attachments")
+            .and_then(Value::as_array)
+            .is_none_or(|attachments| attachments.len() != 1)
+        {
+            return Err(StorageError::InvalidRequest(
+                "Terminal image paste needs exactly one PNG image.".into(),
+            ));
+        }
+        let mut materialized = self.materialize_message(request, "")?;
+        let path = materialized.paths.first().cloned().ok_or_else(|| {
+            StorageError::InvalidRequest("Terminal image paste needs exactly one PNG image.".into())
+        })?;
+        materialized.keep();
+        Ok(path)
+    }
+
     pub fn append_turn_message(
         &self,
         chat_id: &str,

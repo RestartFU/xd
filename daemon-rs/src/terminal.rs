@@ -27,6 +27,7 @@ use crate::{
     terminal_query::TerminalQueryResponder,
     terminal_replay::{
         HISTORY_LIMIT, REPLAY_ITEM_LIMIT, RecordOutcome, ReplayFrame, TerminalState,
+        pasted_text_bytes,
     },
 };
 
@@ -233,6 +234,29 @@ impl TerminalManager {
             .write_all(&data)
             .map_err(|error| format!("Cannot write terminal: {error}."))?;
         Ok(json!({"ok": true}))
+    }
+
+    pub fn paste_image(&self, request: &Value, path: &Path) -> Result<Value, String> {
+        let session = self.session(text(request, "terminal", "A terminal id is required.")?)?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| "The pasted image path is not valid UTF-8.".to_owned())?;
+        let bracketed = session
+            .state
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?
+            .bracketed_paste();
+        let data = pasted_text_bytes(path, bracketed);
+        let mut writer = session
+            .writer
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?;
+        writer
+            .as_mut()
+            .ok_or_else(|| "The terminal is closed.".to_owned())?
+            .write_all(&data)
+            .map_err(|error| format!("Cannot write terminal: {error}."))?;
+        Ok(json!({"ok": true, "path": path}))
     }
 
     pub fn resize(&self, request: &Value) -> Result<Value, String> {

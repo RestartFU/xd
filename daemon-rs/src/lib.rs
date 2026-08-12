@@ -335,6 +335,7 @@ impl Engine {
             Some("terminal-open") => self.terminal_open(&request),
             Some("terminal-open-agent") => self.terminal_open_agent(&request),
             Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
+            Some("terminal-paste-image") => self.terminal_paste_image(&request),
             Some("terminal-resize") => self.terminals.resize(&request).unwrap_or_else(error_reply),
             Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
             Some("voice-model") => self.voice_request(&request, "voice-model", || {
@@ -807,6 +808,23 @@ impl Engine {
             Err(error) => return error_reply(error),
         };
         self.terminals.list(chat_id)
+    }
+
+    fn terminal_paste_image(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust daemon state storage is not configured.");
+        };
+        let path = match store.materialize_terminal_image(request) {
+            Ok(path) => path,
+            Err(error) => return error_reply(error),
+        };
+        match self.terminals.paste_image(request, &path) {
+            Ok(reply) => reply,
+            Err(error) => {
+                let _ = fs::remove_file(path);
+                error_reply(error)
+            }
+        }
     }
 
     fn delete_chat(&self, request: &Value) -> Value {
@@ -1520,6 +1538,7 @@ fn hidden_git_state() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::{
@@ -1804,6 +1823,57 @@ mod tests {
                 .unwrap()
                 .contains("working directory does not exist")
         );
+        drop(engine);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn terminal_image_paste_materializes_the_image_on_the_daemon_machine() {
+        let root = test_directory();
+        let workspaces = root.join("Workspaces");
+        let store = StateStore::open(root.join("chats.db"), workspaces).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({
+            "op": "new-folder",
+            "name": "Project",
+        }))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = engine.dispatch(json!({
+            "op": "new-chat",
+            "folder": folder,
+            "backend": "codex",
+        }))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let opened = engine.dispatch(json!({
+            "op": "terminal-open",
+            "chat": chat,
+            "columns": 80,
+            "rows": 24,
+            "reuse": false,
+        }));
+        assert_eq!(opened["ok"], true, "{opened}");
+        let terminal = opened["id"].as_str().unwrap().to_owned();
+        let png = b"\x89PNG\r\n\x1a\n";
+
+        let pasted = engine.dispatch(json!({
+            "op": "terminal-paste-image",
+            "terminal": terminal,
+            "attachments": [{
+                "name": "screenshot.png",
+                "mime": "image/png",
+                "data": STANDARD.encode(png),
+            }],
+        }));
+        let _ = engine.dispatch(json!({"op": "terminal-kill", "terminal": terminal}));
+
+        assert_eq!(pasted["ok"], true, "{pasted}");
+        let path = PathBuf::from(pasted["path"].as_str().unwrap());
+        assert!(path.starts_with(root.join("remote-pasted")));
+        assert_eq!(fs::read(path).unwrap(), png);
         drop(engine);
         fs::remove_dir_all(root).ok();
     }

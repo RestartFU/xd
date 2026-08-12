@@ -298,20 +298,15 @@ impl FileEditor {
                 return;
             }
             if self.allow_images
-                && let Some(ClipboardEntry::Image(image)) = item
-                    .into_entries()
-                    .find(|entry| matches!(entry, ClipboardEntry::Image(_)))
+                && let Some((format, bytes)) = clipboard_image(&item)
             {
-                cx.emit(EditorEvent::PasteImage {
-                    format: image.format(),
-                    bytes: image.bytes().to_vec(),
-                });
+                cx.emit(EditorEvent::PasteImage { format, bytes });
                 return;
             }
         }
 
         if self.allow_images
-            && let Some(bytes) = windows_clipboard_png()
+            && let Some(bytes) = platform_clipboard_png()
         {
             cx.emit(EditorEvent::PasteImage {
                 format: ImageFormat::Png,
@@ -476,6 +471,13 @@ impl FileEditor {
     fn range_from_utf16(&self, range: &Range<usize>) -> Range<usize> {
         self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
     }
+}
+
+pub(crate) fn clipboard_image(item: &ClipboardItem) -> Option<(ImageFormat, Vec<u8>)> {
+    item.entries().iter().find_map(|entry| match entry {
+        ClipboardEntry::Image(image) => Some((image.format(), image.bytes().to_vec())),
+        ClipboardEntry::String(_) => None,
+    })
 }
 
 impl EntityInputHandler for FileEditor {
@@ -1007,14 +1009,14 @@ fn encode_clipboard_rgba_as_png(
 }
 
 #[cfg(windows)]
-fn windows_clipboard_png() -> Option<Vec<u8>> {
+pub(crate) fn platform_clipboard_png() -> Option<Vec<u8>> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
     let image = clipboard.get_image().ok()?;
     encode_clipboard_rgba_as_png(image.width, image.height, image.bytes.as_ref()).ok()
 }
 
 #[cfg(not(windows))]
-fn windows_clipboard_png() -> Option<Vec<u8>> {
+pub(crate) fn platform_clipboard_png() -> Option<Vec<u8>> {
     None
 }
 

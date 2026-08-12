@@ -5,6 +5,17 @@ use xd_terminal::TerminalScreen;
 pub(crate) const HISTORY_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const REPLAY_ITEM_LIMIT: usize = 65_536;
 
+pub(crate) fn pasted_text_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    if !bracketed {
+        return text.as_bytes().to_vec();
+    }
+    let mut bytes = Vec::with_capacity(text.len() + 12);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~");
+    bytes
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ReplayFrame {
     Output(Vec<u8>),
@@ -42,6 +53,10 @@ impl TerminalState {
             closing: false,
             screen: TerminalScreen::new(usize::from(columns), usize::from(rows)),
         }
+    }
+
+    pub(crate) fn bracketed_paste(&self) -> bool {
+        self.screen.bracketed_paste()
     }
 
     fn compact_replay(&mut self, byte_limit: usize, item_limit: usize) -> bool {
@@ -141,6 +156,18 @@ impl TerminalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_text_uses_the_sessions_bracketed_paste_mode() {
+        assert_eq!(
+            pasted_text_bytes("/tmp/image.png", false),
+            b"/tmp/image.png"
+        );
+        assert_eq!(
+            pasted_text_bytes("/tmp/image.png", true),
+            b"\x1b[200~/tmp/image.png\x1b[201~"
+        );
+    }
 
     #[test]
     fn compaction_preserves_an_exact_reconstructable_checkpoint() {
