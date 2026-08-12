@@ -7873,7 +7873,7 @@ impl XdDesktop {
                 let instance = session_instance;
                 session_instance += 1;
                 let selected = active_chat_id == Some(session.id.as_str());
-                let emphasized = selected || session.working;
+                let emphasized = selected;
                 let project_id = project.id.clone();
                 let chat_id = session.id.clone();
                 let delete_chat_id = session.id.clone();
@@ -11455,6 +11455,21 @@ mod tests {
             board.contains(".child(div().min_w_0().flex_1().truncate().child(session.branch))"),
             "branch text needs a shrinking, truncating flex child"
         );
+    }
+
+    #[test]
+    fn session_board_only_emphasizes_the_selected_chat() {
+        let source = include_str!("main.rs");
+        let board = source
+            .split_once("fn render_minimal_session_board(")
+            .expect("shared session board")
+            .1
+            .split_once("fn render_minimal_home(")
+            .expect("end of shared session board")
+            .0;
+
+        assert!(board.contains("let emphasized = selected;"));
+        assert!(!board.contains("let emphasized = selected || session.working;"));
     }
 
     #[test]
