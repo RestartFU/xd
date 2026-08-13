@@ -51,19 +51,22 @@ if [[ ! "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
   exit 1
 fi
 
-if [[ "$bump" == --current ]]; then
-  printf '%s\n' "$current"
-  exit 0
-fi
-
 major="${BASH_REMATCH[1]}"
 minor="${BASH_REMATCH[2]}"
 patch="${BASH_REMATCH[3]}"
+current_code=$((major * 1000000 + minor * 1000 + patch))
 
 for manifest in host/Cargo.toml; do
   grep -m1 -qx "version = \"$current\"" "$manifest" \
     || { printf '%s version mismatch\n' "$manifest" >&2; exit 1; }
 done
+
+grep -Eq "^[[:space:]]*versionName = \"$current\"$" \
+  mobile/androidApp/build.gradle.kts \
+  || { printf 'mobile versionName mismatch\n' >&2; exit 1; }
+grep -Eq "^[[:space:]]*versionCode = $current_code$" \
+  mobile/androidApp/build.gradle.kts \
+  || { printf 'mobile versionCode mismatch\n' >&2; exit 1; }
 
 grep -A1 -m1 '^name = "xd-desktop"$' desktop/Cargo.lock \
   | grep -qx "version = \"$current\"" \
@@ -72,6 +75,11 @@ grep -A1 -m1 '^name = "xd-host"$' host/Cargo.lock \
   | grep -qx "version = \"$current\"" \
   || { printf 'host/Cargo.lock version mismatch\n' >&2; exit 1; }
 
+if [[ "$bump" == --current ]]; then
+  printf '%s\n' "$current"
+  exit 0
+fi
+
 case "$bump" in
   patch) patch=$((patch + 1)) ;;
   minor) minor=$((minor + 1)); patch=0 ;;
@@ -79,6 +87,7 @@ case "$bump" in
 esac
 
 to="$major.$minor.$patch"
+to_code=$((major * 1000000 + minor * 1000 + patch))
 
 if [[ "$dry_run" == --dry-run ]]; then
   printf '%s\n' "$to"
@@ -110,6 +119,18 @@ do
     { print }
   '
 done
+
+rewrite mobile/androidApp/build.gradle.kts \
+  -v current="$current" -v current_code="$current_code" \
+  -v to="$to" -v to_code="$to_code" '
+  $0 ~ "^[[:space:]]*versionCode = " current_code "$" {
+    sub(current_code "$", to_code)
+  }
+  $0 ~ "^[[:space:]]*versionName = \"" current "\"$" {
+    sub("\"" current "\"$", "\"" to "\"")
+  }
+  { print }
+'
 
 # A lockfile states the same version again under the package that has it,
 # inside the block that names it.

@@ -52,7 +52,7 @@ import com.restartfu.xd.model.Folder
 import com.restartfu.xd.net.Link
 
 private const val MOBILE_UPDATE_URL =
-    "https://github.com/RestartFU/xd/releases/download/nightly/xd-nightly-android.apk"
+    "https://github.com/RestartFU/xd/releases/latest/download/xd-android.apk"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

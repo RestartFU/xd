@@ -126,7 +126,8 @@ jobs:
                 desktop/Cargo.toml \
                 desktop/Cargo.lock \
                 host/Cargo.toml \
-                host/Cargo.lock
+                host/Cargo.lock \
+                mobile/androidApp/build.gradle.kts
               git commit -m "chore: release $tag" \
                 -m "Co-authored-by: Codex <codex@openai.com>"
               git tag -a "$tag" -m "xd $tag"
@@ -258,8 +259,33 @@ jobs:
             dist/macos/xd-macos-${{ matrix.arch }}.zip
             dist/macos/xd-macos-${{ matrix.arch }}.zip.sha256
 
+  android:
+    needs: prepare
+    runs-on: [self-hosted, linux, x64, xd]
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Build the Android APK
+        run: ./scripts/mobile-build.sh
+
+      - name: Name it for the release
+        run: |
+          set -euo pipefail
+          mv dist/mobile/xd-mobile-debug.apk xd-android.apk
+          sha256sum xd-android.apk > xd-android.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: |
+            xd-android.apk
+            xd-android.apk.sha256
+
   publish:
-    needs: [prepare, linux, macos]
+    needs: [prepare, linux, macos, android]
     # GitHub's own runner: this job moves every artifact through itself, and
     # that gigabyte should not cross a home connection twice. See nightly.yml.
     runs-on: ubuntu-latest
@@ -295,6 +321,11 @@ jobs:
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
           \`\`\`
 
+          Android:
+
+          Download \`xd-android.apk\` from this release. Android connects
+          directly over SSH and requires the stable xd host on the remote machine.
+
           Linux and macOS are self-contained.
           EOF
           )
@@ -313,6 +344,7 @@ jobs:
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip xd-macos-*.zip.sha256 \
+              xd-android.apk xd-android.apk.sha256 \
               scripts/install.sh scripts/install-macos.sh
           else
             gh release create "$tag" \
@@ -323,6 +355,8 @@ jobs:
               xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip \
               xd-macos-*.zip.sha256 \
+              xd-android.apk \
+              xd-android.apk.sha256 \
               scripts/install.sh \
               scripts/install-macos.sh
           fi

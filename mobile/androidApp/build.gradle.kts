@@ -14,22 +14,22 @@ android {
         applicationId = "com.restartfu.xd.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 1004
+        versionName = "0.1.4"
         resValue("string", "app_name", "xd")
     }
 
     // A fixed key, checked in on purpose.
     //
     // Gradle otherwise generates one per machine, and a CI runner starts
-    // empty, so every nightly would be signed differently and Android would
-    // refuse to update an installed build: "package conflicts with an existing
-    // package". Signing every build with the same key makes updates work.
+    // empty, so every published APK would be signed differently and Android
+    // would refuse to update an installed build: "package conflicts with an
+    // existing package". Signing every build with the same key makes updates
+    // work across nightly and stable release assets.
     //
     // This is not a secret and must never be treated as one. It is the same
     // idea as Android's own debug keystore, whose password is public: it
-    // proves nothing about who built the APK. A published release would need
-    // a real key kept out of the repository.
+    // provides update continuity, not proof of who built the APK.
     signingConfigs {
         getByName("debug") {
             storeFile = file("debug.p12")
