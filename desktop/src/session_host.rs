@@ -9,6 +9,7 @@ pub const TMUX_CONFIGURATION: &str = concat!(
     "set -g focus-events on\n",
     "set -g mouse on\n",
     "set -g status off\n",
+    "set -g allow-passthrough on\n",
     "set -g set-titles on\n",
     "set -g set-titles-string \"#{pane_title}\"\n",
 );
@@ -385,6 +386,7 @@ mod tests {
 
     #[test]
     fn managed_tmux_configuration_is_accepted_by_tmux() {
+        assert!(TMUX_CONFIGURATION.contains("set -g allow-passthrough on"));
         let directory =
             std::env::temp_dir().join(format!("xd-tmux-configuration-test-{}", std::process::id()));
         fs::create_dir_all(&directory).unwrap();

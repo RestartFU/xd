@@ -298,6 +298,25 @@ pub struct MessagePageChange {
 }
 
 impl AppModel {
+    pub fn apply_desktop_terminal_activity(&mut self, chat_id: &str, working: bool) {
+        let revision = self
+            .terminal_activity_by_chat
+            .values()
+            .map(|activity| activity.revision)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1);
+        let mut body = serde_json::json!({
+            "chat": chat_id,
+            "terminal_working": working,
+        });
+        if let Some(epoch) = &self.terminal_activity_epoch {
+            body["terminal_activity_epoch"] = Value::String(epoch.clone());
+            body["terminal_activity_revision"] = Value::from(revision);
+        }
+        self.apply_event("terminal-activity", &body);
+    }
+
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
         let mut snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
         let terminal_activity_revision = self.prepare_terminal_activity_version(
@@ -1252,6 +1271,43 @@ mod tests {
             .unwrap();
 
         assert!(!model.chats[0].terminal_working);
+    }
+
+    #[test]
+    fn desktop_runtime_activity_survives_an_unchanged_host_tree() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&serde_json::json!({
+                "folders": [{"id": "folder-1", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat-1",
+                    "folder": "folder-1",
+                    "title": "Chat",
+                    "backend": "jcode",
+                    "terminal_working": false
+                }],
+                "terminal_activity_epoch": "host-a",
+                "terminal_activity_revision": 4
+            }))
+            .unwrap();
+
+        model.apply_desktop_terminal_activity("chat-1", true);
+        model
+            .apply_tree(&serde_json::json!({
+                "folders": [{"id": "folder-1", "name": "Workspace"}],
+                "chats": [{
+                    "id": "chat-1",
+                    "folder": "folder-1",
+                    "title": "Chat",
+                    "backend": "jcode",
+                    "terminal_working": false
+                }],
+                "terminal_activity_epoch": "host-a",
+                "terminal_activity_revision": 4
+            }))
+            .unwrap();
+
+        assert!(model.chats[0].terminal_working);
     }
 
     #[test]

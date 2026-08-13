@@ -5089,7 +5089,12 @@ impl XdDesktop {
                     .update(cx, |this, cx| {
                         let (name, body) = terminal_runtime_event(event);
                         if name == "terminal-activity" {
-                            this.model.apply_event(name, &body);
+                            if let (Some(chat_id), Some(working)) = (
+                                body.get("chat").and_then(Value::as_str),
+                                body.get("terminal_working").and_then(Value::as_bool),
+                            ) {
+                                this.model.apply_desktop_terminal_activity(chat_id, working);
+                            }
                             cx.notify();
                         } else {
                             this.handle_terminal_screen_event(
@@ -5486,10 +5491,9 @@ impl XdDesktop {
     }
 
     fn apply_terminal_opened_event(panel: &mut TerminalPanel, body: &Value) -> bool {
-        let event_agent = body
-            .get("agent")
-            .and_then(Value::as_str)
-            .and_then(AgentCli::from_protocol_name);
+        let protocol_agent = body.get("agent").and_then(Value::as_str);
+        let event_agent = protocol_agent.and_then(AgentCli::from_protocol_name);
+        let completes_opening = panel.opening_matches_protocol_agent(protocol_agent);
         if !panel.accepts_agent(event_agent) {
             return false;
         }
@@ -5513,6 +5517,9 @@ impl XdDesktop {
             });
         }
         panel.selected = Some(terminal_id.to_owned());
+        if completes_opening {
+            panel.finish_opening();
+        }
         true
     }
 
@@ -7258,6 +7265,7 @@ impl XdDesktop {
         let output_scroller = div()
             .id("minimal-terminal-output")
             .size_full()
+            .whitespace_nowrap()
             .overflow_y_scroll()
             .track_scroll(&self.terminal_scroll)
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
@@ -11645,6 +11653,41 @@ mod tests {
     }
 
     #[test]
+    fn matching_local_terminal_open_completes_the_pending_tab() {
+        let mut panel = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Claude);
+        panel.opening = true;
+        panel.opening_agent = Some(AgentCli::Claude);
+
+        assert!(XdDesktop::apply_terminal_opened_event(
+            &mut panel,
+            &serde_json::json!({
+                "chat": "chat",
+                "terminal": "unsupported",
+                "agent": "unsupported",
+                "columns": 80,
+                "rows": 24,
+            }),
+        ));
+        assert!(panel.opening);
+
+        assert!(XdDesktop::apply_terminal_opened_event(
+            &mut panel,
+            &serde_json::json!({
+                "chat": "chat",
+                "terminal": "claude",
+                "title": "Claude",
+                "agent": "claude",
+                "columns": 80,
+                "rows": 24,
+            }),
+        ));
+        assert!(
+            !panel.opening,
+            "the opened event must allow another terminal or agent tab to start"
+        );
+    }
+
+    #[test]
     fn restoring_mixed_tabs_prefers_the_route_agent_over_hash_order() {
         let shell = XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({
             "id": "shell",
@@ -11754,6 +11797,30 @@ mod tests {
         assert!(!scroller.contains(".child(terminal_input)"));
         assert!(terminal.contains(".child(output_scroller)"));
         assert!(terminal.contains(".child(terminal_input)"));
+    }
+
+    #[test]
+    fn terminal_rows_never_wrap_inside_the_measured_viewport() {
+        let source = include_str!("main.rs");
+        let terminal = source
+            .split_once("fn render_minimal_terminal(")
+            .expect("minimal terminal renderer")
+            .1
+            .split_once("fn render_minimal_titlebar")
+            .expect("end of minimal terminal renderer")
+            .0;
+        let scroller = terminal
+            .split_once("let output_scroller =")
+            .expect("terminal output scroller builder")
+            .1
+            .split_once("let measurement_canvas =")
+            .expect("end of terminal output scroller")
+            .0;
+
+        // The PTY has already wrapped every row at the reported column count.
+        // Letting GPUI wrap the rendered text a second time turns one terminal
+        // row into two visual rows and pushes later rows below the viewport.
+        assert!(scroller.contains(".whitespace_nowrap()"));
     }
 
     #[test]
