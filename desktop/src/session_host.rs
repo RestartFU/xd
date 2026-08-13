@@ -40,6 +40,7 @@ pub struct AgentCommand {
     arguments: Vec<String>,
     unset_environment: Vec<String>,
     login_shell_label: Option<String>,
+    user_shell: bool,
 }
 
 impl AgentCommand {
@@ -54,6 +55,17 @@ impl AgentCommand {
             arguments: arguments.into_iter().map(Into::into).collect(),
             unset_environment: Vec::new(),
             login_shell_label: None,
+            user_shell: false,
+        }
+    }
+
+    pub fn user_shell() -> Self {
+        Self {
+            program: String::new(),
+            arguments: Vec::new(),
+            unset_environment: Vec::new(),
+            login_shell_label: None,
+            user_shell: true,
         }
     }
 
@@ -68,6 +80,9 @@ impl AgentCommand {
     }
 
     fn shell_command(&self) -> String {
+        if self.user_shell {
+            return "exec \"${SHELL:-/bin/sh}\" -i".to_owned();
+        }
         let command = self
             .unset_environment
             .iter()
@@ -89,11 +104,11 @@ impl AgentCommand {
             "xd: {label} is not installed or is not available on PATH. Install it, then start a new tab."
         );
         let inner = format!(
-            "if command -v {} >/dev/null 2>&1; then exec {command}; else printf '%s\\n' {} >&2; exec \"${{SHELL:-/bin/sh}}\" -l; fi",
+            "if command -v {} >/dev/null 2>&1; then if {command}; then :; else :; fi; else printf '%s\\n' {} >&2; fi; exec \"${{SHELL:-/bin/sh}}\" -i",
             shell_quote(&self.program),
             shell_quote(&missing),
         );
-        format!("exec \"${{SHELL:-/bin/sh}}\" -lic {}", shell_quote(&inner))
+        format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", shell_quote(&inner))
     }
 }
 
@@ -484,23 +499,34 @@ mod tests {
     }
 
     #[test]
-    fn external_agents_are_discovered_in_the_users_login_shell() {
+    fn interactive_terminals_use_the_configured_user_shell() {
+        assert_eq!(
+            AgentCommand::user_shell().shell_command(),
+            "exec \"${SHELL:-/bin/sh}\" -i"
+        );
+    }
+
+    #[test]
+    fn external_agents_are_discovered_in_the_users_interactive_shell() {
         let command = AgentCommand::new("codex", ["resume", "session-1"])
             .discover_in_user_shell("Codex")
             .shell_command();
 
-        assert!(command.starts_with("exec \"${SHELL:-/bin/sh}\" -lic "));
+        assert!(command.starts_with("exec \"${SHELL:-/bin/sh}\" -ic "));
         assert!(
             command.contains("command -v '\"'\"'codex'\"'\"'"),
             "{command}"
         );
         assert!(
-            command
-                .contains("exec '\"'\"'codex'\"'\"' '\"'\"'resume'\"'\"' '\"'\"'session-1'\"'\"'"),
+            command.contains("'\"'\"'codex'\"'\"' '\"'\"'resume'\"'\"' '\"'\"'session-1'\"'\"'"),
             "{command}"
         );
+        assert!(
+            !command.contains("then exec '\"'\"'codex'\"'\"'"),
+            "the discovery shell must survive when Ctrl+C exits the agent: {command}"
+        );
         assert!(command.contains("Codex is not installed or is not available on PATH"));
-        assert!(command.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+        assert!(command.contains("exec \"${SHELL:-/bin/sh}\" -i"));
     }
 
     #[test]
@@ -511,7 +537,7 @@ mod tests {
             .shell_command();
 
         assert!(command.contains(
-            "exec env '\"'\"'-u'\"'\"' '\"'\"'TMUX'\"'\"' '\"'\"'claude'\"'\"' '\"'\"'--dangerously-skip-permissions'\"'\"'"
+            "env '\"'\"'-u'\"'\"' '\"'\"'TMUX'\"'\"' '\"'\"'claude'\"'\"' '\"'\"'--dangerously-skip-permissions'\"'\"'"
         ), "{command}");
     }
 

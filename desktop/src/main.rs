@@ -5192,14 +5192,7 @@ impl XdDesktop {
                 ["--no-update"],
             )
             .discover_in_user_shell("JCode"),
-            None => AgentCommand::new(
-                if remote {
-                    "sh".into()
-                } else {
-                    env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
-                },
-                ["-l"],
-            ),
+            None => AgentCommand::user_shell(),
         }
     }
 
@@ -12296,6 +12289,22 @@ mod tests {
             .0;
         assert!(!interrupt.contains("TextSelection::selected"));
         assert!(interrupt.contains("self.terminal_bytes(vec![3], cx)"));
+    }
+
+    #[test]
+    fn plain_terminal_tabs_delegate_startup_to_the_users_shell() {
+        let production = include_str!("main.rs");
+        let command = production
+            .split_once("fn terminal_agent_command(")
+            .expect("terminal command builder")
+            .1
+            .split_once("fn resize_terminal_viewport(")
+            .expect("end of terminal command builder")
+            .0;
+
+        assert!(command.contains("None => AgentCommand::user_shell()"));
+        assert!(!command.contains("\"sh\".into()"));
+        assert!(!command.contains("[\"-l\"]"));
     }
 
     #[gpui::test]
