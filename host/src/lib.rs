@@ -8,7 +8,8 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{SyncSender, TrySendError, sync_channel},
     },
-    thread,
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use serde_json::{Value, json};
@@ -72,6 +73,7 @@ pub struct Engine {
     self_update: SelfUpdate,
     pairing: PairingService,
     peer_listener: Mutex<Option<PeerListener>>,
+    _shared_event_monitor: Option<SharedEventMonitor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +89,17 @@ pub(crate) struct EventBus {
     next_event: AtomicU64,
     next_subscriber: AtomicU64,
     subscribers: Mutex<HashMap<u64, Subscriber>>,
+    shared: Option<SharedEventPublisher>,
+}
+
+struct SharedEventPublisher {
+    store: Arc<StateStore>,
+    source: String,
+}
+
+struct SharedEventMonitor {
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<()>>,
 }
 
 struct Subscriber {
@@ -115,6 +128,7 @@ impl Engine {
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
+            _shared_event_monitor: None,
             events,
             runtime: None,
         }
@@ -127,13 +141,14 @@ impl Engine {
 
     pub fn with_store_and_data(store: StateStore, data_directory: Option<PathBuf>) -> Self {
         let store = Arc::new(store);
-        let events = Arc::new(EventBus::default());
+        let events = Arc::new(EventBus::with_store(store.clone()));
         let auth = AuthManager::new(events.clone());
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
         let self_update = SelfUpdate::new(events.clone());
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
+        let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
         let engine = Self {
             runtime: Some(TurnRuntime::new(
                 store.clone(),
@@ -153,6 +168,7 @@ impl Engine {
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
+            _shared_event_monitor: shared_event_monitor,
             events,
         };
         engine.auth.refresh_all();
@@ -1131,6 +1147,16 @@ impl Engine {
 }
 
 impl EventBus {
+    fn with_store(store: Arc<StateStore>) -> Self {
+        Self {
+            shared: Some(SharedEventPublisher {
+                store,
+                source: uuid::Uuid::new_v4().to_string(),
+            }),
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     fn subscribe(&self, sender: SyncSender<Value>, connection: UnixStream) -> Result<u64, String> {
         self.subscribe_with_auth(sender, Some(connection), Arc::new(AtomicBool::new(true)))
@@ -1164,7 +1190,17 @@ impl EventBus {
         }
     }
 
-    fn publish(&self, mut event: Value) {
+    fn publish(&self, event: Value) {
+        if shared_event(&event)
+            && let Some(shared) = &self.shared
+            && let Err(error) = shared.store.append_shared_event(&shared.source, &event)
+        {
+            eprintln!("xd-host: cannot relay chat event: {error}");
+        }
+        self.publish_local(event);
+    }
+
+    fn publish_local(&self, mut event: Value) {
         let id = self.next_event.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(event) = event.as_object_mut() {
             event.insert("id".into(), id.into());
@@ -1223,6 +1259,73 @@ impl EventBus {
             }
         }
     }
+}
+
+impl SharedEventMonitor {
+    fn start(events: Arc<EventBus>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let initial_cursor = events
+            .shared
+            .as_ref()
+            .and_then(|shared| shared.store.latest_shared_event_id().ok())
+            .unwrap_or(0);
+        let worker = thread::Builder::new()
+            .name("xd-shared-events".into())
+            .spawn(move || {
+                let Some(shared) = events.shared.as_ref() else {
+                    return;
+                };
+                let mut cursor = initial_cursor;
+                while !worker_stop.load(Ordering::Acquire) {
+                    thread::park_timeout(Duration::from_millis(50));
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Ok(pending) = shared.store.shared_events_after(cursor) else {
+                        continue;
+                    };
+                    for (id, source, event) in pending {
+                        cursor = id;
+                        if source != shared.source {
+                            events.publish_local(event);
+                        }
+                    }
+                }
+            })
+            .ok();
+        Self { stop, worker }
+    }
+}
+
+impl Drop for SharedEventMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker.thread().unpark();
+            let _ = worker.join();
+        }
+    }
+}
+
+fn shared_event(event: &Value) -> bool {
+    matches!(
+        event.get("event").and_then(Value::as_str),
+        Some(
+            "tree"
+                | "changed"
+                | "repository-changed"
+                | "turn-started"
+                | "text"
+                | "tool"
+                | "turn-finished"
+                | "commands"
+                | "queued"
+                | "draft"
+                | "shortcuts-changed"
+                | "terminal-activity"
+        )
+    )
 }
 
 #[cfg(test)]
@@ -1774,6 +1877,131 @@ mod tests {
         assert_eq!(receiver.recv().unwrap()["id"], 2);
         bus.unsubscribe(subscriber);
         drop(peer);
+    }
+
+    #[test]
+    fn chat_events_cross_host_process_boundaries() {
+        let root = test_directory();
+        let database = root.join("chats.db");
+        let workspaces = root.join("Workspaces");
+        let first =
+            Engine::with_store(StateStore::open(&database, &workspaces).expect("first host store"));
+        let second = Engine::with_store(
+            StateStore::open(&database, &workspaces).expect("second host store"),
+        );
+        let (sender, receiver) = sync_channel(8);
+        let (connection, peer) = UnixStream::pair().unwrap();
+        let subscriber = second.events.subscribe(sender, connection).unwrap();
+        while receiver.try_recv().is_ok() {}
+
+        first.events.publish(json!({
+            "event": "text",
+            "chat": "chat-1",
+            "text": "live from desktop",
+            "turn_id": 7,
+            "turn_sequence": 3,
+        }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let event = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = receiver
+                .recv_timeout(remaining)
+                .expect("the other host process should relay the live chat event");
+            if event["event"] == "text" {
+                break event;
+            }
+        };
+        assert_eq!(event["event"], "text");
+        assert_eq!(event["chat"], "chat-1");
+        assert_eq!(event["text"], "live from desktop");
+
+        second.events.unsubscribe(subscriber);
+        drop(peer);
+    }
+
+    #[test]
+    fn shared_chat_events_do_not_echo_or_relay_terminal_output() {
+        let root = test_directory();
+        let database = root.join("chats.db");
+        let workspaces = root.join("Workspaces");
+        let first =
+            Engine::with_store(StateStore::open(&database, &workspaces).expect("first host store"));
+        let second = Engine::with_store(
+            StateStore::open(&database, &workspaces).expect("second host store"),
+        );
+        let (first_sender, first_receiver) = sync_channel(8);
+        let (first_connection, first_peer) = UnixStream::pair().unwrap();
+        let first_subscriber = first
+            .events
+            .subscribe(first_sender, first_connection)
+            .unwrap();
+        let (second_sender, second_receiver) = sync_channel(8);
+        let (second_connection, second_peer) = UnixStream::pair().unwrap();
+        let second_subscriber = second
+            .events
+            .subscribe(second_sender, second_connection)
+            .unwrap();
+
+        first
+            .events
+            .publish(json!({"event": "text", "chat": "chat-1", "text": "once"}));
+        assert_eq!(next_event(&first_receiver, "text")["text"], "once");
+        assert_eq!(next_event(&second_receiver, "text")["text"], "once");
+        first.events.publish(json!({
+            "event": "terminal-output",
+            "chat": "chat-1",
+            "terminal": "terminal-1",
+            "data": "not shared",
+        }));
+        assert_eq!(
+            next_event(&first_receiver, "terminal-output")["data"],
+            "not shared"
+        );
+        assert!(!receives_event(
+            &second_receiver,
+            "terminal-output",
+            std::time::Duration::from_millis(150),
+        ));
+        assert!(!receives_event(
+            &first_receiver,
+            "text",
+            std::time::Duration::from_millis(150),
+        ));
+
+        first.events.unsubscribe(first_subscriber);
+        second.events.unsubscribe(second_subscriber);
+        drop(first_peer);
+        drop(second_peer);
+    }
+
+    fn next_event(receiver: &std::sync::mpsc::Receiver<Value>, name: &str) -> Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = receiver
+                .recv_timeout(remaining)
+                .expect("expected host event");
+            if event["event"] == name {
+                return event;
+            }
+        }
+    }
+
+    fn receives_event(
+        receiver: &std::sync::mpsc::Receiver<Value>,
+        name: &str,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match receiver.recv_timeout(remaining) {
+                Ok(event) if event["event"] == name => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
     }
 
     #[test]

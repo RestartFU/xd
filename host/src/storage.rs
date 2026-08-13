@@ -48,6 +48,7 @@ const MAX_COMPAT_REPOSITORY_PREVIEW_BYTES: usize = 128 * 1024;
 const MAX_FILE_BROWSE_BYTES: usize = 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 5_000;
 const MAX_GIT_DRAFT_CONTEXT_BYTES: usize = 256 * 1024;
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_CLONE_URL_BYTES: usize = 512;
@@ -220,6 +221,65 @@ impl StateStore {
         )
     }
 
+    pub(crate) fn append_shared_event(
+        &self,
+        source: &str,
+        event: &Value,
+    ) -> Result<(), StorageError> {
+        let encoded = serde_json::to_string(event)
+            .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "INSERT INTO shared_events (source, payload) VALUES (?, ?)",
+            (source, encoded),
+        )?;
+        let id = database.last_insert_rowid();
+        if id % 256 == 0 {
+            database.execute(
+                "DELETE FROM shared_events WHERE id <= ?",
+                [id.saturating_sub(16_384)],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn latest_shared_event_id(&self) -> Result<i64, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM shared_events",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::from)
+    }
+
+    pub(crate) fn shared_events_after(
+        &self,
+        after: i64,
+    ) -> Result<Vec<(i64, String, Value)>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT id, source, payload FROM shared_events WHERE id > ? ORDER BY id LIMIT 512",
+        )?;
+        let rows = statement.query_map([after], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut events = Vec::new();
+        for row in rows {
+            let (id, source, payload) = row?;
+            let event = serde_json::from_str(&payload).map_err(|error| {
+                StorageError::InvalidRequest(format!("Saved host event is invalid: {error}"))
+            })?;
+            events.push((id, source, event));
+        }
+        Ok(events)
+    }
+
     pub fn remote_listener(&self) -> Result<Option<(String, u16)>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let encoded = database
@@ -280,6 +340,7 @@ impl StateStore {
                 source,
             }
         })?;
+        database.busy_timeout(DATABASE_BUSY_TIMEOUT)?;
         database.pragma_update(None, "foreign_keys", true)?;
         if !flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
             initialize_schema(&database)?;
@@ -3236,6 +3297,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_chat_partial_reply_columns(database)?;
             ensure_workspace_sort_order(database)?;
             ensure_chat_sort_order(database)?;
+            ensure_shared_events_table(database)?;
             disable_claude_mode(database)?;
             return Ok(());
         }
@@ -3293,6 +3355,8 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); \
          CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, \
            created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL); \
+         CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+           source TEXT NOT NULL, payload TEXT NOT NULL); \
          CREATE TRIGGER IF NOT EXISTS remember_agent_defaults \
            AFTER UPDATE OF backend, model, effort, access, plan, fast, claude_mode ON chats \
            WHEN OLD.backend IS NOT NEW.backend OR OLD.model IS NOT NEW.model \
@@ -3321,7 +3385,17 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_chat_partial_reply_columns(database)?;
     ensure_workspace_sort_order(database)?;
     ensure_chat_sort_order(database)?;
+    ensure_shared_events_table(database)?;
     disable_claude_mode(database)?;
+    Ok(())
+}
+
+fn ensure_shared_events_table(database: &Connection) -> Result<(), StorageError> {
+    database.execute(
+        "CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+         source TEXT NOT NULL, payload TEXT NOT NULL)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -5603,6 +5677,44 @@ mod tests {
             serde_json::from_str::<Value>(&encoded).unwrap(),
             json!({"bind": "::", "port": 4001})
         );
+    }
+
+    #[test]
+    fn shared_event_append_waits_for_transient_database_contention() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let database_path = fixture.database.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let lock = thread::spawn(move || {
+            let database = Connection::open(database_path).unwrap();
+            database.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(100));
+            database.execute_batch("COMMIT").unwrap();
+        });
+
+        locked_rx.recv().unwrap();
+        store
+            .append_shared_event("other-host", &json!({"event": "text", "text": "hello"}))
+            .unwrap();
+        lock.join().unwrap();
+
+        let events = store.shared_events_after(0).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1, "other-host");
+        assert_eq!(events[0].2["text"], "hello");
+    }
+
+    #[test]
+    fn database_contention_wait_is_explicitly_bounded() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let database = store.database.lock().unwrap();
+        let timeout: u64 = database
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(timeout, 1_000);
     }
 
     #[test]
