@@ -1,8 +1,10 @@
 use std::{
     collections::HashMap,
     io::{Read, Write},
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 use async_channel::{Receiver, Sender};
@@ -57,7 +59,13 @@ struct Session {
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
+    cleanup: Option<ProcessSpec>,
 }
+
+#[cfg(not(test))]
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const CLEANUP_TIMEOUT: Duration = Duration::from_millis(100);
 
 impl SessionRuntime {
     pub fn new() -> (Self, Receiver<SessionEvent>) {
@@ -79,6 +87,7 @@ impl SessionRuntime {
         title: &str,
         agent: Option<&str>,
         spec: ProcessSpec,
+        cleanup: Option<ProcessSpec>,
         columns: usize,
         rows: usize,
     ) -> Result<(), String> {
@@ -124,6 +133,7 @@ impl SessionRuntime {
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(Some(child)),
+            cleanup,
         });
         sessions.insert(terminal_id.to_owned(), session.clone());
         drop(sessions);
@@ -184,11 +194,27 @@ impl SessionRuntime {
     }
 
     pub fn kill(&self, terminal_id: &str) -> Result<(), String> {
-        let session = match self.session(terminal_id) {
-            Ok(session) => session,
-            Err(_) => return Ok(()),
+        let session = match self
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?
+            .remove(terminal_id)
+        {
+            Some(session) => session,
+            None => return Ok(()),
         };
-        session.close();
+        let _ = self.events.send_blocking(SessionEvent::Closed {
+            chat_id: session.chat_id.clone(),
+            terminal_id: session.terminal_id.clone(),
+        });
+        let _ = thread::Builder::new()
+            .name("xd-terminal-cleanup".into())
+            .spawn(move || {
+                session.close();
+                if let Some(cleanup) = session.cleanup.clone() {
+                    run_cleanup(cleanup);
+                }
+            });
         Ok(())
     }
 
@@ -215,6 +241,31 @@ impl SessionRuntime {
             thread::sleep(std::time::Duration::from_millis(5));
         }
         false
+    }
+}
+
+fn run_cleanup(spec: ProcessSpec) {
+    let mut child = match Command::new(spec.program)
+        .args(spec.arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return,
+    };
+    let deadline = Instant::now() + CLEANUP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+        }
     }
 }
 
@@ -270,13 +321,21 @@ fn start_reader(
                 }
             }
             session.close();
-            if let Ok(mut sessions) = sessions.lock() {
-                sessions.remove(&session.terminal_id);
-            }
-            let _ = events.send_blocking(SessionEvent::Closed {
-                chat_id: session.chat_id.clone(),
-                terminal_id: session.terminal_id.clone(),
+            let should_close = sessions.lock().is_ok_and(|mut sessions| {
+                let is_current = sessions
+                    .get(&session.terminal_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session));
+                if is_current {
+                    sessions.remove(&session.terminal_id);
+                }
+                is_current
             });
+            if should_close {
+                let _ = events.send_blocking(SessionEvent::Closed {
+                    chat_id: session.chat_id.clone(),
+                    terminal_id: session.terminal_id.clone(),
+                });
+            }
         })
         .expect("terminal reader thread should start");
 }
@@ -451,6 +510,7 @@ mod tests {
                     PathBuf::from("/bin/sh"),
                     ["-c", "printf ready; read line; printf ':%s' \"$line\""],
                 ),
+                None,
                 80,
                 24,
             )
@@ -466,6 +526,90 @@ mod tests {
         let closed = events.recv_blocking().unwrap();
         assert!(matches!(closed, SessionEvent::Closed { .. }));
         assert!(runtime.wait_until_empty(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn explicit_close_runs_persistent_cleanup_without_blocking_the_caller() {
+        let directory =
+            std::env::temp_dir().join(format!("xd-terminal-cleanup-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let marker = directory.join("closed");
+        let cleanup = ProcessSpec::new(
+            "/bin/sh",
+            [
+                "-c".to_owned(),
+                format!("printf closed > {}", marker.to_string_lossy()),
+            ],
+        );
+        let (runtime, events) = SessionRuntime::new();
+        runtime
+            .open(
+                "chat-one",
+                "terminal-cleanup",
+                "Terminal",
+                None,
+                ProcessSpec::new("/bin/sh", ["-c", "sleep 30"]),
+                Some(cleanup),
+                80,
+                24,
+            )
+            .unwrap();
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            SessionEvent::Opened { .. }
+        ));
+
+        let started = std::time::Instant::now();
+        runtime.kill("terminal-cleanup").unwrap();
+        assert!(started.elapsed() < Duration::from_millis(50));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !marker.exists() {
+            assert!(std::time::Instant::now() < deadline, "cleanup did not run");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn explicit_close_allows_immediate_reopen_with_the_same_terminal_id() {
+        let (runtime, events) = SessionRuntime::new();
+        runtime
+            .open(
+                "chat-one",
+                "stable-agent",
+                "Claude",
+                Some("claude"),
+                ProcessSpec::new("/bin/sh", ["-c", "sleep 30"]),
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        assert!(matches!(
+            events.recv_blocking().unwrap(),
+            SessionEvent::Opened { .. }
+        ));
+        runtime.kill("stable-agent").unwrap();
+        assert!(
+            (0..16).any(|_| matches!(events.recv_blocking().unwrap(), SessionEvent::Closed { .. }))
+        );
+
+        runtime
+            .open(
+                "chat-one",
+                "stable-agent",
+                "Claude",
+                Some("claude"),
+                ProcessSpec::new("/bin/sh", ["-c", "printf reopened; sleep 30"]),
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        assert!(
+            (0..16).any(|_| matches!(events.recv_blocking().unwrap(), SessionEvent::Opened { .. }))
+        );
+        assert!(recv_output_containing(&events, "reopened"));
+        runtime.kill("stable-agent").unwrap();
     }
 
     fn recv_output_containing(

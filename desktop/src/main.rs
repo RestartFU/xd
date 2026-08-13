@@ -446,6 +446,55 @@ fn terminal_tab_title(agent: Option<AgentCli>) -> String {
     agent.map(AgentCli::label).unwrap_or("Terminal").to_owned()
 }
 
+fn stable_agent_session_id(terminal_id: &str) -> String {
+    fn hash(seed: u64, value: &str) -> u64 {
+        value.as_bytes().iter().fold(seed, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+    }
+
+    let high = hash(0xcbf29ce484222325, terminal_id);
+    let low = hash(0x84222325cbf29ce4, terminal_id);
+    let mut bytes = ((u128::from(high) << 64) | u128::from(low)).to_be_bytes();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn terminal_session_id(
+    chat_id: &str,
+    agent: Option<AgentCli>,
+    reuse: bool,
+    unique: u128,
+) -> String {
+    if agent.is_some() || reuse {
+        format!(
+            "{chat_id}:{}",
+            agent.map(AgentCli::protocol_name).unwrap_or("terminal")
+        )
+    } else {
+        format!("{chat_id}:terminal:{unique}")
+    }
+}
+
 fn jcode_terminal_screen_working(screen: &str) -> Option<bool> {
     let prompt = screen
         .lines()
@@ -5186,7 +5235,7 @@ impl XdDesktop {
         }
     }
 
-    fn terminal_agent_command(&self, agent: Option<AgentCli>) -> AgentCommand {
+    fn terminal_agent_command(&self, agent: Option<AgentCli>, terminal_id: &str) -> AgentCommand {
         let remote = self.active_endpoint == ChatEndpoint::Remote;
         match agent {
             Some(AgentCli::Codex) => {
@@ -5205,7 +5254,12 @@ impl XdDesktop {
                 if self.settings.allow_all_permissions {
                     arguments.push("--dangerously-bypass-approvals-and-sandbox".into());
                 }
-                AgentCommand::new(program, arguments).discover_in_user_shell("Codex")
+                let mut resume_arguments = vec!["resume".to_owned(), "--last".to_owned()];
+                resume_arguments.extend(arguments.clone());
+                AgentCommand::new(program, arguments)
+                    .resume_with(resume_arguments)
+                    .record_codex_session()
+                    .discover_in_user_shell("Codex")
             }
             Some(AgentCli::Claude) => {
                 let executable = if remote {
@@ -5213,11 +5267,17 @@ impl XdDesktop {
                 } else {
                     env::var("XD_CLAUDE_EXECUTABLE").unwrap_or_else(|_| "claude".into())
                 };
-                let mut arguments: Vec<String> = Vec::new();
+                let session_id = stable_agent_session_id(terminal_id);
+                let mut common_arguments = Vec::new();
                 if self.settings.allow_all_permissions {
-                    arguments.push("--dangerously-skip-permissions".into());
+                    common_arguments.push("--dangerously-skip-permissions".into());
                 }
+                let mut arguments = vec!["--session-id".to_owned(), session_id.clone()];
+                arguments.extend(common_arguments.clone());
+                let mut resume_arguments = vec!["--resume".to_owned(), session_id];
+                resume_arguments.extend(common_arguments);
                 AgentCommand::new(executable, arguments)
+                    .resume_with(resume_arguments)
                     .unset_environment("TMUX")
                     .discover_in_user_shell("Claude Code")
             }
@@ -5229,6 +5289,7 @@ impl XdDesktop {
                 },
                 ["--no-update"],
             )
+            .resume_with(["--no-update", "--resume"])
             .discover_in_user_shell("JCode"),
             None => AgentCommand::user_shell(),
         }
@@ -5402,35 +5463,31 @@ impl XdDesktop {
         panel.opening = true;
         panel.opening_agent = agent;
         panel.error = None;
-        let terminal_id = if reuse {
-            format!(
-                "{chat_id}:{}",
-                agent.map(AgentCli::protocol_name).unwrap_or("terminal")
-            )
-        } else {
-            format!(
-                "{chat_id}:{}:{}",
-                agent.map(AgentCli::protocol_name).unwrap_or("terminal"),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            )
-        };
+        let terminal_id = terminal_session_id(
+            &chat_id,
+            agent,
+            reuse,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        );
         let title = terminal_tab_title(agent);
         let workdir = self.model.workdir.clone();
         let result = workdir
             .ok_or_else(|| "The session working directory is still loading.".to_owned())
             .and_then(|workdir| {
                 let host = self.active_session_host()?;
-                let command = self.terminal_agent_command(agent);
+                let command = self.terminal_agent_command(agent, &terminal_id);
                 let process = host.attach(&terminal_id, Path::new(&workdir), &command);
+                let cleanup = host.kill_process(&terminal_id);
                 self.terminal_runtime.open(
                     &chat_id,
                     &terminal_id,
                     &title,
                     agent.map(AgentCli::protocol_name),
                     process,
+                    Some(cleanup),
                     columns,
                     rows,
                 )
@@ -10642,6 +10699,32 @@ mod tests {
         assert_eq!(working_dot_alphas(2), [0xff, 0xff, 0x4d]);
         assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
+    }
+
+    #[test]
+    fn agent_tabs_keep_one_stable_identity_per_backend() {
+        assert_eq!(
+            terminal_session_id("chat-1", Some(AgentCli::Claude), false, 1),
+            terminal_session_id("chat-1", Some(AgentCli::Claude), false, 2)
+        );
+        assert_ne!(
+            terminal_session_id("chat-1", Some(AgentCli::Claude), false, 1),
+            terminal_session_id("chat-1", Some(AgentCli::Codex), false, 1)
+        );
+        assert_ne!(
+            terminal_session_id("chat-1", None, false, 1),
+            terminal_session_id("chat-1", None, false, 2)
+        );
+    }
+
+    #[test]
+    fn claude_session_identity_is_stable_and_uuid_shaped() {
+        let first = stable_agent_session_id("chat-1:claude");
+        let second = stable_agent_session_id("chat-1:claude");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "4");
+        assert!(matches!(&first[19..20], "8" | "9" | "a" | "b"));
     }
 
     #[test]

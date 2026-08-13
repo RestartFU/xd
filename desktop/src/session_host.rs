@@ -1,6 +1,8 @@
 use std::{
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 pub const TMUX_CONFIGURATION: &str = concat!(
@@ -38,6 +40,8 @@ impl ProcessSpec {
 pub struct AgentCommand {
     program: String,
     arguments: Vec<String>,
+    resume_arguments: Option<Vec<String>>,
+    record_codex_session: bool,
     unset_environment: Vec<String>,
     login_shell_label: Option<String>,
     user_shell: bool,
@@ -53,6 +57,8 @@ impl AgentCommand {
         Self {
             program: program.into(),
             arguments: arguments.into_iter().map(Into::into).collect(),
+            resume_arguments: None,
+            record_codex_session: false,
             unset_environment: Vec::new(),
             login_shell_label: None,
             user_shell: false,
@@ -63,6 +69,8 @@ impl AgentCommand {
         Self {
             program: String::new(),
             arguments: Vec::new(),
+            resume_arguments: None,
+            record_codex_session: false,
             unset_environment: Vec::new(),
             login_shell_label: None,
             user_shell: true,
@@ -74,36 +82,66 @@ impl AgentCommand {
         self
     }
 
+    pub fn resume_with<I, S>(mut self, arguments: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.resume_arguments = Some(arguments.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn record_codex_session(mut self) -> Self {
+        self.record_codex_session = true;
+        self
+    }
+
     pub fn discover_in_user_shell(mut self, label: impl Into<String>) -> Self {
         self.login_shell_label = Some(label.into());
         self
     }
 
     fn shell_command(&self) -> String {
+        self.shell_command_with_marker(None)
+    }
+
+    fn shell_command_with_marker(&self, marker: Option<&str>) -> String {
         if self.user_shell {
             return "exec \"${SHELL:-/bin/sh}\" -i".to_owned();
         }
-        let command = self
-            .unset_environment
-            .iter()
-            .flat_map(|name| ["-u", name.as_str()])
-            .chain(std::iter::once(self.program.as_str()))
-            .chain(self.arguments.iter().map(String::as_str))
-            .map(shell_quote)
-            .collect::<Vec<_>>()
-            .join(" ");
-        let command = if self.unset_environment.is_empty() {
-            command
-        } else {
-            format!("env {command}")
+        let start_arguments = match marker.filter(|_| self.record_codex_session) {
+            Some(_) => {
+                let mut arguments = self.arguments.clone();
+                arguments.extend(["-c".to_owned(), codex_notify_override()]);
+                arguments
+            }
+            None => self.arguments.clone(),
+        };
+        let command = self.command(&start_arguments);
+        let command = match (marker, self.resume_arguments.as_deref()) {
+            (Some(marker), Some(resume_arguments)) if self.record_codex_session => format!(
+                "MARKER={marker}; export XD_AGENT_SESSION_MARKER=\"$MARKER\"; mkdir -p \"$(dirname \"$MARKER\")\" || exit; if [ -s \"$MARKER\" ]; then IFS= read -r SESSION < \"$MARKER\"; exec {} 'resume' \"$SESSION\" {}; elif [ -e \"$MARKER\" ]; then exec {}; else : > \"$MARKER\"; exec {command}; fi",
+                shell_quote(&self.program),
+                self.arguments
+                    .iter()
+                    .map(|value| shell_quote(value))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                self.command(resume_arguments),
+            ),
+            (Some(marker), Some(resume_arguments)) => format!(
+                "MARKER={marker}; mkdir -p \"$(dirname \"$MARKER\")\" || exit; if [ -e \"$MARKER\" ]; then exec {}; else : > \"$MARKER\"; exec {command}; fi",
+                self.command(resume_arguments)
+            ),
+            _ => format!("exec {command}"),
         };
         let Some(label) = &self.login_shell_label else {
-            return format!("exec {command}");
+            return command;
         };
         let missing = format!(
             "xd: {label} is not installed or is not available on PATH. Install it, then start a new tab."
         );
-        let child = format!("(trap - INT; exec {command})");
+        let child = format!("(trap - INT; {command})");
         let inner = format!(
             "trap '' INT; if command -v {} >/dev/null 2>&1; then if {child}; then :; else :; fi; else printf '%s\\n' {} >&2; fi; exec \"${{SHELL:-/bin/sh}}\" -i",
             shell_quote(&self.program),
@@ -111,6 +149,30 @@ impl AgentCommand {
         );
         format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", shell_quote(&inner))
     }
+
+    fn command(&self, arguments: &[String]) -> String {
+        let command = self
+            .unset_environment
+            .iter()
+            .flat_map(|name| ["-u", name.as_str()])
+            .chain(std::iter::once(self.program.as_str()))
+            .chain(arguments.iter().map(String::as_str))
+            .map(shell_quote)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if self.unset_environment.is_empty() {
+            command
+        } else {
+            format!("env {command}")
+        }
+    }
+}
+
+fn codex_notify_override() -> String {
+    let script = "marker=$XD_AGENT_SESSION_MARKER; payload=$1; [ -n \"$marker\" ] || exit 0; id=$(printf '%s\\n' \"$payload\" | sed -n 's/.*\"thread-id\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'); case \"$id\" in ''|*[!A-Za-z0-9_-]*) exit 0;; esac; umask 077; tmp=\"$marker.$$\"; printf '%s\\n' \"$id\" > \"$tmp\" && mv \"$tmp\" \"$marker\"";
+    let command = serde_json::to_string(&["sh", "-c", script, "xd-codex-recorder"])
+        .expect("static Codex recorder command should serialize");
+    format!("notify={command}")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,27 +333,51 @@ impl SessionHost {
     pub fn attach(&self, id: &str, workdir: &Path, agent: &AgentCommand) -> ProcessSpec {
         let session = session_name(id);
         match &self.target {
-            HostTarget::Local { tmux, runtime } => ProcessSpec::new(
-                tmux,
-                [
-                    "-S".to_owned(),
-                    runtime.join("tmux.sock").to_string_lossy().into_owned(),
-                    "-f".to_owned(),
-                    runtime.join("tmux.conf").to_string_lossy().into_owned(),
-                    "start-server".to_owned(),
-                    ";".to_owned(),
-                    "source-file".to_owned(),
-                    runtime.join("tmux.conf").to_string_lossy().into_owned(),
-                    ";".to_owned(),
-                    "new-session".to_owned(),
-                    "-A".to_owned(),
-                    "-s".to_owned(),
-                    session,
-                    "-c".to_owned(),
-                    workdir.to_string_lossy().into_owned(),
-                    agent.shell_command(),
-                ],
-            ),
+            HostTarget::Local { tmux, runtime } => {
+                let marker = agent.resume_arguments.as_ref().map(|_| {
+                    runtime
+                        .join("agent-sessions")
+                        .join(format!("{session}.started"))
+                });
+                if let Some(marker) = marker.as_ref()
+                    && Command::new(tmux)
+                        .args(["-S"])
+                        .arg(runtime.join("tmux.sock"))
+                        .args(["has-session", "-t", &session])
+                        .status()
+                        .is_ok_and(|status| status.success())
+                    && !marker.exists()
+                {
+                    let _ = marker.parent().map(fs::create_dir_all);
+                    let _ = fs::write(marker, []);
+                }
+                ProcessSpec::new(
+                    tmux,
+                    [
+                        "-S".to_owned(),
+                        runtime.join("tmux.sock").to_string_lossy().into_owned(),
+                        "-f".to_owned(),
+                        runtime.join("tmux.conf").to_string_lossy().into_owned(),
+                        "start-server".to_owned(),
+                        ";".to_owned(),
+                        "source-file".to_owned(),
+                        runtime.join("tmux.conf").to_string_lossy().into_owned(),
+                        ";".to_owned(),
+                        "new-session".to_owned(),
+                        "-A".to_owned(),
+                        "-s".to_owned(),
+                        session.clone(),
+                        "-c".to_owned(),
+                        workdir.to_string_lossy().into_owned(),
+                        agent.shell_command_with_marker(
+                            marker
+                                .as_ref()
+                                .map(|marker| shell_quote(&marker.to_string_lossy()))
+                                .as_deref(),
+                        ),
+                    ],
+                )
+            }
             HostTarget::Ssh {
                 command,
                 remote_runtime,
@@ -304,11 +390,22 @@ impl SessionHost {
                     .collect::<Vec<_>>()
                     .join(" ");
                 let remote = format!(
-                    "RUNTIME=\"{runtime}\"; mkdir -p \"$RUNTIME\" || exit; CONF=\"$RUNTIME/tmux.conf\"; printf '%s\\n' {configuration} > \"$CONF\" || exit; TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"; [ -x \"$TMUX\" ] || TMUX=tmux; exec \"$TMUX\" -S \"$RUNTIME/tmux.sock\" -f \"$CONF\" start-server \\; source-file \"$CONF\" \\; new-session -A -s {} -c {} {}",
+                    "RUNTIME=\"{runtime}\"; mkdir -p \"$RUNTIME/agent-sessions\" || exit; CONF=\"$RUNTIME/tmux.conf\"; printf '%s\\n' {configuration} > \"$CONF\" || exit; TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"; [ -x \"$TMUX\" ] || TMUX=tmux; MARKER=\"$RUNTIME/agent-sessions/{session}.started\"; if \"$TMUX\" -S \"$RUNTIME/tmux.sock\" has-session -t {} 2>/dev/null && [ ! -e \"$MARKER\" ]; then : > \"$MARKER\"; fi; exec \"$TMUX\" -S \"$RUNTIME/tmux.sock\" -f \"$CONF\" start-server \\; source-file \"$CONF\" \\; new-session -A -s {} -c {} {}",
                     data_name.to_string_lossy(),
                     shell_quote(&session),
+                    shell_quote(&session),
                     shell_quote(&workdir.to_string_lossy()),
-                    shell_quote(&agent.shell_command()),
+                    shell_quote(
+                        &agent.shell_command_with_marker(
+                            agent
+                                .resume_arguments
+                                .as_ref()
+                                .map(|_| format!(
+                                    "\"$HOME/{remote_runtime}/agent-sessions/{session}.started\""
+                                ))
+                                .as_deref(),
+                        )
+                    ),
                 );
                 let mut arguments = command.options.clone();
                 arguments.extend([
@@ -317,6 +414,36 @@ impl SessionHost {
                     command.destination.clone(),
                     remote,
                 ]);
+                ProcessSpec::new(&command.program, arguments)
+            }
+        }
+    }
+
+    pub fn kill_process(&self, id: &str) -> ProcessSpec {
+        let session = session_name(id);
+        match &self.target {
+            HostTarget::Local { tmux, runtime } => ProcessSpec::new(
+                tmux,
+                [
+                    "-S".to_owned(),
+                    runtime.join("tmux.sock").to_string_lossy().into_owned(),
+                    "kill-session".to_owned(),
+                    "-t".to_owned(),
+                    session,
+                ],
+            ),
+            HostTarget::Ssh {
+                command,
+                remote_runtime,
+            } => {
+                let runtime = format!("$HOME/{remote_runtime}");
+                let remote = format!(
+                    "RUNTIME=\"{runtime}\"; TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"; [ -x \"$TMUX\" ] || TMUX=tmux; exec \"$TMUX\" -S \"$RUNTIME/tmux.sock\" kill-session -t {}",
+                    crate::channel::data_name().to_string_lossy(),
+                    shell_quote(&session),
+                );
+                let mut arguments = command.options.clone();
+                arguments.extend(["--".to_owned(), command.destination.clone(), remote]);
                 ProcessSpec::new(&command.program, arguments)
             }
         }
@@ -400,7 +527,107 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{AgentCommand, ProcessSpec, SessionHost, SshCommand, TMUX_CONFIGURATION};
+    use super::{
+        AgentCommand, ProcessSpec, SessionHost, SshCommand, TMUX_CONFIGURATION, shell_quote,
+    };
+
+    fn detached(mut spec: ProcessSpec) -> ProcessSpec {
+        let index = spec
+            .arguments
+            .iter()
+            .position(|argument| argument == "new-session")
+            .expect("tmux new-session command");
+        spec.arguments.insert(index + 1, "-d".into());
+        spec.arguments.retain(|argument| argument != "-A");
+        spec
+    }
+
+    fn wait_for_lines(path: &Path, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let lines = fs::read_to_string(path)
+                .map(|contents| contents.lines().count())
+                .unwrap_or(0);
+            if lines >= expected {
+                return;
+            }
+            assert!(Instant::now() < deadline, "agent launch was not recorded");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for_session_to_close(runtime: &Path, terminal_id: &str) {
+        let session = super::session_name(terminal_id);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Command::new("tmux")
+            .args(["-S"])
+            .arg(runtime.join("tmux.sock"))
+            .args(["has-session", "-t", &session])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            assert!(Instant::now() < deadline, "tmux session did not close");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn codex_notification_records_the_exact_thread_id_atomically() {
+        let directory =
+            std::env::temp_dir().join(format!("xd-codex-recorder-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let marker = directory.join("session");
+        let override_value = super::codex_notify_override();
+        let command: Vec<String> =
+            serde_json::from_str(override_value.strip_prefix("notify=").unwrap()).unwrap();
+        let status = Command::new(&command[0])
+            .args(&command[1..])
+            .env("XD_AGENT_SESSION_MARKER", &marker)
+            .arg(r#"{"type":"agent-turn-complete","thread-id":"thread-exact-1"}"#)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(fs::read_to_string(marker).unwrap(), "thread-exact-1\n");
+    }
+
+    #[test]
+    fn codex_resume_reads_the_recorded_thread_instead_of_using_last() {
+        let directory =
+            std::env::temp_dir().join(format!("xd-codex-resume-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let marker = directory.join("session");
+        fs::write(&marker, "thread-exact-2\n").unwrap();
+        let log = directory.join("arguments");
+        let executable = directory.join("codex");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\n",
+                shell_quote(&log.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).unwrap();
+
+        let command = AgentCommand::new(executable.to_string_lossy(), ["--no-alt-screen"])
+            .resume_with(["resume", "--last", "--no-alt-screen"])
+            .record_codex_session()
+            .shell_command_with_marker(Some(&shell_quote(&marker.to_string_lossy())));
+        assert!(
+            Command::new("/bin/sh")
+                .args(["-c", &command])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "resume\nthread-exact-2\n--no-alt-screen\n"
+        );
+    }
 
     #[test]
     fn managed_tmux_configuration_is_accepted_by_tmux() {
@@ -562,6 +789,179 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_terminal_kills_its_persistent_tmux_session() {
+        let directory = std::env::temp_dir().join(format!(
+            "xd-terminal-close-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("tmux.conf"), TMUX_CONFIGURATION).unwrap();
+        let host = SessionHost::local(PathBuf::from("tmux"), directory.clone());
+        let terminal_id = "chat:claude:close-test";
+        let spec =
+            detached(host.attach(terminal_id, &directory, &AgentCommand::new("sleep", ["30"])));
+        assert!(
+            Command::new(&spec.program)
+                .args(&spec.arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let session = super::session_name(terminal_id);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !Command::new("tmux")
+            .args(["-S"])
+            .arg(directory.join("tmux.sock"))
+            .args(["has-session", "-t", &session])
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            assert!(Instant::now() < deadline, "tmux session did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let cleanup = host.kill_process(terminal_id);
+        assert!(
+            Command::new(cleanup.program)
+                .args(cleanup.arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        assert!(
+            !Command::new("tmux")
+                .args(["-S"])
+                .arg(directory.join("tmux.sock"))
+                .args(["has-session", "-t", &session])
+                .status()
+                .is_ok_and(|status| status.success()),
+            "closing the tab left an orphaned tmux session"
+        );
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn recreating_a_dead_agent_terminal_resumes_its_backend_session() {
+        let directory = std::env::temp_dir().join(format!(
+            "xd-terminal-resume-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("tmux.conf"), TMUX_CONFIGURATION).unwrap();
+        let log = directory.join("launches");
+        let agent = directory.join("agent");
+        fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n",
+                super::shell_quote(&log.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&agent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o700);
+        }
+        fs::set_permissions(&agent, permissions).unwrap();
+        let host = SessionHost::local(PathBuf::from("tmux"), directory.clone());
+        let command =
+            AgentCommand::new(agent.to_string_lossy(), ["new"]).resume_with(["resume", "--last"]);
+
+        for launch in 1..=2 {
+            let spec = detached(host.attach("chat:codex", &directory, &command));
+            let status = Command::new(&spec.program)
+                .args(&spec.arguments)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            wait_for_lines(&log, launch);
+            wait_for_session_to_close(&directory, "chat:codex");
+        }
+
+        assert_eq!(fs::read_to_string(&log).unwrap(), "new\nresume --last\n");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn reattaching_a_legacy_terminal_marks_it_for_future_resume() {
+        let directory = std::env::temp_dir().join(format!(
+            "xd-terminal-legacy-resume-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("tmux.conf"), TMUX_CONFIGURATION).unwrap();
+        let host = SessionHost::local(PathBuf::from("tmux"), directory.clone());
+        let terminal_id = "chat:codex:legacy";
+        let legacy =
+            detached(host.attach(terminal_id, &directory, &AgentCommand::new("sleep", ["30"])));
+        assert!(
+            Command::new(&legacy.program)
+                .args(&legacy.arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+        thread::sleep(Duration::from_millis(100));
+
+        let log = directory.join("launches");
+        let agent = directory.join("agent");
+        fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n",
+                super::shell_quote(&log.to_string_lossy())
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&agent).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            permissions.set_mode(0o700);
+        }
+        fs::set_permissions(&agent, permissions).unwrap();
+        let resumable =
+            AgentCommand::new(agent.to_string_lossy(), ["new"]).resume_with(["resume", "--last"]);
+
+        let _reattach = host.attach(terminal_id, &directory, &resumable);
+        let cleanup = host.kill_process(terminal_id);
+        assert!(
+            Command::new(cleanup.program)
+                .args(cleanup.arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let recreated = detached(host.attach(terminal_id, &directory, &resumable));
+        assert!(
+            Command::new(&recreated.program)
+                .args(&recreated.arguments)
+                .status()
+                .unwrap()
+                .success()
+        );
+        wait_for_lines(&log, 1);
+        assert_eq!(fs::read_to_string(&log).unwrap(), "resume --last\n");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn external_agents_are_discovered_in_the_users_interactive_shell() {
         let command = AgentCommand::new("codex", ["resume", "session-1"])
             .discover_in_user_shell("Codex")
@@ -616,7 +1016,7 @@ mod tests {
             ["-p", "22", "-tt", "--", "zenomc.org"]
         );
         let remote = &spec.arguments[5];
-        assert!(remote.contains("mkdir -p \"$RUNTIME\""));
+        assert!(remote.contains("mkdir -p \"$RUNTIME/agent-sessions\""));
         assert!(
             !remote.contains("[ -f \"$CONF\" ]"),
             "the managed tmux configuration must be refreshed on every attach: {remote}"
