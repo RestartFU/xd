@@ -10,8 +10,8 @@ use std::ops::Range;
 use gpui::{
     AnyElement, App, Bounds, CursorStyle, DispatchPhase, Element, ElementId, Global,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, TextLayout, Window, fill, point,
-    rgba,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, SharedString, TextLayout, Window,
+    fill, point, px, rgba,
 };
 
 const SELECTION: u32 = 0x6b8cff55;
@@ -82,6 +82,7 @@ pub fn selectable_in_document(
         element: Some(element.into_any_element()),
         links: Vec::new(),
         link_listener: None,
+        selection_scroll: None,
     }
 }
 
@@ -104,6 +105,7 @@ pub fn selectable_links_in_document(
         element: Some(element.into_any_element()),
         links,
         link_listener: Some(Box::new(listener)),
+        selection_scroll: None,
     }
 }
 
@@ -118,9 +120,15 @@ pub struct Selectable {
     element: Option<AnyElement>,
     links: Vec<Range<usize>>,
     link_listener: Option<LinkListener>,
+    selection_scroll: Option<ScrollHandle>,
 }
 
 impl Selectable {
+    pub fn with_selection_scroll(mut self, scroll: ScrollHandle) -> Self {
+        self.selection_scroll = Some(scroll);
+        self
+    }
+
     fn paint_selection(&self, window: &mut Window, cx: &App) {
         if !TextSelection::owns(cx, self.document) {
             return;
@@ -219,12 +227,9 @@ impl Selectable {
             .unwrap_or_else(|| 0..self.layout.len());
         let layout = self.layout.clone();
         let moved = hitbox.clone();
+        let selection_scroll = self.selection_scroll.clone();
         window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-            if phase != DispatchPhase::Bubble
-                || !event.dragging()
-                || event.position.y < moved.top()
-                || event.position.y > moved.bottom()
-            {
+            if phase != DispatchPhase::Bubble || !event.dragging() {
                 return;
             }
             if !cx
@@ -233,9 +238,32 @@ impl Selectable {
             {
                 return;
             }
+
+            let mut scrolled = false;
+            if let Some(scroll) = selection_scroll.as_ref() {
+                let bounds = scroll.bounds();
+                if let Some(y) = selection_edge_scroll(
+                    scroll.offset().y,
+                    scroll.max_offset().height,
+                    event.position.y,
+                    bounds.top(),
+                    bounds.bottom(),
+                ) {
+                    let mut offset = scroll.offset();
+                    offset.y = y;
+                    scroll.set_offset(offset);
+                    scrolled = true;
+                }
+            } else if event.position.y < moved.top() || event.position.y > moved.bottom() {
+                return;
+            }
+
             let index = document_range.start + index_at(&layout, event.position);
             let selection = cx.global_mut::<TextSelection>();
             if selection.head == index {
+                if scrolled {
+                    window.refresh();
+                }
                 return;
             }
             selection.head = index;
@@ -300,6 +328,24 @@ fn index_at(layout: &TextLayout, position: Point<Pixels>) -> usize {
     match layout.index_for_position(position) {
         Ok(index) | Err(index) => index,
     }
+}
+
+fn selection_edge_scroll(
+    current: Pixels,
+    maximum: Pixels,
+    pointer: Pixels,
+    top: Pixels,
+    bottom: Pixels,
+) -> Option<Pixels> {
+    let step = px(19.);
+    let next = if pointer < top {
+        (current + step).min(px(0.))
+    } else if pointer > bottom {
+        (current - step).max(-maximum)
+    } else {
+        return None;
+    };
+    (next != current).then_some(next)
 }
 
 fn cursor_for_hover(is_link: bool) -> CursorStyle {
@@ -568,5 +614,29 @@ mod tests {
     fn a_word_selection_does_not_cross_a_newline() {
         assert_eq!(word_range("one\n  two", 3), 3..4);
         assert_eq!(word_range("one\n  two", 4), 4..6);
+    }
+
+    #[test]
+    fn dragging_selection_past_viewport_edges_advances_scroll_offset() {
+        assert_eq!(
+            selection_edge_scroll(px(-40.), px(200.), px(5.), px(10.), px(90.)),
+            Some(px(-21.))
+        );
+        assert_eq!(
+            selection_edge_scroll(px(-40.), px(200.), px(95.), px(10.), px(90.)),
+            Some(px(-59.))
+        );
+        assert_eq!(
+            selection_edge_scroll(px(-40.), px(200.), px(50.), px(10.), px(90.)),
+            None
+        );
+        assert_eq!(
+            selection_edge_scroll(px(-5.), px(200.), px(0.), px(10.), px(90.)),
+            Some(px(0.))
+        );
+        assert_eq!(
+            selection_edge_scroll(px(-195.), px(200.), px(100.), px(10.), px(90.)),
+            Some(px(-200.))
+        );
     }
 }

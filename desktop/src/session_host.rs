@@ -103,8 +103,9 @@ impl AgentCommand {
         let missing = format!(
             "xd: {label} is not installed or is not available on PATH. Install it, then start a new tab."
         );
+        let child = format!("(trap - INT; exec {command})");
         let inner = format!(
-            "if command -v {} >/dev/null 2>&1; then if {command}; then :; else :; fi; else printf '%s\\n' {} >&2; fi; exec \"${{SHELL:-/bin/sh}}\" -i",
+            "trap '' INT; if command -v {} >/dev/null 2>&1; then if {child}; then :; else :; fi; else printf '%s\\n' {} >&2; fi; exec \"${{SHELL:-/bin/sh}}\" -i",
             shell_quote(&self.program),
             shell_quote(&missing),
         );
@@ -395,6 +396,8 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
+        thread,
+        time::{Duration, Instant},
     };
 
     use super::{AgentCommand, ProcessSpec, SessionHost, SshCommand, TMUX_CONFIGURATION};
@@ -507,12 +510,66 @@ mod tests {
     }
 
     #[test]
+    fn interrupting_an_agent_returns_to_a_live_shell() {
+        let socket = format!("xd-agent-interrupt-test-{}", std::process::id());
+        let command = AgentCommand::new("sleep", ["30"])
+            .discover_in_user_shell("test agent")
+            .shell_command();
+        let started = Command::new("tmux")
+            .args(["-L", &socket, "new-session", "-d", "-s", "check", &command])
+            .status()
+            .unwrap();
+        assert!(started.success());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let output = Command::new("tmux")
+                .args([
+                    "-L",
+                    &socket,
+                    "display-message",
+                    "-pt",
+                    "check:0.0",
+                    "#{pane_current_command}",
+                ])
+                .output()
+                .unwrap();
+            if output.stdout == b"sleep\n" || Instant::now() >= deadline {
+                assert_eq!(output.stdout, b"sleep\n", "agent did not start");
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let interrupted = Command::new("tmux")
+            .args(["-L", &socket, "send-keys", "-t", "check:0.0", "C-c"])
+            .status()
+            .unwrap();
+        assert!(interrupted.success());
+        thread::sleep(Duration::from_millis(100));
+        let alive = Command::new("tmux")
+            .args(["-L", &socket, "has-session", "-t", "check"])
+            .status()
+            .unwrap();
+        let _ = Command::new("tmux")
+            .args(["-L", &socket, "kill-server"])
+            .output();
+
+        assert!(
+            alive.success(),
+            "Ctrl+C closed the persistent terminal pane"
+        );
+    }
+
+    #[test]
     fn external_agents_are_discovered_in_the_users_interactive_shell() {
         let command = AgentCommand::new("codex", ["resume", "session-1"])
             .discover_in_user_shell("Codex")
             .shell_command();
 
         assert!(command.starts_with("exec \"${SHELL:-/bin/sh}\" -ic "));
+        assert!(command.contains("trap '\"'\"''\"'\"' INT"), "{command}");
+        assert!(command.contains("trap - INT; exec"), "{command}");
         assert!(
             command.contains("command -v '\"'\"'codex'\"'\"'"),
             "{command}"

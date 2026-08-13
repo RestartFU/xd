@@ -446,6 +446,20 @@ fn terminal_tab_title(agent: Option<AgentCli>) -> String {
     agent.map(AgentCli::label).unwrap_or("Terminal").to_owned()
 }
 
+fn jcode_terminal_screen_working(screen: &str) -> Option<bool> {
+    let prompt = screen
+        .lines()
+        .rev()
+        .map(str::trim_start)
+        .find(|line| !line.is_empty())?;
+    let marker = prompt.trim_start_matches(|character: char| character.is_ascii_digit());
+    match marker.chars().next()? {
+        '…' => Some(true),
+        '>' => Some(false),
+        _ => None,
+    }
+}
+
 fn terminal_runtime_event(event: SessionEvent) -> (&'static str, Value) {
     match event {
         SessionEvent::Opened {
@@ -3939,6 +3953,18 @@ impl XdDesktop {
             "terminal-closed" => Self::apply_terminal_closed_event(panel, body),
             _ => false,
         };
+        let terminal_working = (name == "terminal-output" && changed)
+            .then(|| {
+                let terminal_id = terminal_id?;
+                let session = panel
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == terminal_id)?;
+                (session.agent == Some(AgentCli::Jcode)).then(|| {
+                    jcode_terminal_screen_working(&session.screen.rendered_with_cursor().text)
+                })?
+            })
+            .flatten();
         if needs_hydration {
             panel.loading = false;
         }
@@ -3954,6 +3980,18 @@ impl XdDesktop {
                 "terminal-opened" | "terminal-output" | "terminal-closed"
             ) {
                 self.sync_terminal_input_mode(cx);
+            }
+        }
+        if let Some(working) = terminal_working {
+            let unchanged = self
+                .endpoint_model(endpoint)
+                .chats
+                .iter()
+                .find(|chat| chat.id == chat_id)
+                .is_some_and(|chat| chat.terminal_working == working);
+            if !unchanged {
+                self.endpoint_model_mut(endpoint)
+                    .apply_desktop_terminal_activity(&chat_id, working);
             }
         }
     }
@@ -7188,6 +7226,7 @@ impl XdDesktop {
                     output_layout,
                     output,
                 )
+                .with_selection_scroll(self.terminal_scroll.clone())
                 .into_any_element()
             } else {
                 let (ranges, urls) = terminal_links.into_iter().unzip::<_, _, Vec<_>, Vec<_>>();
@@ -7205,6 +7244,7 @@ impl XdDesktop {
                         }
                     },
                 )
+                .with_selection_scroll(self.terminal_scroll.clone())
                 .into_any_element()
             }
         } else {
@@ -11793,6 +11833,19 @@ mod tests {
     }
 
     #[test]
+    fn terminal_selection_uses_its_output_scroll_handle() {
+        let terminal = include_str!("main.rs")
+            .split_once("fn render_minimal_terminal(")
+            .expect("minimal terminal renderer")
+            .1
+            .split_once("fn render_minimal_context_toolbar(")
+            .expect("end of minimal terminal renderer")
+            .0;
+
+        assert!(terminal.contains("with_selection_scroll(self.terminal_scroll.clone())"));
+    }
+
+    #[test]
     fn terminal_rows_never_wrap_inside_the_measured_viewport() {
         let source = include_str!("main.rs");
         let terminal = source
@@ -12305,6 +12358,22 @@ mod tests {
         assert!(command.contains("None => AgentCommand::user_shell()"));
         assert!(!command.contains("\"sh\".into()"));
         assert!(!command.contains("[\"-l\"]"));
+    }
+
+    #[test]
+    fn jcode_prompt_marker_reports_working_and_idle_states() {
+        assert_eq!(
+            jcode_terminal_screen_working("history\n18… 󰌘\n"),
+            Some(true)
+        );
+        assert_eq!(
+            jcode_terminal_screen_working("history\n19> 󰖟\n"),
+            Some(false)
+        );
+        assert_eq!(
+            jcode_terminal_screen_working("ordinary shell output\n"),
+            None
+        );
     }
 
     #[gpui::test]

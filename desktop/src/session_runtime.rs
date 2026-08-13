@@ -338,11 +338,10 @@ impl ActivityParser {
             .strip_prefix(b"0;")
             .and_then(|title| match title {
                 b"Ready" => Some(false),
-                title if title == "✳ Claude Code".as_bytes() => Some(false),
+                title if title.starts_with("✳ ".as_bytes()) => Some(false),
                 b"Working" | b"Thinking" | b"Waiting" | b"Starting" => Some(true),
                 title
-                    if title == "◐ Claude Code".as_bytes()
-                        || title == "◑ Claude Code".as_bytes() =>
+                    if title.starts_with("◐ ".as_bytes()) || title.starts_with("◑ ".as_bytes()) =>
                 {
                     Some(true)
                 }
@@ -421,6 +420,20 @@ mod tests {
         );
         assert_eq!(
             parser.feed("\x1b]0;✳ Claude Code\x07".as_bytes()),
+            vec![false]
+        );
+    }
+
+    #[test]
+    fn claude_task_titles_preserve_spinner_activity_semantics() {
+        let mut parser = ActivityParser::default();
+
+        assert_eq!(
+            parser.feed("\x1b]0;◐ Fix confirmed bugs\x07".as_bytes()),
+            vec![true]
+        );
+        assert_eq!(
+            parser.feed("\x1b]0;✳ Fix confirmed bugs\x07".as_bytes()),
             vec![false]
         );
     }
