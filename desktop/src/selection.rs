@@ -178,7 +178,7 @@ impl Selectable {
         hitbox: &Hitbox,
         link_listener: Option<LinkListener>,
         window: &mut Window,
-        _cx: &App,
+        cx: &App,
     ) {
         let block = self.block;
         let document = self.document;
@@ -302,7 +302,73 @@ impl Selectable {
                 listener(link, window, cx);
             }
         });
+
+        if let Some(scroll) = self.selection_scroll.clone() {
+            schedule_selection_auto_scroll(
+                document,
+                document_range,
+                self.layout.clone(),
+                scroll,
+                window,
+                cx,
+            );
+        }
     }
+}
+
+fn schedule_selection_auto_scroll(
+    document: u64,
+    document_range: Range<usize>,
+    layout: TextLayout,
+    scroll: ScrollHandle,
+    window: &mut Window,
+    cx: &App,
+) {
+    if !cx
+        .try_global::<TextSelection>()
+        .is_some_and(|selection| selection.dragging && selection.block == Some(document))
+    {
+        return;
+    }
+    let bounds = scroll.bounds();
+    if selection_edge_scroll(
+        scroll.offset().y,
+        scroll.max_offset().height,
+        window.mouse_position().y,
+        bounds.top(),
+        bounds.bottom(),
+    )
+    .is_none()
+    {
+        return;
+    }
+
+    window.on_next_frame(move |window, cx| {
+        if !cx
+            .try_global::<TextSelection>()
+            .is_some_and(|selection| selection.dragging && selection.block == Some(document))
+        {
+            return;
+        }
+        let pointer = window.mouse_position();
+        let bounds = scroll.bounds();
+        let Some(y) = selection_edge_scroll(
+            scroll.offset().y,
+            scroll.max_offset().height,
+            pointer.y,
+            bounds.top(),
+            bounds.bottom(),
+        ) else {
+            return;
+        };
+
+        let mut offset = scroll.offset();
+        offset.y = y;
+        scroll.set_offset(offset);
+        let index = document_range.start + index_at(&layout, pointer);
+        cx.global_mut::<TextSelection>().head = index;
+        window.refresh();
+    });
 }
 
 /// The selected portion painted by one block, translated back to local bytes.
@@ -638,5 +704,20 @@ mod tests {
             selection_edge_scroll(px(-195.), px(200.), px(100.), px(10.), px(90.)),
             Some(px(-200.))
         );
+    }
+
+    #[test]
+    fn selection_auto_scroll_repeats_while_the_pointer_stays_past_an_edge() {
+        let source = include_str!("selection.rs");
+        let listener = source
+            .split_once("fn listen(")
+            .expect("selection listener")
+            .1
+            .split_once("/// The selected portion")
+            .expect("end of selection listener")
+            .0;
+
+        assert!(listener.contains("schedule_selection_auto_scroll("));
+        assert!(listener.contains("window.on_next_frame"));
     }
 }
