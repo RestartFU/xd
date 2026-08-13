@@ -1,7 +1,7 @@
 package com.restartfu.xd.store
 
 import com.restartfu.xd.credentials.MemoryCredentialStore
-import com.restartfu.xd.credentials.StoredCredentials
+import com.restartfu.xd.credentials.testCredentials
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.FakeSocketFactory
 import com.restartfu.xd.net.Link
@@ -45,19 +45,15 @@ class ChatSessionCoreTest {
         val actor = ConnectionActor(
             factory,
             MemoryCredentialStore(
-                StoredCredentials(
-                    host = "host",
-                    port = 4001,
-                    token = "token",
-                    certificateDer = byteArrayOf(1, 2, 3),
-                ),
+                testCredentials(),
             ),
             backgroundScope,
         )
         runCurrent()
         factory.latest.connected()
         runCurrent()
-        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
         runCurrent()
         runCurrent()
         assertIs<Link.Up>(actor.link.value)
@@ -81,7 +77,7 @@ class ChatSessionCoreTest {
 
         core.onEvent(
             SequencedEvent(
-                sequence = 2,
+                sequence = 1,
                 value = buildJsonObject {
                     put("event", "text")
                     put("chat", "chat")
@@ -99,19 +95,15 @@ class ChatSessionCoreTest {
         val actor = ConnectionActor(
             factory,
             MemoryCredentialStore(
-                StoredCredentials(
-                    host = "host",
-                    port = 4001,
-                    token = "token",
-                    certificateDer = byteArrayOf(1, 2, 3),
-                ),
+                testCredentials(),
             ),
             backgroundScope,
         )
         runCurrent()
         factory.latest.connected()
         runCurrent()
-        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
         runCurrent()
         runCurrent()
 
@@ -145,19 +137,15 @@ class ChatSessionCoreTest {
         val actor = ConnectionActor(
             factory,
             MemoryCredentialStore(
-                StoredCredentials(
-                    host = "host",
-                    port = 4001,
-                    token = "token",
-                    certificateDer = byteArrayOf(1, 2, 3),
-                ),
+                testCredentials(),
             ),
             backgroundScope,
         )
         runCurrent()
         factory.latest.connected()
         runCurrent()
-        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
         runCurrent()
         runCurrent()
 
@@ -181,19 +169,15 @@ class ChatSessionCoreTest {
         val actor = ConnectionActor(
             factory,
             MemoryCredentialStore(
-                StoredCredentials(
-                    host = "host",
-                    port = 4001,
-                    token = "token",
-                    certificateDer = byteArrayOf(1, 2, 3),
-                ),
+                testCredentials(),
             ),
             backgroundScope,
         )
         runCurrent()
         factory.latest.connected()
         runCurrent()
-        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
         runCurrent()
         runCurrent()
 
@@ -253,12 +237,7 @@ class ChatSessionCoreTest {
     private fun testActor(scope: CoroutineScope): ConnectionActor = ConnectionActor(
         FakeSocketFactory(),
         MemoryCredentialStore(
-            StoredCredentials(
-                host = "host",
-                port = 4001,
-                token = "token",
-                certificateDer = byteArrayOf(1, 2, 3),
-            ),
+            testCredentials(),
         ),
         scope,
     )

@@ -1,213 +1,268 @@
 package com.restartfu.xd.net
 
+import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.HostKey
+import com.jcraft.jsch.HostKeyRepository
+import com.jcraft.jsch.JSch
+import com.jcraft.jsch.JSchChangedHostKeyException
+import com.jcraft.jsch.JSchException
+import com.jcraft.jsch.JSchUnknownHostKeyException
+import com.jcraft.jsch.Session
+import com.jcraft.jsch.UserInfo
+import com.restartfu.xd.credentials.SshAuthentication
+import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.credentials.SshHostKey
+import java.io.ByteArrayOutputStream
 import java.io.EOFException
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.ConnectException
-import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
-import java.security.cert.CertificateException
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.LinkedBlockingQueue
-import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLException
-import javax.net.ssl.SSLSocket
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
-public class AndroidSocketFactory(
+public class AndroidSshSocketFactory(
     private val connectTimeoutMillis: Int = 10_000,
-    private val handshakeTimeoutMillis: Int = 10_000,
 ) : PlatformSocketFactory {
     init {
         require(connectTimeoutMillis > 0) { "Connect timeout must be positive" }
-        require(handshakeTimeoutMillis > 0) { "Handshake timeout must be positive" }
     }
 
-    override fun create(): PlatformSocket =
-        AndroidSocket(connectTimeoutMillis, handshakeTimeoutMillis)
+    override fun create(): PlatformSocket = AndroidSshSocket(connectTimeoutMillis)
 }
 
-internal class AndroidSocket(
+internal class AndroidSshSocket(
     private val connectTimeoutMillis: Int,
-    private val handshakeTimeoutMillis: Int = connectTimeoutMillis,
 ) : PlatformSocket {
-    init {
-        require(connectTimeoutMillis > 0) { "Connect timeout must be positive" }
-        require(handshakeTimeoutMillis > 0) { "Handshake timeout must be positive" }
-    }
-
     private val closed = AtomicBoolean(false)
     private val callbackFinished = AtomicBoolean(false)
     private val writes = LinkedBlockingQueue<ByteArray>()
-    private val writerFailure = AtomicReference<SocketFailure?>()
-
-    @Volatile
-    private var socket: SSLSocket? = null
 
     @Volatile
     private var listener: PlatformSocketListener? = null
 
     @Volatile
+    private var session: Session? = null
+
+    @Volatile
+    private var channel: ChannelExec? = null
+
+    @Volatile
     private var writer: Thread? = null
 
-    override fun connect(
-        host: String,
-        port: Int,
-        pinnedCertificateDer: ByteArray?,
-        listener: PlatformSocketListener,
-    ) {
+    override fun connect(connection: SshConnection, listener: PlatformSocketListener) {
         check(this.listener == null) { "A PlatformSocket can connect only once" }
-        require(host.isNotBlank()) { "Host must not be blank" }
-        require(port in 1..65535) { "Port must be between 1 and 65535" }
+        require(connection.host.isNotBlank()) { "Host must not be blank" }
+        require(connection.port in 1..65535) { "Port must be between 1 and 65535" }
+        require(connection.username.isNotBlank()) { "Username must not be blank" }
         this.listener = listener
-
-        Thread(
-            {
-                runConnection(host, port, pinnedCertificateDer?.copyOf())
-            },
-            "xd-mobile-tls",
-        ).apply {
-            isDaemon = true
-            start()
+        thread(name = "xd-mobile-ssh", isDaemon = true) {
+            runConnection(connection)
         }
     }
 
     override fun send(bytes: ByteArray) {
-        check(!closed.get()) { "Socket is closed" }
-        check(socket != null) { "Socket is not connected" }
+        check(!closed.get()) { "SSH connection is closed" }
+        check(channel?.isConnected == true) { "SSH channel is not connected" }
         writes.add(bytes.copyOf())
     }
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        try {
-            socket?.close()
-        } catch (_: IOException) {
-            // Closing is best effort and idempotent.
-        }
         writer?.interrupt()
+        channel?.disconnect()
+        session?.disconnect()
     }
 
-    private fun runConnection(
-        host: String,
-        port: Int,
-        pin: ByteArray?,
-    ) {
+    private fun runConnection(connection: SshConnection) {
+        val jsch = JSch()
+        val repository = PinningHostKeyRepository(connection.hostKey, jsch)
         var terminalReason: SocketFailure? = null
-        var reachedEof = false
         try {
-            if (closed.get()) throw EOFException("Socket was closed")
-            val context = SSLContext.getInstance("TLS")
-            context.init(null, arrayOf(PinningTrustManager(pin)), null)
-            val active = context.socketFactory.createSocket() as SSLSocket
-            socket = active
-            if (closed.get()) {
-                active.close()
-                throw EOFException("Socket was closed")
+            jsch.hostKeyRepository = repository
+            configureIdentity(jsch, connection.authentication)
+            val activeSession = jsch.getSession(connection.username, connection.host, connection.port)
+            session = activeSession
+            activeSession.setConfig("StrictHostKeyChecking", "yes")
+            activeSession.setConfig(
+                "PreferredAuthentications",
+                when (connection.authentication) {
+                    is SshAuthentication.Password -> "password"
+                    is SshAuthentication.PrivateKey -> "publickey"
+                },
+            )
+            if (connection.authentication is SshAuthentication.Password) {
+                activeSession.setPassword(connection.authentication.value.encodeToByteArray())
             }
-            active.tcpNoDelay = true
-            active.sslParameters = active.sslParameters.apply {
-                endpointIdentificationAlgorithm = null
-            }
-            active.connect(InetSocketAddress(host, port), connectTimeoutMillis)
-            active.soTimeout = handshakeTimeoutMillis
-            active.startHandshake()
-            active.soTimeout = 0
+            activeSession.connect(connectTimeoutMillis)
+            if (closed.get()) throw EOFException("SSH connection was closed")
 
-            if (closed.get()) throw EOFException("Socket was closed")
-            val certificate = active.session.peerCertificates.firstOrNull()?.encoded
-                ?: throw SSLException("The host supplied no certificate")
-            writer = thread(name = "xd-mobile-tls-writer", isDaemon = true) {
-                runWriter(active)
-            }
-            listener?.onConnected(certificate.copyOf())
+            val activeChannel = activeSession.openChannel("exec") as ChannelExec
+            channel = activeChannel
+            activeChannel.setCommand(XD_HOST_COMMAND)
+            val stdout = activeChannel.inputStream
+            val stderr = activeChannel.extInputStream
+            val stdin = activeChannel.outputStream
+            val stderrBuffer = ByteArrayOutputStream()
+            val stderrThread = drainStderr(stderr, stderrBuffer)
+            activeChannel.connect(connectTimeoutMillis)
+            if (closed.get()) throw EOFException("SSH connection was closed")
 
-            val buffer = ByteArray(READ_BUFFER_BYTES)
-            while (!closed.get()) {
-                val count = active.inputStream.read(buffer)
-                if (count < 0) {
-                    reachedEof = true
-                    break
+            writer = thread(name = "xd-mobile-ssh-writer", isDaemon = true) {
+                runWriter(stdin)
+            }
+            listener?.onConnected()
+            readStdout(stdout)
+            stderrThread.join(500)
+            if (!closed.get()) {
+                val exit = activeChannel.exitStatus
+                terminalReason = if (exit > 0) {
+                    val detail = stderrBuffer.toString(Charsets.UTF_8.name()).trim()
+                    SocketFailure(
+                        SocketFailureKind.IO,
+                        if (detail.isEmpty()) {
+                            "The remote xd host exited with status $exit"
+                        } else {
+                            "The remote xd host exited with status $exit: $detail"
+                        },
+                    )
+                } else {
+                    SocketFailure(SocketFailureKind.IO, "The remote xd host closed the SSH channel")
                 }
-                if (count > 0) listener?.onBytes(buffer.copyOf(count))
-            }
-            if (!reachedEof && closed.get()) {
-                terminalReason = SocketFailure(SocketFailureKind.CANCELLED, "Socket closed")
             }
         } catch (error: Throwable) {
-            terminalReason = writerFailure.get() ?: error.toSocketFailure()
+            if (!closed.get()) terminalReason = error.toSocketFailure(repository.presented)
         } finally {
-            try {
-                socket?.close()
-            } catch (_: IOException) {
-                // Reader already ended.
-            }
-            socket = null
-            writer?.interrupt()
-            writer = null
+            close()
+            finish(terminalReason)
         }
-        finish(terminalReason)
     }
 
-    private fun runWriter(active: SSLSocket) {
+    private fun configureIdentity(jsch: JSch, authentication: SshAuthentication) {
+        if (authentication !is SshAuthentication.PrivateKey) return
+        val privateKey = authentication.bytes.copyOf()
+        val passphrase = authentication.passphrase?.encodeToByteArray()
+        try {
+            jsch.addIdentity("xd-mobile", privateKey, null, passphrase)
+        } finally {
+            privateKey.fill(0)
+            passphrase?.fill(0)
+        }
+    }
+
+    private fun runWriter(output: OutputStream) {
         try {
             while (!closed.get()) {
                 val bytes = writes.take()
-                active.outputStream.write(bytes)
-                active.outputStream.flush()
+                output.write(bytes)
+                output.flush()
             }
         } catch (_: InterruptedException) {
-            // Normal shutdown wakes a writer waiting for work.
+            Thread.currentThread().interrupt()
         } catch (error: Throwable) {
             if (!closed.get()) {
-                writerFailure.compareAndSet(null, error.toSocketFailure())
-                try {
-                    active.close()
-                } catch (_: IOException) {
-                    // Closing the reader is best effort.
-                }
+                close()
+                finish(error.toSocketFailure(null))
             }
         }
     }
 
+    private fun readStdout(input: InputStream) {
+        val buffer = ByteArray(32 * 1024)
+        while (!closed.get()) {
+            val count = input.read(buffer)
+            if (count < 0) return
+            if (count > 0) listener?.onBytes(buffer.copyOf(count))
+        }
+    }
+
+    private fun drainStderr(input: InputStream, destination: ByteArrayOutputStream): Thread =
+        thread(name = "xd-mobile-ssh-stderr", isDaemon = true) {
+            val buffer = ByteArray(4096)
+            try {
+                while (!closed.get()) {
+                    val count = input.read(buffer)
+                    if (count < 0) return@thread
+                    if (destination.size() < MAX_STDERR_BYTES) {
+                        destination.write(buffer, 0, minOf(count, MAX_STDERR_BYTES - destination.size()))
+                    }
+                }
+            } catch (_: IOException) {
+                // Closing the channel interrupts the stderr reader.
+            }
+        }
+
     private fun finish(reason: SocketFailure?) {
-        if (callbackFinished.compareAndSet(false, true)) {
-            listener?.onClosed(reason)
-        }
-    }
-
-    private fun Throwable.toSocketFailure(): SocketFailure {
-        val kind = when {
-            hasCause<PinMismatchCertificateException>() -> SocketFailureKind.PIN_MISMATCH
-            closed.get() -> SocketFailureKind.CANCELLED
-            this is UnknownHostException ||
-                this is ConnectException ||
-                this is NoRouteToHostException ||
-                this is SocketTimeoutException -> SocketFailureKind.UNREACHABLE
-            this is SSLException || hasCause<CertificateException>() -> SocketFailureKind.TLS
-            else -> SocketFailureKind.IO
-        }
-        val fallback = when (kind) {
-            SocketFailureKind.PIN_MISMATCH ->
-                "The host certificate does not match the paired machine"
-            SocketFailureKind.CANCELLED -> "Socket closed"
-            else -> "Connection failed"
-        }
-        return SocketFailure(kind, message ?: fallback)
-    }
-
-    private inline fun <reified T : Throwable> Throwable.hasCause(): Boolean {
-        var current: Throwable? = this
-        while (current != null) {
-            if (current is T) return true
-            current = current.cause
-        }
-        return false
-    }
-
-    private companion object {
-        const val READ_BUFFER_BYTES = 64 * 1024
+        if (callbackFinished.compareAndSet(false, true)) listener?.onClosed(reason)
     }
 }
+
+internal class PinningHostKeyRepository(
+    private val expected: SshHostKey?,
+    private val jsch: JSch = JSch(),
+) : HostKeyRepository {
+    @Volatile
+    var presented: SshHostKey? = null
+        private set
+
+    override fun check(host: String, key: ByteArray): Int {
+        val hostKey = HostKey(host, key)
+        presented = SshHostKey(
+            algorithm = hostKey.type,
+            encoded = key.copyOf(),
+            fingerprint = hostKey.getFingerPrint(jsch),
+        )
+        val pin = expected ?: return HostKeyRepository.NOT_INCLUDED
+        return if (pin.algorithm == hostKey.type && pin.encoded.contentEquals(key)) {
+            HostKeyRepository.OK
+        } else {
+            HostKeyRepository.CHANGED
+        }
+    }
+
+    override fun add(hostkey: HostKey, ui: UserInfo?) = Unit
+    override fun remove(host: String?, type: String?) = Unit
+    override fun remove(host: String?, type: String?, key: ByteArray?) = Unit
+    override fun getKnownHostsRepositoryID(): String = "xd-mobile-pinned-host-key"
+    override fun getHostKey(): Array<HostKey> = emptyArray()
+    override fun getHostKey(host: String?, type: String?): Array<HostKey> = emptyArray()
+}
+
+private fun Throwable.toSocketFailure(presented: SshHostKey?): SocketFailure {
+    val message = message ?: "SSH connection failed"
+    return when {
+        this is JSchUnknownHostKeyException -> SocketFailure(
+            SocketFailureKind.HOST_KEY_UNKNOWN,
+            "Verify the SSH host key before connecting",
+            presented,
+        )
+        this is JSchChangedHostKeyException -> SocketFailure(
+            SocketFailureKind.HOST_KEY_MISMATCH,
+            "The SSH host key does not match the pinned key",
+            presented,
+        )
+        this is JSchException && (
+            message.contains("Auth fail", ignoreCase = true) ||
+                message.contains("Auth cancel", ignoreCase = true) ||
+                message.contains("authentication", ignoreCase = true)
+        ) ->
+            SocketFailure(SocketFailureKind.AUTHENTICATION, "SSH authentication failed")
+        this is UnknownHostException || this is NoRouteToHostException ||
+            this is ConnectException || this is SocketTimeoutException ||
+            cause is UnknownHostException || cause is NoRouteToHostException ||
+            cause is ConnectException || cause is SocketTimeoutException ->
+            SocketFailure(SocketFailureKind.UNREACHABLE, message)
+        this is IOException || this is JSchException -> SocketFailure(SocketFailureKind.IO, message)
+        else -> SocketFailure(SocketFailureKind.IO, message)
+    }
+}
+
+internal const val XD_HOST_COMMAND: String =
+    "exec \"\$HOME/.local/share/xd/runtime/v1/xd-host\" stdio " +
+        "--data \"\$HOME/.local/share/xd\""
+
+private const val MAX_STDERR_BYTES = 16 * 1024

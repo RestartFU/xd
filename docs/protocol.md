@@ -1,41 +1,24 @@
-# Legacy mobile wire protocol
+# xd host wire protocol
 
-> This documents the experimental mobile client's previous paired TLS
-> transport. The desktop no longer exposes this transport: local mode owns an
-> `xd-host stdio` child and remote mode runs that child over SSH.
-
-This document is the normative contract between `xd serve` and every remote
-client. The Rust host in `host/src/lib.rs` owns framing and dispatch for
-local and remote clients alike; `desktop/src/protocol.rs` and the Kotlin
-`shared/.../protocol` package implement the client side. Protocol version 1 is
-reported by a successful `hello`.
+This is the normative JSON Lines contract used by `xd-host stdio`. The desktop
+uses it over child-process stdin/stdout locally and over SSH remotely. Android
+runs the same stdio endpoint through an SSH exec channel.
 
 Any wire change must update the Rust host/desktop tests and the Kotlin
 `commonTest` fixtures together. Server and clients must ignore unknown object
-members unless a later protocol version explicitly says otherwise.
+members unless explicitly documented otherwise.
 
 ## Transport and framing
 
-- TCP port 4001 by default.
-- TLS begins immediately after the TCP connection. There is no plaintext mode
-  and no upgrade handshake.
-- The legacy TLS layer created and persisted a self-signed certificate. During
-  pairing a client accepted the presented
-  leaf and persists it alongside the issued token. Every later connection must
-  require that exact leaf.
 - Application data is UTF-8 JSON Lines: one JSON object followed by `LF`
   (`0x0a`). Empty lines are ignored.
-- Requests, replies, and events share one ordered, full-duplex connection.
-- Frames are limited to 64 KiB before authentication and 96 MiB afterwards
-  (`AUTH_FRAME_LIMIT` and `FRAME_LIMIT` in `host/src/lib.rs`). An oversized frame is a
-  protocol error and closes the connection.
-- Each session holds a bounded 256-event outbound queue
-  (`Session::EVENT_QUEUE_SIZE`). **A client that stops draining its socket is
-  disconnected** rather than allowed to apply backpressure to the host. A
-  client must keep reading even while busy.
-
-JSON member absence and JSON `null` are different. Unless an operation says
-otherwise, an optional member is omitted rather than sent as `null`.
+- Requests, replies, and events share one ordered, full-duplex stdio stream.
+- Frames are limited to 96 MiB. An oversized frame is a protocol error and
+  closes the connection.
+- The transport must keep draining output while connected. A stalled reader is
+  disconnected rather than allowed to block the host indefinitely.
+- JSON member absence and JSON `null` are different. Unless an operation says
+  otherwise, an optional member is omitted rather than sent as `null`.
 
 ## Requests, replies, and events
 
@@ -103,82 +86,17 @@ A `text` or `tool` event already folded into a `chat` snapshot's `segment` can
 therefore arrive after that snapshot's reply. Clients must not deduplicate live
 turn output by arrival order; use the turn watermark described under `chat`.
 
-## Authentication
+## Transport authentication
 
-`pair` and `hello` are the only operations allowed on an unauthenticated
-connection (`Operation#authentication_required?`). Everything else is refused
-with `Not authenticated. Say hello first.`
+Authentication and machine identity are established by the transport before
+`xd-host stdio` starts. A local desktop owns the child process directly. Remote
+desktop and mobile clients authenticate with SSH and verify the SSH host key.
+There is no application-level `pair` or `hello` operation and no bearer token.
+The first application frame may be any supported request.
 
-### Pair
-
-Pairing is armed by `xd pair`, `xd serve --pair`, or from the desktop app's **Add a
-Device…** panel. The pairing window has no device name; the connecting client
-supplies its automatic name when it submits the code:
-
-```json
-{"op":"peer-pairing"}
-```
-
-The displayed `XXXX-XXXX` code is valid for five minutes and one matching
-submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
-
-```json
-{"op":"pair","code":"4F2K-9QX7","name":"Pixel 9"}
-{"ok":true,"token":"base64 device token","device":"Pixel 9"}
-```
-
-`code` is required, as is a non-empty `name` supplied by the connecting client.
-The host normalizes and stores that name; it does not invent one. The local
-owner can rename it later through device management. A successful pair:
-
-- authenticates the existing connection; do not send `hello` afterward;
-- consumes the code before writing the device record, so even a storage failure
-  requires a new code;
-- returns a long-lived bearer token and the authoritative device name;
-- requires the client to persist token and pinned certificate atomically.
-
-### Hello
-
-Every later connection sends `hello` as its first request:
-
-```json
-{"op":"hello","token":"base64 device token"}
-{"ok":true,"device":"Phone","version":1}
-```
-
-An unknown or revoked token returns `ok:false`. Clients must stop retrying and
-offer pairing again. A certificate mismatch must also stop retries: continuing
-would disclose the bearer token to a different peer.
-
-### Device management
-
-The host owner manages paired credentials through the local IPC endpoint.
-These operations require local transport and are never accepted from a remote
-or mobile client:
-
-```json
-{"op":"devices"}
-{"ok":true,"devices":[
-  {"id":"local opaque id","name":"Phone","created_at":0,
-   "last_seen":0,"connected":true}
-]}
-{"op":"rename-device","device":"local opaque id","name":"Tablet"}
-{"ok":true}
-{"op":"revoke-device","device":"local opaque id"}
-{"ok":true}
-```
-
-The `id` is only for the local management surface; clients must not expose or
-persist it as a remote credential. Renaming changes the host-owned name.
-Revoking deletes the token, disconnects every active session for that device,
-and requires pairing again.
-
-### What a remote client cannot do
-
-`peer-pairing` requires an authenticated connection **and** local transport
-(`Engine::peer_pairing`). A paired remote device cannot mint pairing codes for
-further devices, cannot open listeners, enable TLS, or manage other paired
-devices. Pairing and device-management authority stays on the host machine.
+The SSH account has the same authority as the host process. Clients must pin or
+otherwise strictly verify the SSH host key before sending password or private-key
+authentication material.
 
 ## State reads
 

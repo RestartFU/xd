@@ -1,10 +1,30 @@
 package com.restartfu.xd.credentials
 
-public data class StoredCredentials(
+public sealed interface SshAuthentication {
+    public data class Password(val value: String) : SshAuthentication
+
+    public data class PrivateKey(
+        val bytes: ByteArray,
+        val passphrase: String? = null,
+    ) : SshAuthentication
+}
+
+public data class SshHostKey(
+    val algorithm: String,
+    val encoded: ByteArray,
+    val fingerprint: String,
+)
+
+public data class SshConnection(
     val host: String,
     val port: Int,
-    val token: String,
-    val certificateDer: ByteArray,
+    val username: String,
+    val authentication: SshAuthentication,
+    val hostKey: SshHostKey? = null,
+)
+
+public data class StoredCredentials(
+    val connection: SshConnection,
 )
 
 public interface CredentialStore {
@@ -34,5 +54,13 @@ internal class MemoryCredentialStore(
 }
 
 internal fun StoredCredentials.copyStored(): StoredCredentials = copy(
-    certificateDer = certificateDer.copyOf(),
+    connection = connection.copyConnection(),
+)
+
+internal fun SshConnection.copyConnection(): SshConnection = copy(
+    authentication = when (val authentication = authentication) {
+        is SshAuthentication.Password -> authentication.copy()
+        is SshAuthentication.PrivateKey -> authentication.copy(bytes = authentication.bytes.copyOf())
+    },
+    hostKey = hostKey?.copy(encoded = hostKey.encoded.copyOf()),
 )

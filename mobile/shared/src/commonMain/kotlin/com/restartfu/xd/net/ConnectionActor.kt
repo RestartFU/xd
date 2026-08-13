@@ -1,15 +1,12 @@
 package com.restartfu.xd.net
 
-import com.restartfu.xd.automaticDeviceName
 import com.restartfu.xd.credentials.CredentialStore
+import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.StoredCredentials
-import com.restartfu.xd.protocol.HelloReply
 import com.restartfu.xd.protocol.Ops
-import com.restartfu.xd.protocol.PairReply
 import com.restartfu.xd.protocol.RemoteProtocolException
-import com.restartfu.xd.protocol.RemoteRefusedException
 import com.restartfu.xd.protocol.WireJson
-import com.restartfu.xd.protocol.decodeReply
 import com.restartfu.xd.protocol.requireSuccess
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -24,7 +21,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -33,7 +29,7 @@ import kotlinx.serialization.json.jsonObject
 public sealed interface Link {
     public data object Idle : Link
     public data object Connecting : Link
-    public data class Up(val deviceName: String) : Link
+    public data class Up(val remoteName: String) : Link
     public data class Down(
         val message: String,
         val nextAttemptInMs: Long,
@@ -46,14 +42,17 @@ public sealed interface Link {
 }
 
 public enum class FatalReason {
-    PIN_MISMATCH,
-    UNKNOWN_DEVICE,
+    HOST_KEY_MISMATCH,
+    AUTHENTICATION,
     PROTOCOL,
 }
 
-public sealed interface PairResult {
-    public data class Success(val deviceName: String) : PairResult
-    public data class Failure(val message: String) : PairResult
+public sealed interface ConnectResult {
+    public data class Success(val remoteName: String) : ConnectResult
+    public data class HostKeyVerificationRequired(
+        val hostKey: SshHostKey,
+    ) : ConnectResult
+    public data class Failure(val message: String) : ConnectResult
 }
 
 public class NotConnectedException(
@@ -85,14 +84,13 @@ internal data class SequencedEvent(
 /**
  * Owns connection state and is the only coroutine touching protocol queues.
  *
- * Socket callbacks append messages to a bounded channel. Parsing, greeting,
- * FIFO matching, and reconnect decisions happen in [run].
+ * Socket callbacks append messages to a bounded channel. Parsing, FIFO
+ * matching, and reconnect decisions happen in [run].
  */
 internal class ConnectionActor(
     private val socketFactory: PlatformSocketFactory,
     private val credentialStore: CredentialStore,
     private val scope: CoroutineScope,
-    private val deviceName: String = automaticDeviceName(),
 ) {
     private val mailbox = Channel<Message>(MAILBOX_CAPACITY)
     private val backoff = Backoff()
@@ -103,12 +101,11 @@ internal class ConnectionActor(
     private val _events = MutableSharedFlow<SequencedEvent>(extraBufferCapacity = 1024)
     private var credentials: StoredCredentials? = null
     private var socket: PlatformSocket? = null
-    private var leafCertificateDer: ByteArray? = null
     private var generation: Long = 0
     private var inboundSequence: Long = 0
     private var wanted: Boolean = true
     private var retryJob: Job? = null
-    private var pairing: PairAttempt? = null
+    private var connectionAttempt: ConnectionAttempt? = null
     private val callTimeouts = mutableMapOf<Long, Job>()
     private val calls = CallQueue(
         write = { bytes ->
@@ -133,38 +130,12 @@ internal class ConnectionActor(
         sendToMailbox(Message.Background)
     }
 
-    suspend fun pair(
-        host: String,
-        port: Int,
-        code: String,
-    ): PairResult {
-        require(host.isNotBlank()) { "Host must not be blank" }
-        require(port in 1..65535) { "Port must be between 1 and 65535" }
-        require(code.isNotBlank()) { "Pairing code must not be blank" }
-
-        val result = CompletableDeferred<PairResult>()
-        mailbox.send(
-            Message.Pair(
-                host = host,
-                port = port,
-                code = code,
-                deviceName = deviceName,
-                result = result,
-            ),
-        )
+    suspend fun connect(connection: SshConnection): ConnectResult {
+        validateConnection(connection)
+        val result = CompletableDeferred<ConnectResult>()
+        mailbox.send(Message.Connect(connection, result))
         return result.await()
     }
-
-    @Deprecated(
-        "The device name comes from the connecting platform; the supplied name is ignored.",
-        ReplaceWith("pair(host, port, code)"),
-    )
-    suspend fun pair(
-        host: String,
-        port: Int,
-        code: String,
-        _deviceName: String,
-    ): PairResult = pair(host, port, code)
 
     suspend fun forget() {
         val done = CompletableDeferred<Unit>()
@@ -215,13 +186,14 @@ internal class ConnectionActor(
             when (message) {
                 Message.Poke -> handlePoke()
                 Message.Background -> handleBackground()
-                is Message.Pair -> handlePair(message)
+                is Message.Connect -> handleConnect(message)
                 is Message.Forget -> handleForget(message)
                 is Message.Call -> handleCall(message)
                 is Message.SocketConnected -> handleConnected(message)
                 is Message.SocketBytes -> handleBytes(message)
                 is Message.SocketClosed -> handleClosed(message)
-                is Message.GreetingFinished -> handleGreeting(message)
+                is Message.ReadinessSucceeded -> handleReadinessSucceeded(message)
+                is Message.ReadinessFailed -> handleReadinessFailed(message)
                 is Message.CallTimedOut -> handleCallTimedOut(message)
                 is Message.ProtocolFailure -> handleProtocolFailure(message)
                 is Message.Retry -> handleRetry()
@@ -236,7 +208,7 @@ internal class ConnectionActor(
         backoff.reset()
 
         if (_link.value is Link.Fatal) return
-        if (socket == null && (pairing != null || credentials != null)) connect()
+        if (socket == null && (connectionAttempt != null || credentials != null)) connectSocket()
     }
 
     private fun handleBackground() {
@@ -244,36 +216,32 @@ internal class ConnectionActor(
         wanted = false
         retryJob?.cancel()
         retryJob = null
-        pairing?.result?.complete(
-            PairResult.Failure("Pairing cancelled when the app moved to background"),
+        connectionAttempt?.result?.complete(
+            ConnectResult.Failure("Connection cancelled when the app moved to background"),
         )
-        pairing = null
+        connectionAttempt = null
         closeCurrent(DisconnectedException("App moved to background"))
         _link.value = fatal ?: Link.Idle
     }
 
-    private fun handlePair(message: Message.Pair) {
-        pairing?.result?.complete(PairResult.Failure("Superseded by another pairing attempt"))
+    private fun handleConnect(message: Message.Connect) {
+        connectionAttempt?.result?.complete(
+            ConnectResult.Failure("Superseded by another connection attempt"),
+        )
         retryJob?.cancel()
         retryJob = null
         backoff.reset()
         wanted = true
-        closeCurrent(DisconnectedException("Starting pairing"))
-        pairing = PairAttempt(
-            host = message.host,
-            port = message.port,
-            code = message.code,
-            deviceName = message.deviceName,
-            result = message.result,
-        )
-        connect()
+        closeCurrent(DisconnectedException("Starting connection"))
+        connectionAttempt = ConnectionAttempt(message.connection, message.result)
+        connectSocket()
     }
 
     private suspend fun handleForget(message: Message.Forget) {
         retryJob?.cancel()
         retryJob = null
-        pairing?.result?.complete(PairResult.Failure("Pairing cancelled"))
-        pairing = null
+        connectionAttempt?.result?.complete(ConnectResult.Failure("Connection cancelled"))
+        connectionAttempt = null
         try {
             credentialStore.clear()
         } catch (error: CancellationException) {
@@ -354,37 +322,80 @@ internal class ConnectionActor(
         message.done.complete(Unit)
     }
 
-    private fun handleConnected(message: Message.SocketConnected) {
+    private suspend fun handleConnected(message: Message.SocketConnected) {
         if (message.generation != generation || socket == null) return
-        leafCertificateDer = message.certificateDer.copyOf()
-        val attempt = pairing
-        val reply = CompletableDeferred<SequencedReply>()
-        try {
-            val request = if (attempt != null) {
-                Ops.pair(attempt.code, attempt.deviceName)
-            } else {
-                val saved = credentials
-                    ?: return protocolFatal("Connected without credentials or pairing")
-                Ops.hello(saved.token)
-            }
-            calls.enqueue(request, reply)
+        val connection = connectionAttempt?.connection ?: credentials?.connection
+            ?: return protocolFatal("Connected without SSH credentials")
+        if (connection.hostKey == null) {
+            return handleClosed(
+                Message.SocketClosed(
+                    generation,
+                    SocketFailure(SocketFailureKind.IO, "SSH connected without a verified host key"),
+                ),
+            )
+        }
+        val response = CompletableDeferred<SequencedReply>()
+        val call = try {
+            calls.enqueue(Ops.tree(), response)
         } catch (error: Throwable) {
             handleClosed(
                 Message.SocketClosed(
                     generation,
-                    SocketFailure(SocketFailureKind.IO, error.message ?: "Greeting write failed"),
+                    SocketFailure(SocketFailureKind.IO, error.message ?: "Write failed"),
                 ),
             )
             return
         }
-
-        val greetingGeneration = generation
-        scope.launch {
-            val result = runCatching {
-                withTimeout(GREETING_TIMEOUT_MILLIS) { reply.await() }
-            }
-            mailbox.send(Message.GreetingFinished(greetingGeneration, result))
+        val inboundMark = inboundSequence
+        callTimeouts[call.id] = scope.launch {
+            delay(CALL_TIMEOUT_MILLIS)
+            mailbox.send(Message.CallTimedOut(call.id, inboundMark))
         }
+        val probeGeneration = generation
+        scope.launch {
+            try {
+                response.await().value.requireSuccess()
+                mailbox.send(Message.ReadinessSucceeded(probeGeneration))
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                mailbox.send(Message.ReadinessFailed(probeGeneration, error))
+            }
+        }
+    }
+
+    private suspend fun handleReadinessSucceeded(message: Message.ReadinessSucceeded) {
+        if (message.generation != generation || socket == null) return
+        val attempt = connectionAttempt
+        val connection = attempt?.connection ?: credentials?.connection
+            ?: return protocolFatal("Ready without SSH credentials")
+        if (attempt != null) {
+            val saved = StoredCredentials(connection)
+            try {
+                credentialStore.save(saved)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                connectionAttempt = null
+                wanted = false
+                closeCurrent(error)
+                _link.value = Link.Idle
+                attempt.result.complete(
+                    ConnectResult.Failure(error.message ?: "Could not save SSH credentials"),
+                )
+                return
+            }
+            credentials = saved
+            connectionAttempt = null
+            _hasCredentials.value = true
+            attempt.result.complete(ConnectResult.Success(remoteName(connection)))
+        }
+        backoff.reset()
+        _link.value = Link.Up(remoteName(connection))
+    }
+
+    private fun handleReadinessFailed(message: Message.ReadinessFailed) {
+        if (message.generation != generation || socket == null) return
+        protocolFatal("Host did not complete xd-host protocol setup", message.error)
     }
 
     private suspend fun handleBytes(message: Message.SocketBytes) {
@@ -405,96 +416,41 @@ internal class ConnectionActor(
         }
     }
 
-    private suspend fun handleGreeting(message: Message.GreetingFinished) {
-        if (message.generation != generation || socket == null) return
-        val raw = message.result.getOrElse {
-            return handleClosed(
-                Message.SocketClosed(
-                    generation,
-                    SocketFailure(SocketFailureKind.IO, it.message ?: "Greeting failed"),
-                ),
-            )
-        }
-
-        val value = raw.value
-        try {
-            value.requireSuccess()
-            val attempt = pairing
-            if (attempt != null) {
-                val reply = value.decodeReply<PairReply>()
-                require(reply.token.isNotBlank()) { "Pair reply has an empty token" }
-                val certificate = leafCertificateDer
-                    ?: throw RemoteProtocolException("Pairing returned no certificate")
-                val saved = StoredCredentials(
-                    host = attempt.host,
-                    port = attempt.port,
-                    token = reply.token,
-                    certificateDer = certificate.copyOf(),
-                )
-                credentialStore.save(saved)
-                credentials = saved
-                pairing = null
-                _hasCredentials.value = true
-                backoff.reset()
-                _link.value = Link.Up(reply.device)
-                attempt.result.complete(PairResult.Success(reply.device))
-            } else {
-                val reply = value.decodeReply<HelloReply>()
-                if (reply.version != PROTOCOL_VERSION) {
-                    return protocolFatal(
-                        "Unsupported host protocol version ${reply.version}",
-                    )
-                }
-                backoff.reset()
-                _link.value = Link.Up(reply.device)
-            }
-        } catch (error: RemoteRefusedException) {
-            val attempt = pairing
-            pairing = null
-            wanted = false
-            closeCurrent(error)
-            _link.value = if (attempt == null) {
-                Link.Fatal(FatalReason.UNKNOWN_DEVICE, error.message.orEmpty())
-            } else {
-                Link.Idle
-            }
-            attempt?.result?.complete(PairResult.Failure(error.message.orEmpty()))
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            val attempt = pairing
-            pairing = null
-            attempt?.result?.complete(
-                PairResult.Failure(error.message ?: "Invalid pairing reply"),
-            )
-            protocolFatal("Invalid greeting reply", error)
-        }
-    }
-
     private fun handleClosed(message: Message.SocketClosed) {
         if (message.generation != generation) return
         val reason = message.failure
         val text = reason?.message ?: "Host closed the connection"
         val old = socket
         socket = null
-        leafCertificateDer = null
         assembler.reset()
         cancelCallTimeouts()
         calls.failAll(DisconnectedException(text))
         old?.close()
 
-        val attempt = pairing
+        val attempt = connectionAttempt
         if (attempt != null) {
-            pairing = null
+            connectionAttempt = null
             wanted = false
             _link.value = Link.Idle
-            attempt.result.complete(PairResult.Failure(text))
+            val result = if (
+                reason?.kind == SocketFailureKind.HOST_KEY_UNKNOWN && reason.hostKey != null
+            ) {
+                ConnectResult.HostKeyVerificationRequired(reason.hostKey)
+            } else {
+                ConnectResult.Failure(text)
+            }
+            attempt.result.complete(result)
             return
         }
 
-        if (reason?.kind == SocketFailureKind.PIN_MISMATCH) {
+        if (reason?.kind == SocketFailureKind.HOST_KEY_MISMATCH) {
             wanted = false
-            _link.value = Link.Fatal(FatalReason.PIN_MISMATCH, text)
+            _link.value = Link.Fatal(FatalReason.HOST_KEY_MISMATCH, text)
+            return
+        }
+        if (reason?.kind == SocketFailureKind.AUTHENTICATION) {
+            wanted = false
+            _link.value = Link.Fatal(FatalReason.AUTHENTICATION, text)
             return
         }
 
@@ -509,25 +465,17 @@ internal class ConnectionActor(
     private fun handleRetry() {
         retryJob = null
         if (wanted && credentials != null && socket == null && _link.value !is Link.Fatal) {
-            connect()
+            connectSocket()
         }
     }
 
-    private fun connect() {
+    private fun connectSocket() {
         check(socket == null)
-        val attempt = pairing
-        val saved = credentials
-        val host = attempt?.host ?: saved?.host ?: return
-        val port = attempt?.port ?: saved?.port ?: return
-        val pin = if (attempt != null) null else saved?.certificateDer
-        check(pin != null || attempt != null) {
-            "Unpinned TLS is legal only during pairing"
-        }
+        val connection = connectionAttempt?.connection ?: credentials?.connection ?: return
 
         generation += 1
         val thisGeneration = generation
         assembler.reset()
-        leafCertificateDer = null
         _link.value = Link.Connecting
         val created = try {
             socketFactory.create()
@@ -545,10 +493,8 @@ internal class ConnectionActor(
         }
         socket = created
         val listener = object : PlatformSocketListener {
-            override fun onConnected(leafCertificateDer: ByteArray) {
-                sendToMailbox(
-                    Message.SocketConnected(thisGeneration, leafCertificateDer.copyOf()),
-                )
+            override fun onConnected() {
+                sendToMailbox(Message.SocketConnected(thisGeneration))
             }
 
             override fun onBytes(chunk: ByteArray) {
@@ -576,7 +522,7 @@ internal class ConnectionActor(
         }
 
         try {
-            created.connect(host, port, pin?.copyOf(), listener)
+            created.connect(connection, listener)
         } catch (error: Throwable) {
             handleClosed(
                 Message.SocketClosed(
@@ -603,8 +549,8 @@ internal class ConnectionActor(
     ) {
         wanted = false
         val error = RemoteProtocolException(message, cause)
-        pairing?.result?.complete(PairResult.Failure(message))
-        pairing = null
+        connectionAttempt?.result?.complete(ConnectResult.Failure(message))
+        connectionAttempt = null
         closeCurrent(error)
         _link.value = Link.Fatal(FatalReason.PROTOCOL, message)
     }
@@ -613,7 +559,6 @@ internal class ConnectionActor(
         generation += 1
         val old = socket
         socket = null
-        leafCertificateDer = null
         assembler.reset()
         cancelCallTimeouts()
         calls.failAll(error)
@@ -631,12 +576,9 @@ internal class ConnectionActor(
         }
     }
 
-    private data class PairAttempt(
-        val host: String,
-        val port: Int,
-        val code: String,
-        val deviceName: String,
-        val result: CompletableDeferred<PairResult>,
+    private data class ConnectionAttempt(
+        val connection: SshConnection,
+        val result: CompletableDeferred<ConnectResult>,
     )
 
     private sealed interface Message {
@@ -644,12 +586,9 @@ internal class ConnectionActor(
         data object Background : Message
         data object Retry : Message
 
-        data class Pair(
-            val host: String,
-            val port: Int,
-            val code: String,
-            val deviceName: String,
-            val result: CompletableDeferred<PairResult>,
+        data class Connect(
+            val connection: SshConnection,
+            val result: CompletableDeferred<ConnectResult>,
         ) : Message
 
         data class Forget(val done: CompletableDeferred<Unit>) : Message
@@ -671,7 +610,6 @@ internal class ConnectionActor(
 
         data class SocketConnected(
             val generation: Long,
-            val certificateDer: ByteArray,
         ) : Message
 
         data class SocketBytes(
@@ -684,10 +622,15 @@ internal class ConnectionActor(
             val failure: SocketFailure?,
         ) : Message
 
-        data class GreetingFinished(
+        data class ReadinessSucceeded(
             val generation: Long,
-            val result: Result<SequencedReply>,
         ) : Message
+
+        data class ReadinessFailed(
+            val generation: Long,
+            val error: Throwable,
+        ) : Message
+
     }
 
     /**
@@ -704,11 +647,29 @@ internal class ConnectionActor(
     }
 
     private companion object {
-        const val GREETING_TIMEOUT_MILLIS = 15_000L
         const val CALL_TIMEOUT_MILLIS = 30_000L
         const val LONG_CALL_TIMEOUT_MILLIS = 5 * 60_000L
         const val MAILBOX_CAPACITY = 64
-        const val PROTOCOL_VERSION = 1
         val LONG_OPERATIONS = setOf("git-action")
     }
 }
+
+private fun validateConnection(connection: SshConnection) {
+    require(connection.host.isNotBlank()) { "Host must not be blank" }
+    require(connection.port in 1..65535) { "Port must be between 1 and 65535" }
+    require(connection.username.isNotBlank()) { "Username must not be blank" }
+    when (val authentication = connection.authentication) {
+        is com.restartfu.xd.credentials.SshAuthentication.Password ->
+            require(authentication.value.isNotEmpty()) { "Password must not be empty" }
+        is com.restartfu.xd.credentials.SshAuthentication.PrivateKey ->
+            require(authentication.bytes.isNotEmpty()) { "Private key must not be empty" }
+    }
+    connection.hostKey?.let {
+        require(it.algorithm.isNotBlank()) { "Host-key algorithm must not be blank" }
+        require(it.encoded.isNotEmpty()) { "Host key must not be empty" }
+        require(it.fingerprint.isNotBlank()) { "Host-key fingerprint must not be blank" }
+    }
+}
+
+private fun remoteName(connection: SshConnection): String =
+    "${connection.username}@${connection.host}"

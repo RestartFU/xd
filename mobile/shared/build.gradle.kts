@@ -44,6 +44,16 @@ kotlin {
             implementation(kotlin("test"))
             implementation(libs.kotlinx.coroutines.test)
         }
+
+        androidMain.dependencies {
+            implementation(libs.jsch)
+            implementation(libs.bouncy.castle)
+        }
+
+        androidUnitTest.dependencies {
+            implementation(libs.sshd.core)
+            implementation(libs.sshd.common)
+        }
     }
 }
 

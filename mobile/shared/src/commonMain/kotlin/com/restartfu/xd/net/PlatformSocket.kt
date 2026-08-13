@@ -1,20 +1,15 @@
 package com.restartfu.xd.net
 
+import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.credentials.SshHostKey
+
 public fun interface PlatformSocketFactory {
     public fun create(): PlatformSocket
 }
 
 public interface PlatformSocket {
-    /**
-     * Connects and starts delivering serialized callbacks.
-     *
-     * A null pin is legal only for a pairing greeting. Every normal
-     * connection must compare the exact presented leaf DER with its pin.
-     */
     public fun connect(
-        host: String,
-        port: Int,
-        pinnedCertificateDer: ByteArray?,
+        connection: SshConnection,
         listener: PlatformSocketListener,
     )
 
@@ -26,15 +21,16 @@ public interface PlatformSocket {
 }
 
 public interface PlatformSocketListener {
-    public fun onConnected(leafCertificateDer: ByteArray)
+    public fun onConnected()
     public fun onBytes(chunk: ByteArray)
     public fun onClosed(reason: SocketFailure?)
 }
 
 public enum class SocketFailureKind {
     UNREACHABLE,
-    PIN_MISMATCH,
-    TLS,
+    HOST_KEY_UNKNOWN,
+    HOST_KEY_MISMATCH,
+    AUTHENTICATION,
     IO,
     CANCELLED,
 }
@@ -42,4 +38,5 @@ public enum class SocketFailureKind {
 public data class SocketFailure(
     val kind: SocketFailureKind,
     val message: String,
+    val hostKey: SshHostKey? = null,
 )

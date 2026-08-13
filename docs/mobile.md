@@ -1,72 +1,68 @@
-# Legacy mobile development
+# Mobile development
 
-> The current desktop remote transport is SSH-only and has no pairing server.
-> This document describes the experimental mobile client's previous paired TLS
-> protocol while mobile transport is being redesigned.
+The Android client under `mobile/` is a remote view onto an xd host. It now uses
+the same architecture as remote desktop mode:
 
-The mobile client is a separate Gradle project under `mobile/`. It is a client
-of `xd serve`, not a port of the GTK application or the agent subprocesses.
+```text
+Android ── SSH exec stdin/stdout ── xd-host stdio
+```
 
-The shared Kotlin Multiplatform module owns the wire protocol, the multiplexed
-call queue, reconnect policy, tree/chat stores, and transcript state machine.
-Each application supplies the TLS socket, encrypted credential storage, and
-native screens. The shared module targets Android, the JVM, and iOS; the
-SwiftUI application arrives in the iOS client phase.
+There is no mobile daemon, pairing code, bearer token, TLS listener, local IPC,
+on-device agent, Git process, SQLite database, or offline chat cache.
 
-`docs/protocol.md` is the normative wire contract this module implements.
+## Connection and security
 
-## Remote only
+The setup screen accepts:
 
-The mobile client is **remote only**, by construction and on purpose:
+- hostname or Tailscale IP;
+- SSH port, default `22`;
+- SSH username;
+- either an SSH password or an imported private key with an optional passphrase.
 
-- It reaches the host exclusively over pinned TLS. There is no Unix-socket or
-  local-IPC path, so it can only ever talk to `listen_remote`.
-- It runs no agent, no Git, and no SQLite. The phone is a view onto a host
-  that owns all of that.
-- It stores no chat data on the device. `TreeStore`, `ChatSession`, and
-  `TranscriptMachine` are in-memory and rebuilt from `tree`, `chat`, and
-  `messages` on every connect. The only persisted record is the credential —
-  host, port, device token, and pinned leaf certificate.
-- It cannot pair further devices. The host restricts `peer-pairing` to local
-  transport, so pairing authority stays on the host machine.
+The first connection stops before SSH authentication and displays the presented
+SSH host-key algorithm and SHA-256 fingerprint. The user must compare it with a
+trusted source and explicitly confirm it. Android then reconnects and pins the
+exact host-key bytes and algorithm. A changed host key is fatal until the saved
+connection is forgotten.
 
-Do not add a local transport, an on-device database, or an offline cache
-without revisiting this section first.
+Password or private-key material, connection details, and the pinned host key are
+stored as one AES-256-GCM record backed by Android Keystore. The app never offers
+a trust-anyway path after a key mismatch.
 
-## iOS targets
+The remote command is:
 
-`mobile/shared` declares `iosArm64` and `iosSimulatorArm64`. `iosX64` is
-deliberately absent: the Intel simulator is dead weight and this repository's
-macOS builders already require Apple Silicon.
+```sh
+exec "$HOME/.local/share/xd/runtime/v1/xd-host" stdio \
+  --data "$HOME/.local/share/xd"
+```
 
-The targets exist now so the protocol, store, and transcript code cannot drift
-into being Android-shaped. What is present today:
+The matching stable xd host must already be installed on the remote machine.
+Connecting once with the desktop deploys the current host automatically. Mobile
+does not upload native host binaries because the phone cannot determine or ship
+every remote OS and architecture safely.
 
-- `iosMain` supplies `currentEpochMillis`, the module's only `expect`.
-- The whole common suite — framing, call multiplexing, reconnect, transcript
-  watermark — compiles and runs on the simulator.
+JSch supplies the Android SSH client. Bouncy Castle is bundled for modern EdDSA
+and XDH algorithms on Android versions whose platform providers do not expose
+them.
 
-The iOS platform glue (a Network.framework socket with
-`sec_protocol_options_set_verify_block` pinning, and a Keychain
-`CredentialStore`) lands with the SwiftUI application, for the same reason
-`AndroidSocket` landed with the Android application: both are app-side plumbing
-that must be compiled and exercised on a real host, not written blind.
+## Runtime behavior
 
-**Apple targets cannot be compiled on Linux.** `make mobile-test` configures
-them but skips every Apple compilation — `compileIosMainKotlinMetadata` reports
-`SKIPPED`. The `ios` job in `.github/workflows/mobile.yml` runs on macOS and is
-the only thing that actually builds them. If that job is removed, the iOS
-source set rots silently.
+The shared Kotlin Multiplatform module owns JSON Lines framing, request matching,
+reconnect policy, tree/chat stores, terminal events, and transcript state. The
+Android source set supplies SSH and encrypted credential storage.
 
-## Requirement
+The app keeps no foreground service. Leaving it closes SSH. Returning reconnects
+and takes fresh snapshots because the host has no resumable event log.
+
+The mobile client remains remote-only by design. Do not add local transport,
+on-device agents, an offline database, or a cache without revisiting this model.
+
+## Build requirements
 
 - Docker with BuildKit
 
-The checked-in wrapper, JDK 21, and Android SDK 35 run inside the build image.
-No host Gradle, JDK, or Android SDK is required. Android Studio may still
-create `mobile/local.properties` for IDE use; that file is ignored.
-
-## Commands
+The checked-in Gradle wrapper, JDK 21, and Android SDK 35 run inside the build
+image. No host Gradle, JDK, or Android SDK is required.
 
 From the repository root:
 
@@ -75,288 +71,35 @@ make mobile-test
 make mobile-android
 ```
 
-The test command builds the Docker `test` stage. The Android command exports
-the debug APK to `dist/mobile/xd-mobile-debug.apk`.
+`mobile-test` builds the Docker test stage and runs the shared JVM and Android
+unit suites. `mobile-android` also builds, signs, aligns, verifies, and exports:
 
-`mobile-test` includes:
-
-- split UTF-8 and 96 MiB framing limits;
-- reply multiplexing by `_xd_request`, including out-of-order replies, the
-  id-less compatibility path, and an abandoned call whose late reply must not
-  shift onto the next caller;
-- greeting, pairing, reconnect, and fatal pin/protocol behavior;
-- the transcript transition matrix, including the turn watermark that keeps a
-  snapshot-covered delta from being applied twice;
-- a full FakeSocket vertical slice from pairing through streamed output;
-- a real JSSE loopback TLS listener for TOFU, exact-leaf pinning, and mismatch
-  detection.
-
-The APK build also runs that suite, signs the debug APK, and verifies its
-alignment and signature before exporting it.
-
-Every build is signed with the checked-in key described under Nightly APK, so
-a rebuild installs over the last one and keeps its pairing credentials.
-
-## Nightly APK
-
-The rolling nightly release publishes `xd-nightly-android.apk` beside the
-Linux and macOS artifacts. It is the same APK `make mobile-android` produces:
-a test build requiring no secrets or other setup.
-
-It is signed with `mobile/androidApp/debug.p12`, a fixed key checked into the
-repository on purpose. Gradle otherwise generates one per machine and a CI
-runner starts empty, so every nightly would carry a different signature and
-Android would refuse to install over the last one -- "App not installed as
-package conflicts with an existing package". One key for every build, local
-and CI, means updates install in place.
-
-That key is not a secret and must never be treated as one. It is the same idea
-as Android's own debug keystore, whose password is public: it proves nothing
-about who built the APK. Publishing this app properly would need a real key
-kept out of the repository, and the nightly would then have to be signed with
-it consistently.
-
-If you already have an xd build installed that predates this, uninstall it
-once; from then on updates apply normally.
-
-## Try it on a phone
-
-Start a pairing window on the machine that owns the workspaces:
-
-```sh
-./dist/xd.sh serve --pair
+```text
+dist/mobile/xd-mobile-debug.apk
 ```
 
-The host prints a single-use `XXXX-XXXX` code valid for five minutes. Install
-the Docker-built APK, open it, and enter the host's reachable hostname or
-Tailscale IP, port `4001`, and code. Android supplies its model automatically
-as the device name; there is no editable name field. The owner can rename the
-device later from **Manage Devices…**:
+Install it with:
 
 ```sh
 adb install -r dist/mobile/xd-mobile-debug.apk
 ```
 
-After pairing, Android stores the device token and the exact leaf certificate
-as one AES-256-GCM record backed by Android Keystore. Later connections accept
-only that certificate. A certificate change stops reconnects and requires an
-explicit forget-and-re-pair flow; there is no trust-anyway action.
+## Nightly APK
 
-The app deliberately keeps no foreground service. Leaving it backgrounds and
-closes the socket; returning reconnects, reloads the tree, and reloads every
-open chat from the host.
+The rolling nightly release publishes `xd-nightly-android.apk` beside the Linux
+and macOS artifacts. Debug and nightly APKs use the checked-in
+`mobile/androidApp/debug.p12` key so updates install over earlier builds.
 
-For IDE use, the Gradle wrapper remains available from `mobile/`:
+That key is intentionally public and proves nothing about who built the APK. A
+production release would require a consistently protected release key.
 
-```sh
-./gradlew :shared:allTests
-./gradlew :androidApp:assembleDebug
-```
+## iOS targets
 
-Direct wrapper use requires a local JDK 21 and Android SDK 35.
+`mobile/shared` declares `iosArm64` and `iosSimulatorArm64` so common protocol and
+state code cannot drift into Android-only APIs. Linux Docker builds configure but
+cannot compile Apple targets. The macOS job in `.github/workflows/mobile.yml` is
+the build authority for them.
 
-## Markdown
-
-Assistant messages are parsed as CommonMark with GitHub tables and
-strikethrough, using `org.jetbrains:markdown` -- multiplatform down to the
-Apple targets. A correct parser is not something to hand-roll in the mobile
-client.
-
-Parsing produces a document of blocks and spans in `shared/.../markdown`, not
-styled text, so each client draws it natively from one interpretation of the
-source. Compose renders it today; SwiftUI will render the same document.
-
-Only `http`, `https` and `mailto` links survive, matching the desktop's
-`safe_link?`. Anything else keeps its text and loses the link, so a
-`javascript:` or `file:` target can never be handed to the system. Images have
-nowhere to be drawn in a transcript, so they read as their alt text.
-
-A user's own message and system text are shown verbatim. They were typed
-rather than authored as Markdown, and rendering them would eat characters the
-sender meant literally.
-
-Assistant output streams, so the parser is called on half-written documents
-constantly; anything it cannot make sense of falls back to the literal text.
-
-## Vector drawables
-
-Android's `PathParser` reads numbers greedily and cannot split packed SVG arc
-flags: `0 014.21` becomes the number 14.21 rather than flags `0` and `1`
-followed by `4.21`, and the shape comes out mangled. SVG optimisers emit that
-form routinely, so an icon pasted straight from one looks right everywhere
-except on Android, and nothing in the build notices -- the drawable compiles
-happily.
-
-`make mobile-test` fails if any drawable packs arc flags. Separate them:
-`a1 1 0 0 1 2 2`, never `a1 1 0 012 2`.
-
-## Syntax colouring
-
-Code in the transcript is coloured with the desktop's palette and language
-list: expanded inline diffs, and fenced code blocks in assistant messages.
-`mobile/shared/.../syntax` holds it, so an iOS client gets it unchanged.
-
-The token colours and language rules mirror `desktop/src/markdown.rs`; the
-keyword, type, and constant sets live in `Words.kt` so every mobile target uses
-one table. Update both implementations together when a language changes.
-
-`languageForPath` is an exact port, so a file resolves to the same language on
-both clients.
-
-The scanner covers what code spends its time in: comments including nested
-block comments, strings with escapes, Go and Odin raw strings, Rust raw
-strings, Kotlin and TOML triple strings, numbers, keywords, types, constants
-and call sites.
-
-It deliberately does **not** implement the desktop's exotic lexing: heredocs,
-Ruby and Crystal percent literals and regex, C# verbatim and raw strings, Bash
-expansion and quoting state, Crystal macro delimiters, TOML table headers, and
-YAML anchors. Those constructs render as plain text. That is a deliberate
-trade: uncoloured reads fine, mis-coloured does not, and the desktop remains
-the place to read a large diff closely.
-
-## A running turn
-
-While a turn runs, a row at the foot of the transcript counts how long it has
-been going, with the same moving dots and the same wording as the desktop --
-`TurnTiming` lives in `shared` so the two clients cannot drift apart on
-phrasing. A turn can spend minutes between visible output, thinking or inside a
-tool that prints nothing, and without this the phone looks like it dropped the
-message.
-
-The count comes from a start time, not from counting up. Opening a chat whose
-turn is already running shows its real age: `chat` reports `working_for`, and
-the transcript store turns that into a start time. A phone's clock can disagree
-with the host's, so a negative elapsed time is clamped rather than shown.
-
-## Panes
-
-The desktop shows the conversation, terminal, files and diff side by side. A
-phone has room for one at a time, so they are tabs over the same chat.
-
-**Diff** reads whole patches with `working-all` and `branch-all` rather than
-the desktop's per-file sections, because a phone shows one scrollable patch.
-`branch-all` needs the branch point, so switching to it costs a `base` read
-first.
-
-**Files** lists and previews through `file-browse`, syntax colouring the
-preview by path. It is read-only: the host supports `write`, but editing
-code on a phone is not what this is for. Paths stay relative to the working
-directory because the host refuses anything else.
-
-**Terminal** attaches to the shared pty. The session lives on the host and
-every attached device sees the same screen, so opening reuses an existing
-terminal rather than starting a second one; replay rebuilds the scrollback,
-resize frames included and in order, before live output is applied.
-
-Because the host broadcasts raw pty bytes, the client has to interpret them.
-`shared/.../terminal` holds a VT100/xterm subset: cursor movement, erase,
-scrolling and SGR colour, including bright and 256-colour. Unsupported escapes
-are consumed rather than printed, so they cost formatting instead of turning
-the screen into noise.
-
-Input goes straight to the pty as it is typed, with no submit step, so tab
-completion, Ctrl-C and a live prompt behave as they should. Tapping the screen
-raises the keyboard, and the cursor is drawn as a block where the next
-character will land.
-
-Android delivers typed characters as text edits rather than key events, so the
-keyboard is driven through a one-pixel field the reader never sees; its value
-is padded because a backspace on an already-empty field is otherwise
-unobservable. A key bar supplies what a soft keyboard cannot send at all --
-Esc, Tab, arrows, and a sticky Ctrl that applies to the next character.
-
-One limit worth knowing: a full-screen application will not render faithfully.
-The desktop keeps VTE for that.
-
-## The tree
-
-The New button creates either a workspace or a chat. A chat can be created once
-there is a workspace folder to hold it.
-
-A long press on a chat offers Move, Rename, and Delete. A long press on a folder
-offers Move. Move opens a destination picker rather than relying on drag-and-
-drop, which is difficult to discover on a phone; folders can be moved to the
-top level or into another folder, while chats must stay inside a folder. The
-host rejects cycles, repository leaves, and name collisions.
-
-Long press rather than visible buttons keeps rare actions out of rows that are
-already tap targets for the thing you usually want. Deleting is irreversible —
-the host forgets the agent session, kills the chat's terminals and removes the
-transcript — so it keeps a confirmation that names the chat.
-
-Mutations refresh the tree rather than waiting for the host's `tree` broadcast,
-so the row has already changed by the time the dialog closes. Tree broadcasts
-also reload open chat sessions because moving a chat or folder can change its
-inherited backend, model, or workdir. Renaming a chat likewise reloads its open
-session: it broadcasts `tree` and nothing else, so a chat already open would
-otherwise keep its old title in the header.
-
-## Reading a transcript
-
-Only the reader's own messages get a bubble, as on the desktop, and it is
-tinted rather than left on the default surface. A reply is the page: it is most
-of what is on screen and it is the thing being read, so carding it too leaves
-the two indistinguishable — a column of identical boxes whose only difference
-is which side is narrower.
-
-## Tagged questions
-
-When the assistant asks something with a short list of answers, it tags the
-block and the client renders buttons. Tapping one sends it as the next message;
-that is all a button does, so anything a button offers can also be typed.
-
-The buttons come from the last stored message rather than from the
-`turn-finished` event that announced the question. The host stores the block
-verbatim, so reading it from the message means the buttons survive reopening
-the chat — where an event-only answer would leave the question stranded with no
-way to answer it but retyping. They disappear as soon as a turn starts, a
-message is queued, or anything else is said, because by then the buttons would
-answer the wrong question.
-
-`AskBlock` in `shared` mirrors `host/src/ask.rs` case for case. Stripping
-the block is not optional:
-left alone the tags render as literal text in the transcript. The question
-itself stays, in bold, so the conversation still reads in order after the
-buttons are gone.
-
-Options are one per line rather than wrapped into a grid. An option is a whole
-answer, often a sentence, and a row of truncated sentences is not a choice
-anyone can make. A question that only accepts typed text gets no buttons at
-all — the composer is already there.
-
-## Images in the transcript
-
-Sending an attachment stores the PNG on the host and leaves
-`[image: /path.png]` on its own line in the message, so a sent image would
-otherwise read as that literal text. The transcript recognises those markers
-and draws the image, keeping prose and images in the order they were written.
-
-The rule matches the desktop transcript parser: the whole line, and nothing
-else on it. A message that merely mentions `[image: ...]` mid-sentence stays
-prose.
-
-Bytes live on the host, so each one is fetched with `image-read`, which
-serves only paths inside its own remote-paste directory. The scaled preview is
-requested rather than the original: a transcript never needs full resolution.
-Previews are bounded in height so a tall screenshot cannot push the rest of a
-turn off screen, and tapping opens the image full screen.
-
-An image sent from another machine, or cleaned up since, reports itself as
-unavailable rather than failing the transcript.
-
-## Attaching images
-
-The composer can attach up to 4 images, which is the host's limit alongside
-10 MiB per image and 20 MiB in total.
-
-The host accepts **PNG only** and checks the signature, but a phone gallery
-holds JPEG and HEIC, so images are decoded and re-encoded on the device. As on
-the desktop they are scaled to fit 1920 first: a modern phone photo encoded to
-PNG at full resolution runs to tens of megabytes and would simply be refused.
-PNG is lossless, so when a scaled image still exceeds 10 MiB the only remedy
-is fewer pixels; the encoder halves the bound until it fits.
-
-Picking uses Android's photo picker, which grants access to the chosen items
-only and needs no storage permission. The app still declares nothing beyond
-`INTERNET`.
+The current SSH transport is Android-only. An iOS application will need native
+SSH transport and Keychain-backed credentials while preserving the same strict
+host-key confirmation contract.

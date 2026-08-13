@@ -43,6 +43,10 @@ android {
         compose = true
     }
 
+    packaging {
+        resources.excludes += "META-INF/versions/**/OSGI-INF/MANIFEST.MF"
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21

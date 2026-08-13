@@ -26,15 +26,6 @@ class OpsTest {
     }
 
     @Test
-    fun pairingSendsTheConnectingDeviceName() {
-        val request = Ops.pair("ABCD-EFGH", "Pixel 9")
-
-        assertEquals("pair", request.getValue("op").jsonPrimitive.content)
-        assertEquals("ABCD-EFGH", request.getValue("code").jsonPrimitive.content)
-        assertEquals("Pixel 9", request.getValue("name").jsonPrimitive.content)
-    }
-
-    @Test
     fun booleanOptionsAreStringsOnWire() {
         val request = Ops.setBoolOption("chat", ChatOption.PLAN, true)
 

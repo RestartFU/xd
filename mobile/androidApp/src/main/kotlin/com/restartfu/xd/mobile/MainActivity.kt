@@ -25,7 +25,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ui.FatalScreen
 import com.restartfu.xd.mobile.ui.MinimalMobileApp
-import com.restartfu.xd.mobile.ui.PairScreen
+import com.restartfu.xd.mobile.ui.ConnectScreen
 import com.restartfu.xd.mobile.ui.minimalColors
 import com.restartfu.xd.net.Link
 
@@ -112,7 +112,7 @@ private fun XdMobileApp(
             CircularProgressIndicator()
         }
     } else if (!hasCredentials) {
-        PairScreen(model)
+        ConnectScreen(model)
     } else if (link is Link.Fatal) {
         FatalScreen(link as Link.Fatal, operationError, model::forget)
     } else {

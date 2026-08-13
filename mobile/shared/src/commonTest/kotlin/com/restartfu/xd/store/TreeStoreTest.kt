@@ -1,7 +1,7 @@
 package com.restartfu.xd.store
 
 import com.restartfu.xd.credentials.MemoryCredentialStore
-import com.restartfu.xd.credentials.StoredCredentials
+import com.restartfu.xd.credentials.testCredentials
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.FakeSocketFactory
 import kotlin.test.Test
@@ -20,19 +20,15 @@ class TreeStoreTest {
         val actor = ConnectionActor(
             factory,
             MemoryCredentialStore(
-                StoredCredentials(
-                    host = "host",
-                    port = 4001,
-                    token = "token",
-                    certificateDer = byteArrayOf(1, 2, 3),
-                ),
+                testCredentials(),
             ),
             backgroundScope,
         )
         runCurrent()
         factory.latest.connected()
         runCurrent()
-        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
         runCurrent()
         runCurrent()
 
@@ -41,13 +37,13 @@ class TreeStoreTest {
         runCurrent()
         factory.latest.receive(
             """{"ok":true,"folders":[],"chats":[{"id":"chat","folder":"folder",""" +
-                """"title":"Hello","backend":"codex","working":false}]}""",
+                """"title":"Hello","backend":"codex","working":false}],"_xd_request":2}""",
         )
         runCurrent()
         refresh.await()
         assertFalse(store.state.value.chats.single().working)
 
-        store.setChatWorking("chat", working = true, sequence = 2)
+        store.setChatWorking("chat", working = true, sequence = 1)
         assertFalse(store.state.value.chats.single().working)
 
         store.setChatWorking("chat", working = true, sequence = 3)

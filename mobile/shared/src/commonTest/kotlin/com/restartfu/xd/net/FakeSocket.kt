@@ -1,5 +1,8 @@
 package com.restartfu.xd.net
 
+import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.credentials.SshHostKey
+
 internal class FakeSocketFactory : PlatformSocketFactory {
     val sockets = mutableListOf<FakeSocket>()
 
@@ -10,22 +13,16 @@ internal class FakeSocketFactory : PlatformSocketFactory {
 }
 
 internal class FakeSocket : PlatformSocket {
-    var host: String? = null
-    var port: Int? = null
-    var pin: ByteArray? = null
+    var connection: SshConnection? = null
     var listener: PlatformSocketListener? = null
     val writes = mutableListOf<ByteArray>()
     var closed = false
 
     override fun connect(
-        host: String,
-        port: Int,
-        pinnedCertificateDer: ByteArray?,
+        connection: SshConnection,
         listener: PlatformSocketListener,
     ) {
-        this.host = host
-        this.port = port
-        pin = pinnedCertificateDer?.copyOf()
+        this.connection = connection
         this.listener = listener
     }
 
@@ -34,12 +31,14 @@ internal class FakeSocket : PlatformSocket {
         writes += bytes.copyOf()
     }
 
+    fun writeText(index: Int = writes.lastIndex): String = writes[index].decodeToString()
+
     override fun close() {
         closed = true
     }
 
-    fun connected(certificateDer: ByteArray = byteArrayOf(1, 2, 3)) {
-        listener?.onConnected(certificateDer)
+    fun connected() {
+        listener?.onConnected()
     }
 
     fun receive(vararg lines: String) {
@@ -47,10 +46,15 @@ internal class FakeSocket : PlatformSocket {
         listener?.onBytes(bytes)
     }
 
+    fun receiveReadinessTreeReply(requestId: Long = 1) {
+        receive("""{"ok":true,"folders":[],"chats":[],"_xd_request":$requestId}""")
+    }
+
     fun fail(
         kind: SocketFailureKind = SocketFailureKind.IO,
         message: String = "socket failed",
+        hostKey: SshHostKey? = null,
     ) {
-        listener?.onClosed(SocketFailure(kind, message))
+        listener?.onClosed(SocketFailure(kind, message, hostKey))
     }
 }

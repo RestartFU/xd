@@ -131,9 +131,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # A test build, signed with the generated debug key. The runner starts
-      # with a cold signing cache, so that key differs per run and Android
-      # will refuse to update an installed APK in place -- uninstall first.
+      # A test build signed with the repository's fixed public debug key, so it
+      # installs over the previous nightly without an uninstall.
       - name: Build the Android APK
         run: ./scripts/mobile-build.sh
 
@@ -195,9 +194,9 @@ jobs:
           ./xd-nightly/xd.sh
           \`\`\`
 
-          Android is included as an experimental legacy client build. The
-          current remote desktop uses the configured SSH command with no
-          pairing service or listening port.
+          Android connects directly over SSH with password or imported-key
+          authentication and explicit SSH host-key fingerprint verification.
+          The remote machine must already have the stable xd host installed.
 
           Linux and macOS are self-contained.
           EOF

@@ -3,9 +3,9 @@ package com.restartfu.xd.credentials
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Base64
 import com.restartfu.xd.protocol.WireJson
 import java.security.KeyStore
+import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -21,8 +21,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
- * Stores one encrypted credential record. One preference key means token and
- * certificate cannot be observed in a partially-updated state.
+ * Stores one encrypted SSH credential record. One preference key means the
+ * authentication secret and pinned host key update atomically.
  */
 public class AndroidCredentialStore(
     context: Context,
@@ -30,62 +30,45 @@ public class AndroidCredentialStore(
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
     override suspend fun load(): StoredCredentials? = withContext(Dispatchers.IO) {
-        val record = preferences.getString(RECORD, null) ?: return@withContext null
+        val record = preferences.getString(RECORD, null) ?: run {
+            preferences.edit().remove(LEGACY_RECORD).apply()
+            return@withContext null
+        }
         runCatching {
             val separator = record.indexOf(':')
             require(separator > 0 && separator < record.lastIndex)
-            val iv = Base64.decode(record.substring(0, separator), Base64.NO_WRAP)
-            val ciphertext = Base64.decode(record.substring(separator + 1), Base64.NO_WRAP)
+            val iv = Base64.getDecoder().decode(record.substring(0, separator))
+            val ciphertext = Base64.getDecoder().decode(record.substring(separator + 1))
             val cipher = Cipher.getInstance(CIPHER)
             cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, iv))
-            decode(cipher.doFinal(ciphertext).decodeToString())
+            decodeCredentialRecord(cipher.doFinal(ciphertext).decodeToString())
         }.getOrNull()
     }
 
     override suspend fun save(credentials: StoredCredentials): Unit = withContext(Dispatchers.IO) {
-        require(credentials.host.isNotBlank())
-        require(credentials.port in 1..65535)
-        require(credentials.token.isNotBlank())
-        require(credentials.certificateDer.isNotEmpty())
+        val connection = credentials.connection
+        require(connection.host.isNotBlank())
+        require(connection.port in 1..65535)
+        require(connection.username.isNotBlank())
+        val hostKey = requireNotNull(connection.hostKey)
+        require(hostKey.algorithm.isNotBlank() && hostKey.encoded.isNotEmpty())
+        require(hostKey.fingerprint.isNotBlank())
 
-        val plain = buildJsonObject {
-            put("host", credentials.host)
-            put("port", credentials.port)
-            put("token", credentials.token)
-            put(
-                "certificate",
-                Base64.encodeToString(credentials.certificateDer, Base64.NO_WRAP),
-            )
-        }.toString().encodeToByteArray()
+        val plain = encodeCredentialRecord(credentials).encodeToByteArray()
         val cipher = Cipher.getInstance(CIPHER)
         cipher.init(Cipher.ENCRYPT_MODE, key())
-        val record = Base64.encodeToString(cipher.iv, Base64.NO_WRAP) +
+        val record = Base64.getEncoder().withoutPadding().encodeToString(cipher.iv) +
             ":" +
-            Base64.encodeToString(cipher.doFinal(plain), Base64.NO_WRAP)
+            Base64.getEncoder().withoutPadding().encodeToString(cipher.doFinal(plain))
         check(preferences.edit().putString(RECORD, record).commit()) {
             "Could not persist remote credentials"
         }
     }
 
     override suspend fun clear(): Unit = withContext(Dispatchers.IO) {
-        check(preferences.edit().remove(RECORD).commit()) {
+        check(preferences.edit().remove(RECORD).remove(LEGACY_RECORD).commit()) {
             "Could not clear remote credentials"
         }
-    }
-
-    private fun decode(value: String): StoredCredentials {
-        val objectValue = WireJson.parseToJsonElement(value).jsonObject
-        val host = objectValue.stringValue("host")
-        val port = objectValue["port"]?.jsonPrimitive?.intOrNull
-            ?: error("Missing credential port")
-        val token = objectValue.stringValue("token")
-        val certificate = Base64.decode(
-            objectValue.stringValue("certificate"),
-            Base64.NO_WRAP,
-        )
-        require(host.isNotBlank() && port in 1..65535)
-        require(token.isNotBlank() && certificate.isNotEmpty())
-        return StoredCredentials(host, port, token, certificate)
     }
 
     private fun key(): SecretKey = synchronized(KEY_LOCK) {
@@ -106,13 +89,10 @@ public class AndroidCredentialStore(
         }
     }
 
-    private fun JsonObject.stringValue(name: String): String =
-        this[name]?.jsonPrimitive?.contentOrNull
-            ?: error("Missing credential $name")
-
     private companion object {
         const val PREFERENCES = "xd-remote-credentials"
-        const val RECORD = "encrypted-record-v1"
+        const val RECORD = "encrypted-record-v2"
+        const val LEGACY_RECORD = "encrypted-record-v1"
         const val KEYSTORE = "AndroidKeyStore"
         const val KEY_ALIAS = "xd-remote-credentials-v1"
         const val CIPHER = "AES/GCM/NoPadding"
@@ -120,3 +100,59 @@ public class AndroidCredentialStore(
         val KEY_LOCK = Any()
     }
 }
+
+internal fun encodeCredentialRecord(credentials: StoredCredentials): String {
+    val connection = credentials.connection
+    val hostKey = requireNotNull(connection.hostKey)
+    return buildJsonObject {
+        put("host", connection.host)
+        put("port", connection.port)
+        put("username", connection.username)
+        when (val authentication = connection.authentication) {
+            is SshAuthentication.Password -> {
+                require(authentication.value.isNotEmpty())
+                put("authentication", "password")
+                put("password", authentication.value)
+            }
+            is SshAuthentication.PrivateKey -> {
+                require(authentication.bytes.isNotEmpty())
+                put("authentication", "private-key")
+                put("privateKey", Base64.getEncoder().withoutPadding().encodeToString(authentication.bytes))
+                authentication.passphrase?.let { put("passphrase", it) }
+            }
+        }
+        put("hostKeyAlgorithm", hostKey.algorithm)
+        put("hostKey", Base64.getEncoder().withoutPadding().encodeToString(hostKey.encoded))
+        put("hostKeyFingerprint", hostKey.fingerprint)
+    }.toString()
+}
+
+internal fun decodeCredentialRecord(value: String): StoredCredentials {
+    val objectValue = WireJson.parseToJsonElement(value).jsonObject
+    val host = objectValue.stringValue("host")
+    val port = objectValue["port"]?.jsonPrimitive?.intOrNull
+        ?: error("Missing credential port")
+    val username = objectValue.stringValue("username")
+    val authentication = when (objectValue.stringValue("authentication")) {
+        "password" -> SshAuthentication.Password(objectValue.stringValue("password"))
+        "private-key" -> SshAuthentication.PrivateKey(
+            bytes = Base64.getDecoder().decode(objectValue.stringValue("privateKey")),
+            passphrase = objectValue["passphrase"]?.jsonPrimitive?.contentOrNull,
+        )
+        else -> error("Unknown SSH authentication type")
+    }
+    val hostKey = SshHostKey(
+        algorithm = objectValue.stringValue("hostKeyAlgorithm"),
+        encoded = Base64.getDecoder().decode(objectValue.stringValue("hostKey")),
+        fingerprint = objectValue.stringValue("hostKeyFingerprint"),
+    )
+    require(host.isNotBlank() && port in 1..65535)
+    require(username.isNotBlank() && hostKey.encoded.isNotEmpty())
+    return StoredCredentials(
+        SshConnection(host, port, username, authentication, hostKey),
+    )
+}
+
+private fun JsonObject.stringValue(name: String): String =
+    this[name]?.jsonPrimitive?.contentOrNull
+        ?: error("Missing credential $name")

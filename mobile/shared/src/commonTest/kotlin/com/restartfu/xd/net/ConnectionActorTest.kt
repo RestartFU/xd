@@ -1,6 +1,9 @@
 package com.restartfu.xd.net
 
 import com.restartfu.xd.credentials.MemoryCredentialStore
+import com.restartfu.xd.credentials.SshAuthentication
+import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.StoredCredentials
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -20,99 +23,132 @@ import kotlinx.serialization.json.jsonPrimitive
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionActorTest {
     @Test
-    fun authenticatesStoredCredentialsWithPinnedCertificate() = runTest {
-        val certificate = byteArrayOf(9, 8, 7)
+    fun storedTransportIsNotReadyUntilHostProtocolReplies() = runTest {
+        val hostKey = byteArrayOf(9, 8, 7)
         val factory = FakeSocketFactory()
-        val store = MemoryCredentialStore(credentials(certificate))
+        val store = MemoryCredentialStore(credentials(hostKey))
         val actor = ConnectionActor(factory, store, backgroundScope)
         runCurrent()
 
-        assertContentEquals(certificate, factory.latest.pin)
-        factory.latest.connected(certificate)
-        runCurrent()
-        assertEquals(
-            """{"op":"hello","token":"token","_xd_request":1}""" + "\n",
-            factory.latest.writes.single().decodeToString(),
-        )
-
-        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
-        runCurrent()
+        val actual = factory.latest.connection
+        assertEquals("host", actual?.host)
+        assertEquals("alice", actual?.username)
+        assertContentEquals(hostKey, actual?.hostKey?.encoded)
+        factory.latest.connected()
         runCurrent()
 
-        assertEquals(Link.Up("Pixel"), actor.link.value)
+        assertIs<Link.Connecting>(actor.link.value)
+        assertEquals(1, factory.latest.writes.size)
+        assertEquals("tree", factory.latest.writeText().substringAfter("\"op\":\"").substringBefore("\""))
+
+        factory.latest.receive(treeReply())
+        runCurrent()
+
+        assertEquals(Link.Up("alice@host"), actor.link.value)
     }
 
     @Test
-    fun pairingUsesOneUnpinnedGreetingAndPersistsCertificate() = runTest {
+    fun newCredentialsAreNotSavedAndConnectDoesNotSucceedUntilHostProtocolReplies() = runTest {
         val factory = FakeSocketFactory()
         val store = MemoryCredentialStore()
-        val actor = ConnectionActor(
-            factory,
-            store,
-            backgroundScope,
-            deviceName = "Test device",
-        )
-        val result = async {
-            actor.pair("host", 4001, "ABCD-EFGH")
-        }
-        runCurrent()
-
-        assertNull(factory.latest.pin)
-        val certificate = byteArrayOf(4, 5, 6)
-        factory.latest.connected(certificate)
-        runCurrent()
-        assertEquals(
-            """{"op":"pair","code":"ABCD-EFGH","name":"Test device","_xd_request":1}""" + "\n",
-            factory.latest.writes.single().decodeToString(),
-        )
-
-        factory.latest.receive("""{"ok":true,"token":"new-token","device":"Workstation"}""")
-        runCurrent()
-        runCurrent()
-
-        assertEquals(PairResult.Success("Workstation"), result.await())
-        assertEquals(Link.Up("Workstation"), actor.link.value)
-        assertEquals("new-token", store.load()?.token)
-        assertContentEquals(certificate, store.load()?.certificateDer)
-        assertEquals(1, factory.latest.writes.size)
-    }
-
-    @Test
-    fun invalidPairingNameCompletesWithFailure() = runTest {
-        val factory = FakeSocketFactory()
-        val actor = ConnectionActor(
-            factory,
-            MemoryCredentialStore(),
-            backgroundScope,
-            deviceName = " ",
-        )
-        val result = async {
-            actor.pair("host", 4001, "ABCD-EFGH")
-        }
+        val actor = ConnectionActor(factory, store, backgroundScope)
+        val request = connection(hostKey = SshHostKey("ssh-ed25519", byteArrayOf(1), "SHA256:new"))
+        val result = async { actor.connect(request) }
         runCurrent()
 
         factory.latest.connected()
         runCurrent()
 
-        val failure = assertIs<PairResult.Failure>(result.await())
-        assertEquals("Device name must not be blank", failure.message)
-        assertEquals(Link.Idle, actor.link.value)
-        assertTrue(factory.latest.closed)
+        assertFalse(result.isCompleted)
+        assertNull(store.load())
+        assertIs<Link.Connecting>(actor.link.value)
+        assertEquals(1, factory.latest.writes.size)
+        assertEquals("tree", factory.latest.writeText().substringAfter("\"op\":\"").substringBefore("\""))
+
+        factory.latest.receive(treeReply())
+        runCurrent()
+
+        assertEquals(ConnectResult.Success("alice@host"), result.await())
+        val saved = store.load()?.connection
+        assertEquals(request.copy(hostKey = null), saved?.copy(hostKey = null))
+        assertEquals(request.hostKey?.algorithm, saved?.hostKey?.algorithm)
+        assertEquals(request.hostKey?.fingerprint, saved?.hostKey?.fingerprint)
+        assertContentEquals(request.hostKey?.encoded, saved?.hostKey?.encoded)
+        assertEquals(Link.Up("alice@host"), actor.link.value)
     }
 
     @Test
-    fun backgroundingCompletesAndClearsPairingAttempt() = runTest {
+    fun newConnectionClosedBeforeHostProtocolReplyFailsWithoutSavingOrRetrying() = runTest {
+        val factory = FakeSocketFactory()
+        val store = MemoryCredentialStore()
+        val actor = ConnectionActor(factory, store, backgroundScope)
+        val result = async {
+            actor.connect(connection(hostKey = SshHostKey("ssh-ed25519", byteArrayOf(1), "SHA256:new")))
+        }
+        runCurrent()
+
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.fail(message = "xd-host missing")
+        runCurrent()
+
+        val failure = assertIs<ConnectResult.Failure>(result.await())
+        assertEquals("xd-host missing", failure.message)
+        assertNull(store.load())
+        assertEquals(Link.Idle, actor.link.value)
+        advanceTimeBy(300_000)
+        runCurrent()
+        assertEquals(1, factory.sockets.size)
+    }
+
+    @Test
+    fun unknownSshHostKeyRequiresExplicitConfirmationWithoutSavingCredentials() = runTest {
+        val factory = FakeSocketFactory()
+        val store = MemoryCredentialStore()
+        val actor = ConnectionActor(factory, store, backgroundScope)
+        val request = SshConnection(
+            host = "host",
+            port = 22,
+            username = "alice",
+            authentication = SshAuthentication.Password("secret"),
+        )
+        val result = async {
+            actor.connect(request)
+        }
+        runCurrent()
+
+        assertEquals(request, factory.latest.connection)
+        val hostKey = SshHostKey(
+            algorithm = "ssh-ed25519",
+            encoded = byteArrayOf(4, 5, 6),
+            fingerprint = "SHA256:example",
+        )
+        factory.latest.fail(
+            kind = SocketFailureKind.HOST_KEY_UNKNOWN,
+            message = "Verify host key",
+            hostKey = hostKey,
+        )
+        runCurrent()
+
+        assertEquals(ConnectResult.HostKeyVerificationRequired(hostKey), result.await())
+        assertNull(store.load())
+        assertEquals(Link.Idle, actor.link.value)
+        assertTrue(factory.latest.writes.isEmpty())
+    }
+
+    @Test
+    fun backgroundingCompletesAndClearsConnectionAttempt() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val result = async {
-            actor.pair("host", 4001, "ABCD-EFGH")
+            actor.connect(connection())
         }
         runCurrent()
 
         actor.goBackground()
         runCurrent()
 
-        val failure = assertIs<PairResult.Failure>(result.await())
+        val failure = assertIs<ConnectResult.Failure>(result.await())
         assertTrue(failure.message.contains("background"))
         assertEquals(Link.Idle, actor.link.value)
         assertTrue(factory.latest.closed)
@@ -158,7 +194,7 @@ class ConnectionActorTest {
     }
 
     @Test
-    fun pinMismatchIsFatalAndNeverRetries() = runTest {
+    fun hostKeyMismatchIsFatalAndNeverRetries() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(
             factory,
@@ -167,11 +203,11 @@ class ConnectionActorTest {
         )
         runCurrent()
 
-        factory.latest.fail(SocketFailureKind.PIN_MISMATCH, "certificate changed")
+        factory.latest.fail(SocketFailureKind.HOST_KEY_MISMATCH, "host key changed")
         runCurrent()
         val fatal = assertIs<Link.Fatal>(actor.link.value)
 
-        assertEquals(FatalReason.PIN_MISMATCH, fatal.reason)
+        assertEquals(FatalReason.HOST_KEY_MISMATCH, fatal.reason)
         advanceTimeBy(300_000)
         runCurrent()
         assertEquals(1, factory.sockets.size)
@@ -187,7 +223,7 @@ class ConnectionActorTest {
         )
         runCurrent()
 
-        factory.latest.fail(SocketFailureKind.PIN_MISMATCH, "certificate changed")
+        factory.latest.fail(SocketFailureKind.HOST_KEY_MISMATCH, "host key changed")
         runCurrent()
         actor.goBackground()
         runCurrent()
@@ -195,7 +231,7 @@ class ConnectionActorTest {
         runCurrent()
 
         assertEquals(
-            FatalReason.PIN_MISMATCH,
+            FatalReason.HOST_KEY_MISMATCH,
             assertIs<Link.Fatal>(actor.link.value).reason,
         )
         assertEquals(1, factory.sockets.size)
@@ -236,7 +272,7 @@ class ConnectionActorTest {
         assertIs<Link.Up>(actor.link.value)
 
         // The abandoned slot must not swallow a later caller's reply. Ids run
-        // hello=1, slow=2, next=3.
+        // readiness=1, slow=2, next=3.
         val next = async { actor.call(com.restartfu.xd.protocol.Ops.ping()) }
         runCurrent()
         factory.latest.receive("""{"ok":true,"answer":"pong","_xd_request":3}""")
@@ -315,70 +351,6 @@ class ConnectionActorTest {
         assertTrue(factory.latest.closed)
     }
 
-    @Test
-    fun malformedPairingReplyFailsInsteadOfLeavingCallerWaiting() = runTest {
-        val factory = FakeSocketFactory()
-        val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
-        val result = async {
-            actor.pair("host", 4001, "ABCD-EFGH")
-        }
-        runCurrent()
-        factory.latest.connected()
-        runCurrent()
-
-        factory.latest.receive("not-json")
-        runCurrent()
-
-        assertIs<PairResult.Failure>(result.await())
-        assertEquals(FatalReason.PROTOCOL, assertIs<Link.Fatal>(actor.link.value).reason)
-    }
-
-    @Test
-    fun pairingGreetingTimesOut() = runTest {
-        val factory = FakeSocketFactory()
-        val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
-        val result = async {
-            actor.pair("host", 4001, "ABCD-EFGH")
-        }
-        runCurrent()
-        factory.latest.connected()
-        runCurrent()
-
-        advanceTimeBy(15_000)
-        runCurrent()
-
-        val failure = assertIs<PairResult.Failure>(result.await())
-        assertTrue(failure.message.contains("Timed out", ignoreCase = true))
-        assertEquals(Link.Idle, actor.link.value)
-        assertTrue(factory.latest.closed)
-    }
-
-    @Test
-    fun refusedPairingCanBeRetried() = runTest {
-        val factory = FakeSocketFactory()
-        val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
-        val first = async {
-            actor.pair("host", 4001, "BAD1-CODE")
-        }
-        runCurrent()
-        factory.latest.connected()
-        runCurrent()
-        factory.latest.receive("""{"ok":false,"error":"expired code"}""")
-        runCurrent()
-
-        assertIs<PairResult.Failure>(first.await())
-        assertEquals(Link.Idle, actor.link.value)
-
-        val second = async {
-            actor.pair("host", 4001, "ABCD-EFGH")
-        }
-        runCurrent()
-        assertEquals(2, factory.sockets.size)
-        actor.goBackground()
-        runCurrent()
-        assertIs<PairResult.Failure>(second.await())
-    }
-
     private suspend fun kotlinx.coroutines.test.TestScope.connectedActor(
         factory: FakeSocketFactory,
     ): ConnectionActor {
@@ -390,19 +362,25 @@ class ConnectionActorTest {
         runCurrent()
         factory.latest.connected()
         runCurrent()
-        factory.latest.receive("""{"ok":true,"device":"Pixel","version":1}""")
-        runCurrent()
+        factory.latest.receive(treeReply())
         runCurrent()
         assertIs<Link.Up>(actor.link.value)
         return actor
     }
 
     private fun credentials(
-        certificate: ByteArray = byteArrayOf(1, 2, 3),
+        hostKey: ByteArray = byteArrayOf(1, 2, 3),
     ) = StoredCredentials(
-        host = "host",
-        port = 4001,
-        token = "token",
-        certificateDer = certificate,
+        connection(hostKey = SshHostKey("ssh-ed25519", hostKey, "SHA256:test")),
     )
+
+    private fun connection(hostKey: SshHostKey? = null) = SshConnection(
+        host = "host",
+        port = 22,
+        username = "alice",
+        authentication = SshAuthentication.Password("secret"),
+        hostKey = hostKey,
+    )
+
+    private fun treeReply() = """{"ok":true,"nodes":[],"_xd_request":1}"""
 }

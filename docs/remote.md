@@ -49,6 +49,7 @@ and any restrictions required for that account.
 
 ## Mobile
 
-The old TLS pairing transport is not part of this desktop architecture. The
-experimental mobile client is documented separately in [mobile.md](mobile.md)
-while its transport is redesigned around the new SSH-only model.
+Android uses the same SSH-only model through an in-process SSH client. It accepts
+password or imported private-key authentication, requires explicit SHA-256 host-key
+fingerprint confirmation before authentication, pins the exact host key, and runs
+`xd-host stdio` through an SSH exec channel. See [mobile.md](mobile.md).

@@ -5,20 +5,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 
 @Serializable
-public data class PairReply(
-    val ok: Boolean,
-    val token: String,
-    val device: String = "Unknown device",
-)
-
-@Serializable
-public data class HelloReply(
-    val ok: Boolean,
-    val device: String,
-    val version: Int,
-)
-
-@Serializable
 public data class FolderReply(
     val id: String,
     val name: String,

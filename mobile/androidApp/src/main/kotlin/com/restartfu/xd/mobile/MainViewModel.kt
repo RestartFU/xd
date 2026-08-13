@@ -1,12 +1,16 @@
 package com.restartfu.xd.mobile
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.restartfu.xd.XdClient
-import com.restartfu.xd.net.PairResult
+import com.restartfu.xd.credentials.SshAuthentication
+import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.credentials.SshHostKey
+import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.ChatOption
@@ -15,6 +19,7 @@ import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -24,6 +29,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 
 data class ShortcutEditorState(
     val folderId: String?,
@@ -41,9 +47,20 @@ data class CreatedDirectSession(
     val title: String,
 )
 
+data class PendingHostKeyConfirmation(
+    val hostKey: SshHostKey,
+    val host: String,
+    val port: Int,
+    val username: String,
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     val client: XdClient = (application as XdApplication).client
-    private val _pairing = MutableStateFlow(false)
+    private val _connecting = MutableStateFlow(false)
+    private val _pendingHostKey = MutableStateFlow<PendingHostKeyConfirmation?>(null)
+    private val _privateKeyName = MutableStateFlow<String?>(null)
+    private var pendingConnection: SshConnection? = null
+    private var privateKeyBytes: ByteArray? = null
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
     private val _creatingWorkspace = MutableStateFlow(false)
@@ -55,7 +72,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _error = MutableStateFlow<String?>(null)
     private val _shortcutEditor = MutableStateFlow<ShortcutEditorState?>(null)
 
-    val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
+    val connecting: StateFlow<Boolean> = _connecting.asStateFlow()
+    val pendingHostKey: StateFlow<PendingHostKeyConfirmation?> = _pendingHostKey.asStateFlow()
+    val privateKeyName: StateFlow<String?> = _privateKeyName.asStateFlow()
     val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
@@ -70,28 +89,103 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val hostError: StateFlow<String?> = _hostError.asStateFlow()
     val hostBusy: StateFlow<Boolean> = _updating.asStateFlow()
 
-    fun pair(
+    fun connect(
         host: String,
         port: Int,
-        code: String,
+        username: String,
+        password: String,
+        usePrivateKey: Boolean,
+        passphrase: String,
     ) {
-        if (_pairing.value) return
-        _pairing.value = true
+        val authentication = if (usePrivateKey) {
+            val key = privateKeyBytes
+            if (key == null) {
+                _error.value = "Choose an SSH private key"
+                return
+            }
+            SshAuthentication.PrivateKey(key.copyOf(), passphrase.ifEmpty { null })
+        } else {
+            SshAuthentication.Password(password)
+        }
+        startConnection(SshConnection(host, port, username, authentication))
+    }
+
+    fun importPrivateKey(uri: Uri, displayName: String?) {
+        viewModelScope.launch {
+            try {
+                val bytes = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver.openInputStream(uri)?.use {
+                        it.readBytes()
+                    } ?: error("Could not open the selected private key")
+                }
+                require(bytes.isNotEmpty()) { "The selected private key is empty" }
+                clearPrivateKey()
+                privateKeyBytes = bytes
+                _privateKeyName.value = displayName ?: "Imported private key"
+                _error.value = null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: "Could not import the private key"
+            }
+        }
+    }
+
+    fun clearPrivateKey() {
+        privateKeyBytes?.fill(0)
+        privateKeyBytes = null
+        _privateKeyName.value = null
+    }
+
+    fun confirmHostKey() {
+        val connection = pendingConnection ?: return
+        _pendingHostKey.value = null
+        pendingConnection = null
+        startConnection(connection)
+    }
+
+    fun cancelHostKeyConfirmation() {
+        clearPendingConnection()
+    }
+
+    private fun startConnection(connection: SshConnection) {
+        if (_connecting.value) return
+        clearPendingConnection()
+        _connecting.value = true
         _error.value = null
         viewModelScope.launch {
             try {
-                when (val result = client.pair(host, port, code)) {
-                    is PairResult.Success -> Unit
-                    is PairResult.Failure -> _error.value = result.message
+                when (val result = client.connect(connection)) {
+                    is ConnectResult.Success -> clearPrivateKey()
+                    is ConnectResult.HostKeyVerificationRequired -> {
+                        pendingConnection = connection.copy(hostKey = result.hostKey)
+                        _pendingHostKey.value = PendingHostKeyConfirmation(
+                            hostKey = result.hostKey,
+                            host = connection.host,
+                            port = connection.port,
+                            username = connection.username,
+                        )
+                    }
+                    is ConnectResult.Failure -> _error.value = result.message
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not pair with the host"
+                _error.value = error.message ?: "Could not connect over SSH"
             } finally {
-                _pairing.value = false
+                _connecting.value = false
             }
         }
+    }
+
+    private fun clearPendingConnection() {
+        val connection = pendingConnection
+        pendingConnection = null
+        val authentication = connection?.authentication
+        if (authentication is SshAuthentication.PrivateKey) {
+            authentication.bytes.fill(0)
+        }
+        _pendingHostKey.value = null
     }
 
     fun forget() {

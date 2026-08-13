@@ -5,7 +5,10 @@ import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.net.FakeSocketFactory
 import com.restartfu.xd.net.FakeSocket
 import com.restartfu.xd.net.Link
-import com.restartfu.xd.net.PairResult
+import com.restartfu.xd.credentials.SshAuthentication
+import com.restartfu.xd.credentials.SshConnection
+import com.restartfu.xd.credentials.SshHostKey
+import com.restartfu.xd.net.ConnectResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -21,41 +24,34 @@ import kotlinx.coroutines.test.runTest
 @OptIn(ExperimentalCoroutinesApi::class)
 class XdClientVerticalSliceTest {
     @Test
-    fun blankDeviceNameIsRejected() = runTest {
+    fun blankSshUsernameIsRejected() = runTest {
+        val client = XdClient(FakeSocketFactory(), MemoryCredentialStore(), backgroundScope)
         assertFailsWith<IllegalArgumentException> {
-            XdClient(
-                FakeSocketFactory(),
-                MemoryCredentialStore(),
-                backgroundScope,
-                deviceName = " ",
-            )
+            client.connect(testConnection().copy(username = " "))
         }
     }
 
     @Test
-    fun pairTreeChatSendAndStream() = runTest {
+    fun connectTreeChatSendAndStream() = runTest {
         val factory = FakeSocketFactory()
         val client = XdClient(
             factory,
             MemoryCredentialStore(),
             backgroundScope,
-            deviceName = "Test device",
         )
-        val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH")
+        val connecting = async {
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
-        socket.connected(byteArrayOf(1, 2, 3))
+        socket.connected()
         runCurrent()
-        assertEquals("pair", socket.opAt(0))
-        assertTrue(socket.writes[0].decodeToString().contains(""""name":"Test device"""))
-        socket.receive("""{"ok":true,"token":"mobile-token","device":"Workstation"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        val pair = assertIs<PairResult.Success>(pairing.await())
-        assertEquals("Workstation", pair.deviceName)
-        assertEquals(Link.Up("Workstation"), client.link.value)
+        val connected = assertIs<ConnectResult.Success>(connecting.await())
+        assertEquals("alice@host", connected.remoteName)
+        assertEquals(Link.Up("alice@host"), client.link.value)
 
         assertEquals("tree", socket.opAt(1))
         socket.receive(
@@ -175,16 +171,17 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH")
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
 
         assertEquals("tree", socket.opAt(1))
         socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
@@ -220,16 +217,17 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH")
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
         socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
         runCurrent()
 
@@ -254,16 +252,17 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH")
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
 
         socket.receive("""{"ok":true,"folders":"invalid","chats":[]}""")
         runCurrent()
@@ -281,16 +280,17 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH", "Pixel")
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
         socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
         runCurrent()
 
@@ -317,16 +317,17 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH", "Pixel")
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
         socket.receive(
             """{"ok":true,"folders":[{"id":"source","name":"Source"},{"id":"target","name":"Target"}],"chats":[{"id":"chat","folder":"source","title":"Chat","backend":"codex","working":false}]}""",
         )
@@ -366,16 +367,17 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH", "Pixel")
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
         socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
         runCurrent()
 
@@ -400,16 +402,17 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH")
+            client.connect(testConnection())
         }
         runCurrent()
 
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
         socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
         runCurrent()
 
@@ -434,15 +437,16 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH")
+            client.connect(testConnection())
         }
         runCurrent()
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
 
         socket.receive(treeReply(working = false))
         runCurrent()
@@ -473,15 +477,16 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("host", 4001, "ABCD-EFGH")
+            client.connect(testConnection())
         }
         runCurrent()
         val socket = factory.latest
         socket.connected()
         runCurrent()
-        socket.receive("""{"ok":true,"token":"mobile-token"}""")
+        socket.receiveReadinessTreeReply()
         runCurrent()
-        assertIs<PairResult.Success>(pairing.await())
+        runCurrent()
+        assertIs<ConnectResult.Success>(pairing.await())
         socket.receive(treeReply(working = false))
         runCurrent()
 
@@ -508,7 +513,7 @@ class XdClientVerticalSliceTest {
     }
 
     private fun FakeSocket.countOps(op: String): Int =
-        writes.count { it.decodeToString().contains(""""op":"$op"""") }
+        writes.drop(1).count { it.decodeToString().contains(""""op":"$op"""") }
 
     private fun chatReply(
         working: Boolean,
@@ -534,4 +539,12 @@ class XdClientVerticalSliceTest {
         """{"ok":true,"folders":[{"id":"folder","name":"Work"}],""" +
             """"chats":[{"id":"chat","folder":"folder","title":"Hello",""" +
             """"backend":"codex","working":$working}]}"""
+    private fun testConnection() = SshConnection(
+        host = "host",
+        port = 22,
+        username = "alice",
+        authentication = SshAuthentication.Password("secret"),
+        hostKey = SshHostKey("ssh-ed25519", byteArrayOf(1, 2, 3), "SHA256:test"),
+    )
+
 }

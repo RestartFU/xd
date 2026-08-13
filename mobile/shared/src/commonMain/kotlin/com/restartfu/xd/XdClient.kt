@@ -1,10 +1,11 @@
 package com.restartfu.xd
 
 import com.restartfu.xd.credentials.CredentialStore
+import com.restartfu.xd.credentials.SshConnection
 import com.restartfu.xd.model.TreeSnapshot
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
-import com.restartfu.xd.net.PairResult
+import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocketFactory
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
@@ -32,22 +33,15 @@ import kotlinx.serialization.json.JsonPrimitive
 import com.restartfu.xd.terminal.TerminalEvent
 import com.restartfu.xd.terminal.TerminalWire
 
-private fun validatedDeviceName(name: String): String {
-    require(name.isNotBlank()) { "Device name must not be blank" }
-    return name
-}
-
 public class XdClient(
     socketFactory: PlatformSocketFactory,
     credentials: CredentialStore,
     private val scope: CoroutineScope,
-    deviceName: String = automaticDeviceName(),
 ) {
     private val actor = ConnectionActor(
         socketFactory,
         credentials,
         scope,
-        validatedDeviceName(deviceName),
     )
     private val treeStore = TreeStore(actor)
     private val treeRefreshRequests = Channel<Unit>(Channel.CONFLATED)
@@ -121,22 +115,8 @@ public class XdClient(
         actor.goBackground()
     }
 
-    public suspend fun pair(
-        host: String,
-        port: Int,
-        code: String,
-    ): PairResult = actor.pair(host, port, code)
-
-    @Deprecated(
-        "The device name comes from the connecting platform; the supplied name is ignored.",
-        ReplaceWith("pair(host, port, code)"),
-    )
-    public suspend fun pair(
-        host: String,
-        port: Int,
-        code: String,
-        _deviceName: String,
-    ): PairResult = pair(host, port, code)
+    public suspend fun connect(connection: SshConnection): ConnectResult =
+        actor.connect(connection)
 
     public suspend fun forget() {
         actor.forget()
@@ -177,7 +157,7 @@ public class XdClient(
     }
 
     /**
-     * Asks about, or performs, an update of the host this client is paired
+     * Asks about, or performs, an update of the connected host
      * with. Connection-level rather than chat-level: it is the machine being
      * updated, not a conversation.
      */
