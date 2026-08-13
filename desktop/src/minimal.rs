@@ -4,6 +4,7 @@ use xd_desktop::model::{ChatSummary, Folder};
 pub(crate) enum AgentCli {
     Codex,
     Claude,
+    Jcode,
 }
 
 impl AgentCli {
@@ -12,6 +13,8 @@ impl AgentCli {
             Some(Self::Codex)
         } else if backend.eq_ignore_ascii_case("claude") {
             Some(Self::Claude)
+        } else if backend.eq_ignore_ascii_case("jcode") {
+            Some(Self::Jcode)
         } else {
             None
         }
@@ -21,6 +24,7 @@ impl AgentCli {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
+            Self::Jcode => "JCode",
         }
     }
 
@@ -28,6 +32,7 @@ impl AgentCli {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Jcode => "jcode",
         }
     }
 
@@ -35,6 +40,7 @@ impl AgentCli {
         match agent {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
+            "jcode" => Some(Self::Jcode),
             _ => None,
         }
     }

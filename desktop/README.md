@@ -3,9 +3,9 @@
 This directory contains xd's production Rust/GPUI desktop client for Linux,
 macOS, and Windows.
 
-The application presents workspace-organized Codex, Claude Code, and terminal
+The application presents workspace-organized Codex, Claude Code, JCode, and terminal
 sessions. It owns navigation, cached UI state, terminal emulation, chat input,
-themes, voice input, diffs, and the desktop window. Persistent chat/workspace
+themes, diffs, and the desktop window. Persistent chat/workspace
 state and agent orchestration are provided by the bundled `xd-host` process.
 
 ## Process model
@@ -15,7 +15,7 @@ There is no background xd daemon or listening socket.
 - Local mode starts `xd-host stdio` as a child of the desktop and stops it when
   the window closes.
 - Remote mode runs `xd-host stdio` through the user's persisted SSH command.
-- Codex, Claude Code, and terminal tabs run in bundled tmux sessions on the
+- Codex, Claude Code, JCode, and terminal tabs run in bundled tmux sessions on the
   selected local or remote machine so they can be reattached after reconnects.
 - Local and remote modes never coexist in one window.
 
@@ -32,6 +32,6 @@ docker build --target gpui-desktop-check .
 Every push to `master` replaces the rolling Linux and macOS nightly. Tagged
 releases use the stable application id and install beside the nightly.
 
-The bundle includes the GPUI desktop, `xd-host`, pinned Codex and Claude Code
-executables, bundled tmux, and the private Whisper runtime. Stable and nightly
-installation commands are in the main [README](../README.md#install).
+The bundle includes the GPUI desktop, `xd-host`, and tmux. Install Codex and/or
+Claude Code separately and make the commands available on `PATH`. Stable and
+nightly installation commands are in the main [README](../README.md#install).

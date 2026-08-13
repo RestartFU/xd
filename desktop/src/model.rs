@@ -244,7 +244,6 @@ pub struct AppModel {
     pub access: String,
     pub plan: bool,
     pub fast: bool,
-    pub claude_mode: bool,
     pub context_used: u64,
     pub context_window: u64,
     pub auth_state: String,
@@ -358,7 +357,6 @@ impl AppModel {
             self.access.clear();
             self.plan = false;
             self.fast = false;
-            self.claude_mode = false;
             self.context_used = 0;
             self.context_window = 0;
             self.auth_state.clear();
@@ -393,7 +391,6 @@ impl AppModel {
         self.access.clear();
         self.plan = false;
         self.fast = false;
-        self.claude_mode = false;
         self.context_used = 0;
         self.context_window = 0;
         self.auth_state.clear();
@@ -442,11 +439,6 @@ impl AppModel {
         self.plan = body.get("plan").and_then(Value::as_bool).unwrap_or(false);
         self.fast =
             self.backend == "codex" && body.get("fast").and_then(Value::as_bool).unwrap_or(false);
-        self.claude_mode = self.backend == "codex"
-            && body
-                .get("claude_mode")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
         self.context_used = body
             .get("context_used")
             .and_then(Value::as_u64)
@@ -905,7 +897,6 @@ impl AppModel {
             access: "edit".into(),
             plan: false,
             fast: false,
-            claude_mode: false,
             context_used: 16_948,
             context_window: 272_000,
             auth_state: "signed-in".into(),
@@ -1604,7 +1595,7 @@ mod tests {
             .unwrap();
         model.apply_chat(&json!({
             "backend": "claude", "model": "claude-opus-5", "effort": "high",
-            "access": "edit", "plan": true, "fast": true, "claude_mode": true,
+            "access": "edit", "plan": true, "fast": true,
             "queue": [], "working": false,
             "context_used": 21_335, "context_window": 1_000_000
         }));
@@ -1618,15 +1609,13 @@ mod tests {
         assert_eq!(model.context_window, 1_000_000);
         assert!(model.plan);
         assert!(!model.fast);
-        assert!(!model.claude_mode);
 
         model.apply_chat(&json!({
             "backend": "codex", "model": "gpt-5.6-sol", "effort": "max",
-            "access": "edit", "plan": false, "fast": true, "claude_mode": true,
+            "access": "edit", "plan": false, "fast": true,
             "queue": [], "working": false
         }));
         assert!(model.fast);
-        assert!(model.claude_mode);
         assert_eq!(model.context_used, 0);
         assert_eq!(model.context_window, 0);
     }

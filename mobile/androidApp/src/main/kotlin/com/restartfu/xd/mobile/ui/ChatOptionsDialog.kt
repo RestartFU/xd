@@ -62,7 +62,6 @@ internal fun ChatOptionsDialog(
     val efforts = catalog.firstOrNull { it.id == state.backend }
         ?.efforts
         .orEmpty()
-        .filterNot { state.claudeMode && it == "ultra" }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -94,14 +93,6 @@ internal fun ChatOptionsDialog(
                         checked = state.fast,
                         enabled = !busy,
                         onCheckedChange = model::setFast,
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    OptionSwitch(
-                        title = "Claude mode",
-                        description = "Run Codex through Claude Code's agent harness.",
-                        checked = state.claudeMode,
-                        enabled = !busy,
-                        onCheckedChange = model::setClaudeMode,
                     )
                 }
 

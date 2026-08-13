@@ -186,7 +186,7 @@ private fun MinimalProjectsHome(
                 item("projects-label") { SectionLabel("PROJECTS") }
                 if (projects.isEmpty()) {
                     item("empty-projects") {
-                        EmptyCard("Create a workspace, then start a Codex or Claude session.")
+                        EmptyCard("Create a workspace, then start a Codex, Claude, or JCode session.")
                     }
                 } else {
                     items(projects, key = MinimalProject::id) { project ->
@@ -229,7 +229,7 @@ private fun MinimalProjectsHome(
                     }
                     if (sessions.isEmpty()) {
                         item("empty-sessions") {
-                            EmptyCard("No sessions yet. Start one with Codex or Claude.")
+                            EmptyCard("No sessions yet. Start one with Codex, Claude, or JCode.")
                         }
                     } else {
                         items(sessions, key = MinimalSession::id) { session ->

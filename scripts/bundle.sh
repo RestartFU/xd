@@ -5,7 +5,7 @@
 #   bundle.sh <staging-dir> <out-dir> <launcher-template>
 #
 # The result is a directory that can be copied to any x86_64 Linux host and run
-# via ./xd.sh, with zero dependency on the host's own GTK/glib stack.
+# via ./xd.sh, with zero dependency on the host's native graphics stack.
 #
 # Paths that must be absolute at runtime are written as @BUNDLE@ placeholders
 # and substituted by the launcher, which is what makes the tree relocatable.
@@ -17,32 +17,9 @@ OUT="${2:?output dir}"
 LAUNCHER="${3:?launcher template}"
 
 ARCH_DIR=/usr/lib/x86_64-linux-gnu
-PIXBUF_LOADERS="$ARCH_DIR/gdk-pixbuf-2.0/2.10.0/loaders"
-
 mkdir -p "$OUT"/{bin,lib,libexec,share,etc}
-
-# Deliberately empty: GIO_MODULE_DIR points here so the app cannot pick up the
-# host's GIO modules. See scripts/xd.sh.
-mkdir -p "$OUT/lib/gio/modules"
 mkdir -p "$OUT/lib/ossl-modules"
 cp -a "$ARCH_DIR"/ossl-modules/*.so "$OUT/lib/ossl-modules/" 2>/dev/null || true
-
-# CPAL opens Linux microphones through ALSA. GNOME routes ALSA's `default`
-# device into PipeWire, but that route is a dlopened plugin rather than a
-# dependency ldd can discover from the desktop binary. Bundle the plugin built
-# for our own libasound; loading the host's copy is not ABI-safe across distros.
-mkdir -p "$OUT/lib/alsa-lib"
-for plugin in \
-  libasound_module_ctl_pipewire.so \
-  libasound_module_pcm_pipewire.so
-do
-  install -m0755 "$ARCH_DIR/alsa-lib/$plugin" "$OUT/lib/alsa-lib/$plugin"
-done
-mkdir -p "$OUT/lib/spa-0.2"
-cp -a "$ARCH_DIR/spa-0.2/." "$OUT/lib/spa-0.2/"
-mkdir -p "$OUT/lib/pipewire-0.3"
-cp -a "$ARCH_DIR/pipewire-0.3/." "$OUT/lib/pipewire-0.3/"
-cp -a /usr/share/pipewire "$OUT/share/"
 
 install -Dm755 "$STAGE/usr/bin/xd" "$OUT/bin/xd"
 install -Dm755 "$STAGE/usr/bin/git" "$OUT/bin/git"
@@ -70,18 +47,6 @@ for helper in "$OUT/libexec/git-core-real/"*; do
   fi
 done
 
-# --- gdk-pixbuf loaders (dlopened, so they are extra closure roots) ---------
-mkdir -p "$OUT/lib/gdk-pixbuf-2.0/loaders"
-cp -a "$PIXBUF_LOADERS"/*.so "$OUT/lib/gdk-pixbuf-2.0/loaders/"
-
-# Debian keeps the query tool out of $PATH, under the gdk-pixbuf libdir.
-QUERY_LOADERS=$(command -v gdk-pixbuf-query-loaders \
-  || echo "$ARCH_DIR/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders")
-
-"$QUERY_LOADERS" \
-  | sed "s|$PIXBUF_LOADERS|@BUNDLE@/lib/gdk-pixbuf-2.0/loaders|g" \
-  > "$OUT/etc/loaders.cache.in"
-
 # --- shared library closure -------------------------------------------------
 # ldd already resolves transitively, so one pass over every dlopen root is
 # enough. NSS modules are added by hand: they are opened by name, never linked.
@@ -89,19 +54,11 @@ mapfile -t roots < <(printf '%s\n' \
   "$OUT/bin/xd" \
   "$OUT/libexec/xd-host" \
   "$OUT/libexec/tmux" \
-  "$OUT/libexec/claude-bin" \
-  "$OUT/libexec/claude-code-proxy" \
   "$OUT/libexec/curl-bin" \
   "$OUT/libexec/git-bin" \
   "$OUT/libexec/git-core-real"/* \
   "$OUT/libexec/openssl-bin" \
-  "$OUT/libexec/whisper-bin" \
-  "$OUT/libexec/whisper-server-bin" \
   "$OUT/lib/ossl-modules"/*.so \
-  "$OUT/lib/alsa-lib"/*.so \
-  "$OUT/lib/spa-0.2"/*/*.so \
-  "$OUT/lib/pipewire-0.3"/*.so \
-  "$OUT/lib/gdk-pixbuf-2.0/loaders"/*.so \
   "$ARCH_DIR"/libnss_files.so.2 \
   "$ARCH_DIR"/libnss_dns.so.2)
 
@@ -121,28 +78,18 @@ done
 # The dynamic loader itself: the host may not have one at the usual path.
 cp -L "$ARCH_DIR/ld-linux-x86-64.so.2" "$OUT/lib/ld-linux-x86-64.so.2"
 
-# --- GSettings schemas (ours + GTK's) --------------------------------------
-mkdir -p "$OUT/share/glib-2.0/schemas"
-cp -a /usr/share/glib-2.0/schemas/*.xml "$OUT/share/glib-2.0/schemas/" 2>/dev/null || true
-cp -a "$STAGE/usr/share/glib-2.0/schemas/"*.xml "$OUT/share/glib-2.0/schemas/"
-glib-compile-schemas "$OUT/share/glib-2.0/schemas"
-
-# --- icon themes ------------------------------------------------------------
+# --- application icon and cursor theme -------------------------------------
 mkdir -p "$OUT/share/icons"
-cp -a /usr/share/icons/Adwaita "$OUT/share/icons/"
-cp -a /usr/share/icons/hicolor "$OUT/share/icons/"
+mkdir -p "$OUT/share/icons/Adwaita"
+cp -a /usr/share/icons/Adwaita/index.theme "$OUT/share/icons/Adwaita/"
+cp -a /usr/share/icons/Adwaita/cursors "$OUT/share/icons/Adwaita/"
+mkdir -p "$OUT/share/icons/hicolor"
 cp -a "$STAGE/usr/share/icons/hicolor/." "$OUT/share/icons/hicolor/"
-gtk4-update-icon-cache -q -t -f "$OUT/share/icons/hicolor" 2>/dev/null || true
-
-# --- MIME database ---------------------------------------------------------
-# GdkPixbuf finds the SVG loader through its cache, but GIO must first classify
-# the icon as image/svg+xml. Minimal hosts do not carry a shared MIME database.
-cp -a /usr/share/mime "$OUT/share/mime"
 
 # --- keyboard data ----------------------------------------------------------
 # libxkbcommon compiles the keymap the compositor hands over against these
-# files. Without them GDK ends up with no keymap at all and crashes on the
-# first input event, so they are not optional.
+# files. Without them the window backend has no keymap, so they are not
+# optional.
 mkdir -p "$OUT/share/X11"
 cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
 [ -d /usr/share/X11/locale ] && cp -a /usr/share/X11/locale "$OUT/share/X11/locale"
@@ -154,36 +101,7 @@ cp -a /usr/share/X11/xkb "$OUT/share/X11/xkb"
 mkdir -p "$OUT/share/locale-data"
 cp -a /usr/lib/locale/C.utf8 "$OUT/share/locale-data/"
 
-# --- GLib networking --------------------------------------------------------
-# GIO loads HTTPS support from a module, not from itself.
-mkdir -p "$OUT/lib/gio/modules"
-cp -a "$ARCH_DIR"/gio/modules/libgiognutls.so "$OUT/lib/gio/modules/" 2>/dev/null || \
-  cp -a /usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so "$OUT/lib/gio/modules/"
-for extra in $(ldd /usr/lib/x86_64-linux-gnu/gio/modules/libgiognutls.so \
-                 | awk '/=> \//{print $3}'); do
-  base=$(basename "$extra")
-  [ -e "$OUT/lib/$base" ] || cp -aL "$extra" "$OUT/lib/"
-done
-
-# --- software GL ------------------------------------------------------------
-# Mesa's own llvmpipe, carried whole: rendering is then identical on every
-# machine, and GTK's GL renderer never depends on what the host has. The
-# vendor file needs an absolute path, so it is a template rewritten per
-# launch like the caches above.
 ARCH_LIB=/usr/lib/x86_64-linux-gnu
-for lib in "$ARCH_LIB"/libEGL.so.1* "$ARCH_LIB"/libEGL_mesa.so.0* \
-           "$ARCH_LIB"/libGLdispatch.so.0* "$ARCH_LIB"/libgbm.so.1* \
-           "$ARCH_LIB"/libglapi.so.0* "$ARCH_LIB"/libGLESv2.so.2* \
-           "$ARCH_LIB"/libGL.so.1* "$ARCH_LIB"/libGLX.so.0*; do
-  [ -e "$lib" ] && cp -a "$lib" "$OUT/lib/"
-done
-mkdir -p "$OUT/lib/dri"
-cp -aL "$ARCH_LIB"/dri/*.so "$OUT/lib/dri/" 2>/dev/null || true
-for extra in $(ldd "$ARCH_LIB"/libEGL_mesa.so.0 "$OUT"/lib/dri/*.so 2>/dev/null \
-                 | awk '/=> \//{print $3}' | sort -u); do
-  base=$(basename "$extra")
-  [ -e "$OUT/lib/$base" ] || cp -aL "$extra" "$OUT/lib/"
-done
 # --- Vulkan -----------------------------------------------------------------
 # GPUI renders through Vulkan, and unlike GL the loader finds its driver
 # through JSON manifests on the host. A machine with no manifests -- no
@@ -217,20 +135,12 @@ for extra in $(ldd "$OUT"/lib/libvulkan_*.so 2>/dev/null \
   [ -e "$OUT/lib/$base" ] || cp -aL "$extra" "$OUT/lib/"
 done
 
-cat > "$OUT/etc/egl_vendor.json.in" <<'JSON'
-{
-    "file_format_version" : "1.0.0",
-    "ICD" : { "library_path" : "@BUNDLE@/lib/libEGL_mesa.so.0" }
-}
-JSON
-
 # --- fonts + fontconfig -----------------------------------------------------
 # FONTCONFIG_SYSROOT would isolate the config more thoroughly, but fontconfig
 # reports FC_FILE without the sysroot prefix, so cairo then fails to open every
 # font. Pointing FONTCONFIG_FILE/PATH at the bundle is the workable option.
 mkdir -p "$OUT/share/fonts"
-for dir in /usr/share/fonts/opentype/cantarell /usr/share/fonts/truetype/dejavu \
-           /usr/share/fonts/truetype/inter /usr/share/fonts/opentype/inter \
+for dir in /usr/share/fonts/truetype/dejavu \
            /usr/share/fonts/truetype/jetbrains-mono \
            /usr/share/fonts/truetype/noto; do
   [ -d "$dir" ] && cp -a "$dir" "$OUT/share/fonts/"

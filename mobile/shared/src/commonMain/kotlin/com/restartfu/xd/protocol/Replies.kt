@@ -83,8 +83,6 @@ public data class ChatReply(
     val shortcuts: List<String> = emptyList(),
     val plan: Boolean,
     val fast: Boolean = false,
-    @SerialName("claude_mode")
-    val claudeMode: Boolean = false,
     val queued: String? = null,
     val queue: List<String> = emptyList(),
     val draft: String = "",
@@ -274,11 +272,4 @@ public data class TerminalListReply(
 public data class TerminalOpenReply(
     val ok: Boolean,
     val id: String,
-)
-
-/** Whether the daemon -- not the phone -- has the speech model on disk. */
-@Serializable
-public data class VoiceModelReply(
-    val ok: Boolean,
-    val available: Boolean,
 )

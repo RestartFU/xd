@@ -16,7 +16,6 @@ use crate::{
     EventBus, StateStore,
     agent::{AgentCommand, AgentEvent, AgentParser, TodoItem, TodoUpdate},
     ask::{self, Ask},
-    claude_proxy::ClaudeProxy,
     secrets::SecretsStore,
     storage::TurnSpec,
 };
@@ -40,7 +39,6 @@ struct RuntimeInner {
     next_turn: AtomicU64,
     secrets: Arc<SecretsStore>,
     commands: Mutex<HashMap<String, (String, Vec<String>)>>,
-    claude_proxy: ClaudeProxy,
     /// Agent processes kept between a chat's turns, by chat.
     sessions: Mutex<HashMap<String, AgentSession>>,
     todos: Mutex<HashMap<String, Vec<TodoItem>>>,
@@ -154,7 +152,6 @@ impl TurnRuntime {
                 next_turn: AtomicU64::new(0),
                 secrets,
                 commands: Mutex::new(HashMap::new()),
-                claude_proxy: ClaudeProxy::new(),
                 sessions: Mutex::new(HashMap::new()),
                 todos: Mutex::new(HashMap::new()),
             }),
@@ -175,22 +172,9 @@ impl TurnRuntime {
                 _ => secret_prompt,
             });
         }
-        let mut command_backend = turn.backend.clone();
-        let mut command_model = turn.model.clone();
-        let mut command_effort = turn.effort.clone();
-        if turn.claude_mode {
-            let endpoint = self.inner.claude_proxy.endpoint()?;
-            command_backend = "claude".into();
-            command_model = claude_mode_model(&turn.model, turn.fast);
-            if command_effort == "ultra" {
-                command_effort = "max".into();
-            }
-            for (name, value) in
-                claude_mode_environment(&endpoint, &command_model, turn.context_window)
-            {
-                set_environment(&mut turn.environment, name, value);
-            }
-        }
+        let command_backend = turn.backend.clone();
+        let command_model = turn.model.clone();
+        let command_effort = turn.effort.clone();
         let specification = AgentCommand {
             backend: &command_backend,
             prompt: &turn.prompt,
@@ -199,7 +183,7 @@ impl TurnRuntime {
             model: &command_model,
             effort: &command_effort,
             access: &turn.access,
-            fast: turn.fast && !turn.claude_mode,
+            fast: turn.fast,
             session_id: turn.session_id.as_deref(),
             environment: &turn.environment,
         };
@@ -480,12 +464,7 @@ impl TurnRuntime {
         keeps_process: bool,
     ) {
         let started = Instant::now();
-        let parser_backend = if turn.claude_mode {
-            "claude"
-        } else {
-            &turn.backend
-        };
-        let mut parser = match AgentParser::new(parser_backend) {
+        let mut parser = match AgentParser::new(&turn.backend) {
             Ok(parser) => parser,
             Err(error) => {
                 self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
@@ -947,48 +926,6 @@ fn drain_stderr(stderr: impl Read + Send + 'static, into: Arc<Mutex<String>>) {
     });
 }
 
-fn claude_mode_model(model: &str, fast: bool) -> String {
-    format!(
-        "{}{suffix}[1m]",
-        model,
-        suffix = if fast { "-fast" } else { "" }
-    )
-}
-
-fn claude_mode_environment(
-    endpoint: &str,
-    model: &str,
-    context_window: i64,
-) -> Vec<(String, String)> {
-    [
-        ("ANTHROPIC_BASE_URL", endpoint.to_owned()),
-        ("ANTHROPIC_AUTH_TOKEN", "unused".into()),
-        ("ANTHROPIC_MODEL", model.to_owned()),
-        ("ANTHROPIC_SMALL_FAST_MODEL", "gpt-5.6-luna[1m]".into()),
-        (
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
-            context_window.max(0).to_string(),
-        ),
-        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1".into()),
-        ("CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK", "1".into()),
-        ("DISABLE_AUTOUPDATER", "1".into()),
-    ]
-    .into_iter()
-    .map(|(name, value)| (name.into(), value))
-    .collect()
-}
-
-fn set_environment(environment: &mut Vec<(String, String)>, name: String, value: String) {
-    if let Some((_, current)) = environment
-        .iter_mut()
-        .find(|(existing, _)| existing == &name)
-    {
-        *current = value;
-    } else {
-        environment.push((name, value));
-    }
-}
-
 fn usage_snapshot(
     input: u64,
     output: u64,
@@ -1021,33 +958,6 @@ mod tests {
         progress.set_segment("Half");
         progress.set_segment("Half an ans");
         assert_eq!(*progress.segment.lock().unwrap(), "Half an ans");
-    }
-
-    #[test]
-    fn routes_codex_models_through_the_proxy_alias() {
-        assert_eq!(claude_mode_model("gpt-5.6-sol", false), "gpt-5.6-sol[1m]");
-        assert_eq!(
-            claude_mode_model("gpt-5.6-sol", true),
-            "gpt-5.6-sol-fast[1m]"
-        );
-    }
-
-    #[test]
-    fn proxy_environment_overrides_agent_secrets() {
-        let mut environment = vec![("ANTHROPIC_BASE_URL".into(), "private".into())];
-        for (name, value) in
-            claude_mode_environment("http://127.0.0.1:4321", "gpt-5.6-sol[1m]", 272_000)
-        {
-            set_environment(&mut environment, name, value);
-        }
-        assert_eq!(
-            environment
-                .iter()
-                .find(|(name, _)| name == "ANTHROPIC_BASE_URL")
-                .map(|(_, value)| value.as_str()),
-            Some("http://127.0.0.1:4321")
-        );
-        assert!(environment.contains(&("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "272000".into())));
     }
 
     #[test]

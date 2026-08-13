@@ -6,6 +6,7 @@ public enum class DirectAgent(
 ) {
     CODEX("codex", "Codex"),
     CLAUDE("claude", "Claude"),
+    JCODE("jcode", "JCode"),
     ;
 
     public companion object {

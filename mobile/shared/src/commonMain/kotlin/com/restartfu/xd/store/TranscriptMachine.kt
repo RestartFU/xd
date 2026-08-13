@@ -293,7 +293,6 @@ public object TranscriptMachine {
                 shortcuts = chat.shortcuts,
                 plan = chat.plan,
                 fast = chat.fast,
-                claudeMode = chat.claudeMode,
                 queue = chat.queue,
                 draft = chat.draft,
                 draftRevision = chat.draftRevision,

@@ -44,7 +44,6 @@ internal fun ModelPicker(
     currentBackend: String,
     currentModel: String?,
     currentEffort: String?,
-    claudeMode: Boolean,
     onDismiss: () -> Unit,
 ) {
     val catalog by model.catalog.collectAsStateWithLifecycle()
@@ -57,9 +56,7 @@ internal fun ModelPicker(
     LaunchedEffect(Unit) { model.loadCatalog() }
 
     val effortBackend = catalog.firstOrNull { it.id == effortBackendId }
-    val efforts = effortBackend?.efforts.orEmpty().filterNot {
-        effortBackend?.id == currentBackend && claudeMode && it == "ultra"
-    }
+    val efforts = effortBackend?.efforts.orEmpty()
     val modelReady = effortBackend != null &&
         currentBackend == effortBackend.id &&
         (currentModel ?: effortBackend.defaultModel) == effortModelId

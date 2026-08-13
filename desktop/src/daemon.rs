@@ -59,14 +59,6 @@ pub enum RequestKind {
     RevokeDevice {
         device_id: String,
     },
-    VoiceModel {
-        chat_id: String,
-    },
-    VoiceMutation {
-        chat_id: String,
-        token: String,
-        operation: String,
-    },
     Search {
         query: String,
     },
@@ -519,39 +511,6 @@ impl DaemonHandle {
                 device_id: device_id.to_owned(),
             },
             json!({"op": "revoke-device", "device": device_id}),
-        )
-    }
-
-    pub fn voice_model(&self, chat_id: &str) -> Result<(), String> {
-        self.send(
-            RequestKind::VoiceModel {
-                chat_id: chat_id.to_owned(),
-            },
-            json!({"op": "voice-model", "chat": chat_id}),
-        )
-    }
-
-    pub fn voice_action(
-        &self,
-        operation: &str,
-        chat_id: &str,
-        token: &str,
-        audio: Option<&[u8]>,
-    ) -> Result<(), String> {
-        let mut body = json!({"op": operation, "request": token});
-        if operation != "voice-cancel" {
-            body["chat"] = Value::String(chat_id.to_owned());
-        }
-        if let Some(audio) = audio {
-            body["audio"] = Value::String(STANDARD.encode(audio));
-        }
-        self.send(
-            RequestKind::VoiceMutation {
-                chat_id: chat_id.to_owned(),
-                token: token.to_owned(),
-                operation: operation.to_owned(),
-            },
-            body,
         )
     }
 
@@ -1479,20 +1438,6 @@ impl DaemonHandle {
                 "op": "set-option",
                 "chat": chat_id,
                 "option": "fast",
-                "value": if enabled { "true" } else { "false" },
-            }),
-        )
-    }
-
-    pub fn set_claude_mode(&self, chat_id: &str, enabled: bool) -> Result<(), String> {
-        self.send(
-            RequestKind::SetOption {
-                chat_id: chat_id.to_owned(),
-            },
-            json!({
-                "op": "set-option",
-                "chat": chat_id,
-                "option": "claude-mode",
                 "value": if enabled { "true" } else { "false" },
             }),
         )
@@ -2472,53 +2417,6 @@ mod tests {
                 },
                 ..
             } if folder_id == "folder-1" && title == "Existing worktree"
-        ));
-
-        server.join().unwrap();
-        let _ = fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn streams_voice_chunks_with_chat_and_request_identity() {
-        let directory = env::temp_dir().join(format!("xd-voice-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut request)
-                .unwrap();
-            let request: Value = serde_json::from_str(&request).unwrap();
-            assert_eq!(request["op"], "voice-stream-chunk");
-            assert_eq!(request["chat"], "chat-1");
-            assert_eq!(request["request"], "recording-1");
-            assert_eq!(request["audio"], "AAEC");
-            let request_id = request["_xd_request"].as_u64().unwrap();
-            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
-        });
-
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
-        assert!(matches!(
-            updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
-        ));
-        daemon
-            .voice_action(
-                "voice-stream-chunk",
-                "chat-1",
-                "recording-1",
-                Some(&[0, 1, 2]),
-            )
-            .unwrap();
-        assert!(matches!(
-            updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
-                kind: RequestKind::VoiceMutation { token, operation, .. },
-                ..
-            } if token == "recording-1" && operation == "voice-stream-chunk"
         ));
 
         server.join().unwrap();

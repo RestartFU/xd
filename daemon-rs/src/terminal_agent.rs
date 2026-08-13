@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use crate::agent::{resolve_claude, resolve_codex};
+use crate::agent::{resolve_claude, resolve_codex, resolve_jcode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalAgent {
     Codex,
     Claude,
+    Jcode,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +63,7 @@ impl TerminalAgent {
         match agent {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
+            "jcode" => Some(Self::Jcode),
             _ => None,
         }
     }
@@ -70,6 +72,7 @@ impl TerminalAgent {
         match self {
             Self::Codex => "codex",
             Self::Claude => "claude",
+            Self::Jcode => "jcode",
         }
     }
 
@@ -77,6 +80,7 @@ impl TerminalAgent {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
+            Self::Jcode => "JCode",
         }
     }
 
@@ -84,6 +88,7 @@ impl TerminalAgent {
         match self {
             Self::Codex => resolve_codex(),
             Self::Claude => resolve_claude(),
+            Self::Jcode => resolve_jcode(),
         }
     }
 
@@ -128,6 +133,12 @@ impl TerminalAgent {
                     arguments.push("--dangerously-skip-permissions".into());
                 }
             }
+            Self::Jcode => {
+                if let Some(AgentSession::Resume(session_id)) = session {
+                    arguments.extend(["--resume".into(), session_id.into()]);
+                }
+                arguments.push("--no-update".into());
+            }
         }
         Ok(arguments)
     }
@@ -148,6 +159,10 @@ mod tests {
             TerminalAgent::from_wire_name("claude"),
             Some(TerminalAgent::Claude)
         );
+        assert_eq!(
+            TerminalAgent::from_wire_name("jcode"),
+            Some(TerminalAgent::Jcode)
+        );
         assert_eq!(TerminalAgent::from_wire_name("shell"), None);
         assert_eq!(TerminalAgent::from_wire_name("Codex"), None);
     }
@@ -158,6 +173,8 @@ mod tests {
         assert_eq!(TerminalAgent::Codex.title(), "Codex");
         assert_eq!(TerminalAgent::Claude.wire_name(), "claude");
         assert_eq!(TerminalAgent::Claude.title(), "Claude");
+        assert_eq!(TerminalAgent::Jcode.wire_name(), "jcode");
+        assert_eq!(TerminalAgent::Jcode.title(), "JCode");
     }
 
     #[test]
@@ -214,6 +231,12 @@ mod tests {
                 .arguments(false, Some(AgentSession::New("chat-session-1")), None,)
                 .unwrap(),
             ["--session-id", "chat-session-1"]
+        );
+        assert_eq!(
+            TerminalAgent::Jcode
+                .arguments(false, Some(AgentSession::Resume("jcode-1")), None)
+                .unwrap(),
+            ["--resume", "jcode-1", "--no-update"]
         );
     }
 }

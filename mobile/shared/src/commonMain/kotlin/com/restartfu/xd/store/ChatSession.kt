@@ -21,10 +21,8 @@ import com.restartfu.xd.protocol.PngAttachment
 import com.restartfu.xd.protocol.TerminalListReply
 import com.restartfu.xd.protocol.TerminalOpenReply
 import com.restartfu.xd.protocol.TerminalReply
-import com.restartfu.xd.protocol.VoiceModelReply
 import com.restartfu.xd.protocol.decodeReply
 import com.restartfu.xd.voice.SpeakTagParser
-import com.restartfu.xd.voice.VoiceTransport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -51,7 +49,7 @@ import kotlinx.serialization.json.longOrNull
 public class ChatSession internal constructor(
     private val core: ChatSessionCore,
     private val release: () -> Unit,
-) : AutoCloseable, VoiceTransport {
+) : AutoCloseable {
     public val state: StateFlow<ChatState> = core.state
     /** Complete assistant `<speak>` blocks from this live turn. */
     public val speech: Flow<String> = core.speech
@@ -183,46 +181,6 @@ public class ChatSession internal constructor(
     /** Selects assistant and model together, which is the validated path. */
     public suspend fun selectModel(backend: String, model: String): Unit =
         core.call(Ops.selectModel(core.chatId, backend, model))
-
-    /**
-     * Whether the machine running this chat has the speech model on disk.
-     *
-     * Transcription happens where the chat happens, so a remote chat asks the
-     * remote machine -- and its answer can differ from another chat's.
-     */
-    override suspend fun voiceModelAvailable(): Boolean =
-        core.read(Ops.voiceModel(core.chatId)) {
-            it.decodeReply<VoiceModelReply>().available
-        }
-
-    /** Starts the download; progress arrives as `voice` events, not a reply. */
-    override suspend fun downloadVoiceModel(token: String) {
-        core.read(Ops.voiceModelDownload(core.chatId, token)) { }
-    }
-
-    /** Starts one ordered stream; partial text arrives as voice events. */
-    override suspend fun startVoiceStream(token: String) {
-        core.read(Ops.voiceStreamStart(core.chatId, token)) { }
-    }
-
-    @OptIn(ExperimentalEncodingApi::class)
-    override suspend fun streamVoiceChunk(token: String, pcm: ByteArray) {
-        core.read(
-            Ops.voiceStreamChunk(core.chatId, token, Base64.Default.encode(pcm)),
-        ) { }
-    }
-
-    /** Ends streaming with the authoritative complete recording. */
-    @OptIn(ExperimentalEncodingApi::class)
-    override suspend fun finishVoiceStream(token: String, wav: ByteArray) {
-        core.read(
-            Ops.voiceStreamFinish(core.chatId, token, Base64.Default.encode(wav)),
-        ) { }
-    }
-
-    override suspend fun cancelVoice(token: String) {
-        core.read(Ops.voiceCancel(token)) { }
-    }
 
     override fun close() {
         if (closed) return

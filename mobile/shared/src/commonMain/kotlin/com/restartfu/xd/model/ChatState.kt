@@ -46,7 +46,6 @@ public data class ChatState(
     val shortcuts: List<String> = emptyList(),
     val plan: Boolean = false,
     val fast: Boolean = false,
-    val claudeMode: Boolean = false,
     val queue: List<String> = emptyList(),
     val draft: String = "",
     val draftRevision: Long = 0,

@@ -1,8 +1,8 @@
 # xd
 
-xd is a Rust/GPUI desktop client for workspace-organized Codex and Claude Code
-conversations. Chats inherit their folder's working directory, repository,
-backend, model, and project instructions.
+xd is a Rust/GPUI desktop client for workspace-organized Codex, Claude Code,
+and JCode conversations. Chats inherit their folder's working directory,
+repository, backend, model, and project instructions.
 
 ![xd workspace, chat, terminal, and diff panes](docs/assets/xd-showcase.png)
 
@@ -63,9 +63,10 @@ irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
 ```
 
 The Linux and macOS installers require no root access; Windows uses the normal
-Windows Installer elevation prompt. The bundles include the GPUI desktop, Rust
-desktop, stdio host, Codex, Claude Code, local Whisper speech input, and their native
-runtime helpers.
+Windows Installer elevation prompt. The bundles include the GPUI desktop,
+stdio host, and their native runtime helpers.
+Install the assistants you use separately and make their `codex`, `claude`, or
+`jcode` commands available on `PATH`.
 
 Stable data lives in `~/.local/share/xd` on Linux and
 `~/Library/Application Support/xd` on macOS, and `%LOCALAPPDATA%\xd` on
@@ -77,11 +78,11 @@ either app does not delete its chats or workspaces.
 - Organizes chats in real workspace folders that can be nested, moved, or
   renamed without losing their conversations.
 - Inherits folder settings and instructions down the workspace tree.
-- Runs bundled Codex and Claude Code CLIs with their normal authentication and
-  configuration.
+- Runs user-installed Codex, Claude Code, and JCode CLIs with their normal
+  authentication and configuration.
 - Supports existing checkouts and isolated Git worktrees.
-- Streams Markdown responses, tool calls, inline file diffs, images, and voice
-  messages.
+- Streams Markdown responses, tool calls, inline file diffs, and images, with
+  optional spoken responses.
 - Supports either local use or a remote machine over the SSH command you
   configure. Remote hosts do not listen for xd connections.
 - Searches all stored messages with `Ctrl+K`.

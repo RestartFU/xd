@@ -28,6 +28,7 @@ pub enum GitWriter {
     Chat,
     Claude,
     Codex,
+    Jcode,
 }
 
 impl GitWriter {
@@ -36,6 +37,7 @@ impl GitWriter {
             Self::Chat => None,
             Self::Claude => Some("claude"),
             Self::Codex => Some("codex"),
+            Self::Jcode => Some("jcode"),
         }
     }
 }

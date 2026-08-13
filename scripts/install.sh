@@ -18,7 +18,7 @@
 # links always select the most recent build on that channel.
 #
 # Nothing is compiled and nothing is needed on the machine: the bundle carries
-# its own GTK, glib, Git and everything under them, so it runs on any glibc
+# its own native runtime, Git, and graphics fallback, so it runs on any glibc
 # x86_64 system. It goes in the home directory -- no root, no package manager,
 # and nothing outside these paths:
 #

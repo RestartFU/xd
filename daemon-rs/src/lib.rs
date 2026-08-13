@@ -18,7 +18,6 @@ mod agent;
 mod ask;
 mod auth;
 mod background_process;
-mod claude_proxy;
 mod cli_versions;
 mod git_draft;
 pub mod local_socket;
@@ -39,7 +38,6 @@ mod terminal_agent;
 mod terminal_query;
 mod terminal_replay;
 mod tool_diff;
-mod voice;
 mod workflow;
 mod worktree_name;
 
@@ -57,7 +55,6 @@ pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
 use terminal_agent::{AgentSession, SessionRecorder, TerminalAgent};
-use voice::VoiceService;
 use workflow::WorkflowStatuses;
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
@@ -111,7 +108,6 @@ pub struct Engine {
     workflows: WorkflowStatuses,
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    voice: VoiceService,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
     git_actions: Arc<Mutex<()>>,
@@ -155,7 +151,6 @@ impl Engine {
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
-            voice: VoiceService::new(events.clone(), None),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
             git_actions: Arc::new(Mutex::new(())),
@@ -194,7 +189,6 @@ impl Engine {
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
-            voice: VoiceService::new(events.clone(), data_directory),
             secrets,
             git_drafts,
             git_actions: Arc::new(Mutex::new(())),
@@ -338,33 +332,6 @@ impl Engine {
             Some("terminal-paste-image") => self.terminal_paste_image(&request),
             Some("terminal-resize") => self.terminals.resize(&request).unwrap_or_else(error_reply),
             Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
-            Some("voice-model") => self.voice_request(&request, "voice-model", || {
-                self.voice.model_available(&request)
-            }),
-            Some("voice-model-download") => {
-                self.voice_request(&request, "voice-model-download", || {
-                    self.voice.download(owner, &request)
-                })
-            }
-            Some("voice-stream-start") => {
-                self.voice_request(&request, "voice-stream-start", || {
-                    self.voice.start_stream(owner, &request)
-                })
-            }
-            Some("voice-stream-chunk") => {
-                self.voice_request(&request, "voice-stream-chunk", || {
-                    self.voice.append_stream(owner, &request)
-                })
-            }
-            Some("voice-stream-finish") => {
-                self.voice_request(&request, "voice-stream-finish", || {
-                    self.voice.finish_stream(owner, &request)
-                })
-            }
-            Some("voice-transcribe") => self.voice_request(&request, "voice-transcribe", || {
-                self.voice.transcribe(owner, &request)
-            }),
-            Some("voice-cancel") => self.voice.cancel(owner, &request),
             Some(operation) => json!({
                 "ok": false,
                 "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
@@ -606,26 +573,6 @@ impl Engine {
             .folder_path(folder)
             .map_err(|error| error.to_string())?;
         Ok(Some(folder.to_owned()))
-    }
-
-    fn voice_request(
-        &self,
-        request: &Value,
-        operation: &str,
-        run: impl FnOnce() -> Value,
-    ) -> Value {
-        let chat_id =
-            match required_string(request, "chat", &format!("{operation} needs a chat id.")) {
-                Ok(chat_id) => chat_id,
-                Err(error) => return error_reply(error),
-            };
-        let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
-        };
-        match store.chat(chat_id) {
-            Ok(_) => run(),
-            Err(error) => error_reply(error),
-        }
     }
 
     fn workflow_status(&self, owner: u64, request: &Value) -> Value {
@@ -874,13 +821,13 @@ impl Engine {
         let agent = match required_string(
             request,
             "agent",
-            "terminal-open-agent needs codex or claude.",
+            "terminal-open-agent needs codex, claude, or jcode.",
         ) {
             Ok(agent) => match TerminalAgent::from_wire_name(agent) {
                 Some(agent) => agent,
-                None => return error_reply("terminal-open-agent needs codex or claude."),
+                None => return error_reply("terminal-open-agent needs codex, claude, or jcode."),
             },
-            _ => return error_reply("terminal-open-agent needs codex or claude."),
+            _ => return error_reply("terminal-open-agent needs codex, claude, or jcode."),
         };
         let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
             Ok(chat_id) => chat_id,
@@ -1202,7 +1149,6 @@ impl Engine {
     }
 
     fn unsubscribe(&self, id: u64) {
-        self.voice.cancel_owner(id);
         self.pairing.unregister(id);
         self.events.unsubscribe(id);
     }
@@ -2075,25 +2021,6 @@ mod tests {
     }
 
     #[test]
-    fn targeted_events_reach_only_the_requesting_connection() {
-        let bus = EventBus::default();
-        let (first_sender, first_receiver) = sync_channel(2);
-        let (first_connection, first_peer) = UnixStream::pair().unwrap();
-        let first = bus.subscribe(first_sender, first_connection).unwrap();
-        let (second_sender, second_receiver) = sync_channel(2);
-        let (second_connection, second_peer) = UnixStream::pair().unwrap();
-        let second = bus.subscribe(second_sender, second_connection).unwrap();
-
-        bus.publish_to(second, json!({"event": "voice", "request": "recording"}));
-
-        assert_eq!(second_receiver.recv().unwrap()["request"], "recording");
-        assert!(first_receiver.try_recv().is_err());
-        bus.unsubscribe(first);
-        bus.unsubscribe(second);
-        drop((first_peer, second_peer));
-    }
-
-    #[test]
     fn remote_sessions_pair_resume_and_are_revoked_immediately() {
         let root = test_directory();
         let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
@@ -2223,17 +2150,6 @@ mod tests {
         );
         engine.unsubscribe(remote);
         drop(peer);
-    }
-
-    #[test]
-    fn voice_operations_require_a_chat_before_starting_work() {
-        let reply = dispatch(json!({
-            "op": "voice-model",
-            "_xd_request": 19,
-        }));
-        assert_eq!(reply["ok"], false);
-        assert_eq!(reply["_xd_request"], 19);
-        assert_eq!(reply["error"], "voice-model needs a chat id.");
     }
 
     #[test]

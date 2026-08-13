@@ -5,7 +5,7 @@
 #   ./scripts/build-windows.ps1 -OutputDirectory windows-dist
 #       [-Profile dev|nightly|release]
 
-# Run from a native x86_64 Windows PowerShell with Rust, CMake, and 7-Zip.
+# Run from a native x86_64 Windows PowerShell with Rust and 7-Zip.
 # The resulting tree is self-contained and is consumed by package-windows.ps1.
 
 [CmdletBinding()]
@@ -31,21 +31,10 @@ $buildJobs = if ($env:XD_BUILD_JOBS -match '^[1-9][0-9]*$') {
     [Math]::Max(1, [Math]::Floor([Environment]::ProcessorCount * 0.75))
 }
 $env:CARGO_BUILD_JOBS = $buildJobs.ToString()
-$env:CMAKE_BUILD_PARALLEL_LEVEL = $buildJobs.ToString()
 
-$codexVersion = '0.146.0'
-$codexAsset = 'codex-package-x86_64-pc-windows-msvc.tar.gz'
-$codexSha256 = 'a945559cc0da3437c022d53e5f601f9e8c95980d717c9aad82997e4582ecd55e'
-$claudeVersion = '2.1.220'
-$claudeSha256 = 'af5bf1f1b2aadffc768eccd787084c6fdf9ba81624cbe96c1c6d9ac1a1550231'
-$proxyVersion = '0.1.30'
-$proxyAsset = 'claude-code-proxy-windows-amd64.zip'
-$proxySha256 = '7ee1e9c275de326e97ea7914f9eafa74ed7fb6bfa60223e3fafc0e0daf02e233'
 $gitVersion = '2.55.0.3'
 $gitAsset = 'PortableGit-2.55.0.3-64-bit.7z.exe'
 $gitSha256 = 'ab00566336b5472120f9a52d34f2e79c5406535792acb0548001ffd0bd090e5d'
-$whisperVersion = '1.9.1'
-$whisperSha256 = '147267177eef7b22ec3d2476dd514d1b12e160e176230b740e3d1bd600118447'
 
 function Invoke-CheckedDownload {
     param(
@@ -87,7 +76,7 @@ if ((Test-Path -LiteralPath $outputPath) -and
     (Get-ChildItem -LiteralPath $outputPath -Force | Select-Object -First 1)) {
     throw "Output directory must be empty: $outputPath"
 }
-foreach ($command in @('cargo', 'cmake', 'git', 'rustc', 'tar')) {
+foreach ($command in @('cargo', 'git', 'rustc')) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "$command is required."
     }
@@ -110,27 +99,11 @@ try {
         $cacheDirectory
     ) | Out-Null
 
-    $codexArchive = Join-Path $cacheDirectory "$codexVersion-$codexAsset"
-    $claudeBinary = Join-Path $cacheDirectory "claude-$claudeVersion.exe"
-    $proxyArchive = Join-Path $cacheDirectory "$proxyVersion-$proxyAsset"
     $gitArchive = Join-Path $cacheDirectory "$gitVersion-$gitAsset"
-    $whisperArchive = Join-Path $cacheDirectory "whisper.cpp-$whisperVersion.tar.gz"
 
-    Invoke-CheckedDownload `
-        -Uri "https://releases.openai.com/codex/releases/$codexVersion/$codexAsset" `
-        -Destination $codexArchive -Sha256 $codexSha256
-    Invoke-CheckedDownload `
-        -Uri "https://downloads.claude.ai/claude-code-releases/$claudeVersion/win32-x64/claude.exe" `
-        -Destination $claudeBinary -Sha256 $claudeSha256
-    Invoke-CheckedDownload `
-        -Uri "https://github.com/raine/claude-code-proxy/releases/download/v$proxyVersion/$proxyAsset" `
-        -Destination $proxyArchive -Sha256 $proxySha256
     Invoke-CheckedDownload `
         -Uri "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.3/$gitAsset" `
         -Destination $gitArchive -Sha256 $gitSha256
-    Invoke-CheckedDownload `
-        -Uri "https://github.com/ggml-org/whisper.cpp/archive/refs/tags/v$whisperVersion.tar.gz" `
-        -Destination $whisperArchive -Sha256 $whisperSha256
 
     Push-Location $repositoryRoot
     try {
@@ -190,27 +163,10 @@ fn main() {
     }
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'daemon-rs\target\release\xd-host.exe') `
         -Destination (Join-Path $outputPath 'bin\xd-host.exe')
-    Copy-Item -LiteralPath $claudeBinary `
-        -Destination (Join-Path $outputPath 'bin\claude.exe')
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'data\fonts\DMSans-Variable.ttf') `
         -Destination (Join-Path $outputPath 'share\fonts\xd\DMSans-Variable.ttf')
-    Copy-Item -LiteralPath (Join-Path $repositoryRoot 'data\licenses\claude-code-proxy-LICENSE') `
-        -Destination (Join-Path $outputPath 'share\licenses\xd\claude-code-proxy-LICENSE')
     Copy-Item -LiteralPath (Join-Path $repositoryRoot 'scripts\install.ps1') `
         -Destination (Join-Path $outputPath 'bin\install.ps1')
-
-    $codexDirectory = Join-Path $outputPath 'bin\codex-package'
-    New-Item -ItemType Directory -Path $codexDirectory | Out-Null
-    & tar -xzf $codexArchive -C $codexDirectory
-    Assert-LastExitCode 'Codex extraction'
-
-    $proxyDirectory = Join-Path $workDirectory 'proxy'
-    Expand-Archive -LiteralPath $proxyArchive -DestinationPath $proxyDirectory
-    $proxyBinary = Get-ChildItem -LiteralPath $proxyDirectory `
-        -Filter 'claude-code-proxy.exe' -File -Recurse | Select-Object -First 1
-    if ($null -eq $proxyBinary) { throw 'Claude proxy archive has no executable.' }
-    Copy-Item -LiteralPath $proxyBinary.FullName `
-        -Destination (Join-Path $outputPath 'bin\claude-code-proxy.exe')
 
     $gitDirectory = Join-Path $outputPath 'git'
     & $sevenZip x -y "-o$gitDirectory" $gitArchive | Out-Null
@@ -222,51 +178,10 @@ fn main() {
         Assert-LastExitCode 'PortableGit post-install'
     }
 
-    # Kept between runs the way the macOS build keeps it: whisper.cpp is
-    # pinned by version and compiled the same way every time, so a machine
-    # that has built it once has nothing to learn from building it again.
-    $whisperSource = Join-Path $workDirectory 'whisper-source'
-    New-Item -ItemType Directory -Path $whisperSource | Out-Null
-    & tar -xzf $whisperArchive -C $whisperSource --strip-components=1
-    Assert-LastExitCode 'whisper.cpp extraction'
-    $whisperCache = Join-Path $cacheDirectory "whisper-$whisperVersion"
-    $whisperCached = Join-Path $whisperCache 'whisper-server.exe'
-    if (-not (Test-Path -LiteralPath $whisperCached -PathType Leaf)) {
-        $whisperBuild = Join-Path $workDirectory 'whisper-build'
-        & cmake -S $whisperSource -B $whisperBuild `
-            -A x64 `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DBUILD_SHARED_LIBS=OFF `
-            -DWHISPER_BUILD_TESTS=OFF `
-            -DWHISPER_BUILD_EXAMPLES=ON `
-            -DWHISPER_BUILD_SERVER=ON `
-            -DGGML_NATIVE=OFF `
-            -DGGML_BACKEND_DL=OFF `
-            -DGGML_OPENMP=OFF `
-            -DGGML_CCACHE=OFF
-        Assert-LastExitCode 'whisper.cpp configuration'
-        & cmake --build $whisperBuild --config Release --target whisper-server `
-            --parallel $buildJobs
-        Assert-LastExitCode 'whisper.cpp build'
-        $whisperServer = Get-ChildItem -LiteralPath $whisperBuild `
-            -Filter 'whisper-server.exe' -File -Recurse | Select-Object -First 1
-        if ($null -eq $whisperServer) { throw 'whisper-server.exe was not built.' }
-        New-Item -ItemType Directory -Force -Path $whisperCache | Out-Null
-        Copy-Item -LiteralPath $whisperServer.FullName -Destination $whisperCached
-    }
-    Copy-Item -LiteralPath $whisperCached `
-        -Destination (Join-Path $outputPath 'bin\whisper-server-bin.exe')
-    Copy-Item -LiteralPath (Join-Path $whisperSource 'LICENSE') `
-        -Destination (Join-Path $outputPath 'share\licenses\xd\whisper.cpp-LICENSE')
-
     $required = @(
         'bin\xd.exe',
         'bin\xd-host.exe',
         'bin\install.ps1',
-        'bin\codex-package\bin\codex.exe',
-        'bin\claude.exe',
-        'bin\claude-code-proxy.exe',
-        'bin\whisper-server-bin.exe',
         'git\cmd\git.exe',
         'git\mingw64\libexec\git-core\git-remote-https.exe',
         'git\mingw64\etc\ssl\certs\ca-bundle.crt'
@@ -282,17 +197,6 @@ fn main() {
 
     & (Join-Path $outputPath 'bin\xd.exe') --version
     Assert-LastExitCode 'xd smoke test'
-    & (Join-Path $outputPath 'bin\codex-package\bin\codex.exe') --version |
-        Select-String -SimpleMatch $codexVersion | Out-Null
-    Assert-LastExitCode 'Codex smoke test'
-    & (Join-Path $outputPath 'bin\claude.exe') --version |
-        Select-String -SimpleMatch $claudeVersion | Out-Null
-    Assert-LastExitCode 'Claude smoke test'
-    & (Join-Path $outputPath 'bin\claude-code-proxy.exe') --version |
-        Select-String -SimpleMatch $proxyVersion | Out-Null
-    Assert-LastExitCode 'Claude proxy smoke test'
-    & (Join-Path $outputPath 'bin\whisper-server-bin.exe') --help *> $null
-    Assert-LastExitCode 'whisper.cpp smoke test'
     & (Join-Path $outputPath 'git\cmd\git.exe') --version |
         Select-String -SimpleMatch 'git version 2.55.0.windows.3' | Out-Null
     Assert-LastExitCode 'PortableGit smoke test'

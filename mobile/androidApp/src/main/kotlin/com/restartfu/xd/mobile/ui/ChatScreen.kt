@@ -141,7 +141,6 @@ internal fun ChatScreen(
             currentBackend = state.backend,
             currentModel = state.model,
             currentEffort = state.effort,
-            claudeMode = state.claudeMode,
             onDismiss = { choosingModel = false },
         )
     }
@@ -446,7 +445,6 @@ private fun Composer(
                 }
             }
         }
-        VoiceStatus(model.voice)
         remember(state) { AskBlock.pending(state) }?.let { ask ->
             AskButtons(ask, onAnswer = model::answer, enabled = !sending)
         }
@@ -580,7 +578,6 @@ private fun Composer(
                     onSend = { if (state.working) model.enqueue() else model.send() },
                 ),
             )
-            VoiceButton(model.voice)
             Spacer(Modifier.width(8.dp))
             // One round button that sends and then stops, worded and coloured
             // the way the desktop words and colours it: an arrow in the accent

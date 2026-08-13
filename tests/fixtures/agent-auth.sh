@@ -18,14 +18,6 @@ case "$*" in
     printf '%s\n' '{"loggedIn":false,"authMethod":"none","apiProvider":"firstParty"}'
     exit 1
     ;;
-  "codex auth status")
-    if test -f "$AUTH_STATE/claude-mode"; then
-      echo "Authenticated with Codex"
-      exit 0
-    fi
-    echo "Not authenticated" >&2
-    exit 1
-    ;;
   "login --device-auth")
     if test "${AUTH_NOISY:-0}" = 1; then
       limit=${AUTH_NOISY_LINES:-25000}
@@ -51,19 +43,11 @@ case "$*" in
     test "$code" = "CLAUDE-1234"
     touch "$AUTH_STATE/claude"
     ;;
-  "codex auth device")
-    printf 'Open https://auth.openai.com/codex/device\n'
-    printf 'Enter code PROXY-CODE\n'
-    touch "$AUTH_STATE/claude-mode"
-    ;;
   "logout")
     rm -f "$AUTH_STATE/codex"
     ;;
   "auth logout")
     rm -f "$AUTH_STATE/claude"
-    ;;
-  "codex auth logout")
-    rm -f "$AUTH_STATE/claude-mode"
     ;;
   *)
     echo "unexpected arguments: $*" >&2

@@ -17,7 +17,6 @@ public enum class ChatOption(
     ACCESS("access"),
     PLAN("plan"),
     FAST("fast"),
-    CLAUDE_MODE("claude-mode"),
     BACKEND("backend"),
     NEW_WORKTREE("new-worktree"),
     WORKSPACE("workspace"),
@@ -337,80 +336,6 @@ public object Ops {
         put("value", model)
     }
 
-    /**
-     * Whether the speech model is installed on the daemon.
-     *
-     * Transcription runs where the chat runs, so this asks about that machine's
-     * disk, not the phone's.
-     */
-    public fun voiceModel(chatId: String): JsonObject = withChat("voice-model", chatId)
-
-    /**
-     * Fetches the speech model onto the daemon. Progress arrives as `voice`
-     * events carrying [token], not in the reply.
-     */
-    public fun voiceModelDownload(chatId: String, token: String): JsonObject = buildJsonObject {
-        put("op", "voice-model-download")
-        put("chat", chatId)
-        put("request", validToken(token))
-    }
-
-    public fun voiceStreamStart(chatId: String, token: String): JsonObject = buildJsonObject {
-        put("op", "voice-stream-start")
-        put("chat", chatId)
-        put("request", validToken(token))
-    }
-
-    public fun voiceStreamChunk(
-        chatId: String,
-        token: String,
-        audio: String,
-    ): JsonObject = buildJsonObject {
-        require(audio.isNotEmpty()) { "A voice audio chunk is required" }
-        put("op", "voice-stream-chunk")
-        put("chat", chatId)
-        put("request", validToken(token))
-        put("audio", audio)
-    }
-
-    public fun voiceStreamFinish(
-        chatId: String,
-        token: String,
-        audio: String,
-    ): JsonObject = buildJsonObject {
-        require(audio.isNotEmpty()) { "A voice recording is required" }
-        put("op", "voice-stream-finish")
-        put("chat", chatId)
-        put("request", validToken(token))
-        put("audio", audio)
-    }
-
-    /**
-     * Transcribes a recording. [audio] is a base64 WAV -- see
-     * `com.restartfu.xd.voice.Wav` for the only shape the daemon's whisper
-     * accepts.
-     *
-     * The reply says only that the job started; the text arrives as a `voice`
-     * event, because transcription takes far longer than a request may.
-     */
-    public fun voiceTranscribe(
-        chatId: String,
-        token: String,
-        audio: String,
-    ): JsonObject = buildJsonObject {
-        require(audio.isNotEmpty()) { "A recording is required" }
-        put("op", "voice-transcribe")
-        put("chat", chatId)
-        put("request", validToken(token))
-        put("audio", audio)
-    }
-
-    /** Stops a download or transcription started with [token]. */
-    public fun voiceCancel(token: String): JsonObject = buildJsonObject {
-        put("op", "voice-cancel")
-        put("request", validToken(token))
-    }
-
     public fun ping(): JsonObject = op("ping")
 
     public fun setOption(
@@ -510,8 +435,8 @@ public object Ops {
         allowAllPermissions: Boolean,
     ): JsonObject = buildJsonObject {
         require(columns > 0 && rows > 0) { "A terminal needs a positive size" }
-        require(agent == "codex" || agent == "claude") {
-            "A direct terminal needs codex or claude"
+        require(agent == "codex" || agent == "claude" || agent == "jcode") {
+            "A direct terminal needs codex, claude, or jcode"
         }
         put("op", "terminal-open-agent")
         put("chat", chatId)
@@ -547,18 +472,6 @@ public object Ops {
     }
 
     private val DAEMON_UPDATE_ACTIONS = setOf("status", "check", "install", "restart")
-
-    /** The daemon keys voice jobs on this, and refuses anything longer. */
-    private const val MAX_TOKEN_BYTES = 128
-
-    private fun validToken(token: String): String {
-        val cleaned = token.trim()
-        require(cleaned.isNotEmpty()) { "A voice request needs a token" }
-        require(cleaned.encodeToByteArray().size <= MAX_TOKEN_BYTES) {
-            "That voice token is too long"
-        }
-        return cleaned
-    }
 
     private fun op(name: String): JsonObject = buildJsonObject {
         put("op", name)

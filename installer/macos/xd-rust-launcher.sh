@@ -37,9 +37,9 @@ case "$(basename "$(dirname "$CONTENTS")")" in
 esac
 
 # Finder launches applications with a small PATH. Keep the original value for
-# terminal sessions, then put the app's native agent helpers first for xd.
+# terminal sessions, then add common locations for user-installed assistants.
 export XD_HOST_PATH="${PATH-}"
-export PATH="$RESOURCES/libexec/codex-package/bin:$RESOURCES/libexec:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Use the native macOS data locations. The channel name keeps dev, nightly,
 # and release applications independent when they are installed together.
@@ -49,9 +49,4 @@ export XDG_CACHE_HOME="${HOME}/Library/Caches"
 export XD_SETTINGS_PATH="$XDG_CONFIG_HOME/$XD_DATA_NAME/settings.json"
 
 export XD_HOST_EXECUTABLE="$RESOURCES/libexec/xd-host"
-export XD_CODEX_EXECUTABLE="$RESOURCES/libexec/codex-package/bin/codex"
-export XD_CLAUDE_EXECUTABLE="$RESOURCES/libexec/claude"
-export XD_CLAUDE_PROXY_EXECUTABLE="$RESOURCES/libexec/claude-code-proxy"
-export XD_WHISPER_SERVER="$RESOURCES/libexec/whisper-server-bin"
-
 exec "$CONTENTS/MacOS/xd-desktop" "$@"

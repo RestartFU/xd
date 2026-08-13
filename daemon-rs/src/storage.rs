@@ -66,6 +66,7 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
     ("claude-haiku-4-5", "Claude Haiku 4.5", 0),
     ("claude-opus-4-8", "Claude Opus 4.8", 0),
 ];
+const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Error)]
@@ -148,7 +149,6 @@ pub struct TurnSpec {
     pub effort: String,
     pub access: String,
     pub fast: bool,
-    pub claude_mode: bool,
     pub context_window: i64,
     pub session_backend: String,
     pub session_id: Option<String>,
@@ -567,7 +567,7 @@ impl StateStore {
         let row = database
             .query_row(
                 "SELECT folder_id, title, backend, workdir, model, effort, access, plan, fast, \
-                 claude_mode, queued, new_worktree, daemon_working, draft, draft_attachments, \
+                 queued, new_worktree, daemon_working, draft, draft_attachments, \
                  draft_revision, original_workdir FROM chats WHERE id = ?",
                 [chat_id],
                 |row| {
@@ -581,32 +581,27 @@ impl StateStore {
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, bool>(7)?,
                         row.get::<_, bool>(8)?,
-                        row.get::<_, bool>(9)?,
-                        row.get::<_, Option<String>>(10)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, bool>(10)?,
                         row.get::<_, bool>(11)?,
-                        row.get::<_, bool>(12)?,
+                        row.get::<_, String>(12)?,
                         row.get::<_, String>(13)?,
-                        row.get::<_, String>(14)?,
-                        row.get::<_, i64>(15)?,
-                        row.get::<_, Option<String>>(16)?,
+                        row.get::<_, i64>(14)?,
+                        row.get::<_, Option<String>>(15)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.to_owned()))?;
-        let queue = queue_from_column(row.10.as_deref());
-        let attachments = serde_json::from_str::<Value>(&row.14).unwrap_or_else(|_| json!([]));
+        let queue = queue_from_column(row.9.as_deref());
+        let attachments = serde_json::from_str::<Value>(&row.13).unwrap_or_else(|_| json!([]));
         let has_messages: bool = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
             [chat_id],
             |row| row.get(0),
         )?;
         let shortcuts = effective_shortcuts(&database, &self.workspace_root, &row.0)?;
-        let context_backend = if row.2 == "codex" && row.9 {
-            "claude-mode"
-        } else {
-            row.2.as_str()
-        };
+        let context_backend = row.2.as_str();
         let context_usage = database
             .query_row(
                 "SELECT context_model, context_used, context_window FROM chat_sessions \
@@ -637,15 +632,14 @@ impl StateStore {
             "commands": [],
             "plan": row.7,
             "fast": row.2 == "codex" && row.8,
-            "claude_mode": row.2 == "codex" && row.9,
             "queue": queue,
-            "draft": row.13,
+            "draft": row.12,
             "draft_attachments": attachments,
-            "draft_revision": row.15,
+            "draft_revision": row.14,
             "shortcuts": shortcuts,
-            "working": row.12,
+            "working": row.11,
             "effort": row.5.unwrap_or_else(|| "high".into()),
-            "new_worktree": row.11,
+            "new_worktree": row.10,
             "has_messages": has_messages,
         });
         if let Some((_, used, window)) = context_usage {
@@ -660,7 +654,7 @@ impl StateStore {
             &self.workspace_root,
             &row.0,
             row.3.as_deref(),
-            row.16.as_deref(),
+            row.15.as_deref(),
         ) {
             response["workdir"] = Value::String(workdir.clone());
             if let Ok(worktrees) = list_git_worktrees(Path::new(&workdir)) {
@@ -688,7 +682,7 @@ impl StateStore {
                     .any(|worktree| worktree["current"] == true && worktree["main"] == false);
                 response["linked_worktree"] = Value::Bool(linked);
                 response["worktrees"] = Value::Array(values);
-                if !has_messages && !row.11 && row.16.is_some() && linked {
+                if !has_messages && !row.10 && row.15.is_some() && linked {
                     response["selected_worktree"] = Value::String(workdir);
                 }
             }
@@ -973,6 +967,15 @@ impl StateStore {
                 "ultracode",
             ),
             catalog_backend("codex", "Codex", "gpt-5.6-sol", CODEX_MODELS, "ultra"),
+            json!({
+                "id": "jcode",
+                "name": "JCode",
+                "default_model": "default",
+                "models": JCODE_MODELS.iter().map(|(id, name, context_window)| {
+                    json!({"id": id, "name": name, "context_window": context_window})
+                }).collect::<Vec<_>>(),
+                "efforts": [],
+            }),
         ];
         Ok(json!({"ok": true, "backends": backends}))
     }
@@ -986,15 +989,13 @@ impl StateStore {
         let transaction = database.transaction()?;
         let previous = transaction
             .query_row(
-                "SELECT backend, model, effort, fast, claude_mode FROM chats WHERE id = ?",
+                "SELECT backend, model, effort FROM chats WHERE id = ?",
                 [chat_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, Option<String>>(2)?,
-                        row.get::<_, bool>(3)?,
-                        row.get::<_, bool>(4)?,
                     ))
                 },
             )
@@ -1015,9 +1016,9 @@ impl StateStore {
                 let changed = transaction.execute(
                     "UPDATE chats SET backend = ?, model = ?, effort = ?, \
                      fast = CASE WHEN ? = 'codex' THEN fast ELSE 0 END, \
-                     claude_mode = CASE WHEN ? = 'codex' THEN claude_mode ELSE 0 END, \
+                     claude_mode = 0, \
                      updated_at = ? WHERE id = ?",
-                    params![backend, model, effort, backend, backend, now, chat_id],
+                    params![backend, model, effort, backend, now, chat_id],
                 )?;
                 if previous.0 != backend || previous.1.as_deref() != Some(model) {
                     transaction.execute(
@@ -1038,7 +1039,7 @@ impl StateStore {
             )?,
             "effort" => {
                 if let Some(effort) = value {
-                    if !effort_supported(&previous.0, effort) || (previous.4 && effort == "ultra") {
+                    if !effort_supported(&previous.0, effort) {
                         return Err(StorageError::InvalidRequest(
                             "That reasoning effort is not available for this assistant.".into(),
                         ));
@@ -1065,23 +1066,6 @@ impl StateStore {
                 }
                 update_boolean_option(&transaction, chat_id, "fast", enabled, now)?
             }
-            "claude-mode" => {
-                let enabled = value == Some("true");
-                if enabled && previous.0 != "codex" {
-                    return Err(StorageError::InvalidRequest(
-                        "Claude mode is only available for Codex.".into(),
-                    ));
-                }
-                let effort = if enabled && previous.2.as_deref() == Some("ultra") {
-                    Some("max")
-                } else {
-                    previous.2.as_deref()
-                };
-                transaction.execute(
-                    "UPDATE chats SET claude_mode = ?, effort = ?, updated_at = ? WHERE id = ?",
-                    params![enabled, effort, now, chat_id],
-                )?
-            }
             "backend" => {
                 let backend = value.filter(|backend| !backend.is_empty()).ok_or_else(|| {
                     StorageError::InvalidRequest("A backend value is required.".into())
@@ -1090,9 +1074,9 @@ impl StateStore {
                 transaction.execute(
                     "UPDATE chats SET backend = ?, \
                      fast = CASE WHEN ? = 'codex' THEN fast ELSE 0 END, \
-                     claude_mode = CASE WHEN ? = 'codex' THEN claude_mode ELSE 0 END, \
+                     claude_mode = 0, \
                      updated_at = ? WHERE id = ?",
-                    params![backend, backend, backend, now, chat_id],
+                    params![backend, backend, now, chat_id],
                 )?
             }
             "new-worktree" => transaction.execute(
@@ -2750,7 +2734,7 @@ impl StateStore {
         }
         let defaults = transaction
             .query_row(
-                "SELECT backend, model, effort, access, plan, fast, claude_mode \
+                "SELECT backend, model, effort, access, plan, fast \
                  FROM agent_defaults WHERE singleton = 1",
                 [],
                 |row| {
@@ -2761,12 +2745,11 @@ impl StateStore {
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, bool>(4)?,
                         row.get::<_, bool>(5)?,
-                        row.get::<_, bool>(6)?,
                     ))
                 },
             )
             .optional()?
-            .unwrap_or_else(|| ("claude".into(), None, None, None, false, false, false));
+            .unwrap_or_else(|| ("claude".into(), None, None, None, false, false));
         let folder_values = resolved_folder_values(&folder_setting_chain(
             &transaction,
             &self.workspace_root,
@@ -2847,7 +2830,7 @@ impl StateStore {
                 defaults.3,
                 defaults.4,
                 defaults.5,
-                defaults.6,
+                false,
                 workdir,
                 original_workdir,
                 sort_order,
@@ -3244,6 +3227,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_chat_partial_reply_columns(database)?;
             ensure_workspace_sort_order(database)?;
             ensure_chat_sort_order(database)?;
+            disable_claude_mode(database)?;
             return Ok(());
         }
     }
@@ -3327,6 +3311,19 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_chat_partial_reply_columns(database)?;
     ensure_workspace_sort_order(database)?;
     ensure_chat_sort_order(database)?;
+    disable_claude_mode(database)?;
+    Ok(())
+}
+
+fn disable_claude_mode(database: &Connection) -> Result<(), StorageError> {
+    database.execute(
+        "UPDATE chats SET claude_mode = 0 WHERE claude_mode != 0",
+        [],
+    )?;
+    database.execute(
+        "UPDATE agent_defaults SET claude_mode = 0 WHERE claude_mode != 0",
+        [],
+    )?;
     Ok(())
 }
 
@@ -3926,7 +3923,7 @@ fn catalog_backend(
 }
 
 fn validate_backend(backend: &str) -> Result<(), StorageError> {
-    if matches!(backend, "codex" | "claude") {
+    if matches!(backend, "codex" | "claude" | "jcode") {
         Ok(())
     } else {
         Err(StorageError::InvalidRequest("No such assistant.".into()))
@@ -3936,6 +3933,7 @@ fn validate_backend(backend: &str) -> Result<(), StorageError> {
 fn default_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
+        "jcode" => "default",
         _ => "gpt-5.6-sol",
     }
 }
@@ -3953,6 +3951,7 @@ fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)]
     match backend {
         "codex" => CODEX_MODELS,
         "claude" => CLAUDE_MODELS,
+        "jcode" => JCODE_MODELS,
         _ => &[],
     }
 }
@@ -5096,7 +5095,7 @@ fn prepare_turn(
 ) -> Result<TurnSpec, StorageError> {
     let chat = transaction
         .query_row(
-            "SELECT folder_id, backend, workdir, model, effort, access, plan, fast, claude_mode, new_worktree, \
+            "SELECT folder_id, backend, workdir, model, effort, access, plan, fast, new_worktree, \
              original_workdir FROM chats WHERE id = ?",
             [chat_id],
             |row| {
@@ -5110,8 +5109,7 @@ fn prepare_turn(
                     row.get::<_, bool>(6)?,
                     row.get::<_, bool>(7)?,
                     row.get::<_, bool>(8)?,
-                    row.get::<_, bool>(9)?,
-                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             },
         )
@@ -5123,9 +5121,9 @@ fn prepare_turn(
         workspace_root,
         &chat.0,
         chat.2.as_deref(),
-        chat.10.as_deref(),
+        chat.9.as_deref(),
     )?;
-    if chat.9 {
+    if chat.8 {
         let source = workdir.clone();
         workdir = create_worktree(
             transaction,
@@ -5147,6 +5145,7 @@ fn prepare_turn(
     }
     let model = chat.3.unwrap_or_else(|| match chat.1.as_str() {
         "claude" => "claude-opus-5".into(),
+        "jcode" => "default".into(),
         _ => "gpt-5.6-sol".into(),
     });
     let effort = chat.4.unwrap_or_else(|| "high".into());
@@ -5155,8 +5154,7 @@ fn prepare_turn(
     } else {
         chat.5.unwrap_or_else(|| "read-only".into())
     };
-    let claude_mode = chat.1 == "codex" && chat.8;
-    let session_backend = if claude_mode { "claude-mode" } else { &chat.1 };
+    let session_backend = &chat.1;
     let session_id = transaction
         .query_row(
             "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = ?",
@@ -5187,7 +5185,6 @@ fn prepare_turn(
         effort: effort.clone(),
         access,
         fast: chat.1 == "codex" && chat.7,
-        claude_mode,
         context_window: backend_models(&chat.1)
             .iter()
             .find(|known| known.0 == model)
@@ -5196,15 +5193,14 @@ fn prepare_turn(
         session_backend: session_backend.into(),
         session_id,
         label: format!(
-            "{} · {}{}{}",
+            "{} · {}{}",
             model_label(&chat.1, &model),
             effort_label(&effort),
             if chat.1 == "codex" && chat.7 {
                 " · Fast"
             } else {
                 ""
-            },
-            if claude_mode { " · Claude mode" } else { "" }
+            }
         ),
         environment: Vec::new(),
     })
@@ -6116,7 +6112,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_claude_mode_with_an_isolated_session_and_codex_context() {
+    fn disables_legacy_claude_mode_and_uses_the_codex_session() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
         let database = Connection::open(&fixture.database).unwrap();
@@ -6143,11 +6139,10 @@ mod tests {
         else {
             panic!("first send unexpectedly queued")
         };
-        assert!(turn.claude_mode);
         assert_eq!(turn.context_window, 272_000);
-        assert_eq!(turn.session_backend, "claude-mode");
-        assert_eq!(turn.session_id.as_deref(), Some("proxy-session"));
-        assert_eq!(turn.label, "GPT-5.6 Sol · High · Fast · Claude mode");
+        assert_eq!(turn.session_backend, "codex");
+        assert_eq!(turn.session_id.as_deref(), Some("codex-session"));
+        assert_eq!(turn.label, "GPT-5.6 Sol · High · Fast");
     }
 
     #[test]
@@ -7014,20 +7009,16 @@ mod tests {
         store
             .set_option(&json!({"chat": "chat-1", "option": "effort", "value": "ultra"}))
             .unwrap();
-        store
-            .set_option(&json!({"chat": "chat-1", "option": "claude-mode", "value": "true"}))
-            .unwrap();
         let chat = store.chat("chat-1").unwrap();
         assert_eq!(chat["backend"], "codex");
         assert_eq!(chat["model"], "gpt-5.6-sol");
-        assert_eq!(chat["effort"], "max");
+        assert_eq!(chat["effort"], "ultra");
         store
             .set_option(&json!({"chat": "chat-1", "option": "backend", "value": "claude"}))
             .unwrap();
         let chat = store.chat("chat-1").unwrap();
         assert_eq!(chat["backend"], "claude");
         assert_eq!(chat["fast"], false);
-        assert_eq!(chat["claude_mode"], false);
         let events = store.messages(&json!({"chat": "chat-1"})).unwrap()["messages"]
             .as_array()
             .unwrap()

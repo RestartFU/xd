@@ -8,10 +8,7 @@ use std::{
     hash::{Hash, Hasher},
     ops::Range,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -61,7 +58,6 @@ mod settings;
 mod source_build;
 mod speech;
 mod terminal;
-mod voice_input;
 
 use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
@@ -96,7 +92,6 @@ use settings::{AppSettings, ThemePreset};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
-use voice_input::{CaptureEvent, EndOfSpeech, VoiceRecorder};
 
 const UI_FONT: &str = "DM Sans";
 const EMBEDDED_UI_FONT: &[u8] = include_bytes!("../../data/fonts/DMSans-Variable.ttf");
@@ -106,8 +101,8 @@ const EMBEDDED_UI_FONT: &[u8] = include_bytes!("../../data/fonts/DMSans-Variable
 pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
+const JCODE_ICON: &str = "icons/jcode.svg";
 const SEND_ICON: &str = "icons/send.svg";
-const MIC_ICON: &str = "icons/mic.svg";
 const STOP_ICON: &str = "icons/stop.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
@@ -120,10 +115,8 @@ const MAX_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
-const STEADY_PARTIALS_TO_END: usize = 4;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
-static NEXT_VOICE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
     let lit = frame % 4;
@@ -307,47 +300,6 @@ impl SourceBuildPanel {
                 self.output_bytes = self.output_bytes.saturating_sub(removed.len());
             }
         }
-    }
-}
-
-#[derive(Default)]
-enum VoiceState {
-    #[default]
-    Idle,
-    Checking,
-    NeedsModel,
-    Downloading,
-    Recording,
-    Transcribing,
-    Failed,
-}
-
-#[derive(Default)]
-struct VoiceInput {
-    state: VoiceState,
-    chat_id: String,
-    token: String,
-    base_text: String,
-    partial: String,
-    recorder: Option<VoiceRecorder>,
-    hands_free: bool,
-    end_of_speech: Option<EndOfSpeech>,
-    last_partial: String,
-    steady_partials: usize,
-}
-
-impl VoiceInput {
-    fn hands_free_partial_ended(&mut self, text: &str) -> bool {
-        if !self.hands_free || !matches!(self.state, VoiceState::Recording) {
-            return false;
-        }
-        if text != self.last_partial {
-            self.last_partial = text.to_owned();
-            self.steady_partials = 0;
-            return false;
-        }
-        self.steady_partials = self.steady_partials.saturating_add(1);
-        !text.trim().is_empty() && self.steady_partials >= STEADY_PARTIALS_TO_END
     }
 }
 
@@ -945,8 +897,6 @@ struct XdDesktop {
     cli_versions_loading: bool,
     cli_versions_error: Option<String>,
     auth_input_text: String,
-    voice_input: VoiceInput,
-    voice_applying_text: bool,
     speech_output: SpeechOutput,
     pending_speech: Option<PendingSpeech>,
     daemon: Option<DaemonHandle>,
@@ -1357,8 +1307,6 @@ impl XdDesktop {
             cli_versions_loading: false,
             cli_versions_error: None,
             auth_input_text: String::new(),
-            voice_input: VoiceInput::default(),
-            voice_applying_text: false,
             speech_output: SpeechOutput::default(),
             pending_speech: None,
             daemon: None,
@@ -1645,8 +1593,6 @@ impl XdDesktop {
                 | RequestKind::SetShortcuts { .. }
                 | RequestKind::RemoveWorktree { .. }
                 | RequestKind::SetDraft { .. }
-                | RequestKind::VoiceModel { .. }
-                | RequestKind::VoiceMutation { .. }
                 | RequestKind::DiffRead { .. }
                 | RequestKind::GitStatus { .. }
                 | RequestKind::GitState { .. }
@@ -1699,7 +1645,6 @@ impl XdDesktop {
                 | "queued"
                 | "shortcuts-changed"
                 | "workflow-status"
-                | "voice"
                 | "terminal-opened"
                 | "terminal-activity"
                 | "terminal-output"
@@ -1733,7 +1678,6 @@ impl XdDesktop {
         self.stash_terminal_panel();
         self.sync_draft();
         self.draft_generation = self.draft_generation.saturating_add(1);
-        self.cancel_voice(false, cx);
         std::mem::swap(&mut self.model, &mut self.inactive_model);
         self.active_endpoint = endpoint;
         self.remember_active_connection();
@@ -2004,7 +1948,6 @@ impl XdDesktop {
                     self.pending_speech = None;
                     Arc::make_mut(&mut self.workflow_pending).clear();
                     self.speech_output.stop();
-                    self.cancel_voice(false, cx);
                     self.restore_pending_send(cx);
                     if let Some(diff) = &mut self.diff_panel {
                         diff.loading = false;
@@ -2291,7 +2234,6 @@ impl XdDesktop {
                 self.pending_speech = None;
                 Arc::make_mut(&mut self.workflow_pending).clear();
                 self.speech_output.stop();
-                self.cancel_voice(false, cx);
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
                     defaults.submitting = false;
@@ -2385,8 +2327,6 @@ impl XdDesktop {
                     | RequestKind::TerminalInput { .. }
                     | RequestKind::TerminalResize { .. }
                     | RequestKind::TerminalKill { .. }
-                    | RequestKind::VoiceModel { .. }
-                    | RequestKind::VoiceMutation { .. }
                     | RequestKind::AgentSecrets { .. }
                     | RequestKind::SetAgentSecrets { .. }
                     | RequestKind::AgentClis
@@ -2678,29 +2618,6 @@ impl XdDesktop {
                             .and_then(Value::as_str)
                             .map(str::to_owned);
                     }
-                }
-                RequestKind::VoiceModel { chat_id }
-                    if self.chat_is_active(chat_id)
-                        && matches!(self.voice_input.state, VoiceState::Checking) =>
-                {
-                    self.fail_voice(
-                        value
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("The host could not check the speech model.")
-                            .to_owned(),
-                        cx,
-                    );
-                }
-                RequestKind::VoiceMutation { token, .. } if token == &self.voice_input.token => {
-                    self.fail_voice(
-                        value
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .unwrap_or("The host rejected voice input.")
-                            .to_owned(),
-                        cx,
-                    );
                 }
                 RequestKind::AgentSecrets { folder_id }
                     if self
@@ -3087,17 +3004,6 @@ impl XdDesktop {
                     .update(cx, |input, cx| input.set_text("", cx));
                 self.request_devices();
             }
-            RequestKind::VoiceModel { chat_id }
-                if self.chat_is_active(&chat_id)
-                    && matches!(self.voice_input.state, VoiceState::Checking) =>
-            {
-                if value.get("available").and_then(Value::as_bool) == Some(true) {
-                    self.start_voice_recording(cx);
-                } else {
-                    self.voice_input.state = VoiceState::NeedsModel;
-                }
-            }
-            RequestKind::VoiceMutation { .. } => {}
             RequestKind::WorkflowStatus { marker } => {
                 if value.get("pending").and_then(Value::as_bool) != Some(true) {
                     Arc::make_mut(&mut self.workflow_pending).remove(&marker);
@@ -4079,7 +3985,6 @@ impl XdDesktop {
             self.request_tree();
         }
         match name {
-            "voice" => self.handle_voice_event(&body, cx),
             "terminal-activity" => self.model.apply_event(name, &body),
             "workflow-status" => {
                 if let Some(marker) = body.get("text").and_then(Value::as_str).map(str::to_owned)
@@ -4430,7 +4335,7 @@ impl XdDesktop {
     }
 
     fn sync_active_auth_state(&mut self) {
-        let active_provider = active_auth_provider(&self.model.backend, self.model.claude_mode);
+        let active_provider = self.model.backend.as_str();
         if let Some(provider) = self
             .auth_providers
             .iter()
@@ -5021,226 +4926,6 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn check_voice_model(&mut self, hands_free: bool, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.model.selected_chat.clone() else {
-            return;
-        };
-        let Some(daemon) = self.active_daemon().cloned() else {
-            self.model.connection_error = Some("xd is not connected to a host.".into());
-            return;
-        };
-        if let Err(error) = daemon.voice_model(&chat_id) {
-            self.model.connection_error = Some(error);
-            return;
-        }
-        self.voice_input = VoiceInput {
-            state: VoiceState::Checking,
-            chat_id,
-            token: voice_request_token(),
-            base_text: self.composer.clone(),
-            partial: String::new(),
-            recorder: None,
-            hands_free,
-            end_of_speech: None,
-            last_partial: String::new(),
-            steady_partials: 0,
-        };
-        cx.notify();
-    }
-
-    fn start_voice_recording(&mut self, cx: &mut Context<Self>) {
-        let chat_id = self.voice_input.chat_id.clone();
-        let token = self.voice_input.token.clone();
-        let Some(daemon) = self.active_daemon().cloned() else {
-            self.fail_voice("xd is not connected to a host.".into(), cx);
-            return;
-        };
-        if let Err(error) = daemon.voice_action("voice-stream-start", &chat_id, &token, None) {
-            self.fail_voice(error, cx);
-            return;
-        }
-        let (recorder, events) = match VoiceRecorder::start() {
-            Ok(recording) => recording,
-            Err(error) => {
-                let _ = daemon.voice_action("voice-cancel", &chat_id, &token, None);
-                self.fail_voice(error, cx);
-                return;
-            }
-        };
-        self.voice_input.recorder = Some(recorder);
-        self.voice_input.partial.clear();
-        self.voice_input.end_of_speech = self.voice_input.hands_free.then(EndOfSpeech::default);
-        self.voice_input.last_partial.clear();
-        self.voice_input.steady_partials = 0;
-        self.voice_input.state = VoiceState::Recording;
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = events.recv().await {
-                if this
-                    .update(cx, |this, cx| this.handle_capture_event(&token, event, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    fn handle_capture_event(&mut self, token: &str, event: CaptureEvent, cx: &mut Context<Self>) {
-        if self.voice_input.token != token {
-            return;
-        }
-        let chat_id = self.voice_input.chat_id.clone();
-        let Some(daemon) = self.active_daemon().cloned() else {
-            self.fail_voice("xd is not connected to a host.".into(), cx);
-            return;
-        };
-        match event {
-            CaptureEvent::Chunk(audio)
-                if matches!(
-                    self.voice_input.state,
-                    VoiceState::Recording | VoiceState::Transcribing
-                ) =>
-            {
-                if let Err(error) =
-                    daemon.voice_action("voice-stream-chunk", &chat_id, token, Some(&audio))
-                {
-                    self.fail_voice(error, cx);
-                    return;
-                }
-                let utterance_ended = self
-                    .voice_input
-                    .end_of_speech
-                    .as_mut()
-                    .is_some_and(|detector| detector.accept(&audio));
-                if utterance_ended {
-                    self.voice_input.end_of_speech = None;
-                    if let Some(recorder) = &self.voice_input.recorder {
-                        recorder.stop();
-                    }
-                }
-            }
-            CaptureEvent::Finished(audio) => {
-                self.voice_input.recorder = None;
-                self.voice_input.state = VoiceState::Transcribing;
-                if let Err(error) =
-                    daemon.voice_action("voice-stream-finish", &chat_id, token, Some(&audio))
-                {
-                    self.fail_voice(error, cx);
-                }
-            }
-            CaptureEvent::Failed(error) => {
-                let _ = daemon.voice_action("voice-cancel", &chat_id, token, None);
-                self.fail_voice(error, cx);
-            }
-            CaptureEvent::Chunk(_) => {}
-        }
-        cx.notify();
-    }
-
-    fn handle_voice_event(&mut self, body: &Value, cx: &mut Context<Self>) {
-        if body.get("request").and_then(Value::as_str) != Some(self.voice_input.token.as_str()) {
-            return;
-        }
-        match body.get("state").and_then(Value::as_str) {
-            Some("downloading") => {
-                self.voice_input.state = VoiceState::Downloading;
-            }
-            Some("ready") => self.start_voice_recording(cx),
-            Some("partial") => {
-                let text = body
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                if self.voice_input.hands_free_partial_ended(&text) {
-                    if let Some(recorder) = &self.voice_input.recorder {
-                        recorder.stop();
-                    }
-                }
-                self.voice_input.partial = text.clone();
-                let composer = merge_dictation(&self.voice_input.base_text, &text);
-                self.apply_voice_text(composer, cx);
-            }
-            Some("transcribed") => {
-                let text = body
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let composer = merge_dictation(&self.voice_input.base_text, &text);
-                let hands_free = self.voice_input.hands_free;
-                self.voice_input = VoiceInput::default();
-                self.apply_voice_text(composer, cx);
-                if hands_free {
-                    self.send_composer(cx);
-                    self.check_voice_model(true, cx);
-                }
-            }
-            Some("cancelled") => self.cancel_voice(true, cx),
-            Some("error") => self.fail_voice(
-                body.get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Voice recognition failed.")
-                    .to_owned(),
-                cx,
-            ),
-            _ => {}
-        }
-        cx.notify();
-    }
-
-    fn apply_voice_text(&mut self, text: String, cx: &mut Context<Self>) {
-        self.voice_applying_text = true;
-        self.set_composer_text(text, cx);
-        self.voice_applying_text = false;
-        self.draft_dirty = true;
-        self.schedule_draft_sync(cx);
-    }
-
-    fn fail_voice(&mut self, _error: String, cx: &mut Context<Self>) {
-        let expected = merge_dictation(&self.voice_input.base_text, &self.voice_input.partial);
-        let base = self.voice_input.base_text.clone();
-        if let Some(recorder) = &self.voice_input.recorder {
-            recorder.cancel();
-        }
-        if self.composer == expected {
-            self.apply_voice_text(base, cx);
-        }
-        self.voice_input = VoiceInput {
-            state: VoiceState::Failed,
-            ..VoiceInput::default()
-        };
-        cx.notify();
-    }
-
-    fn cancel_voice(&mut self, restore: bool, cx: &mut Context<Self>) {
-        if matches!(self.voice_input.state, VoiceState::Idle) {
-            return;
-        }
-        let expected = merge_dictation(&self.voice_input.base_text, &self.voice_input.partial);
-        let base = self.voice_input.base_text.clone();
-        if let Some(recorder) = &self.voice_input.recorder {
-            recorder.cancel();
-        }
-        if let Some(daemon) = self.active_daemon().cloned()
-            && !self.voice_input.token.is_empty()
-        {
-            let _ = daemon.voice_action(
-                "voice-cancel",
-                &self.voice_input.chat_id,
-                &self.voice_input.token,
-                None,
-            );
-        }
-        self.voice_input = VoiceInput::default();
-        if restore && self.composer == expected {
-            self.apply_voice_text(base, cx);
-        }
-        cx.notify();
-    }
-
     fn new_terminal_panel(chat_id: String) -> TerminalPanel {
         TerminalPanel {
             chat_id,
@@ -5498,6 +5183,14 @@ impl XdDesktop {
                 }
                 AgentCommand::new("env", arguments)
             }
+            Some(AgentCli::Jcode) => AgentCommand::new(
+                if remote {
+                    "jcode".into()
+                } else {
+                    env::var("XD_JCODE_EXECUTABLE").unwrap_or_else(|_| "jcode".into())
+                },
+                ["--no-update"],
+            ),
             None => AgentCommand::new(
                 if remote {
                     "sh".into()
@@ -6726,9 +6419,6 @@ impl XdDesktop {
         if self.sending {
             return;
         }
-        if !matches!(self.voice_input.state, VoiceState::Idle) {
-            self.cancel_voice(false, cx);
-        }
         let text = self.composer.trim().to_owned();
         let attachments = self.model.draft_attachments.clone();
         let Some(chat_id) = self.model.selected_chat.clone() else {
@@ -7060,9 +6750,6 @@ impl XdDesktop {
     }
 
     fn composer_changed(&mut self, text: String, cx: &mut Context<Self>) {
-        if !self.voice_applying_text && !matches!(self.voice_input.state, VoiceState::Idle) {
-            self.cancel_voice(false, cx);
-        }
         self.composer = text;
         self.draft_dirty = true;
         self.schedule_draft_sync(cx);
@@ -7807,6 +7494,35 @@ impl XdDesktop {
                                         .text_color(rgb(colors.text)),
                                 )
                                 .child("Claude"),
+                        )
+                        .child(
+                            div()
+                                .id("minimal-new-jcode-tab")
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(colors.text))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_minimal_terminal_tab(
+                                        Some(AgentCli::Jcode),
+                                        window,
+                                        cx,
+                                    )
+                                }))
+                                .child(
+                                    svg()
+                                        .path(JCODE_ICON)
+                                        .size(px(18.0))
+                                        .text_color(rgb(colors.text)),
+                                )
+                                .child("JCode"),
                         ),
                 )
             })
@@ -8244,6 +7960,7 @@ impl XdDesktop {
                                 .path(match agent {
                                     AgentCli::Codex => CODEX_ICON,
                                     AgentCli::Claude => CLAUDE_ICON,
+                                    AgentCli::Jcode => JCODE_ICON,
                                 })
                                 .size(px(15.0))
                                 .text_color(rgb(colors.muted)),
@@ -8694,6 +8411,7 @@ impl XdDesktop {
                 let icon = match agent {
                     AgentCli::Codex => CODEX_ICON,
                     AgentCli::Claude => CLAUDE_ICON,
+                    AgentCli::Jcode => JCODE_ICON,
                 };
                 let status = if session.working {
                     div().child("Working").into_any_element()
@@ -9018,7 +8736,7 @@ impl XdDesktop {
                                             .text_sm()
                                             .text_color(rgb(colors.muted))
                                             .child(
-                                                "No sessions yet. Start one with Codex or Claude.",
+                                                "No sessions yet. Start one with Codex, Claude, or JCode.",
                                             ),
                                     )
                                 },
@@ -9030,7 +8748,7 @@ impl XdDesktop {
                                         .text_sm()
                                         .text_color(rgb(colors.muted))
                                         .child(
-                                            "Create a workspace, then start a Codex or Claude session.",
+                                            "Create a workspace, then start a Codex, Claude, or JCode session.",
                                         ),
                                 )
                             }),
@@ -9983,7 +9701,7 @@ impl XdDesktop {
                         )
                         .child(
                             div().flex().gap_2().children(
-                                [AgentCli::Codex, AgentCli::Claude]
+                                [AgentCli::Codex, AgentCli::Claude, AgentCli::Jcode]
                                     .into_iter()
                                     .enumerate()
                                     .map(|(index, agent)| {
@@ -10022,6 +9740,7 @@ impl XdDesktop {
                                                     .path(match agent {
                                                         AgentCli::Codex => CODEX_ICON,
                                                         AgentCli::Claude => CLAUDE_ICON,
+                                                        AgentCli::Jcode => JCODE_ICON,
                                                     })
                                                     .size(px(18.0))
                                                     .text_color(rgb(colors.text)),
@@ -10579,11 +10298,11 @@ impl AssetSource for EmbeddedIcons {
             CODEX_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/codex.svg").as_slice(),
             )),
+            JCODE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/jcode.svg").as_slice(),
+            )),
             SEND_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/send.svg").as_slice(),
-            )),
-            MIC_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/mic.svg").as_slice(),
             )),
             STOP_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/stop.svg").as_slice(),
@@ -10608,22 +10327,14 @@ impl AssetSource for EmbeddedIcons {
         Ok(vec![
             CLAUDE_ICON.into(),
             CODEX_ICON.into(),
+            JCODE_ICON.into(),
             SEND_ICON.into(),
-            MIC_ICON.into(),
             STOP_ICON.into(),
             FOLDER_ICON.into(),
             FILE_ICON.into(),
             GIT_BRANCH_ICON.into(),
             TRASH_ICON.into(),
         ])
-    }
-}
-
-fn active_auth_provider(backend: &str, claude_mode: bool) -> &str {
-    if backend == "codex" && claude_mode {
-        "claude-mode"
-    } else {
-        backend
     }
 }
 
@@ -10636,14 +10347,6 @@ fn reconnect_delay(attempt: u32) -> Duration {
         4 => 2_000,
         _ => 5_000,
     })
-}
-
-fn voice_request_token() -> String {
-    format!(
-        "desktop-{}-{}",
-        std::process::id(),
-        NEXT_VOICE_REQUEST.fetch_add(1, Ordering::Relaxed)
-    )
 }
 
 fn workflow_status_terminal(status: &Value) -> bool {
@@ -10680,18 +10383,6 @@ fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
                 }),
         )
         .collect()
-}
-
-fn merge_dictation(base: &str, spoken: &str) -> String {
-    let spoken = spoken.trim();
-    if spoken.is_empty() {
-        return base.to_owned();
-    }
-    if base.is_empty() || base.chars().last().is_some_and(char::is_whitespace) {
-        format!("{base}{spoken}")
-    } else {
-        format!("{base} {spoken}")
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -11556,11 +11247,6 @@ mod tests {
             text: "partial".into(),
             attachment_generation: None,
         }));
-        assert!(XdDesktop::remote_chat_reply(&RequestKind::VoiceMutation {
-            chat_id: "chat".into(),
-            token: "voice".into(),
-            operation: "voice-stream-start".into(),
-        }));
         assert!(XdDesktop::remote_chat_reply(&RequestKind::DiffRead {
             chat_id: "chat".into(),
             read: "working-all".into(),
@@ -11606,7 +11292,6 @@ mod tests {
         assert!(XdDesktop::local_admin_event("daemon-update"));
         assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
-        assert!(XdDesktop::remote_read_event("voice"));
         assert!(XdDesktop::remote_read_event("terminal-activity"));
         assert!(XdDesktop::remote_read_event("terminal-output"));
         assert!(XdDesktop::remote_read_event("git-draft-finished"));
@@ -11617,7 +11302,7 @@ mod tests {
 
     #[test]
     fn every_agent_mark_is_embedded_and_drawable() {
-        for path in [CLAUDE_ICON, CODEX_ICON] {
+        for path in [CLAUDE_ICON, CODEX_ICON, JCODE_ICON] {
             let bytes = EmbeddedIcons
                 .load(path)
                 .expect("embedded marks load")
@@ -11631,7 +11316,6 @@ mod tests {
     fn composer_action_icons_are_embedded_and_drawable() {
         for path in [
             "icons/send.svg",
-            "icons/mic.svg",
             "icons/stop.svg",
             GIT_BRANCH_ICON,
             TRASH_ICON,
@@ -11973,13 +11657,14 @@ mod tests {
     }
 
     #[test]
-    fn minimal_cli_panel_accepts_shell_codex_and_claude_tabs() {
+    fn minimal_cli_panel_accepts_shell_and_agent_tabs() {
         let mut panel = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Codex);
 
         for (terminal, agent) in [
             ("shell", None),
             ("codex", Some("codex")),
             ("claude", Some("claude")),
+            ("jcode", Some("jcode")),
         ] {
             let mut opened = serde_json::json!({
                 "chat": "chat",
@@ -12001,7 +11686,12 @@ mod tests {
                 .iter()
                 .map(|session| session.agent)
                 .collect::<Vec<_>>(),
-            [None, Some(AgentCli::Codex), Some(AgentCli::Claude)]
+            [
+                None,
+                Some(AgentCli::Codex),
+                Some(AgentCli::Claude),
+                Some(AgentCli::Jcode),
+            ]
         );
     }
 
@@ -12082,7 +11772,7 @@ mod tests {
     }
 
     #[test]
-    fn minimal_terminal_plus_opens_a_three_choice_tab_menu() {
+    fn minimal_terminal_plus_opens_an_agent_tab_menu() {
         let source = include_str!("main.rs");
         let terminal = source
             .split_once("fn render_minimal_terminal(")
@@ -12097,6 +11787,7 @@ mod tests {
             ("minimal-new-shell-tab", "Terminal"),
             ("minimal-new-codex-tab", "Codex"),
             ("minimal-new-claude-tab", "Claude"),
+            ("minimal-new-jcode-tab", "JCode"),
         ] {
             assert!(terminal.contains(id), "missing {label} tab choice");
             assert!(terminal.contains(&format!(".child(\"{label}\")")));
@@ -12105,6 +11796,7 @@ mod tests {
         assert!(terminal.contains("this.open_minimal_terminal_tab(None, window, cx)"));
         assert!(terminal.contains("Some(AgentCli::Codex)"));
         assert!(terminal.contains("Some(AgentCli::Claude)"));
+        assert!(terminal.contains("Some(AgentCli::Jcode)"));
         assert!(terminal.contains(".absolute()"));
     }
 

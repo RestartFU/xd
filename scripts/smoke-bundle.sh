@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# Prove bundle-owned Git and required GTK resources work without finding host
-# replacements through PATH. Run after assembly, before artifact export.
+# Prove bundle-owned runtime helpers work without finding host replacements
+# through PATH. Run after assembly, before artifact export.
 
 set -eu
 
@@ -20,62 +20,28 @@ require_file()
 }
 
 require_file share/icons/Adwaita/index.theme
-require_file \
-  share/icons/Adwaita/symbolic/actions/chat-message-new-symbolic.svg
-require_file \
-  share/icons/Adwaita/symbolic/devices/audio-input-microphone-symbolic.svg
-require_file \
-  share/icons/Adwaita/symbolic/legacy/system-users-symbolic.svg
-require_file \
-  share/icons/hicolor/scalable/apps/xd-backend-claude.svg
-require_file \
-  share/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg
-require_file \
-  share/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
-require_file \
-  share/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
+cursor=$(find "$BUNDLE/share/icons/Adwaita/cursors" -type f -print -quit)
+test -n "$cursor" || {
+  echo "bundle smoke: missing cursor theme" >&2
+  exit 1
+}
+app_icon=$(find "$BUNDLE/share/icons/hicolor/scalable/apps" -type f \
+  -name 'com.restartfu.Xd*.svg' -print -quit)
+test -n "$app_icon" || {
+  echo "bundle smoke: missing application icon" >&2
+  exit 1
+}
 require_file libexec/xd-host
 require_file libexec/tmux
 require_file libexec/install.sh
 require_file libexec/curl
 require_file libexec/openssl
-require_file libexec/codex-package/bin/codex
-require_file libexec/claude
-require_file libexec/whisper-server-bin
-require_file lib/alsa-lib/libasound_module_pcm_pipewire.so
-require_file lib/spa-0.2/support/libspa-support.so
-require_file lib/pipewire-0.3/libpipewire-module-protocol-native.so
-require_file share/pipewire/client.conf
-
-grep -F 'ALSA_PLUGIN_DIR="$HERE/lib/alsa-lib"' "$BUNDLE/xd.sh" >/dev/null || {
-  echo "bundle smoke: launcher does not use its PipeWire ALSA plugin" >&2
-  exit 1
-}
-grep -F 'SPA_PLUGIN_DIR="$HERE/lib/spa-0.2"' "$BUNDLE/xd.sh" >/dev/null || {
-  echo "bundle smoke: launcher does not use its PipeWire SPA modules" >&2
-  exit 1
-}
-grep -F 'PIPEWIRE_MODULE_DIR="$HERE/lib/pipewire-0.3"' "$BUNDLE/xd.sh" >/dev/null || {
-  echo "bundle smoke: launcher does not use its PipeWire client modules" >&2
-  exit 1
-}
-grep -F 'PIPEWIRE_CONFIG_DIR="$HERE/share/pipewire"' "$BUNDLE/xd.sh" >/dev/null || {
-  echo "bundle smoke: launcher does not use its PipeWire configuration" >&2
-  exit 1
-}
 
 # GPUI has no window without a Vulkan driver, and the loader finds one only
 # through these manifests. lavapipe is the one that works anywhere.
 require_file lib/libvulkan.so.1
 require_file lib/libvulkan_lvp.so
 require_file etc/vulkan/libvulkan_lvp.json.in
-
-svg_loader=$(find "$BUNDLE/lib/gdk-pixbuf-2.0" -type f \
-  -name 'libpixbufloader*svg*.so' -print -quit)
-test -n "$svg_loader" || {
-  echo "bundle smoke: missing SVG pixbuf loader" >&2
-  exit 1
-}
 
 # Exercise the public entrypoint with only the host's base utilities visible.
 # Preserve PATH because NixOS does not place those utilities in /usr/bin.
@@ -121,8 +87,6 @@ git_clean -C "$WORK/repository" commit -qm initial
 "$BUNDLE/libexec/curl" --version | grep -F 'curl '
 "$BUNDLE/libexec/openssl" dgst -sha256 "$BUNDLE/libexec/install.sh" \
   | grep -Eq '= [[:xdigit:]]{64}$'
-"$BUNDLE/libexec/claude-code-proxy" --version | grep -F '0.1.30'
-test -f "$BUNDLE/share/licenses/xd/claude-code-proxy-LICENSE"
 printf 'after\n' > "$WORK/repository/file.txt"
 git_clean -C "$WORK/repository" diff --check
 git_clean -C "$WORK/repository" worktree add \
@@ -140,4 +104,4 @@ test "$remote_status" -ne 0
 printf '%s\n' "$remote_error" |
   grep -E 'Failed to connect|Could not connect|Connection refused' >/dev/null
 
-echo "bundle GTK resources and Git smoke: ok"
+echo "bundle runtime and Git smoke: ok"

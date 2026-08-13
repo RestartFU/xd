@@ -38,10 +38,6 @@ foreach ($relativePath in @(
     'bin\xd.exe',
     'bin\xd-host.exe',
     'bin\install.ps1',
-    'bin\codex-package\bin\codex.exe',
-    'bin\claude.exe',
-    'bin\claude-code-proxy.exe',
-    'bin\whisper-server-bin.exe',
     'git\cmd\git.exe'
 )) {
     if (-not (Test-Path -LiteralPath (Join-Path $payloadPath $relativePath))) {

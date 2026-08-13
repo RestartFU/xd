@@ -13,7 +13,6 @@ import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.DaemonUpdateReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
-import com.restartfu.xd.voice.VoiceSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -368,25 +367,11 @@ class ChatViewModel(
     private var draftAttachmentsDirty = false
     private var draftRevision = -1L
 
-    /**
-     * Dictation into the composer.
-     *
-     * The transcript is appended rather than replacing the draft, so speaking
-     * after typing adds to what is there — the same thing the desktop does.
-     */
-    val voice: VoiceSession = VoiceSession(
-        transport = session,
-        recorders = ::AndroidVoiceRecorder,
-        scope = viewModelScope,
-        onTranscript = ::dictated,
-    )
-
     suspend fun resetSpeech() {
         session.resetSpeech()
     }
 
     init {
-        viewModelScope.launch { client.voiceEvents.collect(voice::onEvent) }
         viewModelScope.launch {
             state.collect { synced ->
                 if (synced.draftRevision <= draftRevision) return@collect
@@ -413,28 +398,6 @@ class ChatViewModel(
     fun updateDraft(value: String) {
         _draft.value = value
         scheduleDraftSync()
-    }
-
-    /**
-     * What one finished utterance does.
-     *
-     * Dictation leaves it in the composer to be read and sent. Hands-free
-     * cannot: there is no button press coming, so the utterance is the message.
-     * It still goes through the draft first, so anything already typed there is
-     * carried along rather than dropped.
-     */
-    private fun dictated(transcript: String) {
-        appendToDraft(transcript)
-        if (!voice.handsFree.value) return
-        // The same choice the composer's own action key makes: a turn already
-        // running is steered rather than interrupted.
-        if (state.value.working) enqueue() else send()
-    }
-
-    private fun appendToDraft(transcript: String) {
-        val existing = _draft.value
-        val separator = if (existing.isEmpty() || existing.last().isWhitespace()) "" else " "
-        updateDraft(existing + separator + transcript)
     }
 
     fun attach(context: android.content.Context, uris: List<android.net.Uri>) {
@@ -575,12 +538,6 @@ class ChatViewModel(
         }
     }
 
-    fun setClaudeMode(enabled: Boolean) {
-        launchGuarded(_selectingModel) {
-            session.setBoolOption(ChatOption.CLAUDE_MODE, enabled)
-        }
-    }
-
     fun setNewWorktree(enabled: Boolean) {
         launchGuarded(_selectingModel) {
             session.setBoolOption(ChatOption.NEW_WORKTREE, enabled)
@@ -663,9 +620,6 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
-        // Leaving the chat abandons a recording rather than transcribing into
-        // a composer nobody is looking at.
-        voice.cancel()
         draftSyncJob?.cancel()
         if (draftTextDirty || draftAttachmentsDirty) {
             val text = _draft.value

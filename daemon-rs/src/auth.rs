@@ -16,7 +16,6 @@ use crate::{
     EventBus,
     agent::{resolve_claude, resolve_codex},
     background_process::command as background_command,
-    claude_proxy::resolve_claude_proxy,
 };
 
 const OUTPUT_LIMIT: usize = 64 * 1024;
@@ -53,7 +52,7 @@ struct AuthSession {
 
 impl AuthManager {
     pub(crate) fn new(events: Arc<EventBus>) -> Self {
-        let states = ["codex", "claude", "claude-mode"]
+        let states = ["codex", "claude"]
             .into_iter()
             .map(|provider| {
                 (
@@ -81,7 +80,6 @@ impl AuthManager {
     pub(crate) fn refresh_all(&self) {
         self.refresh("codex");
         self.refresh("claude");
-        self.refresh("claude-mode");
     }
 
     pub(crate) fn refresh(&self, provider: &str) -> bool {
@@ -186,7 +184,7 @@ impl AuthManager {
     }
 
     fn begin_session(&self, provider: &str, login: bool) -> Result<(), String> {
-        if !matches!(provider, "codex" | "claude" | "claude-mode") {
+        if !matches!(provider, "codex" | "claude") {
             return Err("No such assistant.".into());
         }
         let serial = self.inner.next_session.fetch_add(1, Ordering::Relaxed);
@@ -251,15 +249,6 @@ impl AuthManager {
                     ["auth", "login"].as_slice()
                 } else {
                     ["auth", "logout"].as_slice()
-                });
-                command
-            }
-            "claude-mode" => {
-                let mut command = background_command(resolve_claude_proxy());
-                command.args(if login {
-                    ["codex", "auth", "device"].as_slice()
-                } else {
-                    ["codex", "auth", "logout"].as_slice()
                 });
                 command
             }
@@ -421,7 +410,7 @@ impl AuthManager {
             .states
             .lock()
             .map(|states| {
-                ["codex", "claude", "claude-mode"]
+                ["codex", "claude"]
                     .into_iter()
                     .filter_map(|provider| {
                         states
@@ -455,7 +444,6 @@ fn snapshot_value(provider: &str, snapshot: &AuthSnapshot) -> Value {
         "provider": provider,
         "display_name": match provider {
             "claude" => "Claude Code",
-            "claude-mode" => "Claude mode",
             _ => "Codex",
         },
         "state": snapshot.state,
@@ -478,11 +466,6 @@ fn check_status(provider: &str) -> AuthSnapshot {
         "claude" => {
             let mut command = background_command(resolve_claude());
             command.args(["auth", "status", "--json"]);
-            command
-        }
-        "claude-mode" => {
-            let mut command = background_command(resolve_claude_proxy());
-            command.args(["codex", "auth", "status"]);
             command
         }
         _ => {
@@ -526,9 +509,6 @@ fn check_status(provider: &str) -> AuthSnapshot {
     if provider == "claude" {
         return parse_claude_status(&stdout, &stderr, status.success());
     }
-    if provider == "claude-mode" {
-        return parse_proxy_status(&stdout, &stderr, status.success());
-    }
     parse_codex_status(&stdout, &stderr, status.success())
 }
 
@@ -560,24 +540,6 @@ fn parse_claude_status(stdout: &[u8], stderr: &[u8], success: bool) -> AuthSnaps
 fn parse_codex_status(stdout: &[u8], stderr: &[u8], success: bool) -> AuthSnapshot {
     let detail = command_detail(stdout, stderr, success);
     if detail.to_lowercase().contains("not logged in") {
-        signed_out()
-    } else if success {
-        AuthSnapshot {
-            state: "signed-in".into(),
-            detail: Some(detail),
-            login_url: None,
-            device_code: None,
-            needs_input: false,
-        }
-    } else {
-        failed(detail)
-    }
-}
-
-fn parse_proxy_status(stdout: &[u8], stderr: &[u8], success: bool) -> AuthSnapshot {
-    let detail = command_detail(stdout, stderr, success);
-    let normalized = detail.to_ascii_lowercase();
-    if normalized.contains("not authenticated") || normalized.contains("not logged in") {
         signed_out()
     } else if success {
         AuthSnapshot {
@@ -656,7 +618,7 @@ fn login_instructions(provider: &str, output: &str) -> (Option<String>, Option<S
             word.trim_end_matches(['.', ',', ';', ':', ')', ']', '}'])
                 .to_owned()
         });
-    let device_code = matches!(provider, "codex" | "claude-mode")
+    let device_code = (provider == "codex")
         .then(|| {
             clean.split_whitespace().find_map(|word| {
                 let word = word.trim_matches(|character: char| {
@@ -707,15 +669,6 @@ mod tests {
             parse_codex_status(b"Not logged in\n", b"", false).state,
             "signed-out"
         );
-        assert_eq!(
-            parse_proxy_status(b"Codex is not authenticated\n", b"", false).state,
-            "signed-out"
-        );
-        assert_eq!(
-            parse_proxy_status(b"Authenticated with Codex\n", b"", true).state,
-            "signed-in"
-        );
-
         let claude =
             parse_claude_status(br#"{"loggedIn":true,"authMethod":"claude.ai"}"#, b"", true);
         assert_eq!(claude.state, "signed-in");
@@ -746,17 +699,6 @@ mod tests {
             (
                 Some("https://auth.openai.com/device".into()),
                 Some("ABCD-EFGH".into()),
-                false
-            )
-        );
-        assert_eq!(
-            login_instructions(
-                "claude-mode",
-                "Open https://auth.openai.com/device. Enter WXYZ-1234."
-            ),
-            (
-                Some("https://auth.openai.com/device".into()),
-                Some("WXYZ-1234".into()),
                 false
             )
         );

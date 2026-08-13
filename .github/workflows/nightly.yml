@@ -101,7 +101,7 @@ jobs:
             hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-
 
-      # whisper.cpp, the agent downloads and WiX are pinned by version, so what
+      # WiX is pinned by version, so what
       # lands here is decided by the scripts that put it there.
       - uses: actions/cache@v4
         with:
@@ -166,7 +166,7 @@ jobs:
             hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-x86_64-1.95.0-
 
-      # whisper.cpp, the agent downloads and WiX are pinned by version, so what
+      # whisper.cpp and WiX are pinned by version, so what
       # lands here is decided by the scripts that put it there.
       - uses: actions/cache@v4
         with:

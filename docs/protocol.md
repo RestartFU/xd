@@ -217,8 +217,7 @@ must tolerate a child appearing before its parent and treat ids as opaque.
 ```
 
 Success always includes `ok`, `title`, `backend`, `auth_state`, `commands`,
-`plan`, `queue` (oldest first), `working`, `effort`, `claude_mode`,
-`new_worktree`, and
+`plan`, `queue` (oldest first), `working`, `effort`, `new_worktree`, and
 `has_messages`.
 
 Optional members: `auth_detail`, `queued` (compatibility alias for the first
@@ -318,12 +317,11 @@ boundary, not an event cursor.
 | `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to daemon home, lists non-hidden directories |
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
-| `agent-clis` | none | bundled assistant versions |
+| `agent-clis` | none | detected assistant versions |
 | `daemon-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the daemon |
 | `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
-| `voice-model` | `chat` | `available: boolean` — whether *this daemon* has the speech model on disk |
 | `search` | `query` | matching stored messages |
 | `diff-read` | `chat` plus one `read` of `base`, `working-status`, `branch-status` (with `base`), `working-all`, `branch-all` (with `base`), `working-file`/`untracked-file` (with a safe relative `path`), or `branch-file` (with `base` and `path`) | `output: string`, limited to 8 MiB |
 | `ping` | none | no members beyond `ok` |
@@ -453,11 +451,9 @@ command is slow.
 {"op":"set-option","chat":"chat-1","option":"effort","value":"high"}
 ```
 
-Options: `model`, `effort`, `access`, `plan`, `fast`, `claude-mode`, `backend`,
+Options: `model`, `effort`, `access`, `plan`, `fast`, `backend`,
 `new-worktree`, `workspace`. Boolean options take `"true"`/`"false"`.
-`fast` and `claude-mode` are Codex-only; Claude mode routes the selected Codex
-model through Claude Code and does not support `ultra` effort. An unknown
-option is an error.
+`fast` is Codex-only. An unknown option is an error.
 
 Selecting a model atomically requires sending `backend` alongside `value`;
 without `backend` only the model string is stored. The atomic form validates
@@ -511,43 +507,6 @@ chat may reference it. The daemon removes the checkout without force and keeps
 the Git branch, then returns the chat to its original checkout. A successful
 request replies with `ok` alone.
 
-### Voice
-
-Only microphone capture belongs to the client. The daemon owns the speech model
-and the whisper binary, so a remote chat transcribes on the remote machine —
-which is also the machine whose CPU and disk are being spent.
-
-```json
-{"op":"voice-model-download","chat":"chat-1","request":"a1b2…"}
-{"op":"voice-stream-start","chat":"chat-1","request":"a1b2…"}
-{"op":"voice-stream-chunk","chat":"chat-1","request":"a1b2…","audio":"<base64 PCM16>"}
-{"op":"voice-stream-finish","chat":"chat-1","request":"a1b2…","audio":"<base64 WAV>"}
-{"op":"voice-transcribe","chat":"chat-1","request":"a1b2…","audio":"<base64 WAV>"}
-{"op":"voice-cancel","request":"a1b2…"}
-```
-
-`request` is a client-chosen token, at most 128 bytes, that ties the job to the
-`voice` events answering it. The daemon keys jobs on the connection as well, so
-it need only be unique among one client's own outstanding requests, and one
-client cannot cancel another's job.
-
-Every mutation replies `ok` as soon as it is accepted. Everything that matters
-— download progress, live text, the final transcript, failures — arrives as
-`voice` events, because model loading and inference take longer than a request
-may.
-
-For low-latency dictation, start a stream, send ordered chunks of raw 16 kHz
-mono signed 16-bit little-endian PCM, then finish with the complete recording as
-a WAV. The daemon coalesces partial windows so each stream has at most one
-Whisper inference running. It emits `partial` text while recording and an
-authoritative `transcribed` result after the final WAV. The legacy
-`voice-transcribe` operation remains available for clients that only send a
-complete WAV.
-
-Decoded audio is limited to 64 MiB. The daemon does not resample; the final WAV
-must contain 16 kHz mono PCM16. `desktop/src/voice_input.rs` writes this header
-and `daemon-rs/src/voice.rs` validates it.
-
 ### Folder and chat mutations
 
 `new-folder`, `rename-folder`, `move-folder`, `trash-folder`, `rename-chat`,
@@ -596,12 +555,11 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `repository-changed` | `chat` | HEAD moved outside the app. |
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |
 | `terminal-output`, `terminal-closed` | `terminal`, … | Shared pty; output is base64. |
-| `voice` | `request`, `state` of `downloading` (with `progress`, `-1` until the size is known), `ready`, `partial` (with provisional `text`), `transcribed` (with final `text`), `cancelled`, or `error` (with `error`) | Voice job progress, addressed to the connection that asked and naming no chat. |
 | `auth`, `agent-auth-changed` | … | Assistant authentication state. |
 
 ### Tagged questions
 
-Both bundled assistants run non-interactively, so a question is a block in the
+Structured assistant turns run non-interactively, so a question is a block in the
 reply rather than a prompt:
 
 ```

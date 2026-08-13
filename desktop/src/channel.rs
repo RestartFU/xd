@@ -46,17 +46,6 @@ pub fn configure_host(command: &mut Command, _launcher: &Path) {
 
     #[cfg(windows)]
     if let Some(bin) = _launcher.parent() {
-        command
-            .env(
-                "XD_CODEX_EXECUTABLE",
-                bin.join("codex-package/bin/codex.exe"),
-            )
-            .env("XD_CLAUDE_EXECUTABLE", bin.join("claude.exe"))
-            .env(
-                "XD_CLAUDE_PROXY_EXECUTABLE",
-                bin.join("claude-code-proxy.exe"),
-            )
-            .env("XD_WHISPER_SERVER", bin.join("whisper-server-bin.exe"));
         let mut paths = vec![bin.to_owned()];
         if let Some(root) = bin.parent() {
             paths.push(root.join("git/cmd"));

@@ -325,36 +325,6 @@ answer, often a sentence, and a row of truncated sentences is not a choice
 anyone can make. A question that only accepts typed text gets no buttons at
 all — the composer is already there.
 
-## Voice
-
-The microphone button dictates into the composer. Capture is the only part that
-happens on the phone: `AudioRecord` at 16 kHz mono PCM16 sends ordered half-second
-chunks while recording, followed by the complete WAV that
-`daemon-rs/src/voice.rs` validates. The daemon keeps the English `base.en` model
-resident, coalesces live windows to one inference at a time, and returns
-provisional text before the authoritative final transcript. A remote chat still
-transcribes on the remote machine — the phone never downloads the 148 MB model
-or spends its battery on inference.
-
-That download is the one thing worth asking about, and the dialog says whose
-disk it lands on, because "148 MB" reads very differently for a phone than for
-the machine running the chat. Progress arrives as events, not in the reply.
-
-`VoiceSession` in `shared` is the state machine — check, record, transcribe,
-and every way each can fail — so the SwiftUI phase inherits it and only has to
-supply a `VoiceRecorder`. A generation counter discards results from a job the
-reader has already abandoned: the daemon may well be mid-transcription when a
-cancel is sent, and its answer must not land in a composer nobody is watching.
-
-A recorder is built per recording rather than per session. Stop and cancel are
-signals to a running capture, and a fresh object is what keeps a signal that
-arrives a moment early — before the capture coroutine is even scheduled — from
-being read by the next recording instead.
-
-The daemon addresses `voice` events to the connection that asked, and a
-reconnect is a new connection, so a job in flight when the socket drops is lost
-rather than resumed. The desktop behaves the same way.
-
 ## Images in the transcript
 
 Sending an attachment stores the PNG on the daemon and leaves

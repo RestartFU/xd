@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Download: an arrow coming down onto a line, the way every other program
-     draws it. Adwaita's update icon is a box, which reads as "a package
-     exists" rather than "this fetches it". -->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
-  <path fill="#2e3436" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2z"/>
-</svg>

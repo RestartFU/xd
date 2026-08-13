@@ -8,7 +8,6 @@ publish = false
 [dependencies]
 async-channel = "2.5"
 base64 = "0.22"
-cpal = "0.18.1"
 gpui = "=0.2.2"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 portable-pty = "0.9.0"

@@ -12,10 +12,6 @@ APP="${1:?macOS app bundle}"
 [ -x "$APP/Contents/MacOS/xd-desktop" ]
 [ -x "$APP/Contents/Resources/libexec/xd-host" ]
 [ -x "$APP/Contents/Resources/libexec/install.sh" ]
-[ -x "$APP/Contents/Resources/libexec/codex-package/bin/codex" ]
-[ -x "$APP/Contents/Resources/libexec/claude" ]
-[ -x "$APP/Contents/Resources/libexec/claude-code-proxy" ]
-[ -x "$APP/Contents/Resources/libexec/whisper-server-bin" ]
 [ -f "$APP/Contents/Resources/xd.icns" ]
 
 plutil -lint "$APP/Contents/Info.plist"
@@ -35,9 +31,6 @@ codesign --verify --deep --strict "$APP"
 expected=$(uname -m)
 for binary in \
   "$APP/Contents/MacOS/xd-desktop" \
-  "$APP/Contents/Resources/libexec/xd-host" \
-  "$APP/Contents/Resources/libexec/claude" \
-  "$APP/Contents/Resources/libexec/claude-code-proxy" \
-  "$APP/Contents/Resources/libexec/whisper-server-bin"; do
+  "$APP/Contents/Resources/libexec/xd-host"; do
   file "$binary" | grep -F "$expected"
 done
