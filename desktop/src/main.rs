@@ -7186,6 +7186,12 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn close_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.minimal_theme_open = false;
+        self.restore_minimal_popup_focus(window);
+        cx.notify();
+    }
+
     fn toggle_minimal_all_permissions(&mut self, cx: &mut Context<Self>) {
         self.settings.allow_all_permissions = !self.settings.allow_all_permissions;
         if let Err(error) = self.settings.save() {
@@ -9087,6 +9093,12 @@ impl XdDesktop {
                 .absolute()
                 .inset_0()
                 .track_focus(&minimal_popup_focus)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.close_minimal_theme_popup(window, cx)
+                    }),
+                )
                 .child(
                     div()
                         .occlude()
@@ -9100,6 +9112,7 @@ impl XdDesktop {
                         .border_color(rgb(colors.border))
                         .bg(rgb(colors.surface))
                         .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
                                 .px_3()
@@ -10845,6 +10858,25 @@ mod tests {
         ] {
             assert!(settings.contains(behavior), "missing {behavior}");
         }
+    }
+
+    #[test]
+    fn minimal_settings_closes_when_the_backdrop_is_clicked() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let settings = production
+            .split_once("let theme_overlay = self.minimal_theme_open.then(||")
+            .expect("minimal settings overlay")
+            .1
+            .split_once("let remote_overlay")
+            .expect("end of minimal settings overlay")
+            .0;
+
+        assert!(settings.contains("this.close_minimal_theme_popup(window, cx)"));
+        assert!(settings.contains("cx.stop_propagation()"));
     }
 
     #[test]
