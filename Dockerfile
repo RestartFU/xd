@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 #
 # xd is built entirely inside Docker and *run* on the host. The final `bundle`
-# stage emits a self-contained directory tree (binary + full library closure +
-# display support data + launcher) so the result runs on any glibc-based x86_64
-# host, including NixOS where there is no loader at the standard path.
+# stage emits a relocatable directory tree (binary + private library closure +
+# display support data + launcher). The host supplies its glibc and graphics
+# driver so those two tightly coupled parts of the platform always agree.
 
 # --- GPUI desktop ----------------------------------------------------------
 FROM rust:1.95-slim-trixie@sha256:28846ec5a6bcfcddb93f403ba7071bd579787852b2f2ac3839965620e8bd9456 AS gpui-toolchain
@@ -166,7 +166,6 @@ COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 COPY scripts/install.sh /stage/usr/libexec/install.sh
 COPY scripts/curl.sh /stage/usr/libexec/curl
 COPY scripts/git.sh /stage/usr/bin/git
-COPY scripts/git-helper.sh /stage/usr/libexec/git-helper
 COPY scripts/openssl.sh /stage/usr/libexec/openssl
 RUN install -m0755 /usr/bin/tmux /stage/usr/libexec/tmux \
  && install -Dm0644 /usr/share/doc/tmux/copyright /stage/usr/share/licenses/tmux-LICENSE
@@ -210,7 +209,6 @@ RUN set -eux; \
     chmod 0755 \
       /stage/usr/bin/git \
       /stage/usr/libexec/curl \
-      /stage/usr/libexec/git-helper \
       /stage/usr/libexec/install.sh \
       /stage/usr/libexec/openssl; \
     desktop-file-validate "/stage/usr/share/applications/$app_id.desktop"; \

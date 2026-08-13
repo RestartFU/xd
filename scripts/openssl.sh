@@ -1,7 +1,7 @@
 #!/bin/sh
 #
-# OpenSSL is used only when creating a host certificate. Use xd's loader so
-# certificate creation works on hosts without a conventional glibc layout.
+# OpenSSL is used only when creating a host certificate. Its private
+# dependencies use the relative runtime path embedded during bundle assembly.
 
 set -e
 
@@ -11,6 +11,4 @@ BUNDLE=${LIBEXEC%/*}
 export OPENSSL_CONF="${OPENSSL_CONF:-$BUNDLE/etc/ssl/openssl.cnf}"
 export OPENSSL_MODULES="${OPENSSL_MODULES:-$BUNDLE/lib/ossl-modules}"
 
-exec "$BUNDLE/lib/ld-linux-x86-64.so.2" \
-     --library-path "$BUNDLE/lib" \
-     "$LIBEXEC/openssl-bin" "$@"
+exec "$LIBEXEC/openssl-bin" "$@"

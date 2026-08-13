@@ -37,6 +37,20 @@ require_file libexec/install.sh
 require_file libexec/curl
 require_file libexec/openssl
 
+# glibc and the compiler runtimes belong to the host. Shipping either can make
+# distro GPU drivers fail before GPUI creates its Vulkan context.
+for host_runtime in \
+  lib/ld-linux-x86-64.so.2 \
+  lib/libc.so.6 \
+  lib/libm.so.6 \
+  lib/libgcc_s.so.1 \
+  lib/libstdc++.so.6; do
+  test ! -e "$BUNDLE/$host_runtime" || {
+    echo "bundle smoke: must not ship $host_runtime" >&2
+    exit 1
+  }
+done
+
 # GPUI loads Vulkan dynamically. The loader ships with xd; the host supplies
 # the driver matching its GPU and kernel.
 require_file lib/libvulkan.so.1
@@ -55,13 +69,9 @@ env -i \
   XDG_CONFIG_HOME="$WORK/launcher-home/config" \
   "$BUNDLE/xd.sh" --version | grep -E '^xd [0-9]'
 
-"$BUNDLE/lib/ld-linux-x86-64.so.2" \
-  --library-path "$BUNDLE/lib" \
-  "$BUNDLE/libexec/xd-host" --version | grep -E '^xd-host [0-9]'
+"$BUNDLE/libexec/xd-host" --version | grep -E '^xd-host [0-9]'
 
-"$BUNDLE/lib/ld-linux-x86-64.so.2" \
-  --library-path "$BUNDLE/lib" \
-  "$BUNDLE/libexec/tmux" -V | grep -E '^tmux [0-9]'
+"$BUNDLE/libexec/tmux" -V | grep -E '^tmux [0-9]'
 
 git_clean()
 {

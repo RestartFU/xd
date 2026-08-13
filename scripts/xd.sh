@@ -2,10 +2,9 @@
 #
 # Launcher for the relocatable xd bundle.
 #
-# Everything the app needs is loaded out of this directory. The bundled loader
-# is invoked with --library-path rather than exporting LD_LIBRARY_PATH on
-# purpose: host tools spawned by terminal sessions must keep using host
-# libraries. Bundled OpenSSL uses its own small loader wrapper.
+# Private dependencies use relative runtime paths embedded during assembly.
+# glibc and graphics drivers remain host-owned, and no LD_LIBRARY_PATH leaks
+# into terminals or agent CLIs launched by xd.
 
 set -e
 
@@ -69,13 +68,10 @@ export FONTCONFIG_FILE="$RUNTIME/fonts.conf"
 export XKB_CONFIG_ROOT="$HERE/share/X11/xkb"
 export XLOCALEDIR="$HERE/share/X11/locale"
 
-# The bundle carries no compiled locale data, so anything but C.UTF-8 would
-# fail in setlocale() and fall back to plain C -- losing UTF-8 handling along
-# with it. C.UTF-8 is built into glibc and behaves correctly, at the cost of
-# locale-specific number and date formatting.
+# Use the host glibc's portable UTF-8 locale. This avoids locale-specific
+# number and date formatting while retaining correct terminal text handling.
 export LC_ALL=C.UTF-8
 export LANG=C.UTF-8
-export LOCPATH="$HERE/share/locale-data"
 
 export XDG_DATA_DIRS="$HERE/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export XCURSOR_PATH="$HERE/share/icons:${XCURSOR_PATH:-$HOME/.icons:/usr/share/icons}"
@@ -97,6 +93,4 @@ export GIT_EXEC_PATH="$HERE/libexec/git-core"
 export GIT_TEMPLATE_DIR="$HERE/share/git-core/templates"
 export GIT_SSL_CAINFO="$HERE/etc/ssl/certs/ca-certificates.crt"
 
-exec "$HERE/lib/ld-linux-x86-64.so.2" \
-     --library-path "$HERE/lib" \
-     "$HERE/bin/xd" "$@"
+exec "$HERE/bin/xd" "$@"
