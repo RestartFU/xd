@@ -31,6 +31,7 @@ for pattern in \
   XD_CODEX_EXECUTABLE \
   XD_CLAUDE_EXECUTABLE \
   XD_JCODE_EXECUTABLE \
+  XD_COPILOT_EXECUTABLE \
   XD_CLAUDE_PROXY_EXECUTABLE \
   whisper-server \
   whisper.cpp \
@@ -66,4 +67,4 @@ test ! -e data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 test ! -e data/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
 test ! -e tls-proxy-rs
 
-grep -Fq 'user-installed Codex, Claude Code, and JCode' README.md
+grep -Fq 'user-installed Codex, Claude Code, JCode, and GitHub Copilot' README.md

@@ -789,13 +789,17 @@ impl Engine {
         let agent = match required_string(
             request,
             "agent",
-            "terminal-open-agent needs codex, claude, or jcode.",
+            "terminal-open-agent needs codex, claude, jcode, or copilot.",
         ) {
             Ok(agent) => match TerminalAgent::from_wire_name(agent) {
                 Some(agent) => agent,
-                None => return error_reply("terminal-open-agent needs codex, claude, or jcode."),
+                None => {
+                    return error_reply(
+                        "terminal-open-agent needs codex, claude, jcode, or copilot.",
+                    );
+                }
             },
-            _ => return error_reply("terminal-open-agent needs codex, claude, or jcode."),
+            _ => return error_reply("terminal-open-agent needs codex, claude, jcode, or copilot."),
         };
         let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
             Ok(chat_id) => chat_id,
@@ -845,9 +849,12 @@ impl Engine {
             Ok(session_id) => session_id,
             Err(error) => return error_reply(error),
         };
-        let new_session_id = if session_id.is_none() && agent == TerminalAgent::Claude {
-            // Claude accepts a caller-selected UUID for a new conversation,
-            // which lets us persist the association before it starts.
+        let new_session_id = if session_id.is_none()
+            && matches!(agent, TerminalAgent::Claude | TerminalAgent::Copilot)
+        {
+            // Claude and Copilot accept a caller-selected UUID for a new
+            // conversation, which lets us persist the association before it
+            // starts.
             Some(uuid::Uuid::new_v4().to_string())
         } else {
             None

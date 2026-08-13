@@ -93,6 +93,8 @@ pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
 const JCODE_ICON: &str = "icons/jcode.svg";
+const COPILOT_ICON: &str = "icons/copilot.svg";
+const XD_MARK_ICON: &str = "icons/xd-mark.svg";
 const SEND_ICON: &str = "icons/send.svg";
 const STOP_ICON: &str = "icons/stop.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
@@ -171,40 +173,11 @@ fn plus_icon(color: u32) -> gpui::AnyElement {
 }
 
 fn xd_mark(color: u32) -> gpui::AnyElement {
-    div()
-        .relative()
+    svg()
+        .path(XD_MARK_ICON)
         .size(px(20.0))
         .flex_none()
-        .children([
-            div()
-                .absolute()
-                .left(px(1.0))
-                .top(px(1.0))
-                .size(px(8.0))
-                .rounded_sm()
-                .bg(rgb(color)),
-            div()
-                .absolute()
-                .right(px(1.0))
-                .top(px(1.0))
-                .size(px(8.0))
-                .rounded_full()
-                .bg(rgb(color)),
-            div()
-                .absolute()
-                .left(px(1.0))
-                .bottom(px(1.0))
-                .size(px(8.0))
-                .rounded_full()
-                .bg(rgb(color)),
-            div()
-                .absolute()
-                .right(px(1.0))
-                .bottom(px(1.0))
-                .size(px(8.0))
-                .rounded_sm()
-                .bg(rgb(color)),
-        ])
+        .text_color(rgb(color))
         .into_any_element()
 }
 
@@ -5291,6 +5264,27 @@ impl XdDesktop {
             )
             .resume_with(["--no-update", "--resume"])
             .discover_in_user_shell("JCode"),
+            Some(AgentCli::Copilot) => {
+                let executable = if remote {
+                    "copilot".into()
+                } else {
+                    env::var("XD_COPILOT_EXECUTABLE").unwrap_or_else(|_| "copilot".into())
+                };
+                let session_id = stable_agent_session_id(terminal_id);
+                let mut arguments = vec![
+                    "--no-auto-update".to_owned(),
+                    "--no-banner".to_owned(),
+                    "--no-mouse".to_owned(),
+                    "--session-id".to_owned(),
+                    session_id,
+                ];
+                if self.settings.allow_all_permissions {
+                    arguments.push("--allow-all".into());
+                }
+                AgentCommand::new(executable, arguments.clone())
+                    .resume_with(arguments)
+                    .discover_in_user_shell("GitHub Copilot CLI")
+            }
             None => AgentCommand::user_shell(),
         }
     }
@@ -7631,6 +7625,35 @@ impl XdDesktop {
                                         .text_color(rgb(colors.text)),
                                 )
                                 .child("JCode"),
+                        )
+                        .child(
+                            div()
+                                .id("minimal-new-copilot-tab")
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_md()
+                                .text_sm()
+                                .text_color(rgb(colors.text))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_minimal_terminal_tab(
+                                        Some(AgentCli::Copilot),
+                                        window,
+                                        cx,
+                                    )
+                                }))
+                                .child(
+                                    svg()
+                                        .path(COPILOT_ICON)
+                                        .size(px(18.0))
+                                        .text_color(rgb(colors.text)),
+                                )
+                                .child("Copilot"),
                         ),
                 )
             })
@@ -8069,6 +8092,7 @@ impl XdDesktop {
                                     AgentCli::Codex => CODEX_ICON,
                                     AgentCli::Claude => CLAUDE_ICON,
                                     AgentCli::Jcode => JCODE_ICON,
+                                    AgentCli::Copilot => COPILOT_ICON,
                                 })
                                 .size(px(15.0))
                                 .text_color(rgb(colors.muted)),
@@ -8520,6 +8544,7 @@ impl XdDesktop {
                     AgentCli::Codex => CODEX_ICON,
                     AgentCli::Claude => CLAUDE_ICON,
                     AgentCli::Jcode => JCODE_ICON,
+                    AgentCli::Copilot => COPILOT_ICON,
                 };
                 let status = if session.working {
                     div().child("Working").into_any_element()
@@ -8844,7 +8869,7 @@ impl XdDesktop {
                                             .text_sm()
                                             .text_color(rgb(colors.muted))
                                             .child(
-                                                "No sessions yet. Start one with Codex, Claude, or JCode.",
+                                                "No sessions yet. Start one with Codex, Claude, JCode, or Copilot.",
                                             ),
                                     )
                                 },
@@ -8856,7 +8881,7 @@ impl XdDesktop {
                                         .text_sm()
                                         .text_color(rgb(colors.muted))
                                         .child(
-                                            "Create a workspace, then start a Codex, Claude, or JCode session.",
+                                            "Create a workspace, then start a Codex, Claude, JCode, or Copilot session.",
                                         ),
                                 )
                             }),
@@ -9156,7 +9181,7 @@ impl XdDesktop {
                                                 .mt_1()
                                                 .text_xs()
                                                 .text_color(rgb(colors.muted))
-                                                .child("New Codex and Claude tabs skip approvals and sandboxing."),
+                                                .child("New agent tabs skip approvals and sandboxing when the CLI supports it."),
                                         ),
                                 )
                                 .child(
@@ -9816,52 +9841,58 @@ impl XdDesktop {
                         )
                         .child(
                             div().flex().gap_2().children(
-                                [AgentCli::Codex, AgentCli::Claude, AgentCli::Jcode]
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, agent)| {
-                                        let selected = self.minimal_new_session_agent == agent;
-                                        div()
-                                            .id(("minimal-session-agent", index))
-                                            .flex_1()
-                                            .px_3()
-                                            .py_2()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .gap_2()
-                                            .rounded_lg()
-                                            .border_1()
-                                            .border_color(rgb(if selected {
-                                                colors.accent
-                                            } else {
-                                                colors.border
-                                            }))
-                                            .bg(rgb(if selected {
-                                                colors.surface_high
-                                            } else {
-                                                colors.background
-                                            }))
-                                            .text_sm()
-                                            .text_color(rgb(colors.text))
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.minimal_new_session_agent = agent;
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                svg()
-                                                    .path(match agent {
-                                                        AgentCli::Codex => CODEX_ICON,
-                                                        AgentCli::Claude => CLAUDE_ICON,
-                                                        AgentCli::Jcode => JCODE_ICON,
-                                                    })
-                                                    .size(px(18.0))
-                                                    .text_color(rgb(colors.text)),
-                                            )
-                                            .child(agent.label())
-                                    }),
+                                [
+                                    AgentCli::Codex,
+                                    AgentCli::Claude,
+                                    AgentCli::Jcode,
+                                    AgentCli::Copilot,
+                                ]
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, agent)| {
+                                    let selected = self.minimal_new_session_agent == agent;
+                                    div()
+                                        .id(("minimal-session-agent", index))
+                                        .flex_1()
+                                        .px_3()
+                                        .py_2()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap_2()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(if selected {
+                                            colors.accent
+                                        } else {
+                                            colors.border
+                                        }))
+                                        .bg(rgb(if selected {
+                                            colors.surface_high
+                                        } else {
+                                            colors.background
+                                        }))
+                                        .text_sm()
+                                        .text_color(rgb(colors.text))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.minimal_new_session_agent = agent;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            svg()
+                                                .path(match agent {
+                                                    AgentCli::Codex => CODEX_ICON,
+                                                    AgentCli::Claude => CLAUDE_ICON,
+                                                    AgentCli::Jcode => JCODE_ICON,
+                                                    AgentCli::Copilot => COPILOT_ICON,
+                                                })
+                                                .size(px(18.0))
+                                                .text_color(rgb(colors.text)),
+                                        )
+                                        .child(agent.label())
+                                }),
                             ),
                         )
                         .child(
@@ -10415,6 +10446,12 @@ impl AssetSource for EmbeddedIcons {
             JCODE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/jcode.svg").as_slice(),
             )),
+            COPILOT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/copilot.svg").as_slice(),
+            )),
+            XD_MARK_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/xd-mark.svg").as_slice(),
+            )),
             SEND_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/send.svg").as_slice(),
             )),
@@ -10442,6 +10479,8 @@ impl AssetSource for EmbeddedIcons {
             CLAUDE_ICON.into(),
             CODEX_ICON.into(),
             JCODE_ICON.into(),
+            COPILOT_ICON.into(),
+            XD_MARK_ICON.into(),
             SEND_ICON.into(),
             STOP_ICON.into(),
             FOLDER_ICON.into(),
@@ -11364,7 +11403,7 @@ mod tests {
 
     #[test]
     fn every_agent_mark_is_embedded_and_drawable() {
-        for path in [CLAUDE_ICON, CODEX_ICON, JCODE_ICON] {
+        for path in [CLAUDE_ICON, CODEX_ICON, JCODE_ICON, COPILOT_ICON] {
             let bytes = EmbeddedIcons
                 .load(path)
                 .expect("embedded marks load")
@@ -11372,6 +11411,18 @@ mod tests {
             assert!(String::from_utf8_lossy(&bytes).contains("<svg"));
         }
         assert!(EmbeddedIcons.load("icons/missing.svg").unwrap().is_none());
+    }
+
+    #[test]
+    fn product_mark_is_embedded_and_not_x_shaped() {
+        let bytes = EmbeddedIcons
+            .load(XD_MARK_ICON)
+            .expect("embedded mark loads")
+            .expect("the product mark exists");
+        let mark = String::from_utf8_lossy(&bytes);
+        assert!(mark.contains("<rect"));
+        assert!(mark.contains("M8 4h10"));
+        assert!(!mark.contains("rotate"));
     }
 
     #[test]
@@ -11727,6 +11778,7 @@ mod tests {
             ("codex", Some("codex")),
             ("claude", Some("claude")),
             ("jcode", Some("jcode")),
+            ("copilot", Some("copilot")),
         ] {
             let mut opened = serde_json::json!({
                 "chat": "chat",
@@ -11753,6 +11805,7 @@ mod tests {
                 Some(AgentCli::Codex),
                 Some(AgentCli::Claude),
                 Some(AgentCli::Jcode),
+                Some(AgentCli::Copilot),
             ]
         );
     }
@@ -11885,6 +11938,7 @@ mod tests {
             ("minimal-new-codex-tab", "Codex"),
             ("minimal-new-claude-tab", "Claude"),
             ("minimal-new-jcode-tab", "JCode"),
+            ("minimal-new-copilot-tab", "Copilot"),
         ] {
             assert!(terminal.contains(id), "missing {label} tab choice");
             assert!(terminal.contains(&format!(".child(\"{label}\")")));
@@ -11894,6 +11948,7 @@ mod tests {
         assert!(terminal.contains("Some(AgentCli::Codex)"));
         assert!(terminal.contains("Some(AgentCli::Claude)"));
         assert!(terminal.contains("Some(AgentCli::Jcode)"));
+        assert!(terminal.contains("Some(AgentCli::Copilot)"));
         assert!(terminal.contains(".absolute()"));
     }
 

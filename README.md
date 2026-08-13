@@ -1,7 +1,7 @@
 # xd
 
 xd is a Rust/GPUI desktop client for workspace-organized Codex, Claude Code,
-and JCode conversations. Chats inherit their folder's working directory,
+JCode, and GitHub Copilot CLI conversations. Chats inherit their folder's working directory,
 repository, backend, model, and project instructions.
 
 ![xd workspace, chat, terminal, and diff panes](docs/assets/xd-showcase.png)
@@ -52,8 +52,8 @@ curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-mac
 
 The Linux and macOS installers require no root access. The bundles include the
 GPUI desktop, stdio host, and their native runtime helpers.
-Install the assistants you use separately and make their `codex`, `claude`, or
-`jcode` commands available on `PATH`.
+Install the assistants you use separately and make their `codex`, `claude`,
+`jcode`, or `copilot` commands available on `PATH`.
 
 Stable data lives in `~/.local/share/xd` on Linux and
 `~/Library/Application Support/xd` on macOS. Nightly uses the corresponding
@@ -65,7 +65,7 @@ workspaces.
 - Organizes chats in real workspace folders that can be nested, moved, or
   renamed without losing their conversations.
 - Inherits folder settings and instructions down the workspace tree.
-- Runs user-installed Codex, Claude Code, and JCode CLIs with their normal
+- Runs user-installed Codex, Claude Code, JCode, and GitHub Copilot CLIs with their normal
   authentication and configuration.
 - Supports existing checkouts and isolated Git worktrees.
 - Streams Markdown responses, tool calls, inline file diffs, and images, with

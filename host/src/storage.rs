@@ -67,6 +67,7 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
     ("claude-opus-4-8", "Claude Opus 4.8", 0),
 ];
 const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
+const COPILOT_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Error)]
@@ -972,6 +973,15 @@ impl StateStore {
                 "name": "JCode",
                 "default_model": "default",
                 "models": JCODE_MODELS.iter().map(|(id, name, context_window)| {
+                    json!({"id": id, "name": name, "context_window": context_window})
+                }).collect::<Vec<_>>(),
+                "efforts": [],
+            }),
+            json!({
+                "id": "copilot",
+                "name": "GitHub Copilot",
+                "default_model": "default",
+                "models": COPILOT_MODELS.iter().map(|(id, name, context_window)| {
                     json!({"id": id, "name": name, "context_window": context_window})
                 }).collect::<Vec<_>>(),
                 "efforts": [],
@@ -3954,7 +3964,7 @@ fn catalog_backend(
 }
 
 fn validate_backend(backend: &str) -> Result<(), StorageError> {
-    if matches!(backend, "codex" | "claude" | "jcode") {
+    if matches!(backend, "codex" | "claude" | "jcode" | "copilot") {
         Ok(())
     } else {
         Err(StorageError::InvalidRequest("No such assistant.".into()))
@@ -3964,7 +3974,7 @@ fn validate_backend(backend: &str) -> Result<(), StorageError> {
 fn default_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
-        "jcode" => "default",
+        "jcode" | "copilot" => "default",
         _ => "gpt-5.6-sol",
     }
 }
@@ -3983,6 +3993,7 @@ fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)]
         "codex" => CODEX_MODELS,
         "claude" => CLAUDE_MODELS,
         "jcode" => JCODE_MODELS,
+        "copilot" => COPILOT_MODELS,
         _ => &[],
     }
 }

@@ -31,7 +31,7 @@ installed under `~/.local/opt/xd*/`; its state stays under the corresponding
 
 ## Agent and terminal sessions
 
-Codex, Claude Code, JCode, and plain terminal tabs also run through SSH. xd launches
+Codex, Claude Code, JCode, GitHub Copilot, and plain terminal tabs also run through SSH. xd launches
 the bundled tmux on the selected machine so a CLI survives a transient window
 or SSH disconnect and can be reattached on reconnect. tmux is an implementation
 detail: users do not need to install or configure it separately.

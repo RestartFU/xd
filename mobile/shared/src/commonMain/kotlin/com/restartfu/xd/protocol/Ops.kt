@@ -414,8 +414,8 @@ public object Ops {
         allowAllPermissions: Boolean,
     ): JsonObject = buildJsonObject {
         require(columns > 0 && rows > 0) { "A terminal needs a positive size" }
-        require(agent == "codex" || agent == "claude" || agent == "jcode") {
-            "A direct terminal needs codex, claude, or jcode"
+        require(agent == "codex" || agent == "claude" || agent == "jcode" || agent == "copilot") {
+            "A direct terminal needs codex, claude, jcode, or copilot"
         }
         put("op", "terminal-open-agent")
         put("chat", chatId)

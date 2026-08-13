@@ -1,12 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use crate::agent::{resolve_claude, resolve_codex, resolve_jcode};
+use crate::agent::{resolve_claude, resolve_codex, resolve_copilot, resolve_jcode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TerminalAgent {
     Codex,
     Claude,
     Jcode,
+    Copilot,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,7 @@ impl TerminalAgent {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
             "jcode" => Some(Self::Jcode),
+            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -73,6 +75,7 @@ impl TerminalAgent {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Jcode => "jcode",
+            Self::Copilot => "copilot",
         }
     }
 
@@ -81,6 +84,7 @@ impl TerminalAgent {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
             Self::Jcode => "JCode",
+            Self::Copilot => "Copilot",
         }
     }
 
@@ -89,6 +93,7 @@ impl TerminalAgent {
             Self::Codex => resolve_codex(),
             Self::Claude => resolve_claude(),
             Self::Jcode => resolve_jcode(),
+            Self::Copilot => resolve_copilot(),
         }
     }
 
@@ -139,6 +144,24 @@ impl TerminalAgent {
                 }
                 arguments.push("--no-update".into());
             }
+            Self::Copilot => {
+                arguments.extend([
+                    "--no-auto-update".into(),
+                    "--no-banner".into(),
+                    "--no-mouse".into(),
+                ]);
+                if let Some(session) = session {
+                    let session_id = match session {
+                        AgentSession::New(session_id) | AgentSession::Resume(session_id) => {
+                            session_id
+                        }
+                    };
+                    arguments.extend(["--session-id".into(), session_id.into()]);
+                }
+                if allow_all_permissions {
+                    arguments.push("--allow-all".into());
+                }
+            }
         }
         Ok(arguments)
     }
@@ -163,6 +186,10 @@ mod tests {
             TerminalAgent::from_wire_name("jcode"),
             Some(TerminalAgent::Jcode)
         );
+        assert_eq!(
+            TerminalAgent::from_wire_name("copilot"),
+            Some(TerminalAgent::Copilot)
+        );
         assert_eq!(TerminalAgent::from_wire_name("shell"), None);
         assert_eq!(TerminalAgent::from_wire_name("Codex"), None);
     }
@@ -175,6 +202,8 @@ mod tests {
         assert_eq!(TerminalAgent::Claude.title(), "Claude");
         assert_eq!(TerminalAgent::Jcode.wire_name(), "jcode");
         assert_eq!(TerminalAgent::Jcode.title(), "JCode");
+        assert_eq!(TerminalAgent::Copilot.wire_name(), "copilot");
+        assert_eq!(TerminalAgent::Copilot.title(), "Copilot");
     }
 
     #[test]
@@ -237,6 +266,35 @@ mod tests {
                 .arguments(false, Some(AgentSession::Resume("jcode-1")), None)
                 .unwrap(),
             ["--resume", "jcode-1", "--no-update"]
+        );
+        assert_eq!(
+            TerminalAgent::Copilot.arguments(false, None, None).unwrap(),
+            ["--no-auto-update", "--no-banner", "--no-mouse"]
+        );
+        assert_eq!(
+            TerminalAgent::Copilot
+                .arguments(true, Some(AgentSession::Resume("copilot-session-1")), None,)
+                .unwrap(),
+            [
+                "--no-auto-update",
+                "--no-banner",
+                "--no-mouse",
+                "--session-id",
+                "copilot-session-1",
+                "--allow-all"
+            ]
+        );
+        assert_eq!(
+            TerminalAgent::Copilot
+                .arguments(false, Some(AgentSession::New("copilot-session-2")), None)
+                .unwrap(),
+            [
+                "--no-auto-update",
+                "--no-banner",
+                "--no-mouse",
+                "--session-id",
+                "copilot-session-2"
+            ]
         );
     }
 }

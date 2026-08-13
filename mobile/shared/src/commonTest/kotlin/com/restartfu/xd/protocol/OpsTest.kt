@@ -95,6 +95,16 @@ class OpsTest {
         assertEquals("terminal-open-agent", open.getValue("op").jsonPrimitive.content)
         assertEquals("claude", open.getValue("agent").jsonPrimitive.content)
         assertTrue(open.getValue("allow_all_permissions").jsonPrimitive.content.toBoolean())
+
+        val copilot = Ops.terminalOpenAgent(
+            chatId = "chat",
+            columns = 42,
+            rows = 18,
+            reuse = true,
+            agent = "copilot",
+            allowAllPermissions = false,
+        )
+        assertEquals("copilot", copilot.getValue("agent").jsonPrimitive.content)
     }
 
     @Test

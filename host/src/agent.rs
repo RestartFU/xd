@@ -976,6 +976,13 @@ pub(crate) fn resolve_jcode() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("jcode"))
 }
 
+pub(crate) fn resolve_copilot() -> PathBuf {
+    env::var_os("XD_COPILOT_EXECUTABLE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("copilot"))
+}
+
 fn floor_char_boundary(value: &str, index: usize) -> usize {
     let mut index = index.min(value.len());
     while !value.is_char_boundary(index) {
