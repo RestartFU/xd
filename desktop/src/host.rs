@@ -156,6 +156,9 @@ pub enum RequestKind {
     TerminalInput {
         terminal_id: String,
     },
+    TerminalPasteImage {
+        terminal_id: String,
+    },
     TerminalResize {
         terminal_id: String,
     },
@@ -1152,11 +1155,11 @@ impl HostHandle {
         attachment: &Attachment,
     ) -> Result<(), String> {
         self.send(
-            RequestKind::TerminalInput {
+            RequestKind::TerminalPasteImage {
                 terminal_id: terminal_id.to_owned(),
             },
             json!({
-                "op": "terminal-paste-image",
+                "op": "terminal-materialize-image",
                 "terminal": terminal_id,
                 "attachments": [{
                     "name": attachment.name,
@@ -1765,6 +1768,52 @@ mod tests {
                 kind: RequestKind::TerminalOpen { chat_id, reuse, agent },
                 ..
             } if chat_id == "chat-1" && !reuse && agent.is_none()
+        ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn terminal_images_are_materialized_without_targeting_the_retired_host_terminal() {
+        let directory = env::temp_dir().join(format!("xd-terminal-image-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "terminal-materialize-image");
+            assert_eq!(request["terminal"], "terminal-1");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(
+                stream,
+                "{{\"ok\":true,\"path\":\"/remote/paste.png\",\"_xd_request\":{request_id}}}"
+            )
+            .unwrap();
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        host.terminal_paste_image(
+            "terminal-1",
+            &Attachment::from_png("paste.png", b"\x89PNG\r\n\x1a\n".to_vec()).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::TerminalPasteImage { terminal_id },
+                ..
+            } if terminal_id == "terminal-1"
         ));
 
         server.join().unwrap();

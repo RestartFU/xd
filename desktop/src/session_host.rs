@@ -3,6 +3,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const TMUX_CONFIGURATION: &str = concat!(
+    "set -g default-terminal screen-256color\n",
+    "set -sg escape-time 0\n",
+    "set -g focus-events on\n",
+    "set -g mouse on\n",
+    "set -g status off\n",
+    "set -g set-titles on\n",
+    "set -g set-titles-string \"#{pane_title}\"\n",
+);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessSpec {
     pub program: PathBuf,
@@ -251,6 +261,11 @@ impl SessionHost {
                     runtime.join("tmux.sock").to_string_lossy().into_owned(),
                     "-f".to_owned(),
                     runtime.join("tmux.conf").to_string_lossy().into_owned(),
+                    "start-server".to_owned(),
+                    ";".to_owned(),
+                    "source-file".to_owned(),
+                    runtime.join("tmux.conf").to_string_lossy().into_owned(),
+                    ";".to_owned(),
                     "new-session".to_owned(),
                     "-A".to_owned(),
                     "-s".to_owned(),
@@ -266,8 +281,13 @@ impl SessionHost {
             } => {
                 let runtime = format!("$HOME/{remote_runtime}");
                 let data_name = crate::channel::data_name();
+                let configuration = TMUX_CONFIGURATION
+                    .lines()
+                    .map(shell_quote)
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let remote = format!(
-                    "RUNTIME=\"{runtime}\"; mkdir -p \"$RUNTIME\" || exit; CONF=\"$RUNTIME/tmux.conf\"; [ -f \"$CONF\" ] || printf '%s\\n' 'set -g default-terminal screen-256color' 'set -sg escape-time 0' 'set -g focus-events on' 'set -g mouse off' > \"$CONF\"; TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"; [ -x \"$TMUX\" ] || TMUX=tmux; exec \"$TMUX\" -S \"$RUNTIME/tmux.sock\" -f \"$CONF\" new-session -A -s {} -c {} {}",
+                    "RUNTIME=\"{runtime}\"; mkdir -p \"$RUNTIME\" || exit; CONF=\"$RUNTIME/tmux.conf\"; printf '%s\\n' {configuration} > \"$CONF\" || exit; TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"; [ -x \"$TMUX\" ] || TMUX=tmux; exec \"$TMUX\" -S \"$RUNTIME/tmux.sock\" -f \"$CONF\" start-server \\; source-file \"$CONF\" \\; new-session -A -s {} -c {} {}",
                     data_name.to_string_lossy(),
                     shell_quote(&session),
                     shell_quote(&workdir.to_string_lossy()),
@@ -355,9 +375,41 @@ fn split_command_line(input: &str) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
-    use super::{AgentCommand, ProcessSpec, SessionHost, SshCommand};
+    use super::{AgentCommand, ProcessSpec, SessionHost, SshCommand, TMUX_CONFIGURATION};
+
+    #[test]
+    fn managed_tmux_configuration_is_accepted_by_tmux() {
+        let directory =
+            std::env::temp_dir().join(format!("xd-tmux-configuration-test-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let configuration = directory.join("tmux.conf");
+        fs::write(&configuration, TMUX_CONFIGURATION).unwrap();
+        let socket = format!("xd-configuration-test-{}", std::process::id());
+
+        let output = Command::new("tmux")
+            .args(["-L", &socket, "-f"])
+            .arg(&configuration)
+            .args(["start-server", ";", "source-file"])
+            .arg(&configuration)
+            .args([";", "new-session", "-d", "-s", "check", "true"])
+            .output()
+            .unwrap();
+        let _ = Command::new("tmux")
+            .args(["-L", &socket, "kill-server"])
+            .output();
+
+        assert!(
+            output.status.success(),
+            "tmux rejected the managed configuration: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn pasted_ssh_commands_are_parsed_without_a_shell_and_options_may_follow_the_host() {
@@ -412,6 +464,11 @@ mod tests {
                     "/data/xd/runtime/tmux.sock",
                     "-f",
                     "/data/xd/runtime/tmux.conf",
+                    "start-server",
+                    ";",
+                    "source-file",
+                    "/data/xd/runtime/tmux.conf",
+                    ";",
                     "new-session",
                     "-A",
                     "-s",
@@ -475,6 +532,17 @@ mod tests {
         );
         let remote = &spec.arguments[5];
         assert!(remote.contains("mkdir -p \"$RUNTIME\""));
+        assert!(
+            !remote.contains("[ -f \"$CONF\" ]"),
+            "the managed tmux configuration must be refreshed on every attach: {remote}"
+        );
+        assert!(remote.contains("'set -g status off'"), "{remote}");
+        assert!(remote.contains("'set -g mouse on'"), "{remote}");
+        assert!(remote.contains("'set -g set-titles on'"), "{remote}");
+        assert!(
+            remote.contains("'set -g set-titles-string \"#{pane_title}\"'"),
+            "{remote}"
+        );
         assert!(remote.contains(&format!(
             "TMUX=\"$HOME/.local/opt/{}/libexec/tmux\"",
             crate::channel::data_name().to_string_lossy()

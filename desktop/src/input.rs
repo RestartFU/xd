@@ -95,7 +95,7 @@ fn caret_scroll(current: Pixels, caret: Pixels, text: Pixels, visible: Pixels) -
     scroll.clamp(px(0.), overflow)
 }
 
-fn terminal_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+pub(crate) fn terminal_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     if !bracketed {
         return text.as_bytes().to_vec();
     }

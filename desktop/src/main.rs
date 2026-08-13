@@ -22,9 +22,10 @@ use gpui::{
     Animation, AnimationExt, App, Application, AssetSource, Bounds, ClipboardItem, Context,
     CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle,
     KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    ResizeEdge, ScrollHandle, SharedString, StyledText, TextRun, Timer, TitlebarOptions,
-    WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px, rgb, rgba, size, svg,
+    ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
+    TitlebarOptions, WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px, rgb,
+    rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -34,7 +35,7 @@ use xd_desktop::{
     markdown,
     model::{AppModel, Attachment, Message, MessagePageDirection, Worktree},
     remote::{self, RemoteError, SshRemoteBridge, SshRemoteSession},
-    session_host::{AgentCommand, SessionHost, SshCommand},
+    session_host::{AgentCommand, SessionHost, SshCommand, TMUX_CONFIGURATION},
     session_runtime::{SessionEvent, SessionRuntime},
     theme::ThemeColors,
 };
@@ -72,7 +73,7 @@ use input::{
     PageDown as TerminalPageDown, PageUp as TerminalPageUp, Paste,
     ReverseSearch as TerminalReverseSearch, Right, SelectAll, SelectLeft, SelectRight,
     SelectWordLeft, SelectWordRight, ShiftTab as TerminalShiftTab, ShowCharacterPalette, Submit,
-    Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight,
+    Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight, terminal_paste_bytes,
 };
 use minimal::{
     AgentCli, MinimalRoute, project_cards, project_sessions, reconcile_route, resumable_session,
@@ -569,6 +570,17 @@ fn terminal_geometry(width: f32, height: f32, cell_width: f32, line_height: f32)
 fn terminal_scroll_is_at_bottom(scroll: &ScrollHandle) -> bool {
     let remaining = f32::from(scroll.max_offset().height) + f32::from(scroll.offset().y);
     remaining <= 2.0
+}
+
+fn terminal_mouse_scroll_bytes(delta_y: f32) -> Vec<u8> {
+    let button = if delta_y > 0.0 {
+        64
+    } else if delta_y < 0.0 {
+        65
+    } else {
+        return Vec::new();
+    };
+    format!("\x1b[<{button};1;1M").into_bytes()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -1596,6 +1608,7 @@ impl XdDesktop {
                 | RequestKind::TerminalOpen { .. }
                 | RequestKind::TerminalList { .. }
                 | RequestKind::TerminalInput { .. }
+                | RequestKind::TerminalPasteImage { .. }
                 | RequestKind::TerminalResize { .. }
                 | RequestKind::TerminalKill { .. }
                 | RequestKind::AgentSecrets { .. }
@@ -2301,6 +2314,7 @@ impl XdDesktop {
                     | RequestKind::TerminalOpen { .. }
                     | RequestKind::TerminalList { .. }
                     | RequestKind::TerminalInput { .. }
+                    | RequestKind::TerminalPasteImage { .. }
                     | RequestKind::TerminalResize { .. }
                     | RequestKind::TerminalKill { .. }
                     | RequestKind::AgentSecrets { .. }
@@ -2579,6 +2593,7 @@ impl XdDesktop {
                     }
                 }
                 RequestKind::TerminalInput { terminal_id }
+                | RequestKind::TerminalPasteImage { terminal_id }
                 | RequestKind::TerminalResize { terminal_id }
                 | RequestKind::TerminalKill { terminal_id }
                     if self.terminal_panel.as_ref().is_some_and(|panel| {
@@ -3657,6 +3672,31 @@ impl XdDesktop {
                     .is_some_and(|panel| panel.chat_id == chat_id) =>
             {
                 self.apply_terminal_list(&value, cx);
+            }
+            RequestKind::TerminalPasteImage { terminal_id } => {
+                let result = value
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "The host did not return the pasted image path.".to_owned())
+                    .and_then(|path| {
+                        let bracketed = self
+                            .terminal_panel
+                            .as_ref()
+                            .and_then(|panel| {
+                                panel
+                                    .sessions
+                                    .iter()
+                                    .find(|session| session.id == terminal_id)
+                            })
+                            .is_some_and(|session| session.screen.bracketed_paste());
+                        self.terminal_runtime
+                            .input(&terminal_id, &terminal_paste_bytes(path, bracketed))
+                    });
+                if let Err(error) = result
+                    && let Some(panel) = &mut self.terminal_panel
+                {
+                    panel.error = Some(error);
+                }
             }
             RequestKind::TerminalInput { .. } | RequestKind::TerminalResize { .. } => {}
             RequestKind::TerminalKill { .. } => {}
@@ -5087,13 +5127,8 @@ impl XdDesktop {
                 std::fs::create_dir_all(&runtime)
                     .map_err(|error| format!("Cannot prepare terminal sessions: {error}."))?;
                 let configuration = runtime.join("tmux.conf");
-                if !configuration.exists() {
-                    std::fs::write(
-                        &configuration,
-                        "set -g default-terminal screen-256color\nset -sg escape-time 0\nset -g focus-events on\nset -g mouse off\n",
-                    )
+                std::fs::write(&configuration, TMUX_CONFIGURATION)
                     .map_err(|error| format!("Cannot configure terminal sessions: {error}."))?;
-                }
                 Ok(SessionHost::local(tmux, runtime))
             }
             ChatEndpoint::Remote => {
@@ -7225,6 +7260,14 @@ impl XdDesktop {
             .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.terminal_scroll)
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                let delta = event.delta.pixel_delta(px(19.0)).y;
+                let bytes = terminal_mouse_scroll_bytes(f32::from(delta));
+                if !bytes.is_empty() {
+                    this.send_terminal_input(&bytes, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .p(px(TERMINAL_OUTPUT_PADDING))
             .track_focus(&terminal_focus)
             .when(active, |output| {
@@ -11711,6 +11754,13 @@ mod tests {
         assert!(!scroller.contains(".child(terminal_input)"));
         assert!(terminal.contains(".child(output_scroller)"));
         assert!(terminal.contains(".child(terminal_input)"));
+    }
+
+    #[test]
+    fn terminal_wheel_events_are_encoded_for_tmux_scrollback() {
+        assert_eq!(terminal_mouse_scroll_bytes(1.0), b"\x1b[<64;1;1M");
+        assert_eq!(terminal_mouse_scroll_bytes(-1.0), b"\x1b[<65;1;1M");
+        assert!(terminal_mouse_scroll_bytes(0.0).is_empty());
     }
 
     #[test]

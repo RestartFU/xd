@@ -31,6 +31,7 @@ RUN rustup component add rustfmt \
       lld \
       make \
       pkg-config \
+      tmux \
  && rm -rf /var/lib/apt/lists/*
 
 ARG BUILD_JOBS=1

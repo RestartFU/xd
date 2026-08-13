@@ -286,6 +286,7 @@ impl Engine {
             Some("terminal-open") => self.terminal_open(&request),
             Some("terminal-open-agent") => self.terminal_open_agent(&request),
             Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
+            Some("terminal-materialize-image") => self.terminal_materialize_image(&request),
             Some("terminal-paste-image") => self.terminal_paste_image(&request),
             Some("terminal-resize") => self.terminals.resize(&request).unwrap_or_else(error_reply),
             Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
@@ -728,6 +729,16 @@ impl Engine {
                 let _ = fs::remove_file(path);
                 error_reply(error)
             }
+        }
+    }
+
+    fn terminal_materialize_image(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.materialize_terminal_image(request) {
+            Ok(path) => json!({"ok": true, "path": path}),
+            Err(error) => error_reply(error),
         }
     }
 
