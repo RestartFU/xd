@@ -355,7 +355,7 @@ private fun SpeechOutput(
  * The composer, with the desktop's one round button: an arrow while the next
  * message is yours to send, a stop while the turn is the assistant's to finish.
  *
- * One turn per chat is a daemon rule, so a message written while one runs is
+ * One turn per chat is a host rule, so a message written while one runs is
  * queued rather than sent. That happens from the keyboard's own send key, which
  * is what Enter does on the desktop for the same reason: the button is a stop
  * by then.
@@ -588,7 +588,7 @@ private fun Composer(
                 enabled = if (state.working) {
                     !cancelling && !steering
                 } else {
-                    // The daemon accepts text, images, or both.
+                    // The host accepts text, images, or both.
                     !sending && (composer.isNotBlank() || attachments.isNotEmpty())
                 },
                 colors = if (state.working) {
@@ -620,7 +620,7 @@ private fun Composer(
  * Edit, steer or drop one queued message.
  *
  * Steering is only offered while a turn is running, because that is the only
- * time it means anything: the daemon promotes the message and stops the turn
+ * time it means anything: the host promotes the message and stops the turn
  * so the agent takes it up instead of finishing first.
  */
 @Composable

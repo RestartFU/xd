@@ -69,7 +69,7 @@ internal fun PipelineCard(
                 throw error
             } catch (_: Throwable) {
                 // Keep a last-known-good run and its jobs visible through a
-                // transient daemon or GitHub outage. Only a card that has
+                // transient host or GitHub outage. Only a card that has
                 // never loaded successfully needs the unavailable state.
                 val previous = value.status
                 value = PipelineSnapshot(
@@ -266,7 +266,7 @@ private fun PipelineJob(job: WorkflowJobReply) {
 /**
  * How long a run or job has been going, or took.
  *
- * The daemon reports instants rather than an elapsed count, so a running row
+ * The host reports instants rather than an elapsed count, so a running row
  * keeps counting between the ten-second polls instead of stepping in jumps. A
  * finished row without a finish time shows nothing: a climbing count on
  * something already over reads worse than no count at all.

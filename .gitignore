@@ -3,7 +3,7 @@
 /.build-cache/
 /lib/
 /desktop/target/
-/daemon-rs/target/
+/host/target/
 /terminal-core/target/
 /.payload-cache/
 *.o

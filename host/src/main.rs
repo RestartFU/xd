@@ -4,7 +4,7 @@ use std::{
     process::ExitCode,
 };
 
-use xd_daemon::{Engine, StateStore, serve_stdio};
+use xd_host::{Engine, StateStore, serve_stdio};
 
 struct HostOptions {
     database: PathBuf,

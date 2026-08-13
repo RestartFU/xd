@@ -87,7 +87,7 @@ class OpenFilesTest {
         open = open.edited("a.kt", "two and three")
         open = open.saved("a.kt", "two")
 
-        // "two" reached the daemon; "two and three" did not, and is still unsaved.
+        // "two" reached the host; "two and three" did not, and is still unsaved.
         assertEquals("two", open.current?.saved)
         assertEquals("two and three", open.current?.text)
         assertTrue(open.anyDirty)

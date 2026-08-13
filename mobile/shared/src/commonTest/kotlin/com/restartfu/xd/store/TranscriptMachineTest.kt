@@ -200,7 +200,7 @@ class TranscriptMachineTest {
     }
 
     @Test
-    fun worktreeControlsFollowDaemonCapability() {
+    fun worktreeControlsFollowHostCapability() {
         val worktrees = listOf(
             WorktreeReply(
                 path = "/repo",
@@ -343,7 +343,7 @@ class TranscriptMachineTest {
 
     @Test
     fun snapshotCoveredDeltaIsNotAppliedTwice() {
-        // The daemon writes replies and events through separate paths, so a
+        // The host writes replies and events through separate paths, so a
         // delta already folded into `segment` can still arrive afterwards.
         val loaded = reduce(
             ChatState("chat"),
@@ -406,7 +406,7 @@ class TranscriptMachineTest {
 
     @Test
     fun untaggedDeltaAlwaysApplies() {
-        // An older daemon sends no turn ids; nothing may be silently dropped.
+        // An older host sends no turn ids; nothing may be silently dropped.
         val state = ChatState("chat", working = true, turnId = 9, turnSequence = 2)
 
         val applied = reduce(state, TranscriptInput.Text("live")).state

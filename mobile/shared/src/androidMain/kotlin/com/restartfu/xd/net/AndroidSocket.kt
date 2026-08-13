@@ -118,7 +118,7 @@ internal class AndroidSocket(
 
             if (closed.get()) throw EOFException("Socket was closed")
             val certificate = active.session.peerCertificates.firstOrNull()?.encoded
-                ?: throw SSLException("The daemon supplied no certificate")
+                ?: throw SSLException("The host supplied no certificate")
             writer = thread(name = "xd-mobile-tls-writer", isDaemon = true) {
                 runWriter(active)
             }
@@ -191,7 +191,7 @@ internal class AndroidSocket(
         }
         val fallback = when (kind) {
             SocketFailureKind.PIN_MISMATCH ->
-                "The daemon certificate does not match the paired machine"
+                "The host certificate does not match the paired machine"
             SocketFailureKind.CANCELLED -> "Socket closed"
             else -> "Connection failed"
         }

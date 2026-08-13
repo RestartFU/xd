@@ -873,7 +873,7 @@ impl AppModel {
                 Message::new(
                     Some(1),
                     "user",
-                    "Rewrite xd's desktop UI using GPUI, but keep the daemon.",
+                    "Rewrite xd's desktop UI using GPUI, but keep the host.",
                     None,
                 ),
                 Message::new(
@@ -1199,7 +1199,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 1,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [{
@@ -1216,14 +1216,14 @@ mod tests {
                 "chat": "chat",
                 "working": true,
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 2
             }),
         );
 
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 1,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [{
@@ -1239,7 +1239,7 @@ mod tests {
 
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 2,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [{
@@ -1259,7 +1259,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 0,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [{"id": "chat", "folder": "folder", "backend": "codex"}]
@@ -1270,7 +1270,7 @@ mod tests {
             &json!({
                 "chat": "chat",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 2
             }),
         );
@@ -1279,7 +1279,7 @@ mod tests {
             &json!({
                 "chat": "chat",
                 "terminal_working": false,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 1
             }),
         );
@@ -1291,7 +1291,7 @@ mod tests {
             &json!({
                 "chat": "chat",
                 "terminal_working": false,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 2
             }),
         );
@@ -1303,7 +1303,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 0,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [
@@ -1317,7 +1317,7 @@ mod tests {
             &json!({
                 "chat": "chat-a",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 2
             }),
         );
@@ -1326,7 +1326,7 @@ mod tests {
             &json!({
                 "chat": "chat-b",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 1
             }),
         );
@@ -1340,7 +1340,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 0,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [
@@ -1354,14 +1354,14 @@ mod tests {
             &json!({
                 "chat": "chat-a",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 2
             }),
         );
 
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 1,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [
@@ -1390,7 +1390,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 0,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": []
@@ -1401,14 +1401,14 @@ mod tests {
             &json!({
                 "chat": "chat",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 2
             }),
         );
 
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 1,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [{
@@ -1428,7 +1428,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 10,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [{
@@ -1444,7 +1444,7 @@ mod tests {
             &json!({
                 "chat": "chat",
                 "terminal_working": false,
-                "terminal_activity_epoch": "daemon-b",
+                "terminal_activity_epoch": "host-b",
                 "terminal_activity_revision": 1
             }),
         );
@@ -1453,7 +1453,7 @@ mod tests {
             &json!({
                 "chat": "chat",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-b",
+                "terminal_activity_epoch": "host-b",
                 "terminal_activity_revision": 0
             }),
         );
@@ -1466,7 +1466,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 10,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [
@@ -1491,7 +1491,7 @@ mod tests {
             &json!({
                 "chat": "chat-a",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-b",
+                "terminal_activity_epoch": "host-b",
                 "terminal_activity_revision": 1
             }),
         );
@@ -1505,7 +1505,7 @@ mod tests {
         let mut model = AppModel::default();
         model
             .apply_tree(&json!({
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 10,
                 "folders": [{"id": "folder", "name": "Workspace"}],
                 "chats": [{
@@ -1525,7 +1525,7 @@ mod tests {
             &json!({
                 "chat": "chat",
                 "terminal_working": true,
-                "terminal_activity_epoch": "daemon-a",
+                "terminal_activity_epoch": "host-a",
                 "terminal_activity_revision": 1
             }),
         );

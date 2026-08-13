@@ -26,7 +26,7 @@ pub fn app_id() -> String {
     })
 }
 
-fn daemon_update_channel(configured: Option<OsString>, nightly_build: bool) -> OsString {
+fn host_update_channel(configured: Option<OsString>, nightly_build: bool) -> OsString {
     if configured.as_deref() == Some(OsStr::new("dev")) {
         "dev".into()
     } else if nightly_build {
@@ -39,36 +39,8 @@ fn daemon_update_channel(configured: Option<OsString>, nightly_build: bool) -> O
 pub fn configure_host(command: &mut Command, _launcher: &Path) {
     command.env("XD_DATA_NAME", data_name()).env(
         "XD_UPDATE_CHANNEL",
-        daemon_update_channel(env::var_os("XD_UPDATE_CHANNEL"), nightly()),
+        host_update_channel(env::var_os("XD_UPDATE_CHANNEL"), nightly()),
     );
-
-    configure_background(command);
-
-    #[cfg(windows)]
-    if let Some(bin) = _launcher.parent() {
-        let mut paths = vec![bin.to_owned()];
-        if let Some(root) = bin.parent() {
-            paths.push(root.join("git/cmd"));
-        }
-        paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-        if let Ok(path) = env::join_paths(paths) {
-            command.env("PATH", path);
-        }
-    }
-}
-
-pub fn configure_background(_command: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        _command.creation_flags(background_creation_flags(true));
-    }
-}
-
-#[cfg(any(windows, test))]
-fn background_creation_flags(windows: bool) -> u32 {
-    if windows { 0x0800_0000 } else { 0 }
 }
 
 #[cfg(test)]
@@ -83,29 +55,20 @@ mod tests {
     }
 
     #[test]
-    fn background_hosts_use_the_windows_no_console_flag() {
-        assert_eq!(background_creation_flags(true), 0x0800_0000);
-        assert_eq!(background_creation_flags(false), 0);
-    }
-
-    #[test]
-    fn daemon_update_channel_preserves_explicit_dev_identity() {
+    fn host_update_channel_preserves_explicit_dev_identity() {
         assert_eq!(
-            daemon_update_channel(Some(OsString::from("dev")), true),
+            host_update_channel(Some(OsString::from("dev")), true),
             OsString::from("dev")
         );
         assert_eq!(
-            daemon_update_channel(Some(OsString::from("nightly")), false),
+            host_update_channel(Some(OsString::from("nightly")), false),
             OsString::from("release")
         );
         assert_eq!(
-            daemon_update_channel(Some(OsString::from("release")), true),
+            host_update_channel(Some(OsString::from("release")), true),
             OsString::from("nightly")
         );
-        assert_eq!(daemon_update_channel(None, true), OsString::from("nightly"));
-        assert_eq!(
-            daemon_update_channel(None, false),
-            OsString::from("release")
-        );
+        assert_eq!(host_update_channel(None, true), OsString::from("nightly"));
+        assert_eq!(host_update_channel(None, false), OsString::from("release"));
     }
 }

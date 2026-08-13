@@ -44,7 +44,7 @@ impl PairingService {
     ) -> Result<(), String> {
         self.connections
             .lock()
-            .map_err(|_| "daemon connection state is unavailable".to_owned())?
+            .map_err(|_| "host connection state is unavailable".to_owned())?
             .insert(
                 owner,
                 ConnectionIdentity {
@@ -69,7 +69,7 @@ impl PairingService {
         let connections = self
             .connections
             .lock()
-            .map_err(|_| "Daemon connection state is unavailable.")?;
+            .map_err(|_| "Host connection state is unavailable.")?;
         let connection = connections
             .get(&owner)
             .ok_or("Device connection is no longer authorized.")?;
@@ -81,7 +81,7 @@ impl PairingService {
         if connection.transport == Transport::Remote
             && matches!(operation, "devices" | "rename-device" | "revoke-device")
         {
-            return Err("Device management is only available on the daemon machine.");
+            return Err("Device management is only available on the host machine.");
         }
         Ok(())
     }
@@ -118,14 +118,14 @@ impl PairingService {
         let connections = self
             .connections
             .lock()
-            .map_err(|_| "daemon connection state is unavailable".to_owned())?;
+            .map_err(|_| "host connection state is unavailable".to_owned())?;
         let connection = connections
             .get(&owner)
             .ok_or_else(|| "Device connection is no longer authorized.".to_owned())?;
         *connection
             .device_id
             .lock()
-            .map_err(|_| "daemon connection state is unavailable".to_owned())? = Some(device_id);
+            .map_err(|_| "host connection state is unavailable".to_owned())? = Some(device_id);
         connection.authenticated.store(true, Ordering::Release);
         Ok(())
     }

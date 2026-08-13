@@ -107,9 +107,9 @@ internal fun PairScreen(model: MainViewModel) {
 }
 
 /**
- * A pinned certificate that no longer matches, or a token the daemon no longer
+ * A pinned certificate that no longer matches, or a token the host no longer
  * knows, is terminal. There is deliberately no trust-anyway action: the token
- * is remote code execution on the daemon machine.
+ * is remote code execution on the host machine.
  */
 @Composable
 internal fun FatalScreen(
@@ -132,7 +132,7 @@ internal fun FatalScreen(
         Text(
             if (pinMismatch) {
                 "This is not the machine you paired with: its certificate changed. " +
-                    "Re-pair only if you changed or reinstalled the daemon yourself."
+                    "Re-pair only if you changed or reinstalled the host yourself."
             } else {
                 fatal.message
             },
@@ -146,7 +146,7 @@ internal fun FatalScreen(
     }
 }
 
-/** Mirrors the daemon's `XXXX-XXXX` code, whose alphabet omits I, O, 0 and 1. */
+/** Mirrors the host's `XXXX-XXXX` code, whose alphabet omits I, O, 0 and 1. */
 private fun formatPairingCode(input: String): String {
     val raw = input.uppercase().filter { it in PAIRING_ALPHABET }.take(8)
     return if (raw.length > 4) raw.take(4) + "-" + raw.drop(4) else raw

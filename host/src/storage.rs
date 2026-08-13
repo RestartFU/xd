@@ -35,7 +35,7 @@ Use two to six options. When the answer must be free-form text, put <input> on i
 For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap code, tool output, analysis, or questions. The client may ignore speech tags when speech is disabled.
 
 Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all."#;
-const INTERRUPTED_TURN: &str = "The daemon stopped before this turn finished.";
+const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -455,7 +455,7 @@ impl StateStore {
             .collect::<Vec<_>>();
 
         let mut statement = database.prepare(
-            "SELECT id, folder_id, title, backend, daemon_working, workdir, original_workdir FROM chats \
+            "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -567,7 +567,7 @@ impl StateStore {
         let row = database
             .query_row(
                 "SELECT folder_id, title, backend, workdir, model, effort, access, plan, fast, \
-                 queued, new_worktree, daemon_working, draft, draft_attachments, \
+                 queued, new_worktree, host_working, draft, draft_attachments, \
                  draft_revision, original_workdir FROM chats WHERE id = ?",
                 [chat_id],
                 |row| {
@@ -708,7 +708,7 @@ impl StateStore {
             .or_else(|| env::var_os("HOME").map(PathBuf::from))
             .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
             .ok_or_else(|| {
-                StorageError::InvalidRequest("The daemon home directory is unavailable.".into())
+                StorageError::InvalidRequest("The host home directory is unavailable.".into())
             })?;
         let mut entries = visible_directory_entries(&path, true)?;
         entries.truncate(MAX_DIRECTORY_ENTRIES);
@@ -811,7 +811,7 @@ impl StateStore {
                 |row| row.get::<_, Option<String>>(0),
             )
             .optional()?
-            .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+            .ok_or_else(|| StorageError::InvalidRequest("No such folder on the host.".into()))?;
         Ok(json!({"ok": true, "context": context}))
     }
 
@@ -853,7 +853,7 @@ impl StateStore {
         )?;
         if changed != 1 {
             return Err(StorageError::InvalidRequest(
-                "No such folder on the daemon.".into(),
+                "No such folder on the host.".into(),
             ));
         }
         Ok(json!({"ok": true}))
@@ -951,7 +951,7 @@ impl StateStore {
         )?;
         if changed != 1 {
             return Err(StorageError::InvalidRequest(
-                "No such folder on the daemon.".into(),
+                "No such folder on the host.".into(),
             ));
         }
         Ok(json!({"ok": true}))
@@ -1166,7 +1166,7 @@ impl StateStore {
         let transaction = database.transaction()?;
         let working = transaction
             .query_row(
-                "SELECT daemon_working FROM chats WHERE id = ?",
+                "SELECT host_working FROM chats WHERE id = ?",
                 [chat_id],
                 |row| row.get::<_, bool>(0),
             )
@@ -1204,7 +1204,7 @@ impl StateStore {
             worktree_name,
         )?;
         transaction.execute(
-            "UPDATE chats SET daemon_working = 1, draft = '', draft_attachments = '[]', \
+            "UPDATE chats SET host_working = 1, draft = '', draft_attachments = '[]', \
              draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
             params![now_seconds(), chat_id],
         )?;
@@ -1240,7 +1240,7 @@ impl StateStore {
             let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
             let (backend, model, effort, new_worktree, working, has_messages) = database
                 .query_row(
-                    "SELECT backend, model, effort, new_worktree, daemon_working, \
+                    "SELECT backend, model, effort, new_worktree, host_working, \
                      EXISTS (SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
                      FROM chats WHERE id = ?",
                     [chat_id],
@@ -1564,7 +1564,7 @@ impl StateStore {
             Some(serde_json::to_string(&queue).unwrap())
         };
         transaction.execute(
-            "UPDATE chats SET queued = ?, daemon_working = ?, partial_reply = '', \
+            "UPDATE chats SET queued = ?, host_working = ?, partial_reply = '', \
              partial_reply_label = NULL, updated_at = ? WHERE id = ?",
             params![encoded, next_text.is_some(), now_seconds(), chat_id],
         )?;
@@ -1585,7 +1585,7 @@ impl StateStore {
         })
     }
 
-    /// Streamed replies only become a message once the turn ends, so a daemon
+    /// Streamed replies only become a message once the turn ends, so a host
     /// that dies mid-reply used to take the whole answer with it while every
     /// tool call it had already stored survived. Park the text so far on the
     /// chat instead; recovery turns it into a real message. This deliberately
@@ -1605,9 +1605,9 @@ impl StateStore {
         Ok(())
     }
 
-    /// A killed daemon leaves `daemon_working` set with no process behind it:
+    /// A killed host leaves `host_working` set with no process behind it:
     /// the chat looks busy forever, further messages only pile into the queue,
-    /// and Stop has nothing to kill. Clear those rows when the daemon comes
+    /// and Stop has nothing to kill. Clear those rows when the host comes
     /// back and say so in the transcript. Queued messages are kept — they run
     /// on the next turn rather than being started behind the user's back.
     pub fn recover_interrupted_turns(&self) -> Result<Vec<String>, StorageError> {
@@ -1615,7 +1615,7 @@ impl StateStore {
         let transaction = database.transaction()?;
         let interrupted = {
             let mut statement =
-                transaction.prepare("SELECT id FROM chats WHERE daemon_working = 1")?;
+                transaction.prepare("SELECT id FROM chats WHERE host_working = 1")?;
             statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -1634,7 +1634,7 @@ impl StateStore {
         let transaction = database.transaction()?;
         let working = transaction
             .query_row(
-                "SELECT daemon_working FROM chats WHERE id = ?",
+                "SELECT host_working FROM chats WHERE id = ?",
                 [chat_id],
                 |row| row.get::<_, bool>(0),
             )
@@ -1656,7 +1656,7 @@ impl StateStore {
             params![chat_id, error, now_seconds()],
         )?;
         transaction.execute(
-            "UPDATE chats SET daemon_working = 0, partial_reply = '', \
+            "UPDATE chats SET host_working = 0, partial_reply = '', \
              partial_reply_label = NULL, updated_at = ? WHERE id = ?",
             params![now_seconds(), chat_id],
         )?;
@@ -1690,7 +1690,7 @@ impl StateStore {
                 )?;
                 if changed != 1 {
                     return Err(StorageError::InvalidRequest(
-                        "No such folder on the daemon.".into(),
+                        "No such folder on the host.".into(),
                     ));
                 }
             }
@@ -2396,7 +2396,7 @@ impl StateStore {
             && !Path::new(repo).is_dir()
         {
             return Err(StorageError::InvalidRequest(
-                "The repository path must be an existing directory on the daemon.".into(),
+                "The repository path must be an existing directory on the host.".into(),
             ));
         }
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
@@ -2410,7 +2410,7 @@ impl StateStore {
                 )
                 .optional()?
                 .ok_or_else(|| {
-                    StorageError::InvalidRequest("No such folder on the daemon.".into())
+                    StorageError::InvalidRequest("No such folder on the host.".into())
                 })?,
             None => String::new(),
         };
@@ -2491,9 +2491,7 @@ impl StateStore {
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .ok_or_else(|| {
-                StorageError::InvalidRequest("No such workspace on the daemon.".into())
-            })?;
+            .ok_or_else(|| StorageError::InvalidRequest("No such workspace on the host.".into()))?;
         Ok(self.workspace_root.join(relative))
     }
 
@@ -2607,7 +2605,7 @@ impl StateStore {
                 .map(|row| (row.relative_path.clone(), row.clone()))
                 .collect::<HashMap<_, _>>();
             let anchor = rows.iter().find(|row| row.id == anchor_id).ok_or_else(|| {
-                StorageError::InvalidRequest("No such folder on the daemon.".into())
+                StorageError::InvalidRequest("No such folder on the host.".into())
             })?;
             parent_workspace(&anchor.relative_path, &by_path).map(|parent| parent.id.clone())
         } else {
@@ -2631,7 +2629,7 @@ impl StateStore {
                 ));
             }
             let name = source.file_name().ok_or_else(|| {
-                StorageError::InvalidRequest("No such folder on the daemon.".into())
+                StorageError::InvalidRequest("No such folder on the host.".into())
             })?;
             let destination = parent.join(name);
             if destination.exists() {
@@ -2729,7 +2727,7 @@ impl StateStore {
         )?;
         if !folder_exists {
             return Err(StorageError::InvalidRequest(
-                "No such folder on the daemon.".into(),
+                "No such folder on the host.".into(),
             ));
         }
         let defaults = transaction
@@ -2897,7 +2895,7 @@ impl StateStore {
         )?;
         if !folder_exists {
             return Err(StorageError::InvalidRequest(
-                "No such folder on the daemon.".into(),
+                "No such folder on the host.".into(),
             ));
         }
         let sort_order = database.query_row(
@@ -3247,7 +3245,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            claude_mode INTEGER NOT NULL DEFAULT 0, queued TEXT, new_worktree INTEGER NOT NULL DEFAULT 0, \
            terminal_open INTEGER NOT NULL DEFAULT 0, diff_open INTEGER NOT NULL DEFAULT 0, \
            resume_after_restart INTEGER NOT NULL DEFAULT 0, original_workdir TEXT, \
-           daemon_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
+           host_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
            partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, \
            sort_order INTEGER NOT NULL DEFAULT 0, \
@@ -3484,7 +3482,7 @@ fn workspace_relative(
             |row| row.get(0),
         )
         .optional()?
-        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the host.".into()))
 }
 
 fn relative_from_root(root: &Path, path: &Path) -> Result<String, StorageError> {
@@ -3492,7 +3490,7 @@ fn relative_from_root(root: &Path, path: &Path) -> Result<String, StorageError> 
         .ok()
         .and_then(|relative| relative.to_str())
         .map(str::to_owned)
-        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the host.".into()))
 }
 
 fn relocate_workspace_subtree(
@@ -3555,13 +3553,13 @@ fn reorder_workspace(
     };
     let Some(source_index) = ids.iter().position(|id| id == folder_id) else {
         return Err(StorageError::InvalidRequest(
-            "No such folder on the daemon.".into(),
+            "No such folder on the host.".into(),
         ));
     };
     ids.remove(source_index);
     let Some(anchor_index) = ids.iter().position(|id| id == anchor_id) else {
         return Err(StorageError::InvalidRequest(
-            "No such folder on the daemon.".into(),
+            "No such folder on the host.".into(),
         ));
     };
     ids.insert(anchor_index + usize::from(after), folder_id.to_owned());
@@ -3673,7 +3671,7 @@ fn folder_setting_chain(
             |row| row.get::<_, String>(0),
         )
         .optional()?
-        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the host.".into()))?;
     let mut paths = ancestors(&relative).map(str::to_owned).collect::<Vec<_>>();
     paths.reverse();
     paths.push(relative);
@@ -3747,7 +3745,7 @@ fn nullable_directory_setting(
         && !Path::new(value).is_dir()
     {
         return Err(StorageError::InvalidRequest(format!(
-            "The workspace {label} must be an existing directory on the daemon."
+            "The workspace {label} must be an existing directory on the host."
         )));
     }
     Ok(value)
@@ -3765,7 +3763,7 @@ fn effective_instructions(
             |row| row.get::<_, String>(0),
         )
         .optional()?
-        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))?;
+        .ok_or_else(|| StorageError::InvalidRequest("No such folder on the host.".into()))?;
     let mut paths = ancestors(&relative).map(str::to_owned).collect::<Vec<_>>();
     paths.reverse();
     paths.push(relative);
@@ -3853,7 +3851,7 @@ fn shortcut_fields(
                 |row| row.get::<_, String>(0),
             )
             .optional()?
-            .ok_or_else(|| StorageError::InvalidRequest("No such folder on the daemon.".into()))
+            .ok_or_else(|| StorageError::InvalidRequest("No such folder on the host.".into()))
             .map(|stored| serde_json::from_str::<Vec<String>>(&stored).unwrap_or_default())?,
         None => Vec::new(),
     };
@@ -4644,7 +4642,7 @@ fn working_tree_baseline(workdir: &Path) -> Result<&'static str, StorageError> {
 }
 
 fn untracked_file_diff(workdir: &Path, path: &str) -> Result<Vec<u8>, StorageError> {
-    let null_device = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    let null_device = "/dev/null";
     let (status, stdout, stderr) = run_git(
         workdir,
         &[
@@ -5241,7 +5239,7 @@ fn end_interrupted_turn(
         params![chat_id, INTERRUPTED_TURN, now_seconds()],
     )?;
     transaction.execute(
-        "UPDATE chats SET daemon_working = 0, partial_reply = '', partial_reply_label = NULL, \
+        "UPDATE chats SET host_working = 0, partial_reply = '', partial_reply_label = NULL, \
          updated_at = ? WHERE id = ?",
         params![now_seconds(), chat_id],
     )?;
@@ -7248,7 +7246,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_lost_with_the_daemon_is_released_on_the_next_start() {
+    fn a_turn_lost_with_the_host_is_released_on_the_next_start() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
         let database = Connection::open(&fixture.database).unwrap();
@@ -7266,7 +7264,7 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         drop(store);
 
-        // The daemon died mid-turn; the next one has to hand the chat back.
+        // The host died mid-turn; the next one has to hand the chat back.
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         assert_eq!(store.recover_interrupted_turns().unwrap(), vec!["chat-1"]);
@@ -7288,7 +7286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_streamed_reply_survives_the_daemon_that_was_writing_it() {
+    fn a_streamed_reply_survives_the_host_that_was_writing_it() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
         let database = Connection::open(&fixture.database).unwrap();
@@ -7994,7 +7992,7 @@ mod tests {
                        backend TEXT NOT NULL, workdir TEXT, model TEXT, effort TEXT, access TEXT, \
                        plan INTEGER NOT NULL DEFAULT 0, fast INTEGER NOT NULL DEFAULT 0, \
                        claude_mode INTEGER NOT NULL DEFAULT 0, queued TEXT, \
-                       new_worktree INTEGER NOT NULL DEFAULT 0, daemon_working INTEGER NOT NULL DEFAULT 0, \
+                       new_worktree INTEGER NOT NULL DEFAULT 0, host_working INTEGER NOT NULL DEFAULT 0, \
                        draft TEXT NOT NULL DEFAULT '', draft_attachments TEXT NOT NULL DEFAULT '[]', \
                        draft_revision INTEGER NOT NULL DEFAULT 0, last_user_message_at INTEGER NOT NULL DEFAULT 0, \
                        original_workdir TEXT, \

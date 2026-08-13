@@ -89,7 +89,7 @@ public data class FilesPane(
 /**
  * The working directory as a tree, and the files opened out of it.
  *
- * The daemon lists one directory per call, so the tree is filled in as folders
+ * The host lists one directory per call, so the tree is filled in as folders
  * are opened rather than walked up front -- a repository is far too big to send
  * whole, and most of it is never looked at.
  */

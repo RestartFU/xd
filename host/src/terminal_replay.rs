@@ -4,7 +4,7 @@ use xd_terminal::TerminalScreen;
 
 pub(crate) const HISTORY_LIMIT: usize = 16 * 1024 * 1024;
 pub(crate) const REPLAY_ITEM_LIMIT: usize = 65_536;
-// A terminal may retain substantially more history in the daemon than should
+// A terminal may retain substantially more history in the host than should
 // be sent in one protocol reply. Requests and keystrokes share a connection;
 // multi-megabyte terminal-list replies otherwise make a remote CLI appear
 // frozen until all of its scrollback has crossed the network.

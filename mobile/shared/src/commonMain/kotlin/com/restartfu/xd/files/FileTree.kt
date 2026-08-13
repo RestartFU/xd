@@ -4,7 +4,7 @@ import com.restartfu.xd.protocol.FileEntryReply
 
 /** One line of the drawn tree: an entry, and how deep it sits. */
 public data class TreeRow(
-    /** Relative to the chat's working directory, which is what the daemon takes. */
+    /** Relative to the chat's working directory, which is what the host takes. */
     public val path: String,
     public val name: String,
     public val directory: Boolean,
@@ -16,7 +16,7 @@ public data class TreeRow(
 )
 
 /**
- * A directory tree that folds, over a daemon that only lists one directory at a
+ * A directory tree that folds, over a host that only lists one directory at a
  * time.
  *
  * The listing call takes a path and answers with that path's entries, so the
@@ -28,7 +28,7 @@ public data class TreeRow(
  * another: every change returns a new tree rather than being seen half-applied.
  *
  * Paths are relative and never begin with a slash -- the root is `""` -- since
- * that is the only shape the daemon accepts.
+ * that is the only shape the host accepts.
  */
 public data class FileTree(
     private val children: Map<String, List<FileEntryReply>> = emptyMap(),

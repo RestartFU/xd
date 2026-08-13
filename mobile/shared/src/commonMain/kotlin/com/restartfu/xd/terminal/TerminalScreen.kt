@@ -12,7 +12,7 @@ public data class Cell(
 /**
  * A terminal screen driven by raw pty bytes.
  *
- * The daemon broadcasts what the pty wrote, so a client has to interpret it:
+ * The host broadcasts what the pty wrote, so a client has to interpret it:
  * the same bytes drive every attached device, and appending them as text would
  * show escape sequences instead of output.
  *

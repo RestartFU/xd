@@ -34,10 +34,10 @@ public data class ChatState(
     val chatId: String,
     val title: String = "",
     val backend: String = "",
-    /** Absent until the chat is loaded; the daemon then reports the selection. */
+    /** Absent until the chat is loaded; the host then reports the selection. */
     val model: String? = null,
     val effort: String? = null,
-    /** `read-only`, `edit` or `full`. Ignored by the daemon while [plan] is on. */
+    /** `read-only`, `edit` or `full`. Ignored by the host while [plan] is on. */
     val access: String? = null,
     val newWorktree: Boolean = false,
     /** True when this chat is in Git and has not locked its checkout yet. */

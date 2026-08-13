@@ -37,11 +37,9 @@ require_file libexec/install.sh
 require_file libexec/curl
 require_file libexec/openssl
 
-# GPUI has no window without a Vulkan driver, and the loader finds one only
-# through these manifests. lavapipe is the one that works anywhere.
+# GPUI loads Vulkan dynamically. The loader ships with xd; the host supplies
+# the driver matching its GPU and kernel.
 require_file lib/libvulkan.so.1
-require_file lib/libvulkan_lvp.so
-require_file etc/vulkan/libvulkan_lvp.json.in
 
 # Exercise the public entrypoint with only the host's base utilities visible.
 # Preserve PATH because NixOS does not place those utilities in /usr/bin.

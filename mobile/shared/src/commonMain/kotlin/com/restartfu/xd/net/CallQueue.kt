@@ -9,11 +9,11 @@ import kotlinx.serialization.json.longOrNull
 /**
  * Multiplexed request/reply queue.
  *
- * Every request carries a private [REQUEST_ID] the daemon echoes on its reply,
+ * Every request carries a private [REQUEST_ID] the host echoes on its reply,
  * so replies are matched by id rather than by arrival position. That is what
  * keeps a `cancel` from waiting behind a slow `diff-read`.
  *
- * A daemon that does not echo the id still answers strictly in order, so
+ * A host that does not echo the id still answers strictly in order, so
  * [order] is retained as a compatibility path. Abandoned ids stay in [order]
  * precisely so that path stays aligned after a caller times out.
  *

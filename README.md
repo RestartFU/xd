@@ -36,12 +36,6 @@ macOS (Apple Silicon or Intel):
 curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
 ```
 
-Windows x86_64: download the small [setup executable](https://github.com/RestartFU/xd/releases/latest/download/xd-windows-x86_64-setup.exe), or use PowerShell:
-
-```powershell
-& ([scriptblock]::Create((irm https://github.com/RestartFU/xd/releases/latest/download/install.ps1))) -Release
-```
-
 ### Nightly
 
 Linux x86_64:
@@ -56,22 +50,15 @@ macOS (Apple Silicon or Intel):
 curl -fsSL https://github.com/RestartFU/xd/releases/download/nightly/install-macos.sh | sh
 ```
 
-Windows x86_64: download the small [setup executable](https://github.com/RestartFU/xd/releases/download/nightly/xd-nightly-windows-x86_64-setup.exe), or use PowerShell:
-
-```powershell
-irm https://github.com/RestartFU/xd/releases/download/nightly/install.ps1 | iex
-```
-
-The Linux and macOS installers require no root access; Windows uses the normal
-Windows Installer elevation prompt. The bundles include the GPUI desktop,
-stdio host, and their native runtime helpers.
+The Linux and macOS installers require no root access. The bundles include the
+GPUI desktop, stdio host, and their native runtime helpers.
 Install the assistants you use separately and make their `codex`, `claude`, or
 `jcode` commands available on `PATH`.
 
 Stable data lives in `~/.local/share/xd` on Linux and
-`~/Library/Application Support/xd` on macOS, and `%LOCALAPPDATA%\xd` on
-Windows. Nightly uses the corresponding `xd-nightly` directories. Uninstalling
-either app does not delete its chats or workspaces.
+`~/Library/Application Support/xd` on macOS. Nightly uses the corresponding
+`xd-nightly` directories. Uninstalling either app does not delete its chats or
+workspaces.
 
 ## What it does
 
@@ -110,17 +97,8 @@ PROFILE=nightly ./scripts/build-macos.sh
 # -> ./dist/macos/xd-nightly-macos-{arm64,x86_64}.zip
 ```
 
-Native Windows builds require Rust, CMake, 7-Zip, the Windows SDK, and .NET:
-
-```powershell
-./scripts/build-windows.ps1 -OutputDirectory windows-dist -Profile nightly
-./scripts/package-windows.ps1 -Payload windows-dist -OutputDirectory artifacts -Profile nightly
-# -> small ./artifacts/xd-nightly-windows-x86_64-setup.exe
-# -> MSI metadata plus the downloaded payload cabinet
-```
-
 Mobile builds use their own Docker image and also require nothing beyond
 Docker. See [mobile development](docs/mobile.md).
 
-The Linux desktop lives in `desktop/`; the short-lived state host lives in
-`daemon-rs/` while that source directory is being renamed.
+The Linux desktop lives in `desktop/`; its short-lived stdio state host lives
+in `host/`. The host exits with the desktop and is not a background daemon.

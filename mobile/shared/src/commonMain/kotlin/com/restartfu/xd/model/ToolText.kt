@@ -1,10 +1,10 @@
 package com.restartfu.xd.model
 
 /**
- * Reads the `tool` payloads the daemon stores.
+ * Reads the `tool` payloads the host stores.
  *
  * A tool row carrying an inline diff is the text `file_change`, a newline, and
- * a unified patch -- the same marker the daemon writes and the desktop reads.
+ * a unified patch -- the same marker the host writes and the desktop reads.
  * Everything else is free text whose first line reads as
  * a summary.
  *

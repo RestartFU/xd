@@ -39,7 +39,7 @@ impl GitDraftService {
         let store = self
             .store
             .clone()
-            .ok_or_else(|| "Rust daemon state storage is not configured.".to_string())?;
+            .ok_or_else(|| "Rust host state storage is not configured.".to_string())?;
         reserve_slot(&self.active)?;
         let request = request.clone();
         let service = self.clone();

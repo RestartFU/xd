@@ -141,7 +141,7 @@ class OpsTest {
     }
 
     @Test
-    fun directoryListingUsesTheDaemonFilesystem() {
+    fun directoryListingUsesTheHostFilesystem() {
         val home = Ops.listDirectories()
         val nested = Ops.listDirectories("/home/user")
 
@@ -170,7 +170,7 @@ class OpsTest {
 
     @Test
     fun selectingAModelSendsItsAssistantToo() {
-        // Without a backend the daemon stores the string unvalidated and skips
+        // Without a backend the host stores the string unvalidated and skips
         // the effort reconciliation and the visible switch event.
         val request = Ops.selectModel("chat-1", "codex", "gpt-5.5")
 
@@ -191,8 +191,8 @@ class OpsTest {
     }
 
     @Test
-    fun steerCarriesTheTextTheDaemonMatchesOn() {
-        // The daemon refuses a steer whose text is not what is queued, so the
+    fun steerCarriesTheTextTheHostMatchesOn() {
+        // The host refuses a steer whose text is not what is queued, so the
         // guard has to travel with the request.
         val request = Ops.steerQueue("chat-1", 2, "do this instead")
 

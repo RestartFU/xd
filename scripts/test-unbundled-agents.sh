@@ -16,9 +16,7 @@ fail_if_present() {
 packaging=(
   Dockerfile
   scripts/build-macos.sh
-  scripts/build-windows.ps1
   scripts/bundle.sh
-  scripts/package-windows.ps1
   scripts/smoke-bundle.sh
   scripts/smoke-macos.sh
   scripts/xd.sh
@@ -55,16 +53,17 @@ do
 done
 
 test ! -e scripts/claude.sh
-test ! -e daemon-rs/src/claude_proxy.rs
+test ! -e host/src/claude_proxy.rs
 test ! -e data/licenses/claude-code-proxy-LICENSE
 test ! -e data/icons/hicolor/scalable/apps/xd-backend-claude-mode.svg
 test ! -e scripts/whisper.sh
 test ! -e scripts/whisper-server.sh
-test ! -e daemon-rs/src/voice.rs
+test ! -e host/src/voice.rs
 test ! -e desktop/src/voice_input.rs
 test ! -e data/com.restartfu.Xd.gschema.xml.in
 test ! -e data/icons/hicolor/scalable/apps/xd-backend-claude.svg
 test ! -e data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 test ! -e data/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
+test ! -e tls-proxy-rs
 
 grep -Fq 'user-installed Codex, Claude Code, and JCode' README.md

@@ -1,6 +1,6 @@
 package com.restartfu.xd.model
 
-/** A delegated agent marker captured by the daemon from a tool call. */
+/** A delegated agent marker captured by the host from a tool call. */
 public data class SubagentRun(
     val key: String?,
     val identity: String,

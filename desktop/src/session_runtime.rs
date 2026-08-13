@@ -385,7 +385,7 @@ mod tests {
     use super::{ActivityParser, SessionEvent, SessionRuntime};
 
     #[test]
-    fn cli_terminal_titles_drive_activity_without_daemon_events() {
+    fn cli_terminal_titles_drive_activity_without_host_events() {
         let mut parser = ActivityParser::default();
         assert_eq!(parser.feed(b"\x1b]0;Working\x07"), vec![true]);
         assert_eq!(parser.feed(b"\x1b]0;Ready\x1b\\"), vec![false]);

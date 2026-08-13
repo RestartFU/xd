@@ -82,7 +82,7 @@ DESKTOP_PROFILE=$PROFILE
 [ "$DESKTOP_PROFILE" != dev ] || DESKTOP_PROFILE=nightly
 XD_BUILD_PROFILE="$DESKTOP_PROFILE" XD_COMMIT="$COMMIT" \
   cargo build --locked --release --manifest-path desktop/Cargo.toml
-XD_COMMIT="$COMMIT" cargo build --locked --release --manifest-path daemon-rs/Cargo.toml
+XD_COMMIT="$COMMIT" cargo build --locked --release --manifest-path host/Cargo.toml
 
 APP="$OUT/$BUNDLE_NAME.app"
 rm -rf "$APP"
@@ -96,12 +96,14 @@ install -m0755 desktop/target/release/xd-desktop \
   "$APP/Contents/MacOS/xd-desktop"
 install -m0755 installer/macos/xd-rust-launcher.sh \
   "$APP/Contents/MacOS/xd"
-install -m0755 daemon-rs/target/release/xd-host \
+install -m0755 host/target/release/xd-host \
   "$APP/Contents/Resources/libexec/xd-host"
 install -m0755 scripts/install-macos.sh \
   "$APP/Contents/Resources/libexec/install.sh"
 install -m0644 data/fonts/DMSans-Variable.ttf \
   "$APP/Contents/Resources/fonts/DMSans-Variable.ttf"
+install -m0644 data/licenses/alacritty-terminal-LICENSE-APACHE \
+  "$APP/Contents/Resources/licenses/alacritty-terminal-LICENSE-APACHE"
 
 sed \
   -e "s|@BUNDLE_NAME@|$BUNDLE_NAME|g" \

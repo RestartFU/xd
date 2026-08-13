@@ -1,6 +1,6 @@
 package com.restartfu.xd.model
 
-/** A GitHub Actions run marker captured by the daemon from a tool call. */
+/** A GitHub Actions run marker captured by the host from a tool call. */
 public data class PipelineRun(
     val id: String,
     val repository: String,

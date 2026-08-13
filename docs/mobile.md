@@ -19,16 +19,16 @@ SwiftUI application arrives in the iOS client phase.
 
 The mobile client is **remote only**, by construction and on purpose:
 
-- It reaches the daemon exclusively over pinned TLS. There is no Unix-socket or
+- It reaches the host exclusively over pinned TLS. There is no Unix-socket or
   local-IPC path, so it can only ever talk to `listen_remote`.
-- It runs no agent, no Git, and no SQLite. The phone is a view onto a daemon
+- It runs no agent, no Git, and no SQLite. The phone is a view onto a host
   that owns all of that.
 - It stores no chat data on the device. `TreeStore`, `ChatSession`, and
   `TranscriptMachine` are in-memory and rebuilt from `tree`, `chat`, and
   `messages` on every connect. The only persisted record is the credential —
   host, port, device token, and pinned leaf certificate.
-- It cannot pair further devices. The daemon restricts `peer-pairing` to local
-  transport, so pairing authority stays on the daemon machine.
+- It cannot pair further devices. The host restricts `peer-pairing` to local
+  transport, so pairing authority stays on the host machine.
 
 Do not add a local transport, an on-device database, or an offline cache
 without revisiting this section first.
@@ -100,8 +100,8 @@ a rebuild installs over the last one and keeps its pairing credentials.
 ## Nightly APK
 
 The rolling nightly release publishes `xd-nightly-android.apk` beside the
-Linux, macOS, and Windows artifacts. It is the same APK `make mobile-android`
-produces: a test build requiring no secrets or other setup.
+Linux and macOS artifacts. It is the same APK `make mobile-android` produces:
+a test build requiring no secrets or other setup.
 
 It is signed with `mobile/androidApp/debug.p12`, a fixed key checked into the
 repository on purpose. Gradle otherwise generates one per machine and a CI
@@ -127,8 +127,8 @@ Start a pairing window on the machine that owns the workspaces:
 ./dist/xd.sh serve --pair
 ```
 
-The daemon prints a single-use `XXXX-XXXX` code valid for five minutes. Install
-the Docker-built APK, open it, and enter the daemon's reachable hostname or
+The host prints a single-use `XXXX-XXXX` code valid for five minutes. Install
+the Docker-built APK, open it, and enter the host's reachable hostname or
 Tailscale IP, port `4001`, and code. Android supplies its model automatically
 as the device name; there is no editable name field. The owner can rename the
 device later from **Manage Devices…**:
@@ -144,7 +144,7 @@ explicit forget-and-re-pair flow; there is no trust-anyway action.
 
 The app deliberately keeps no foreground service. Leaving it backgrounds and
 closes the socket; returning reconnects, reloads the tree, and reloads every
-open chat from the daemon.
+open chat from the host.
 
 For IDE use, the Gradle wrapper remains available from `mobile/`:
 
@@ -227,7 +227,7 @@ message.
 The count comes from a start time, not from counting up. Opening a chat whose
 turn is already running shows its real age: `chat` reports `working_for`, and
 the transcript store turns that into a start time. A phone's clock can disagree
-with the daemon's, so a negative elapsed time is clamped rather than shown.
+with the host's, so a negative elapsed time is clamped rather than shown.
 
 ## Panes
 
@@ -240,16 +240,16 @@ the desktop's per-file sections, because a phone shows one scrollable patch.
 first.
 
 **Files** lists and previews through `file-browse`, syntax colouring the
-preview by path. It is read-only: the daemon supports `write`, but editing
+preview by path. It is read-only: the host supports `write`, but editing
 code on a phone is not what this is for. Paths stay relative to the working
-directory because the daemon refuses anything else.
+directory because the host refuses anything else.
 
-**Terminal** attaches to the shared pty. The session lives on the daemon and
+**Terminal** attaches to the shared pty. The session lives on the host and
 every attached device sees the same screen, so opening reuses an existing
 terminal rather than starting a second one; replay rebuilds the scrollback,
 resize frames included and in order, before live output is applied.
 
-Because the daemon broadcasts raw pty bytes, the client has to interpret them.
+Because the host broadcasts raw pty bytes, the client has to interpret them.
 `shared/.../terminal` holds a VT100/xterm subset: cursor movement, erase,
 scrolling and SGR colour, including bright and 256-colour. Unsupported escapes
 are consumed rather than printed, so they cost formatting instead of turning
@@ -278,14 +278,14 @@ A long press on a chat offers Move, Rename, and Delete. A long press on a folder
 offers Move. Move opens a destination picker rather than relying on drag-and-
 drop, which is difficult to discover on a phone; folders can be moved to the
 top level or into another folder, while chats must stay inside a folder. The
-daemon rejects cycles, repository leaves, and name collisions.
+host rejects cycles, repository leaves, and name collisions.
 
 Long press rather than visible buttons keeps rare actions out of rows that are
 already tap targets for the thing you usually want. Deleting is irreversible —
-the daemon forgets the agent session, kills the chat's terminals and removes the
+the host forgets the agent session, kills the chat's terminals and removes the
 transcript — so it keeps a confirmation that names the chat.
 
-Mutations refresh the tree rather than waiting for the daemon's `tree` broadcast,
+Mutations refresh the tree rather than waiting for the host's `tree` broadcast,
 so the row has already changed by the time the dialog closes. Tree broadcasts
 also reload open chat sessions because moving a chat or folder can change its
 inherited backend, model, or workdir. Renaming a chat likewise reloads its open
@@ -307,14 +307,14 @@ block and the client renders buttons. Tapping one sends it as the next message;
 that is all a button does, so anything a button offers can also be typed.
 
 The buttons come from the last stored message rather than from the
-`turn-finished` event that announced the question. The daemon stores the block
+`turn-finished` event that announced the question. The host stores the block
 verbatim, so reading it from the message means the buttons survive reopening
 the chat — where an event-only answer would leave the question stranded with no
 way to answer it but retyping. They disappear as soon as a turn starts, a
 message is queued, or anything else is said, because by then the buttons would
 answer the wrong question.
 
-`AskBlock` in `shared` mirrors `daemon-rs/src/ask.rs` case for case. Stripping
+`AskBlock` in `shared` mirrors `host/src/ask.rs` case for case. Stripping
 the block is not optional:
 left alone the tags render as literal text in the transcript. The question
 itself stays, in bold, so the conversation still reads in order after the
@@ -327,7 +327,7 @@ all — the composer is already there.
 
 ## Images in the transcript
 
-Sending an attachment stores the PNG on the daemon and leaves
+Sending an attachment stores the PNG on the host and leaves
 `[image: /path.png]` on its own line in the message, so a sent image would
 otherwise read as that literal text. The transcript recognises those markers
 and draws the image, keeping prose and images in the order they were written.
@@ -336,7 +336,7 @@ The rule matches the desktop transcript parser: the whole line, and nothing
 else on it. A message that merely mentions `[image: ...]` mid-sentence stays
 prose.
 
-Bytes live on the daemon, so each one is fetched with `image-read`, which
+Bytes live on the host, so each one is fetched with `image-read`, which
 serves only paths inside its own remote-paste directory. The scaled preview is
 requested rather than the original: a transcript never needs full resolution.
 Previews are bounded in height so a tall screenshot cannot push the rest of a
@@ -347,10 +347,10 @@ unavailable rather than failing the transcript.
 
 ## Attaching images
 
-The composer can attach up to 4 images, which is the daemon's limit alongside
+The composer can attach up to 4 images, which is the host's limit alongside
 10 MiB per image and 20 MiB in total.
 
-The daemon accepts **PNG only** and checks the signature, but a phone gallery
+The host accepts **PNG only** and checks the signature, but a phone gallery
 holds JPEG and HEIC, so images are decoded and re-encoded on the device. As on
 the desktop they are scaled to fit 1920 first: a modern phone photo encoded to
 PNG at full resolution runs to tens of megabytes and would simply be refused.

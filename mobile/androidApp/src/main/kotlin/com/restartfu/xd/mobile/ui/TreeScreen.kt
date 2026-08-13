@@ -246,7 +246,7 @@ internal fun TreeScreen(
             text = {
                 val name = title.ifBlank { "This chat" }
                 Text(
-                    name + " and its messages will be removed on the daemon. " +
+                    name + " and its messages will be removed on the host. " +
                         "This cannot be undone.",
                 )
             },
@@ -794,7 +794,7 @@ private fun RenameChatDialog(
         },
         confirmButton = {
             TextButton(
-                // The daemon refuses a blank title rather than clearing it, so
+                // The host refuses a blank title rather than clearing it, so
                 // there is nothing to send.
                 onClick = { onRename(name.trim()) },
                 enabled = name.isNotBlank(),
@@ -834,7 +834,7 @@ private fun ConnectionBanner(
     }
 }
 
-/** Guards against a cycle in daemon-supplied parent ids. */
+/** Guards against a cycle in host-supplied parent ids. */
 private fun folderPath(
     folder: Folder,
     foldersById: Map<String, Folder>,

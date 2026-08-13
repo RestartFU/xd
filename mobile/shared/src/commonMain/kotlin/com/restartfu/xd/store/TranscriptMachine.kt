@@ -234,7 +234,7 @@ public object TranscriptMachine {
     /**
      * True when this state already contains the given turn event.
      *
-     * The daemon writes replies and events through separate paths, so a `text`
+     * The host writes replies and events through separate paths, so a `text`
      * or `tool` event already folded into a `chat` snapshot's `segment` can
      * still arrive after that snapshot. Arrival order alone therefore cannot
      * decide this; the turn watermark can.

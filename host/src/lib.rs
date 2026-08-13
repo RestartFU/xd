@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -12,7 +12,6 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use thiserror::Error;
 
 mod agent;
 mod ask;
@@ -20,7 +19,7 @@ mod auth;
 mod background_process;
 mod cli_versions;
 mod git_draft;
-pub mod local_socket;
+mod local_socket;
 mod pairing;
 mod private_fs;
 mod repository_monitor;
@@ -28,10 +27,6 @@ mod runtime;
 mod secrets;
 mod self_update;
 mod storage;
-#[cfg(unix)]
-mod terminal;
-#[cfg(windows)]
-#[path = "terminal_windows.rs"]
 mod terminal;
 mod terminal_activity;
 mod terminal_agent;
@@ -44,7 +39,7 @@ mod worktree_name;
 use auth::AuthManager;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
-use local_socket::{UnixListener, UnixStream, make_private, path_is_socket};
+use local_socket::UnixStream;
 use pairing::{PairingService, Transport, generate_token, token_hash};
 use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
@@ -60,44 +55,6 @@ use workflow::WorkflowStatuses;
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
 pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 const REQUEST_ID: &str = "_xd_request";
-
-/// Consecutive refused accepts that mean the listener itself is finished, not
-/// the connection. Anything less is transient and worth another try.
-const ACCEPT_REFUSAL_LIMIT: u32 = 64;
-const ACCEPT_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
-
-#[derive(Debug, Error)]
-pub enum ServerError {
-    #[error("cannot prepare daemon socket directory {path}: {source}")]
-    CreateDirectory {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("refusing to replace non-socket path {0}")]
-    UnsafeSocketPath(PathBuf),
-    #[error("an xd daemon is already listening on {0}")]
-    AlreadyRunning(PathBuf),
-    #[error("cannot remove stale daemon socket {path}: {source}")]
-    RemoveSocket {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("cannot bind daemon socket {path}: {source}")]
-    Bind {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("daemon socket failed: {0}")]
-    Accept(std::io::Error),
-}
-
-pub struct LocalServer {
-    listener: UnixListener,
-    socket_path: PathBuf,
-    remote_listener: UnixListener,
-    remote_socket_path: PathBuf,
-    engine: Arc<Engine>,
-}
 
 pub struct Engine {
     store: Option<Arc<StateStore>>,
@@ -250,7 +207,7 @@ impl Engine {
                 .unwrap_or_else(error_reply),
             // Protocol v1 desktop builds used these names before file-browse
             // became the shared file API. Keep only the wire aliases so an
-            // independently updated remote daemon does not strand them.
+            // independently updated remote host does not strand them.
             Some("repository-files") => self.read(|store| store.compat_repository_files(&request)),
             Some("repository-file") => self.compat_repository_file(&request, "read"),
             Some("repository-file-write") => self.compat_repository_file(&request, "write"),
@@ -279,7 +236,7 @@ impl Engine {
             }
             Some("agent-auth") => self.auth.snapshots(),
             Some("agent-clis") => self.cli_versions.snapshots(),
-            Some("daemon-update") => self
+            Some("host-update") => self
                 .self_update
                 .perform(request.get("action").and_then(Value::as_str))
                 .unwrap_or_else(error_reply),
@@ -334,7 +291,7 @@ impl Engine {
             Some("terminal-kill") => self.terminals.kill(&request).unwrap_or_else(error_reply),
             Some(operation) => json!({
                 "ok": false,
-                "error": format!("Operation {operation} is not implemented by the Rust daemon yet.")
+                "error": format!("Operation {operation} is not implemented by the Rust host yet.")
             }),
             None => json!({"ok": false, "error": "Request must include a string op."}),
         };
@@ -355,14 +312,14 @@ impl Engine {
         *self
             .peer_listener
             .lock()
-            .map_err(|_| "daemon peer-listener state is unavailable".to_owned())? =
+            .map_err(|_| "host peer-listener state is unavailable".to_owned())? =
             Some(Arc::new(listener));
         Ok(())
     }
 
     fn peer_pairing(&self, owner: u64, request: &Value) -> Value {
         if !self.pairing.is_local(owner) {
-            return error_reply("Pairing codes can only be created on the daemon machine.");
+            return error_reply("Pairing codes can only be created on the host machine.");
         }
         let bind = request.get("bind").and_then(Value::as_str).unwrap_or("::");
         if bind.is_empty() {
@@ -380,10 +337,10 @@ impl Engine {
         };
         let listener = match self.peer_listener.lock() {
             Ok(listener) => listener.clone(),
-            Err(_) => return error_reply("Daemon peer-listener state is unavailable."),
+            Err(_) => return error_reply("Host peer-listener state is unavailable."),
         };
         let Some(listener) = listener else {
-            return error_reply("This daemon cannot accept remote devices.");
+            return error_reply("This host cannot accept remote devices.");
         };
         let endpoint = match listener(bind, port) {
             Ok(endpoint) => endpoint,
@@ -406,7 +363,7 @@ impl Engine {
 
     fn pair(&self, owner: u64, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         let name = match required_string(request, "name", "pair needs a device name.") {
             Ok(name) => match normalize_device_name(name) {
@@ -436,7 +393,7 @@ impl Engine {
 
     fn hello(&self, owner: u64, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         let token = match required_string(request, "token", "hello needs a token") {
             Ok(token) => token,
@@ -480,7 +437,7 @@ impl Engine {
     fn read(&self, operation: impl FnOnce(&StateStore) -> Result<Value, StorageError>) -> Value {
         match self.store.as_ref() {
             Some(store) => operation(store).unwrap_or_else(error_reply),
-            None => error_reply("Rust daemon state storage is not configured."),
+            None => error_reply("Rust host state storage is not configured."),
         }
     }
 
@@ -568,7 +525,7 @@ impl Engine {
         let store = self
             .store
             .as_ref()
-            .ok_or_else(|| "Rust daemon state storage is not configured.".to_string())?;
+            .ok_or_else(|| "Rust host state storage is not configured.".to_string())?;
         store
             .folder_path(folder)
             .map_err(|error| error.to_string())?;
@@ -595,7 +552,7 @@ impl Engine {
             Err(error) => return error_reply(error),
         };
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         if let Err(error) = store.chat(chat_id) {
             return error_reply(error);
@@ -656,7 +613,7 @@ impl Engine {
             return error_reply("Write a pull request title first.");
         }
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         if let Err(error) = store.chat(chat_id) {
             return error_reply(error);
@@ -713,7 +670,7 @@ impl Engine {
 
     fn git_commit(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         let chat_id = request
             .get("chat")
@@ -732,7 +689,7 @@ impl Engine {
 
     fn git_push(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         let chat_id = request
             .get("chat")
@@ -759,7 +716,7 @@ impl Engine {
 
     fn terminal_paste_image(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         let path = match store.materialize_terminal_image(request) {
             Ok(path) => path,
@@ -788,7 +745,7 @@ impl Engine {
             Err(_) => return error_reply("This session's agent state is unavailable."),
         };
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         match store.delete_chat(request) {
             Ok(reply) => {
@@ -806,7 +763,7 @@ impl Engine {
             Err(error) => return error_reply(error),
         };
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         match store.terminal_workdir(chat_id) {
             Ok(workdir) => self
@@ -841,18 +798,18 @@ impl Engine {
             Ok(execution) => execution,
             Err(std::sync::TryLockError::WouldBlock) => {
                 return error_reply(
-                    "Stop the daemon-managed turn before opening this chat's direct CLI.",
+                    "Stop the host-managed turn before opening this chat's direct CLI.",
                 );
             }
             Err(_) => return error_reply("This session's agent state is unavailable."),
         };
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         match store.chat(chat_id) {
             Ok(chat) if chat["working"].as_bool() == Some(true) => {
                 return error_reply(
-                    "Stop the daemon-managed turn before opening this chat's direct CLI.",
+                    "Stop the host-managed turn before opening this chat's direct CLI.",
                 );
             }
             Ok(_) => {}
@@ -871,7 +828,7 @@ impl Engine {
             Err(error) => return error_reply(error),
         };
         let backend = agent.wire_name();
-        // Direct terminals die with the daemon, but their CLI conversation is
+        // Direct terminals die with the host, but their CLI conversation is
         // durable. Reuse its backend id when the client restores this chat.
         let session_id = match store.session_id(chat_id, backend) {
             Ok(session_id) => session_id,
@@ -894,16 +851,16 @@ impl Engine {
             (_, Some(session_id)) => Some(AgentSession::New(session_id)),
             _ => None,
         };
-        let daemon_executable = match std::env::current_exe() {
+        let host_executable = match std::env::current_exe() {
             Ok(executable) => executable,
             Err(error) => {
                 return error_reply(format!(
-                    "Cannot locate the daemon executable for session recording: {error}"
+                    "Cannot locate the host executable for session recording: {error}"
                 ));
             }
         };
         let recorder =
-            SessionRecorder::new(&daemon_executable, store.database_path(), chat_id, backend);
+            SessionRecorder::new(&host_executable, store.database_path(), chat_id, backend);
         match self.terminals.open_agent(
             request,
             &workdir,
@@ -938,7 +895,7 @@ impl Engine {
         operation: impl FnOnce(&StateStore) -> Result<Value, StorageError>,
     ) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         match operation(store) {
             Ok(reply) => {
@@ -951,7 +908,7 @@ impl Engine {
 
     fn new_folder(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         let reply = match store.new_folder(request) {
             Ok(reply) => reply,
@@ -1001,7 +958,7 @@ impl Engine {
         operation: impl FnOnce(&StateStore) -> Result<(Value, Value), StorageError>,
     ) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         match operation(store) {
             Ok((reply, event)) => {
@@ -1026,11 +983,11 @@ impl Engine {
             Err(_) => return error_reply("This session's agent state is unavailable."),
         };
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         if self.terminals.has_agent_session(chat_id) {
             return error_reply(
-                "Close the direct CLI before starting a daemon-managed turn in this session.",
+                "Close the direct CLI before starting a host-managed turn in this session.",
             );
         }
         let mut request = request.clone();
@@ -1070,7 +1027,7 @@ impl Engine {
             .as_ref()
             .is_some_and(|runtime| runtime.cancel(chat_id));
         // Nothing to kill but the chat still reads as working: the turn died
-        // with a previous daemon. Stop should still get the chat back.
+        // with a previous host. Stop should still get the chat back.
         if !killed
             && let Some(store) = self.store.as_ref()
             && store.clear_interrupted_turn(chat_id).unwrap_or(false)
@@ -1083,7 +1040,7 @@ impl Engine {
 
     fn steer_queue(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         match store.steer_queue(request) {
             Ok((reply, event)) => {
@@ -1101,7 +1058,7 @@ impl Engine {
 
     fn remove_worktree(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust daemon state storage is not configured.");
+            return error_reply("Rust host state storage is not configured.");
         };
         match store.remove_worktree(request) {
             Ok(reply) => {
@@ -1116,6 +1073,7 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
     fn subscribe_transport(
         &self,
         sender: SyncSender<Value>,
@@ -1170,7 +1128,7 @@ impl EventBus {
         let id = self.next_subscriber.fetch_add(1, Ordering::Relaxed) + 1;
         self.subscribers
             .lock()
-            .map_err(|_| "daemon event state is unavailable".to_string())?
+            .map_err(|_| "host event state is unavailable".to_string())?
             .insert(
                 id,
                 Subscriber {
@@ -1249,180 +1207,12 @@ impl EventBus {
     }
 }
 
-pub fn remote_socket_path(local: &Path) -> PathBuf {
-    let mut path = local.as_os_str().to_os_string();
-    path.push(".remote");
-    PathBuf::from(path)
-}
-
-fn bind_daemon_socket(path: &Path) -> Result<UnixListener, ServerError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| ServerError::CreateDirectory {
-            path: parent.to_owned(),
-            source,
-        })?;
-    }
-    match fs::symlink_metadata(path) {
-        Ok(_) if path_is_socket(path) => {
-            if UnixStream::connect(path).is_ok() {
-                return Err(ServerError::AlreadyRunning(path.to_owned()));
-            }
-            fs::remove_file(path).map_err(|source| ServerError::RemoveSocket {
-                path: path.to_owned(),
-                source,
-            })?;
-        }
-        Ok(_) => return Err(ServerError::UnsafeSocketPath(path.to_owned())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(ServerError::Bind {
-                path: path.to_owned(),
-                source,
-            });
-        }
-    }
-    let listener = UnixListener::bind(path).map_err(|source| ServerError::Bind {
-        path: path.to_owned(),
-        source,
-    })?;
-    if let Err(source) = make_private(path) {
-        drop(listener);
-        let _ = fs::remove_file(path);
-        return Err(ServerError::Bind {
-            path: path.to_owned(),
-            source,
-        });
-    }
-    Ok(listener)
-}
-
-/// Serves this listener until it cannot possibly serve anything again.
-///
-/// A listener that stops accepting is indistinguishable from a daemon that is
-/// gone -- to every client that is not already connected. The clients holding a
-/// connection carry on, so the desktop looks fine while the phone cannot reach
-/// it at all, and nothing short of a restart brings it back.
-///
-/// So one bad accept does not end this. The kernel refuses a connection for
-/// reasons that pass: the peer went away between connect and accept, a signal
-/// interrupted the call, or the process is briefly out of descriptors. Each of
-/// those used to be permanent.
-fn accept_connections(listener: UnixListener, engine: Arc<Engine>, transport: Transport) {
-    let name = match transport {
-        Transport::Local => "xd-rust-local-client",
-        Transport::Remote => "xd-rust-remote-client",
-    };
-    let mut refusals = 0_u32;
-    loop {
-        let stream = match listener.accept() {
-            Ok((stream, _)) => {
-                refusals = 0;
-                stream
-            }
-            Err(error) => {
-                refusals += 1;
-                eprintln!("xd: cannot accept a connection: {error}");
-                if refusals >= ACCEPT_REFUSAL_LIMIT {
-                    eprintln!("xd: giving up on this listener after {refusals} refusals in a row");
-                    return;
-                }
-                // Long enough for a descriptor to come back, short enough that
-                // a client retrying does not notice.
-                thread::sleep(ACCEPT_RETRY_PAUSE);
-                continue;
-            }
-        };
-        let engine = engine.clone();
-        if thread::Builder::new()
-            .name(name.into())
-            .spawn(move || {
-                let _ = serve_connection_with_engine(stream, engine, transport);
-            })
-            .is_err()
-        {
-            // No thread for this client, but the next one may fare better. The
-            // connection is dropped, which closes it; the listener lives on.
-            eprintln!("xd: cannot serve a connection: out of threads");
-            thread::sleep(ACCEPT_RETRY_PAUSE);
-        }
-    }
-}
-
-impl LocalServer {
-    #[cfg(test)]
-    pub fn bind(socket_path: impl Into<PathBuf>) -> Result<Self, ServerError> {
-        Self::bind_with_engine(socket_path, Engine::transport_only())
-    }
-
-    pub fn bind_with_engine(
-        socket_path: impl Into<PathBuf>,
-        engine: Engine,
-    ) -> Result<Self, ServerError> {
-        let socket_path = socket_path.into();
-        let listener = bind_daemon_socket(&socket_path)?;
-        let remote_socket_path = remote_socket_path(&socket_path);
-        let remote_listener = match bind_daemon_socket(&remote_socket_path) {
-            Ok(listener) => listener,
-            Err(error) => {
-                let _ = fs::remove_file(&socket_path);
-                return Err(error);
-            }
-        };
-        Ok(Self {
-            listener,
-            socket_path,
-            remote_listener,
-            remote_socket_path,
-            engine: Arc::new(engine),
-        })
-    }
-
-    pub fn run(self) -> Result<(), ServerError> {
-        let remote_listener = self
-            .remote_listener
-            .try_clone()
-            .map_err(ServerError::Accept)?;
-        let remote_engine = self.engine.clone();
-        thread::Builder::new()
-            .name("xd-rust-remote-ipc".into())
-            .spawn(move || accept_connections(remote_listener, remote_engine, Transport::Remote))
-            .map_err(ServerError::Accept)?;
-        for connection in self.listener.incoming() {
-            let stream = connection.map_err(ServerError::Accept)?;
-            let engine = self.engine.clone();
-            thread::Builder::new()
-                .name("xd-rust-local-client".into())
-                .spawn(move || {
-                    let _ = serve_connection_with_engine(stream, engine, Transport::Local);
-                })
-                .map_err(ServerError::Accept)?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn socket_path(&self) -> &Path {
-        &self.socket_path
-    }
-
-    #[cfg(test)]
-    pub fn remote_socket_path(&self) -> &Path {
-        &self.remote_socket_path
-    }
-}
-
-impl Drop for LocalServer {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket_path);
-        let _ = fs::remove_file(&self.remote_socket_path);
-    }
-}
-
 #[cfg(test)]
 pub fn serve_connection(stream: UnixStream) -> std::io::Result<()> {
     serve_connection_with_engine(stream, Arc::new(Engine::transport_only()), Transport::Local)
 }
 
+#[cfg(test)]
 fn serve_connection_with_engine(
     stream: UnixStream,
     engine: Arc<Engine>,
@@ -1442,7 +1232,7 @@ fn serve_connection_with_engine(
     drop(outbound);
     let writer_result = writer
         .join()
-        .map_err(|_| std::io::Error::other("daemon writer panicked"))?;
+        .map_err(|_| std::io::Error::other("host writer panicked"))?;
     result.and(writer_result)
 }
 
@@ -1584,8 +1374,6 @@ fn hidden_git_state() -> Value {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::{
         env,
         io::{BufRead, BufReader},
@@ -1593,41 +1381,6 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
-
-    #[test]
-    fn a_listener_survives_a_client_that_vanishes_before_it_is_served() {
-        let root = test_directory();
-        let path = root.join("daemon.sock");
-        let server = LocalServer::bind(&path).unwrap();
-        let socket = server.socket_path().to_owned();
-        thread::spawn(move || {
-            let _ = server.run();
-        });
-
-        // Connect and drop at once, repeatedly. A peer that goes away between
-        // connect and accept is what the kernel refuses an accept for, and a
-        // listener that took that as final would never answer anyone again.
-        for _ in 0..50 {
-            if let Ok(stream) = UnixStream::connect(&socket) {
-                drop(stream);
-            }
-        }
-
-        // Still answering, which is the whole point: an unreachable daemon
-        // looks exactly like a dead one to anything not already connected.
-        let mut stream = UnixStream::connect(&socket).unwrap();
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-            .unwrap();
-        writeln!(stream, "{}", json!({"op": "ping", "_xd_request": 7})).unwrap();
-        let mut reply = String::new();
-        BufReader::new(&stream).read_line(&mut reply).unwrap();
-        let reply: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["ok"], true);
-        assert_eq!(reply[REQUEST_ID], 7);
-
-        fs::remove_dir_all(root).ok();
-    }
 
     #[test]
     fn a_loaded_chat_carries_where_its_live_turn_already_is() {
@@ -1705,13 +1458,13 @@ mod tests {
     }
 
     #[test]
-    fn daemon_does_not_expose_the_orphaned_auth_refresh_operation() {
+    fn host_does_not_expose_the_orphaned_auth_refresh_operation() {
         let operation = "agent-auth-refresh";
         let reply = dispatch(json!({"op": operation}));
         assert_eq!(reply["ok"], false);
         assert_eq!(
             reply["error"],
-            format!("Operation {operation} is not implemented by the Rust daemon yet.")
+            format!("Operation {operation} is not implemented by the Rust host yet.")
         );
     }
 
@@ -1876,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_image_paste_materializes_the_image_on_the_daemon_machine() {
+    fn terminal_image_paste_materializes_the_image_on_the_host_machine() {
         let root = test_directory();
         let workspaces = root.join("Workspaces");
         let store = StateStore::open(root.join("chats.db"), workspaces).unwrap();
@@ -2065,7 +1818,7 @@ mod tests {
         assert_eq!(hello["version"], 1);
         assert_eq!(
             engine.dispatch_for(resumed, json!({"op": "devices"}))["error"],
-            "Device management is only available on the daemon machine."
+            "Device management is only available on the host machine."
         );
 
         let devices = engine.dispatch(json!({"op": "devices"}));
@@ -2146,82 +1899,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             engine.dispatch_for(remote, json!({"op": "peer-pairing"}))["error"],
-            "Pairing codes can only be created on the daemon machine."
+            "Pairing codes can only be created on the host machine."
         );
         engine.unsubscribe(remote);
         drop(peer);
     }
 
-    #[test]
-    fn refuses_to_replace_a_regular_file_with_a_socket() {
-        let root = test_directory();
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("daemon.sock");
-        fs::write(&path, "keep me").unwrap();
-        assert!(matches!(
-            LocalServer::bind(&path),
-            Err(ServerError::UnsafeSocketPath(found)) if found == path
-        ));
-        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn refuses_to_unlink_a_live_daemon_socket() {
-        let root = test_directory();
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("daemon.sock");
-        let listener = UnixListener::bind(&path).unwrap();
-        assert!(matches!(
-            LocalServer::bind(&path),
-            Err(ServerError::AlreadyRunning(found)) if found == path
-        ));
-        assert!(path.exists());
-        drop(listener);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn replaces_a_stale_socket() {
-        let root = test_directory();
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("daemon.sock");
-        drop(UnixListener::bind(&path).unwrap());
-        let server = LocalServer::bind(&path).unwrap();
-        assert!(path.exists());
-        drop(server);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn socket_is_removed_when_the_server_is_dropped() {
-        let root = test_directory();
-        let path = root.join("daemon.sock");
-        let server = LocalServer::bind(&path).unwrap();
-        assert_eq!(server.socket_path(), path);
-        assert!(path.exists());
-        let remote = server.remote_socket_path().to_owned();
-        assert!(remote.exists());
-        #[cfg(unix)]
-        {
-            assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-            assert_eq!(
-                fs::metadata(&remote).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-        drop(server);
-        assert!(!path.exists());
-        assert!(!remote.exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
     fn test_directory() -> PathBuf {
         env::temp_dir().join(format!(
-            "xd-rust-daemon-test-{}-{}",
+            "xd-rust-host-test-{}-{}",
             std::process::id(),
             NEXT_TEST.fetch_add(1, Ordering::Relaxed)
         ))

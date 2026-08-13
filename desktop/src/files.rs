@@ -11,14 +11,14 @@ use std::collections::{HashMap, HashSet};
 
 use crate::BrowseEntry;
 
-/// A directory tree that folds, over a daemon that lists one directory at a time.
+/// A directory tree that folds, over a host that lists one directory at a time.
 ///
 /// Children arrive per directory and are kept; what is drawn is the walk from
 /// the root through whichever directories are open. Folding is then free, and
 /// reopening a directory costs nothing.
 ///
 /// Paths are relative and never begin with a slash -- the root is `""` -- since
-/// that is the only shape the daemon accepts.
+/// that is the only shape the host accepts.
 #[derive(Clone, Debug, Default)]
 pub struct FileTree {
     children: HashMap<String, Vec<BrowseEntry>>,
@@ -109,7 +109,7 @@ impl FileTree {
 pub struct OpenFile {
     /// Relative to the chat's working directory.
     pub path: String,
-    /// What the daemon last handed over, and what a write is checked against.
+    /// What the host last handed over, and what a write is checked against.
     pub saved: String,
     /// What is on screen, which is `saved` until it is typed in.
     pub text: String,

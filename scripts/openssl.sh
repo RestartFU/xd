@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# OpenSSL is used only when creating a daemon certificate. Use xd's loader so
+# OpenSSL is used only when creating a host certificate. Use xd's loader so
 # certificate creation works on hosts without a conventional glibc layout.
 
 set -e

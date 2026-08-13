@@ -24,15 +24,15 @@ import com.restartfu.xd.mobile.MainViewModel
  * whatever the agent was doing, so it is never automatic.
  */
 @Composable
-internal fun DaemonUpdateDialog(
+internal fun HostUpdateDialog(
     model: MainViewModel,
     onDismiss: () -> Unit,
 ) {
-    val status by model.daemon.collectAsStateWithLifecycle()
-    val error by model.daemonError.collectAsStateWithLifecycle()
-    val busy by model.daemonBusy.collectAsStateWithLifecycle()
+    val status by model.host.collectAsStateWithLifecycle()
+    val error by model.hostError.collectAsStateWithLifecycle()
+    val busy by model.hostBusy.collectAsStateWithLifecycle()
 
-    LaunchedEffect(Unit) { model.daemonUpdate("check") }
+    LaunchedEffect(Unit) { model.hostUpdate("check") }
 
     val supported = status?.supported == true
     val state = status?.state ?: "idle"
@@ -42,10 +42,10 @@ internal fun DaemonUpdateDialog(
 
     AlertDialog(
         onDismissRequest = {
-            model.clearDaemonUpdate()
+            model.clearHostUpdate()
             onDismiss()
         },
-        title = { Text("Update daemon") },
+        title = { Text("Update host") },
         text = {
             Column {
                 Text(
@@ -57,7 +57,7 @@ internal fun DaemonUpdateDialog(
                             "This machine's installation cannot update itself. " +
                                 "Update it the way it was installed."
                         state == "installing" ->
-                            "Installing. The daemon keeps running until restarted."
+                            "Installing. The host keeps running until restarted."
                         state == "installed" ->
                             "Installed. Restart to run the new build."
                         state == "failed" ->
@@ -91,12 +91,12 @@ internal fun DaemonUpdateDialog(
         confirmButton = {
             Row {
                 if (restartable) {
-                    TextButton(onClick = { model.daemonUpdate("restart") }) {
+                    TextButton(onClick = { model.hostUpdate("restart") }) {
                         Text("Restart")
                     }
                 }
                 TextButton(
-                    onClick = { model.daemonUpdate("install") },
+                    onClick = { model.hostUpdate("install") },
                     enabled = installable,
                 ) {
                     Text("Install")
@@ -106,7 +106,7 @@ internal fun DaemonUpdateDialog(
         dismissButton = {
             TextButton(
                 onClick = {
-                    model.clearDaemonUpdate()
+                    model.clearHostUpdate()
                     onDismiss()
                 },
             ) { Text("Close") }

@@ -5,12 +5,12 @@
 > `xd-host stdio` child and remote mode runs that child over SSH.
 
 This document is the normative contract between `xd serve` and every remote
-client. The Rust daemon in `daemon-rs/src/lib.rs` owns framing and dispatch for
+client. The Rust host in `host/src/lib.rs` owns framing and dispatch for
 local and remote clients alike; `desktop/src/protocol.rs` and the Kotlin
 `shared/.../protocol` package implement the client side. Protocol version 1 is
 reported by a successful `hello`.
 
-Any wire change must update the Rust daemon/desktop tests and the Kotlin
+Any wire change must update the Rust host/desktop tests and the Kotlin
 `commonTest` fixtures together. Server and clients must ignore unknown object
 members unless a later protocol version explicitly says otherwise.
 
@@ -27,11 +27,11 @@ members unless a later protocol version explicitly says otherwise.
   (`0x0a`). Empty lines are ignored.
 - Requests, replies, and events share one ordered, full-duplex connection.
 - Frames are limited to 64 KiB before authentication and 96 MiB afterwards
-  (`AUTH_FRAME_LIMIT` and `FRAME_LIMIT` in `daemon-rs/src/lib.rs`). An oversized frame is a
+  (`AUTH_FRAME_LIMIT` and `FRAME_LIMIT` in `host/src/lib.rs`). An oversized frame is a
   protocol error and closes the connection.
 - Each session holds a bounded 256-event outbound queue
   (`Session::EVENT_QUEUE_SIZE`). **A client that stops draining its socket is
-  disconnected** rather than allowed to apply backpressure to the daemon. A
+  disconnected** rather than allowed to apply backpressure to the host. A
   client must keep reading even while busy.
 
 JSON member absence and JSON `null` are different. Unless an operation says
@@ -55,7 +55,7 @@ operation-specific members. Errors have this shape:
 ### Request ids
 
 A client should add a private `_xd_request` integer to every request. The
-daemon echoes it on the matching reply, which lets replies be matched by id
+host echoes it on the matching reply, which lets replies be matched by id
 rather than by arrival position:
 
 ```json
@@ -63,13 +63,13 @@ rather than by arrival position:
 {"ok":true,"_xd_request":42}
 ```
 
-This matters because the daemon answers requests concurrently. The operations
+This matters because the host answers requests concurrently. The operations
 that must stay responsive — `cancel`, `voice-cancel`, `agent-auth-cancel`, and
 `ping` — bypass the serialized command path entirely. Without ids, a `cancel`
-answered promptly by the daemon would still sit behind a slow `diff-read` in
+answered promptly by the host would still sit behind a slow `diff-read` in
 the reply stream.
 
-A daemon that does not echo the id answers strictly in order. A client
+A host that does not echo the id answers strictly in order. A client
 supporting that compatibility path must keep a FIFO slot for every request
 written, and must retain the slot of a timed-out or cancelled caller — dropping
 it shifts every later reply onto the wrong request.
@@ -84,7 +84,7 @@ between a request and its reply and do not consume a reply slot:
 ```
 
 `id` is a monotonic counter assigned at publication. **It is per-process and
-in-memory only**: it does not survive a daemon
+in-memory only**: it does not survive a host
 restart, and there is no resume-from-id operation. A reconnecting client must
 take a fresh snapshot rather than try to replay what it missed.
 
@@ -128,7 +128,7 @@ submission. Its alphabet excludes `I`, `O`, `0`, and `1`.
 ```
 
 `code` is required, as is a non-empty `name` supplied by the connecting client.
-The daemon normalizes and stores that name; it does not invent one. The local
+The host normalizes and stores that name; it does not invent one. The local
 owner can rename it later through device management. A successful pair:
 
 - authenticates the existing connection; do not send `hello` afterward;
@@ -152,7 +152,7 @@ would disclose the bearer token to a different peer.
 
 ### Device management
 
-The daemon owner manages paired credentials through the local IPC endpoint.
+The host owner manages paired credentials through the local IPC endpoint.
 These operations require local transport and are never accepted from a remote
 or mobile client:
 
@@ -169,7 +169,7 @@ or mobile client:
 ```
 
 The `id` is only for the local management surface; clients must not expose or
-persist it as a remote credential. Renaming changes the daemon-owned name.
+persist it as a remote credential. Renaming changes the host-owned name.
 Revoking deletes the token, disconnects every active session for that device,
 and requires pairing again.
 
@@ -178,7 +178,7 @@ and requires pairing again.
 `peer-pairing` requires an authenticated connection **and** local transport
 (`Engine::peer_pairing`). A paired remote device cannot mint pairing codes for
 further devices, cannot open listeners, enable TLS, or manage other paired
-devices. Pairing and device-management authority stays on the daemon machine.
+devices. Pairing and device-management authority stays on the host machine.
 
 ## State reads
 
@@ -313,15 +313,15 @@ boundary, not an event cursor.
 |---|---|---|
 | `folder-context` | `folder: string` | `context: string \| null` |
 | `folder-settings` | `folder: string` | inherited folder settings |
-| `shortcuts` | optional `folder: string` | daemon-wide `global`, folder-owned `workspace`, and merged `effective` prompt arrays |
-| `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to daemon home, lists non-hidden directories |
+| `shortcuts` | optional `folder: string` | host-wide `global`, folder-owned `workspace`, and merged `effective` prompt arrays |
+| `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to host home, lists non-hidden directories |
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
 | `agent-clis` | none | detected assistant versions |
-| `daemon-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
+| `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
-| `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the daemon |
-| `image-read` | absolute daemon `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only daemon-created remote pastes |
+| `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
+| `image-read` | absolute host `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only host-created remote pastes |
 | `search` | `query` | matching stored messages |
 | `diff-read` | `chat` plus one `read` of `base`, `working-status`, `branch-status` (with `base`), `working-all`, `branch-all` (with `base`), `working-file`/`untracked-file` (with a safe relative `path`), or `branch-file` (with `base` and `path`) | `output: string`, limited to 8 MiB |
 | `ping` | none | no members beyond `ok` |
@@ -331,9 +331,9 @@ Hidden entries are omitted. Directories sort before files.
 
 ## Intents
 
-The daemon is the only writer. A client never edits state directly: it sends an
-intent, and the daemon applies it and broadcasts what happened. Two devices
-acting at once are therefore ordered by the daemon rather than racing.
+The host is the only writer. A client never edits state directly: it sends an
+intent, and the host applies it and broadcasts what happened. Two devices
+acting at once are therefore ordered by the host rather than racing.
 
 ### `new-chat`
 
@@ -345,7 +345,7 @@ acting at once are therefore ordered by the daemon rather than racing.
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
 its folder's backend and model. When `workdir` is omitted it also inherits the
 folder's effective working directory; a supplied path selects a per-chat
-working directory on the daemon machine.
+working directory on the host machine.
 
 ### `set-shortcuts`
 
@@ -354,7 +354,7 @@ working directory on the daemon machine.
 {"op":"set-shortcuts","folder":"folder-1","shortcuts":["Check this workspace"]}
 ```
 
-Without `folder`, the operation replaces daemon-wide shortcuts. With a folder
+Without `folder`, the operation replaces host-wide shortcuts. With a folder
 id it replaces that workspace's shortcuts. Blank and duplicate prompts are
 removed. Chats receive global prompts followed by prompts inherited from their
 workspace ancestry and display them as send buttons. Activating one uses the
@@ -369,7 +369,7 @@ normal `send` intent, so it is queued automatically while a turn is active.
 
 `name` is required and creates a top-level workspace folder unless `parent`
 contains an existing folder id. `repo` is optional; when present it must be an
-existing directory on the daemon and becomes the new folder's repository and
+existing directory on the host and becomes the new folder's repository and
 fallback working directory. An explicit folder working-directory setting still
 takes precedence. The selected repository is not moved or modified.
 
@@ -382,7 +382,7 @@ takes precedence. The selected repository is not moved or modified.
 
 Both `chat` and `folder` are required. The target folder must exist. Moving a
 chat changes which folder settings it inherits; the chat id and transcript stay
-the same. The daemon broadcasts a `tree` event after a successful move.
+the same. The host broadcasts a `tree` event after a successful move.
 
 ### `send`
 
@@ -393,7 +393,7 @@ the same. The daemon broadcasts a `tree` event after a successful move.
 
 Needs `text`, `attachments`, or both. `queued` is true when a turn was already
 running and this message was appended to the queue instead of started — one
-turn per chat is enforced by the daemon.
+turn per chat is enforced by the host.
 
 Attachments are PNG only:
 
@@ -405,9 +405,9 @@ At most 4 images, each at most 10 MiB, 20 MiB in total.
 
 Desktop clients may provide `worktree_name`, `worktree_backend`, and
 `worktree_model` when the chat is configured to create a new worktree. The
-name is used directly as the hint when supplied; otherwise the daemon uses that
+name is used directly as the hint when supplied; otherwise the host uses that
 configured Git-writing assistant to choose a short worktree name before the
-first turn. Older or other clients may omit them and the daemon falls back to
+first turn. Older or other clients may omit them and the host falls back to
 a prompt slug.
 
 ### `set-draft`
@@ -417,7 +417,7 @@ a prompt slug.
 {"ok":true,"draft":"unfinished","draft_revision":4}
 ```
 
-The daemon persists one composer draft per chat and broadcasts a `draft` event
+The host persists one composer draft per chat and broadcasts a `draft` event
 after every update. `text` is required but may be empty and is limited to 1
 MiB. Optional `attachments` replaces the synchronized PNG preview list; omit it
 for ordinary text edits so large image payloads are not resent on every
@@ -460,20 +460,17 @@ without `backend` only the model string is stored. The atomic form validates
 both, clears an unsupported effort, and appends a visible `Switched to …`
 transcript event.
 
-`daemon-update` updates the daemon's own installation, so a paired device can
+`host-update` updates the host's own installation, so a paired device can
 bring a machine forward without a shell on it. `install` replaces the files,
 which is safe while turns run because the process keeps the binary it already
 mapped; `restart` drops every connection and loses any running turn, so the
-two are separate actions and neither happens on its own. Native Linux bundles,
-macOS apps, and the installed Windows MSI payload support this flow. Windows
-runs the MSI quietly without forcing a reboot; if Windows reports that a reboot
-is required, the in-app install fails instead of claiming that a daemon restart
-completed the update. `supported` is false where the installation cannot
-replace itself, such as source builds, and both `install` and `restart` are
-refused there.
+two are separate actions and neither happens on its own. Native Linux bundles
+and macOS apps support this flow. `supported` is false where the installation
+cannot replace itself, such as source builds, and both `install` and `restart`
+are refused there.
 
-`agent-catalog` lists the assistants and models this daemon can run. The
-desktop reads its own compiled-in catalog because it ships with the daemon; a
+`agent-catalog` lists the assistants and models this host can run. The
+desktop reads its own compiled-in catalog because it ships with the host; a
 separately released client must ask, since `set-option` validates the model id
 and a hard-coded list would be refused as soon as one is added or retired.
 
@@ -486,7 +483,7 @@ and a hard-coded list would be refused as soon as one is added or retired.
 }
 ```
 
-The daemon validates the captured marker, then fetches the run and its jobs from
+The host validates the captured marker, then fetches the run and its jobs from
 GitHub using its configured token. Active jobs omit a terminal conclusion and
 include their latest step name in `log`; clients should show a loading indicator
 rather than an `In progress` label. The endpoint is intended for mobile clients,
@@ -503,7 +500,7 @@ The `chat` and absolute `worktree` path are required. Only the selected linked
 worktree reported by `selected_worktree` may be removed, and the chat must not
 have any messages. The target must be a clean, registered worktree that is
 neither the repository's main checkout nor its current checkout, and no other
-chat may reference it. The daemon removes the checkout without force and keeps
+chat may reference it. The host removes the checkout without force and keeps
 the Git branch, then returns the chat to its original checkout. A successful
 request replies with `ok` alone.
 
@@ -528,12 +525,12 @@ and an optional request correlation string. Commits also require `message`;
 pull-request creation requires `title` and accepts `body`. It acknowledges
 immediately and publishes `git-action-finished`. Successful events contain the
 new repository action state and an optional URL; failures contain `success:
-false` and `error`. The daemon rechecks the advertised action before mutating
+false` and `error`. The host rechecks the advertised action before mutating
 the repository so a stale client cannot run the wrong operation.
 
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
-or one of its descendants, and the daemon rejects a destination name collision.
+or one of its descendants, and the host rejects a destination name collision.
 
 ## Events
 
@@ -576,10 +573,10 @@ them), and `<input>` means a typed answer is also accepted. `turn-finished`
 reports the parsed form in `question`, `options`, and `accepts_input`.
 
 The block is **also stored with the message, verbatim** — unlike workspace
-blocks, which the daemon strips before storage. That is deliberate: it lets
+blocks, which the host strips before storage. That is deliberate: it lets
 every client render its own buttons, and lets a client that reopens a chat find
 the question without having seen the event. A client must therefore strip these
-blocks before rendering, or show raw tags. `daemon-rs/src/ask.rs` is the
+blocks before rendering, or show raw tags. `host/src/ask.rs` is the
 reference parser; the mobile client mirrors it in
 `shared/.../model/Ask.kt`.
 
@@ -595,7 +592,7 @@ transcript is authoritative and the live segment is discarded.
 ## Client obligations
 
 1. Pin the exact leaf certificate after pairing. Never offer a trust-anyway
-   action — the token is remote code execution on the daemon machine.
+   action — the token is remote code execution on the host machine.
 2. Keep reading the socket at all times, or be disconnected at 256 queued
    events.
 3. Re-snapshot on reconnect. There is no event replay.

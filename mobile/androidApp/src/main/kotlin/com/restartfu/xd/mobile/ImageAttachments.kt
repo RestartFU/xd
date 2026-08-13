@@ -23,9 +23,9 @@ data class Attachment(
 )
 
 /**
- * Turns a picked image into an attachment the daemon will accept.
+ * Turns a picked image into an attachment the host will accept.
  *
- * The daemon takes PNG only and validates the signature, but a phone gallery
+ * The host takes PNG only and validates the signature, but a phone gallery
  * holds JPEG and HEIC, so everything is decoded and re-encoded here. Matching
  * the desktop, images are scaled to fit 1920 first: a modern phone photo
  * encoded to PNG at full resolution runs to tens of megabytes and would be
@@ -113,7 +113,7 @@ object ImageAttachments {
      *
      * PNG is lossless, so quality cannot be traded for size the way it can
      * with JPEG. A screenshot of a photograph can still exceed 10 MiB at 1920,
-     * and being refused by the daemon is a worse outcome than being smaller.
+     * and being refused by the host is a worse outcome than being smaller.
      */
     private fun encode(scaled: Bitmap, original: Bitmap): ByteArray {
         var current = scaled

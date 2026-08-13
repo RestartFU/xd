@@ -46,7 +46,7 @@ internal val EFFORT_LABELS = mapOf(
  * Effort, access, Plan/Build and worktree for a chat.
  *
  * Which efforts exist depends on the assistant, so the list comes from the
- * daemon's catalog rather than being assumed here.
+ * host's catalog rather than being assumed here.
  */
 @Composable
 internal fun ChatOptionsDialog(
@@ -122,7 +122,7 @@ internal fun ChatOptionsDialog(
                         FilterChip(
                             selected = state.access == wire,
                             onClick = { model.setAccess(wire) },
-                            // Planning overrides access on the daemon, so
+                            // Planning overrides access on the host, so
                             // choosing one here would not mean anything.
                             enabled = !busy && !state.plan,
                             label = { Text(label) },

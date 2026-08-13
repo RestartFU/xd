@@ -37,7 +37,7 @@ public sealed interface TerminalEvent {
     ) : TerminalEvent
 }
 
-/** One frame of the daemon's bounded output history. */
+/** One frame of the host's bounded output history. */
 public sealed interface ReplayFrame {
     public data class Output(val data: ByteArray) : ReplayFrame {
         override fun equals(other: Any?): Boolean =

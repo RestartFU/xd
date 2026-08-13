@@ -4,8 +4,9 @@
 #
 #   bundle.sh <staging-dir> <out-dir> <launcher-template>
 #
-# The result is a directory that can be copied to any x86_64 Linux host and run
-# via ./xd.sh, with zero dependency on the host's native graphics stack.
+# The result is a directory that can be copied to an x86_64 Linux desktop and
+# run via ./xd.sh. The Vulkan loader is included, while the GPU driver comes
+# from the host because it is hardware- and kernel-specific.
 #
 # Paths that must be absolute at runtime are written as @BUNDLE@ placeholders
 # and substituted by the launcher, which is what makes the tree relocatable.
@@ -102,38 +103,11 @@ mkdir -p "$OUT/share/locale-data"
 cp -a /usr/lib/locale/C.utf8 "$OUT/share/locale-data/"
 
 ARCH_LIB=/usr/lib/x86_64-linux-gnu
-# --- Vulkan -----------------------------------------------------------------
-# GPUI renders through Vulkan, and unlike GL the loader finds its driver
-# through JSON manifests on the host. A machine with no manifests -- no
-# mesa-vulkan-drivers installed -- gave the app no device at all and it died
-# in the GPU init with nothing a reader could act on. Mesa's drivers are
-# carried here, lavapipe among them, so there is always one that works; the
-# launcher only points at them when the host offers nothing itself.
-# The loader is opened by name at runtime, never linked, so the closure above
-# cannot see it: carry it deliberately rather than by way of whatever else
-# happens to link it.
+# --- Vulkan loader ----------------------------------------------------------
+# GPUI opens the loader dynamically, so ldd cannot see it. Drivers stay on the
+# host: bundling every Mesa hardware driver also pulled in LLVM and Z3, adding
+# over 200 MiB of machine-specific graphics code to the application.
 cp -aL "$ARCH_LIB"/libvulkan.so.1 "$OUT/lib/"
-
-mkdir -p "$OUT/etc/vulkan"
-for icd in "$ARCH_LIB"/libvulkan_*.so; do
-  [ -e "$icd" ] || continue
-  cp -aL "$icd" "$OUT/lib/"
-  name=$(basename "$icd")
-  cat > "$OUT/etc/vulkan/${name%.so}.json.in" <<JSON
-{
-    "file_format_version": "1.0.0",
-    "ICD": {
-        "library_path": "@BUNDLE@/lib/$name",
-        "api_version": "1.3.0"
-    }
-}
-JSON
-done
-for extra in $(ldd "$OUT"/lib/libvulkan_*.so 2>/dev/null \
-                 | awk '/=> \//{print $3}' | sort -u); do
-  base=$(basename "$extra")
-  [ -e "$OUT/lib/$base" ] || cp -aL "$extra" "$OUT/lib/"
-done
 
 # --- fonts + fontconfig -----------------------------------------------------
 # FONTCONFIG_SYSROOT would isolate the config more thoroughly, but fontconfig

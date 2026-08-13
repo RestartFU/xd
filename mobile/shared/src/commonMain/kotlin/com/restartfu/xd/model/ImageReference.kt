@@ -1,15 +1,15 @@
 package com.restartfu.xd.model
 
-/** A stretch of a message: prose, or an image the daemon stored. */
+/** A stretch of a message: prose, or an image the host stored. */
 public sealed interface MessagePart {
     public data class Prose(val text: String) : MessagePart
     public data class Image(val path: String) : MessagePart
 }
 
 /**
- * Splits a message around the image markers the daemon writes.
+ * Splits a message around the image markers the host writes.
  *
- * Sending an attachment stores the PNG on the daemon and leaves
+ * Sending an attachment stores the PNG on the host and leaves
  * `[image: /path.png]` on its own line in the message, so without this a sent
  * image reads as that literal text.
  *

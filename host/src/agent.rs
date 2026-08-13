@@ -956,47 +956,17 @@ fn append_access(command: &mut Command, access: &str) {
 }
 
 pub(crate) fn resolve_codex() -> PathBuf {
-    if let Some(configured) = env::var_os("XD_CODEX_EXECUTABLE").filter(|path| !path.is_empty()) {
-        return configured.into();
-    }
-    if let Ok(current) = env::current_exe()
-        && let Some(parent) = current.parent()
-    {
-        for relative in [
-            "codex-package/bin/codex.exe",
-            "codex-package/bin/codex",
-            "libexec/codex-package/bin/codex",
-        ] {
-            let candidate = parent.join(relative);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from("codex")
+    env::var_os("XD_CODEX_EXECUTABLE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("codex"))
 }
 
 pub(crate) fn resolve_claude() -> PathBuf {
-    if let Some(configured) = env::var_os("XD_CLAUDE_EXECUTABLE").filter(|path| !path.is_empty()) {
-        return configured.into();
-    }
-    if let Ok(current) = env::current_exe()
-        && let Some(parent) = current.parent()
-    {
-        for relative in [
-            "claude.exe",
-            "claude",
-            "claude-bin",
-            "libexec/claude",
-            "libexec/claude-bin",
-        ] {
-            let candidate = parent.join(relative);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from("claude")
+    env::var_os("XD_CLAUDE_EXECUTABLE")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("claude"))
 }
 
 pub(crate) fn resolve_jcode() -> PathBuf {

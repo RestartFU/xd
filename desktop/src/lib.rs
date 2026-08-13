@@ -1,6 +1,7 @@
 pub mod activity;
 pub mod channel;
-pub mod daemon;
+pub mod host;
+#[cfg(test)]
 pub mod local_socket;
 pub mod markdown;
 pub mod model;

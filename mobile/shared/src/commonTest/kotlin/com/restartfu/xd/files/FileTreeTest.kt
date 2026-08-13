@@ -48,7 +48,7 @@ class FileTreeTest {
             listOf("src/", "  voice/", "    Wav.kt", "  main.kt", "README.md"),
             tree.drawn(),
         )
-        // Paths stay relative and never lead with a slash: the daemon takes
+        // Paths stay relative and never lead with a slash: the host takes
         // exactly these.
         assertEquals(
             listOf("src", "src/voice", "src/voice/Wav.kt", "src/main.kt", "README.md"),

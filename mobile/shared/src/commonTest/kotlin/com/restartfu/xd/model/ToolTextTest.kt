@@ -15,7 +15,7 @@ class ToolTextTest {
 
     @Test
     fun treatsFileChangeWithoutAPatchAsPlainText() {
-        // The daemon writes the bare marker when it could not compute a patch.
+        // The host writes the bare marker when it could not compute a patch.
         assertNull(ToolText.patch("file_change"))
         assertNull(ToolText.patch("file_change\nnot a patch"))
         assertEquals("Edited files", ToolText.summary("file_change"))

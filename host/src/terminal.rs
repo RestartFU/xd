@@ -451,7 +451,7 @@ impl TerminalSession {
             && !executable_available(&executable)
         {
             return Err(format!(
-                "{} is not installed or is unavailable on the daemon machine.",
+                "{} is not installed or is unavailable on the host machine.",
                 agent.title()
             ));
         }
@@ -988,7 +988,9 @@ mod tests {
         }
         let opened = opened.unwrap();
         let terminal = opened["id"].as_str().unwrap();
-        let output = wait_for_output(&manager, chat_id, "xd-conemu:");
+        // Wait for the final diagnostic line, rather than racing the PTY after
+        // the preceding environment line happens to arrive in its own chunk.
+        let output = wait_for_output(&manager, chat_id, "xd-topology:");
         wait_for_activity(&manager, chat_id, true);
         assert!(manager.working_chats().contains(chat_id));
         manager.kill(&json!({"terminal": terminal})).unwrap();

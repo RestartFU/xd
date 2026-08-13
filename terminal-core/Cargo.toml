@@ -6,4 +6,4 @@ license = "MIT"
 publish = false
 
 [dependencies]
-bincode = { version = "=2.0.1", features = ["derive"] }
+alacritty_terminal = "=0.25.1"

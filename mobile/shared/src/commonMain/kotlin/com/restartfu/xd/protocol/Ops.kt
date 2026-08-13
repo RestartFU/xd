@@ -167,7 +167,7 @@ public object Ops {
     /**
      * Replaces a queued message.
      *
-     * [oldText] is what the client believes is there. The daemon uses it to
+     * [oldText] is what the client believes is there. The host uses it to
      * refuse an edit aimed at a queue another device has already changed.
      */
     public fun editQueue(
@@ -189,7 +189,7 @@ public object Ops {
      * Promotes a queued message to the front and stops the running turn, so
      * the agent takes it up immediately instead of finishing first.
      *
-     * [text] must be the message currently at [index]; the daemon refuses the
+     * [text] must be the message currently at [index]; the host refuses the
      * steer otherwise rather than redirecting the agent to the wrong thing.
      */
     public fun steerQueue(
@@ -209,13 +209,13 @@ public object Ops {
     /**
      * Deletes a chat and everything it owns.
      *
-     * The daemon forgets the agent session, kills the chat's terminals and
+     * The host forgets the agent session, kills the chat's terminals and
      * removes the stored transcript. There is no undo, so a client should ask
      * first.
      */
     public fun deleteChat(chatId: String): JsonObject = withChat("delete-chat", chatId)
 
-    /** Renames a chat. The daemon refuses a blank title rather than clearing it. */
+    /** Renames a chat. The host refuses a blank title rather than clearing it. */
     public fun renameChat(chatId: String, title: String): JsonObject = buildJsonObject {
         require(title.isNotBlank()) { "A chat needs a title" }
         put("op", "rename-chat")
@@ -252,7 +252,7 @@ public object Ops {
         put("name", name)
         if (parentId != null) put("parent", parentId)
         if (!repository.isNullOrBlank()) put("repo", repository)
-        // The daemon clones this into the folder it makes, and checks the
+        // The host clones this into the folder it makes, and checks the
         // address itself: only it knows what its Git can reach.
         if (!repositoryUrl.isNullOrBlank()) put("repo_url", repositoryUrl)
     }
@@ -287,7 +287,7 @@ public object Ops {
     /**
      * Reads a stored image.
      *
-     * The daemon only serves paths inside its own remote-paste directory, so
+     * The host only serves paths inside its own remote-paste directory, so
      * this cannot be pointed at arbitrary files. [preview] asks for a scaled
      * copy, which is all a transcript needs.
      */
@@ -298,26 +298,26 @@ public object Ops {
         put("preview", preview)
     }
 
-    /** The assistants and models this daemon can run. */
+    /** The assistants and models this host can run. */
     public fun agentCatalog(): JsonObject = op("agent-catalog")
 
     /**
-     * Asks about, or performs, an update of the daemon itself.
+     * Asks about, or performs, an update of the host itself.
      *
      * `install` replaces the files, which is safe while turns run; `restart`
      * drops every attached device and loses the running turn, so it is a
      * separate action nobody takes by accident.
      */
-    public fun daemonUpdate(action: String = "status"): JsonObject = buildJsonObject {
-        require(action in DAEMON_UPDATE_ACTIONS) { "No such daemon-update action" }
-        put("op", "daemon-update")
+    public fun hostUpdate(action: String = "status"): JsonObject = buildJsonObject {
+        require(action in HOST_UPDATE_ACTIONS) { "No such host-update action" }
+        put("op", "host-update")
         put("action", action)
     }
 
     /**
      * Selects an assistant and model together.
      *
-     * The daemon only validates and reconciles when both travel in one
+     * The host only validates and reconciles when both travel in one
      * request: it checks the model belongs to the backend, clears an effort
      * the new backend does not support, and records the visible switch. Sent
      * without a backend it would simply store the string.
@@ -391,7 +391,7 @@ public object Ops {
     /**
      * Saves a file.
      *
-     * [original] is what was read, and the daemon refuses the write if the file
+     * [original] is what was read, and the host refuses the write if the file
      * no longer matches it: the agent edits the same tree, and a save that
      * simply overwrote would silently drop whatever it had just done.
      */
@@ -471,7 +471,7 @@ public object Ops {
         put("terminal", terminalId)
     }
 
-    private val DAEMON_UPDATE_ACTIONS = setOf("status", "check", "install", "restart")
+    private val HOST_UPDATE_ACTIONS = setOf("status", "check", "install", "restart")
 
     private fun op(name: String): JsonObject = buildJsonObject {
         put("op", name)

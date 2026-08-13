@@ -74,7 +74,7 @@ internal fun MobileSettingsDialog(
                     Column(Modifier.weight(1f)) {
                         Text("Global shortcuts")
                         Text(
-                            "Buttons shared by every workspace on this daemon.",
+                            "Buttons shared by every workspace on this host.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall,
                         )

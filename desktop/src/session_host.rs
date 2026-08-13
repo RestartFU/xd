@@ -27,6 +27,8 @@ impl ProcessSpec {
 pub struct AgentCommand {
     program: String,
     arguments: Vec<String>,
+    unset_environment: Vec<String>,
+    login_shell_label: Option<String>,
 }
 
 impl AgentCommand {
@@ -39,16 +41,48 @@ impl AgentCommand {
         Self {
             program: program.into(),
             arguments: arguments.into_iter().map(Into::into).collect(),
+            unset_environment: Vec::new(),
+            login_shell_label: None,
         }
     }
 
+    pub fn unset_environment(mut self, name: impl Into<String>) -> Self {
+        self.unset_environment.push(name.into());
+        self
+    }
+
+    pub fn discover_in_user_shell(mut self, label: impl Into<String>) -> Self {
+        self.login_shell_label = Some(label.into());
+        self
+    }
+
     fn shell_command(&self) -> String {
-        let command = std::iter::once(self.program.as_str())
+        let command = self
+            .unset_environment
+            .iter()
+            .flat_map(|name| ["-u", name.as_str()])
+            .chain(std::iter::once(self.program.as_str()))
             .chain(self.arguments.iter().map(String::as_str))
             .map(shell_quote)
             .collect::<Vec<_>>()
             .join(" ");
-        format!("exec {command}")
+        let command = if self.unset_environment.is_empty() {
+            command
+        } else {
+            format!("env {command}")
+        };
+        let Some(label) = &self.login_shell_label else {
+            return format!("exec {command}");
+        };
+        let missing = format!(
+            "xd: {label} is not installed or is not available on PATH. Install it, then start a new tab."
+        );
+        let inner = format!(
+            "if command -v {} >/dev/null 2>&1; then exec {command}; else printf '%s\\n' {} >&2; exec \"${{SHELL:-/bin/sh}}\" -l; fi",
+            shell_quote(&self.program),
+            shell_quote(&missing),
+        );
+        format!("exec \"${{SHELL:-/bin/sh}}\" -lic {}", shell_quote(&inner))
     }
 }
 
@@ -70,7 +104,7 @@ impl SshCommand {
             .file_name()
             .and_then(OsStr::to_str)
             .unwrap_or_default();
-        if !matches!(executable, "ssh" | "ssh.exe") {
+        if executable != "ssh" {
             return Err("The remote command must start with ssh.".into());
         }
 
@@ -388,6 +422,38 @@ mod tests {
                 ],
             )
         );
+    }
+
+    #[test]
+    fn external_agents_are_discovered_in_the_users_login_shell() {
+        let command = AgentCommand::new("codex", ["resume", "session-1"])
+            .discover_in_user_shell("Codex")
+            .shell_command();
+
+        assert!(command.starts_with("exec \"${SHELL:-/bin/sh}\" -lic "));
+        assert!(
+            command.contains("command -v '\"'\"'codex'\"'\"'"),
+            "{command}"
+        );
+        assert!(
+            command
+                .contains("exec '\"'\"'codex'\"'\"' '\"'\"'resume'\"'\"' '\"'\"'session-1'\"'\"'"),
+            "{command}"
+        );
+        assert!(command.contains("Codex is not installed or is not available on PATH"));
+        assert!(command.contains("exec \"${SHELL:-/bin/sh}\" -l"));
+    }
+
+    #[test]
+    fn external_agent_environment_is_removed_after_login_shell_setup() {
+        let command = AgentCommand::new("claude", ["--dangerously-skip-permissions"])
+            .unset_environment("TMUX")
+            .discover_in_user_shell("Claude Code")
+            .shell_command();
+
+        assert!(command.contains(
+            "exec env '\"'\"'-u'\"'\"' '\"'\"'TMUX'\"'\"' '\"'\"'claude'\"'\"' '\"'\"'--dangerously-skip-permissions'\"'\"'"
+        ), "{command}");
     }
 
     #[test]

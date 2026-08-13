@@ -21,7 +21,7 @@ class TreeStoreTest {
             factory,
             MemoryCredentialStore(
                 StoredCredentials(
-                    host = "daemon",
+                    host = "host",
                     port = 4001,
                     token = "token",
                     certificateDer = byteArrayOf(1, 2, 3),

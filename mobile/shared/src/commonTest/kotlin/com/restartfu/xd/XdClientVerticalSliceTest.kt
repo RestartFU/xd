@@ -42,7 +42,7 @@ class XdClientVerticalSliceTest {
             deviceName = "Test device",
         )
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH")
+            client.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -175,7 +175,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH")
+            client.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -220,7 +220,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH")
+            client.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -254,7 +254,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH")
+            client.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -281,7 +281,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("host", 4001, "ABCD-EFGH", "Pixel")
         }
         runCurrent()
 
@@ -317,7 +317,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("host", 4001, "ABCD-EFGH", "Pixel")
         }
         runCurrent()
 
@@ -366,7 +366,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH", "Pixel")
+            client.pair("host", 4001, "ABCD-EFGH", "Pixel")
         }
         runCurrent()
 
@@ -400,7 +400,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH")
+            client.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -434,7 +434,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH")
+            client.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
         val socket = factory.latest
@@ -473,7 +473,7 @@ class XdClientVerticalSliceTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
         val pairing = async {
-            client.pair("daemon", 4001, "ABCD-EFGH")
+            client.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
         val socket = factory.latest

@@ -314,7 +314,7 @@ fn parse_workflow(content: &str) -> Option<ActivityCard> {
 }
 
 /// A file edit arrives as the marker `file_change`, a newline, and a unified
-/// patch — the shape the daemon writes and every client reads.
+/// patch — the shape the host writes and every client reads.
 fn parse_file_change(content: &str) -> Option<ActivityCard> {
     let patch = content.strip_prefix(FILE_CHANGE_PREFIX)?;
     if !patch.starts_with(PATCH_MARKER) {

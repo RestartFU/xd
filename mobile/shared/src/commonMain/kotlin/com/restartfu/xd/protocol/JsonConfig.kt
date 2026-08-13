@@ -16,9 +16,9 @@ public val WireJson: Json = Json {
 }
 
 /**
- * Private request-id member the daemon echoes back on every reply.
+ * Private request-id member the host echoes back on every reply.
  *
- * Mirrors `REQUEST_ID` in `daemon-rs/src/lib.rs`. Sending it opts this client into reply
+ * Mirrors `REQUEST_ID` in `host/src/lib.rs`. Sending it opts this client into reply
  * multiplexing, so a slow `diff-read` cannot hold a `cancel` behind it.
  */
 public const val REQUEST_ID: String = "_xd_request"
@@ -37,7 +37,7 @@ public fun JsonObject.requireSuccess(): JsonObject {
         ?: throw RemoteProtocolException("Remote reply has no boolean ok member")
     if (!ok) {
         val message = (this["error"] as? JsonPrimitive)?.contentOrNull
-            ?: "The daemon refused the request."
+            ?: "The host refused the request."
         throw RemoteRefusedException(message)
     }
     return this

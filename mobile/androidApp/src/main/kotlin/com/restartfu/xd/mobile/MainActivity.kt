@@ -89,7 +89,7 @@ private fun XdMobileApp(
     val operationError by model.error.collectAsStateWithLifecycle()
 
     // No foreground service: leaving closes the socket, returning reconnects
-    // and re-snapshots. The daemon keeps no resumable event log, so there is
+    // and re-snapshots. The host keeps no resumable event log, so there is
     // nothing a backgrounded socket could usefully catch up on.
     DisposableEffect(lifecycleOwner, model.client) {
         val observer = LifecycleEventObserver { _, event ->

@@ -197,7 +197,7 @@ public data class AgentCatalogReply(
 )
 
 @Serializable
-public data class DaemonUpdateReply(
+public data class HostUpdateReply(
     val ok: Boolean,
     val version: String = "",
     val channel: String = "",
@@ -247,7 +247,7 @@ public data class BrowseReadReply(
 )
 
 /**
- * [replay] is the daemon's bounded output history: `{"data": base64}` frames
+ * [replay] is the host's bounded output history: `{"data": base64}` frames
  * with `{"columns","rows"}` resize frames between them. It is kept as raw JSON
  * because the order of the two kinds is the point -- a late device has to
  * interpret older output at the geometry that produced it.

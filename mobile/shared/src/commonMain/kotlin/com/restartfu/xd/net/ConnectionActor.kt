@@ -57,7 +57,7 @@ public sealed interface PairResult {
 }
 
 public class NotConnectedException(
-    message: String = "Not connected to the daemon",
+    message: String = "Not connected to the host",
 ) : IllegalStateException(message)
 
 /**
@@ -65,7 +65,7 @@ public class NotConnectedException(
  * abandoned so a late reply cannot be handed to a later caller.
  */
 public class CallTimedOutException(
-    message: String = "The daemon did not answer in time",
+    message: String = "The host did not answer in time",
 ) : Exception(message)
 
 private class DisconnectedException(
@@ -328,7 +328,7 @@ internal class ConnectionActor(
         callTimeouts.remove(message.id)?.cancel()
         val response = calls.abandon(message.id) ?: return
         response.completeExceptionally(
-            CallTimedOutException("The daemon did not answer in time"),
+            CallTimedOutException("The host did not answer in time"),
         )
 
         val silentStream = inboundSequence == message.inboundMark
@@ -339,9 +339,9 @@ internal class ConnectionActor(
                     SocketFailure(
                         SocketFailureKind.IO,
                         if (silentStream) {
-                            "Daemon did not answer the request in time"
+                            "Host did not answer the request in time"
                         } else {
-                            "Too many daemon requests timed out"
+                            "Too many host requests timed out"
                         },
                     ),
                 ),
@@ -350,7 +350,7 @@ internal class ConnectionActor(
     }
 
     private fun handleProtocolFailure(message: Message.ProtocolFailure) {
-        protocolFatal("Daemon sent a reply with an invalid shape", message.error)
+        protocolFatal("Host sent a reply with an invalid shape", message.error)
         message.done.complete(Unit)
     }
 
@@ -401,7 +401,7 @@ internal class ConnectionActor(
                 }
             }
         } catch (error: Throwable) {
-            protocolFatal("Daemon sent invalid protocol data", error)
+            protocolFatal("Host sent invalid protocol data", error)
         }
     }
 
@@ -442,7 +442,7 @@ internal class ConnectionActor(
                 val reply = value.decodeReply<HelloReply>()
                 if (reply.version != PROTOCOL_VERSION) {
                     return protocolFatal(
-                        "Unsupported daemon protocol version ${reply.version}",
+                        "Unsupported host protocol version ${reply.version}",
                     )
                 }
                 backoff.reset()
@@ -474,7 +474,7 @@ internal class ConnectionActor(
     private fun handleClosed(message: Message.SocketClosed) {
         if (message.generation != generation) return
         val reason = message.failure
-        val text = reason?.message ?: "Daemon closed the connection"
+        val text = reason?.message ?: "Host closed the connection"
         val old = socket
         socket = null
         leafCertificateDer = null
@@ -691,7 +691,7 @@ internal class ConnectionActor(
     }
 
     /**
-     * Mirrors `Daemon::Client`: Git actions may legitimately run for minutes,
+     * Mirrors `Host::Client`: Git actions may legitimately run for minutes,
      * everything else is expected to answer promptly.
      */
     private fun timeoutMillisFor(request: JsonObject): Long {

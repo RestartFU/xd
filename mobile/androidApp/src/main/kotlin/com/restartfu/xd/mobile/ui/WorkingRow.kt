@@ -53,7 +53,7 @@ internal fun WorkingRow(startedAtMillis: Long?) {
  * Seconds since the turn began, recomputed on the second boundary.
  *
  * Derived from the start time rather than counted up, so a turn that was
- * already running when the chat opened shows its real age: the daemon reports
+ * already running when the chat opened shows its real age: the host reports
  * `working_for` on load and the store turns it into a start time.
  */
 @Composable

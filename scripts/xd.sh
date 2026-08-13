@@ -97,53 +97,6 @@ export GIT_EXEC_PATH="$HERE/libexec/git-core"
 export GIT_TEMPLATE_DIR="$HERE/share/git-core/templates"
 export GIT_SSL_CAINFO="$HERE/etc/ssl/certs/ca-certificates.crt"
 
-# The window is drawn through Vulkan, and the Vulkan loader finds its driver
-# through JSON manifests rather than by looking for libraries. Host Mesa ICDs
-# cannot safely be loaded into this relocatable runtime: their dependencies
-# may require a newer host glibc while the process deliberately uses the
-# bundle's libc. Use the matching bundled Mesa drivers on AMD, Intel, and
-# machines without a GPU; lavapipe gives the last case a software device.
-# Proprietary NVIDIA has no bundled equivalent, so NVIDIA-only systems retain
-# host discovery.
-# XD_HOST_VULKAN=1 leaves discovery alone either way, and
-# XD_BUNDLED_VULKAN=1 forces the bundle even on an NVIDIA system.
-if [ -z "${XD_HOST_VULKAN-}" ] \
-  && [ -z "${VK_DRIVER_FILES-}${VK_ICD_FILENAMES-}" ]; then
-  bundled_vulkan=${XD_BUNDLED_VULKAN-}
-  if [ -z "$bundled_vulkan" ]; then
-    nvidia_gpu=
-    for vendor_file in /sys/class/drm/card*/device/vendor; do
-      [ -r "$vendor_file" ] || continue
-      vendor=
-      IFS= read -r vendor < "$vendor_file" || true
-      if [ "$vendor" = "0x10de" ]; then
-        nvidia_gpu=1
-        break
-      fi
-    done
-    [ -n "$nvidia_gpu" ] || bundled_vulkan=1
-  fi
-
-  if [ -n "$bundled_vulkan" ]; then
-    mkdir -p "$RUNTIME/vulkan"
-    bundled_icd=
-    for template in "$HERE/etc/vulkan"/*.json.in; do
-      [ -e "$template" ] || continue
-      manifest="$RUNTIME/vulkan/$(basename "${template%.in}")"
-      sed "s|@BUNDLE@|$HERE|g" "$template" > "$manifest"
-      if [ -z "$bundled_icd" ]; then
-        bundled_icd="$manifest"
-      else
-        bundled_icd="$bundled_icd:$manifest"
-      fi
-    done
-    if [ -n "$bundled_icd" ]; then
-      # Both names: the loader renamed this variable in 1.3.207.
-      export VK_DRIVER_FILES="$bundled_icd"
-      export VK_ICD_FILENAMES="$bundled_icd"
-    fi
-  fi
-fi
 exec "$HERE/lib/ld-linux-x86-64.so.2" \
      --library-path "$HERE/lib" \
      "$HERE/bin/xd" "$@"

@@ -125,8 +125,8 @@ jobs:
               git add \
                 desktop/Cargo.toml \
                 desktop/Cargo.lock \
-                daemon-rs/Cargo.toml \
-                daemon-rs/Cargo.lock
+                host/Cargo.toml \
+                host/Cargo.lock
               git commit -m "chore: release $tag" \
                 -m "Co-authored-by: Codex <codex@openai.com>"
               git tag -a "$tag" -m "xd $tag"
@@ -227,15 +227,14 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             desktop/target
-            daemon-rs/target
+            host/target
             terminal-core/target
           key: >-
             cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
-            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
+            hashFiles('desktop/Cargo.lock', 'host/Cargo.lock', 'terminal-core/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-
 
-      # WiX is pinned by version, so what
-      # lands here is decided by the scripts that put it there.
+      # Native packaging inputs are pinned by the scripts that put them here.
       - uses: actions/cache@v4
         with:
           path: .build-cache
@@ -259,115 +258,8 @@ jobs:
             dist/macos/xd-macos-${{ matrix.arch }}.zip
             dist/macos/xd-macos-${{ matrix.arch }}.zip.sha256
 
-  windows:
-    needs: prepare
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - name: Install the pinned Rust toolchain
-        run: >-
-          rustup toolchain install 1.95.0
-          --profile minimal
-          --component rustfmt
-          --no-self-update
-
-      - name: Limit build parallelism
-        shell: pwsh
-        run: |
-          $jobs = [Math]::Max(
-            1,
-            [Math]::Floor([Environment]::ProcessorCount * 0.75)
-          )
-          "CARGO_BUILD_JOBS=$jobs" >> $env:GITHUB_ENV
-          "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> $env:GITHUB_ENV
-
-      # The dependency compile is most of this job, and a hosted runner keeps
-      # nothing between runs. Keyed on the lockfiles, so unchanged dependencies
-      # come back already built and cargo works out the rest.
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            desktop/target
-            daemon-rs/target
-            terminal-core/target
-          key: >-
-            cargo-${{ runner.os }}-x86_64-1.95.0-${{
-            hashFiles('desktop/Cargo.lock', 'daemon-rs/Cargo.lock', 'terminal-core/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-x86_64-1.95.0-
-
-      # whisper.cpp and WiX are pinned by version, so what
-      # lands here is decided by the scripts that put it there.
-      - uses: actions/cache@v4
-        with:
-          path: .build-cache
-          key: >-
-            payload-${{ runner.os }}-x86_64-${{ hashFiles('scripts/build-windows.ps1', 'scripts/package-windows.ps1') }}
-          restore-keys: payload-${{ runner.os }}-x86_64-
-
-      - name: Build the self-contained native payload
-        env:
-          RUSTUP_TOOLCHAIN: 1.95.0
-        run: >-
-          ./scripts/build-windows.ps1
-          -OutputDirectory windows-dist
-          -Profile release
-
-      - name: Build and exercise the Windows downloader
-        run: |
-          ./scripts/package-windows.ps1 `
-            -Payload windows-dist `
-            -OutputDirectory artifacts `
-            -Profile release `
-            -Version '${{ needs.prepare.outputs.version }}' `
-            -TestDownloadBase http://127.0.0.1:18765
-
-          New-Item -ItemType Directory -Path installer-test | Out-Null
-          Copy-Item artifacts/xd-windows-x86_64-setup-download-test.exe* installer-test/
-          $server = Start-Process python -PassThru -WindowStyle Hidden `
-            -ArgumentList @('-m', 'http.server', '18765', '--bind', '127.0.0.1', '--directory', 'artifacts')
-          try {
-            for ($attempt = 0; $attempt -lt 20; $attempt++) {
-              try {
-                Invoke-WebRequest -UseBasicParsing `
-                  http://127.0.0.1:18765/xd-windows-x86_64-msi.payload `
-                  -Method Head | Out-Null
-                break
-              } catch {
-                if ($attempt -eq 19) { throw }
-                Start-Sleep -Milliseconds 250
-              }
-            }
-            ./scripts/install.ps1 `
-              -SetupPath installer-test/xd-windows-x86_64-setup-download-test.exe `
-              -SetupChecksumPath installer-test/xd-windows-x86_64-setup-download-test.exe.sha256 `
-              -Quiet
-          } finally {
-            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
-          }
-
-          # Only what this job built. An artifact is rooted at the deepest
-          # directory shared by everything in it, so listing a payload under
-          # `artifacts/` beside a file under `scripts/` roots it at the
-          # checkout and the payload arrives still nested. The installer
-          # scripts come from publish's own checkout instead.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: |
-            artifacts/xd-windows-x86_64-setup.exe
-            artifacts/xd-windows-x86_64-setup.exe.sha256
-            artifacts/xd-windows-x86_64-msi.payload
-            artifacts/xd-windows-x86_64-cab.payload
-
   publish:
-    needs: [prepare, linux, macos, windows]
+    needs: [prepare, linux, macos]
     # GitHub's own runner: this job moves every artifact through itself, and
     # that gigabyte should not cross a home connection twice. See nightly.yml.
     runs-on: ubuntu-latest
@@ -403,18 +295,7 @@ jobs:
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
           \`\`\`
 
-          Windows downloader:
-
-          https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/xd-windows-x86_64-setup.exe
-
-          Or PowerShell:
-
-          \`\`\`
-          & ([scriptblock]::Create((irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1))) -Release
-          \`\`\`
-
-          Linux and macOS are self-contained. The Windows setup downloads its
-          verified payload.
+          Linux and macOS are self-contained.
           EOF
           )
 
@@ -424,15 +305,15 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             for legacy in \
               xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
-              xd1.cab xd1.cab.sha256; do
+              xd1.cab xd1.cab.sha256 \
+              xd-windows-x86_64-setup.exe xd-windows-x86_64-setup.exe.sha256 \
+              xd-windows-x86_64-msi.payload xd-windows-x86_64-cab.payload; do
               gh release delete-asset "$tag" "$legacy" --yes || true
             done
             gh release upload "$tag" --clobber \
               xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip xd-macos-*.zip.sha256 \
-              xd-windows-x86_64-setup.exe xd-windows-x86_64-setup.exe.sha256 \
-              xd-windows-x86_64-msi.payload xd-windows-x86_64-cab.payload \
-              scripts/install.sh scripts/install-macos.sh scripts/install.ps1
+              scripts/install.sh scripts/install-macos.sh
           else
             gh release create "$tag" \
               --verify-tag \
@@ -442,11 +323,6 @@ jobs:
               xd-linux-x86_64.tar.gz.sha256 \
               xd-macos-*.zip \
               xd-macos-*.zip.sha256 \
-              xd-windows-x86_64-setup.exe \
-              xd-windows-x86_64-setup.exe.sha256 \
-              xd-windows-x86_64-msi.payload \
-              xd-windows-x86_64-cab.payload \
               scripts/install.sh \
-              scripts/install-macos.sh \
-              scripts/install.ps1
+              scripts/install-macos.sh
           fi

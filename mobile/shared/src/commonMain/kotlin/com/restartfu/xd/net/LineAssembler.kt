@@ -76,7 +76,7 @@ public class LineAssembler(
     }
 
     public companion object {
-        /** Mirrors `daemon-rs::FRAME_LIMIT`. */
+        /** Mirrors `host::FRAME_LIMIT`. */
         public const val MAX_LINE_BYTES: Int = 96 * 1024 * 1024
         private const val INITIAL_CAPACITY: Int = 4096
         private const val LF: Byte = 0x0a

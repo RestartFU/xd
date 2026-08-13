@@ -44,7 +44,7 @@ internal fun ShortcutEditorDialog(
             ) {
                 Text(
                     if (state.folderId == null) {
-                        "These prompt buttons appear in every workspace on this daemon."
+                        "These prompt buttons appear in every workspace on this host."
                     } else {
                         "These prompt buttons appear in this workspace and its children."
                     },

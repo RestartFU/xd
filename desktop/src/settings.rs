@@ -59,12 +59,12 @@ pub struct AppSettings {
     /// never evaluated by a shell.
     pub remote_ssh_command: Option<String>,
     pub active_connection: Option<String>,
-    /// Last selected chat per daemon connection. `last_chat` remains as a
+    /// Last selected chat per host connection. `last_chat` remains as a
     /// backwards-compatible fallback for existing local settings files.
     pub last_chats: HashMap<String, String>,
     pub last_chat: Option<String>,
-    /// Collapsed workspace folders per daemon connection. The legacy flat
-    /// list below remains the fallback for the local daemon.
+    /// Collapsed workspace folders per host connection. The legacy flat
+    /// list below remains the fallback for the local host.
     pub collapsed_folder_sets: HashMap<String, Vec<String>>,
     pub collapsed_folders: Vec<String>,
     pub collapsed_diff_files: HashMap<String, Vec<String>>,
@@ -134,7 +134,6 @@ fn settings_path() -> PathBuf {
     if let Some(path) = env::var_os("XD_SETTINGS_PATH").filter(|path| !path.is_empty()) {
         return PathBuf::from(path);
     }
-    #[cfg(unix)]
     let config_home = env::var_os("XDG_CONFIG_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
@@ -144,11 +143,6 @@ fn settings_path() -> PathBuf {
                 .map(|home| PathBuf::from(home).join(".config"))
         })
         .unwrap_or_else(|| PathBuf::from(".config"));
-    #[cfg(windows)]
-    let config_home = env::var_os("LOCALAPPDATA")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
     let data_name = xd_desktop::channel::data_name();
     config_home.join(data_name).join("settings.json")
 }

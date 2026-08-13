@@ -46,7 +46,7 @@ class ChatSessionCoreTest {
             factory,
             MemoryCredentialStore(
                 StoredCredentials(
-                    host = "daemon",
+                    host = "host",
                     port = 4001,
                     token = "token",
                     certificateDer = byteArrayOf(1, 2, 3),
@@ -100,7 +100,7 @@ class ChatSessionCoreTest {
             factory,
             MemoryCredentialStore(
                 StoredCredentials(
-                    host = "daemon",
+                    host = "host",
                     port = 4001,
                     token = "token",
                     certificateDer = byteArrayOf(1, 2, 3),
@@ -146,7 +146,7 @@ class ChatSessionCoreTest {
             factory,
             MemoryCredentialStore(
                 StoredCredentials(
-                    host = "daemon",
+                    host = "host",
                     port = 4001,
                     token = "token",
                     certificateDer = byteArrayOf(1, 2, 3),
@@ -182,7 +182,7 @@ class ChatSessionCoreTest {
             factory,
             MemoryCredentialStore(
                 StoredCredentials(
-                    host = "daemon",
+                    host = "host",
                     port = 4001,
                     token = "token",
                     certificateDer = byteArrayOf(1, 2, 3),
@@ -254,7 +254,7 @@ class ChatSessionCoreTest {
         FakeSocketFactory(),
         MemoryCredentialStore(
             StoredCredentials(
-                host = "daemon",
+                host = "host",
                 port = 4001,
                 token = "token",
                 certificateDer = byteArrayOf(1, 2, 3),

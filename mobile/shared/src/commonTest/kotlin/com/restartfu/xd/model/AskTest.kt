@@ -6,7 +6,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AskTest {
-    // The same cases the Rust daemon asserts, so the phone and the daemon
+    // The same cases the Rust host asserts, so the phone and the host
     // cannot disagree about what counts as a question.
     @Test
     fun extractsTheLastValidBlock() {

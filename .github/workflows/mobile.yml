@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - 'mobile/**'
-      - 'daemon-rs/**'
+      - 'host/**'
       - 'terminal-core/**'
       - 'desktop/src/protocol.rs'
       - 'docs/protocol.md'

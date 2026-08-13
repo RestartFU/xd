@@ -30,9 +30,9 @@ public data class TerminalPane(
 )
 
 /**
- * One shared pty, drawn from the bytes the daemon broadcasts.
+ * One shared pty, drawn from the bytes the host broadcasts.
  *
- * The session lives on the daemon and every attached device sees the same
+ * The session lives on the host and every attached device sees the same
  * screen, so opening attaches to an existing terminal rather than starting a
  * second one. Replay is applied before live output, which is why the emulator
  * is fed from this one place and in order.

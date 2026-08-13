@@ -4,7 +4,7 @@ package com.restartfu.xd.files
 public data class OpenFile(
     /** Relative to the chat's working directory. */
     public val path: String,
-    /** What the daemon last handed over, and what a write is checked against. */
+    /** What the host last handed over, and what a write is checked against. */
     public val saved: String,
     /** What is on screen, which is [saved] until it is typed in. */
     public val text: String = saved,

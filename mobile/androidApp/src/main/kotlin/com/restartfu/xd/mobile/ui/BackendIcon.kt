@@ -14,7 +14,7 @@ import com.restartfu.xd.mobile.R
 /**
  * The assistant mark for a chat, matching the desktop sidebar.
  *
- * Backend ids come from the daemon's catalog. An unknown one draws nothing
+ * Backend ids come from the host's catalog. An unknown one draws nothing
  * rather than a placeholder: a new backend should not make old clients show a
  * broken glyph.
  */

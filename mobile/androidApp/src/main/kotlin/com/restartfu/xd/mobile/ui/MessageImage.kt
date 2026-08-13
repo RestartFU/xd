@@ -36,9 +36,9 @@ private sealed interface Loaded {
 }
 
 /**
- * An image a message carries, fetched from the daemon.
+ * An image a message carries, fetched from the host.
  *
- * The bytes live on the daemon, not the phone, so the transcript asks for
+ * The bytes live on the host, not the phone, so the transcript asks for
  * them. A scaled preview is requested: a transcript never needs full
  * resolution, and tapping opens the same preview full screen.
  */

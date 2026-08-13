@@ -53,7 +53,7 @@ class ConnectionActorTest {
             deviceName = "Test device",
         )
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH")
+            actor.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -87,7 +87,7 @@ class ConnectionActorTest {
             deviceName = " ",
         )
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH")
+            actor.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -105,7 +105,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH")
+            actor.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
 
@@ -224,7 +224,7 @@ class ConnectionActorTest {
         val slow = async { runCatching { actor.call(com.restartfu.xd.protocol.Ops.ping()) } }
         runCurrent()
 
-        // The daemon is demonstrably alive: it is still pushing turn output.
+        // The host is demonstrably alive: it is still pushing turn output.
         advanceTimeBy(20_000)
         factory.latest.receive("""{"event":"text","chat":"chat-1","text":"hi"}""")
         runCurrent()
@@ -320,7 +320,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH")
+            actor.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
         factory.latest.connected()
@@ -338,7 +338,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val result = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH")
+            actor.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
         factory.latest.connected()
@@ -358,7 +358,7 @@ class ConnectionActorTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(factory, MemoryCredentialStore(), backgroundScope)
         val first = async {
-            actor.pair("daemon", 4001, "BAD1-CODE")
+            actor.pair("host", 4001, "BAD1-CODE")
         }
         runCurrent()
         factory.latest.connected()
@@ -370,7 +370,7 @@ class ConnectionActorTest {
         assertEquals(Link.Idle, actor.link.value)
 
         val second = async {
-            actor.pair("daemon", 4001, "ABCD-EFGH")
+            actor.pair("host", 4001, "ABCD-EFGH")
         }
         runCurrent()
         assertEquals(2, factory.sockets.size)
@@ -400,7 +400,7 @@ class ConnectionActorTest {
     private fun credentials(
         certificate: ByteArray = byteArrayOf(1, 2, 3),
     ) = StoredCredentials(
-        host = "daemon",
+        host = "host",
         port = 4001,
         token = "token",
         certificateDer = certificate,

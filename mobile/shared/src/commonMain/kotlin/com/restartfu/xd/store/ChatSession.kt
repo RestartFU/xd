@@ -109,7 +109,7 @@ public class ChatSession internal constructor(
             it.decodeReply<BrowseReadReply>().content
         }
 
-    /** Saves [content], which the daemon refuses unless the file still reads as [original]. */
+    /** Saves [content], which the host refuses unless the file still reads as [original]. */
     public suspend fun writeFile(path: String, original: String, content: String) {
         core.read(Ops.writeFile(core.chatId, path, original, content)) { }
     }
@@ -161,7 +161,7 @@ public class ChatSession internal constructor(
     public suspend fun setOption(option: ChatOption, value: String): Unit =
         core.call(Ops.setOption(core.chatId, option, value))
 
-    /** The daemon reads `plan` and `new-worktree` as the strings, not JSON. */
+    /** The host reads `plan` and `new-worktree` as the strings, not JSON. */
     public suspend fun setBoolOption(option: ChatOption, value: Boolean): Unit =
         core.call(Ops.setBoolOption(core.chatId, option, value))
 
@@ -172,7 +172,7 @@ public class ChatSession internal constructor(
             Base64.Default.decode(it.decodeReply<ImageReply>().data)
         }
 
-    /** The assistants and models this daemon can run. */
+    /** The assistants and models this host can run. */
     public suspend fun catalog(): List<BackendReply> =
         core.read(Ops.agentCatalog()) {
             it.decodeReply<AgentCatalogReply>().backends
@@ -390,7 +390,7 @@ internal class ChatSessionCore(
         } catch (error: Throwable) {
             apply(
                 TranscriptInput.RequestFailed(
-                    error.message ?: "The daemon refused the request",
+                    error.message ?: "The host refused the request",
                 ),
             )
             throw error

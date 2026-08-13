@@ -6,7 +6,7 @@ import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.net.PlatformSocketFactory
-import com.restartfu.xd.protocol.DaemonUpdateReply
+import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.Ops
@@ -177,13 +177,13 @@ public class XdClient(
     }
 
     /**
-     * Asks about, or performs, an update of the daemon this client is paired
+     * Asks about, or performs, an update of the host this client is paired
      * with. Connection-level rather than chat-level: it is the machine being
      * updated, not a conversation.
      */
-    public suspend fun daemonUpdate(action: String = "status"): DaemonUpdateReply {
-        val value = actor.call(Ops.daemonUpdate(action))
-        return actor.decodeReply(value) { it.decodeReply<DaemonUpdateReply>() }
+    public suspend fun hostUpdate(action: String = "status"): HostUpdateReply {
+        val value = actor.call(Ops.hostUpdate(action))
+        return actor.decodeReply(value) { it.decodeReply<HostUpdateReply>() }
     }
 
     public suspend fun workflowStatus(marker: String): WorkflowStatusReply {
@@ -213,7 +213,7 @@ public class XdClient(
     public suspend fun deleteChat(chatId: String) {
         require(chatId.isNotBlank()) { "Chat id must not be blank" }
         actor.call(Ops.deleteChat(chatId))
-        // The daemon broadcasts a tree event, but refreshing here means the
+        // The host broadcasts a tree event, but refreshing here means the
         // row is gone by the time the confirmation dismisses.
         requestTreeRefresh()
     }
@@ -259,7 +259,7 @@ public class XdClient(
             reply.id?.takeIf(String::isNotBlank)
                 ?: throw RemoteProtocolException("New folder reply has no id")
         }
-        // Do not wait for the daemon's tree broadcast: show the new workspace as
+        // Do not wait for the host's tree broadcast: show the new workspace as
         // soon as the creation dialog closes.
         requestTreeRefresh()
         return id

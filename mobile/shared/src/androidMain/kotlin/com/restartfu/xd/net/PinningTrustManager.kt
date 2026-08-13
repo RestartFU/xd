@@ -5,7 +5,7 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.X509TrustManager
 
 internal class PinMismatchCertificateException :
-    CertificateException("The daemon certificate does not match the paired machine")
+    CertificateException("The host certificate does not match the paired machine")
 
 /**
  * Trusts exactly one leaf certificate. A null pin is allowed only by the
@@ -28,7 +28,7 @@ internal class PinningTrustManager(
         authType: String?,
     ) {
         val leaf = chain?.firstOrNull()
-            ?: throw CertificateException("The daemon supplied no certificate")
+            ?: throw CertificateException("The host supplied no certificate")
         val expected = pin ?: return
         if (!leaf.encoded.contentEquals(expected)) {
             throw PinMismatchCertificateException()

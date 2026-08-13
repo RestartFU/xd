@@ -37,7 +37,7 @@ impl SessionRecorder {
         let executable = self
             .executable
             .to_str()
-            .ok_or("The daemon executable path cannot be passed to Codex.")?;
+            .ok_or("The host executable path cannot be passed to Codex.")?;
         let database = self
             .database
             .to_str()
@@ -113,7 +113,7 @@ impl TerminalAgent {
                 ]);
                 if let Some(recorder) = recorder {
                     // Codex chooses interactive thread ids itself. Its
-                    // completion notifier supplies that id to the daemon
+                    // completion notifier supplies that id to the host
                     // helper after the first completed turn.
                     arguments.extend(["-c".into(), recorder.codex_notify_override()?]);
                 }

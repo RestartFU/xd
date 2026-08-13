@@ -55,7 +55,7 @@ class CallQueueTest {
     }
 
     @Test
-    fun fallsBackToPositionWhenTheDaemonEchoesNoId() = runTest {
+    fun fallsBackToPositionWhenTheHostEchoesNoId() = runTest {
         val queue = CallQueue(write = {})
         val first = async { queue.call(request("first")) }
         val second = async { queue.call(request("second")) }
@@ -126,7 +126,7 @@ class CallQueueTest {
 
         queue.abandon(timedOut.id)?.completeExceptionally(CallTimedOutException())
 
-        // An id-less daemon answers in order, so the first reply belongs to
+        // An id-less host answers in order, so the first reply belongs to
         // the abandoned call and must not shift onto `later`.
         assertNull(queue.acceptReply(SequencedReply(1, reply("too late"))))
         assertFalse(later.response.isCompleted)

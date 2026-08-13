@@ -1,4 +1,3 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
 #![deny(dead_code, unused_imports)]
 
 use std::{
@@ -12,17 +11,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     process::{Command, Stdio},
     thread,
-};
-
-#[cfg(target_os = "windows")]
-use std::{
-    io::Write,
-    os::windows::process::CommandExt,
-    sync::{Mutex, OnceLock},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -38,9 +30,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
     activity,
-    daemon::{
-        DaemonHandle, DaemonUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost,
-    },
+    host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
     model::{AppModel, Attachment, Message, MessagePageDirection, Worktree},
     remote::{self, RemoteError, SshRemoteBridge, SshRemoteSession},
@@ -899,15 +889,13 @@ struct XdDesktop {
     auth_input_text: String,
     speech_output: SpeechOutput,
     pending_speech: Option<PendingSpeech>,
-    daemon: Option<DaemonHandle>,
+    host: Option<HostHandle>,
     _started_host: Option<StartedHost>,
-    #[cfg(windows)]
-    restarting_for_update: bool,
     connection_generation: u64,
     reconnect_attempt: u32,
     connecting: bool,
     connection_in_flight: bool,
-    remote_daemon: Option<DaemonHandle>,
+    remote_host: Option<HostHandle>,
     remote_bridge: Option<SshRemoteBridge>,
     remote_state: RemoteState,
     remote_error: Option<String>,
@@ -1309,15 +1297,13 @@ impl XdDesktop {
             auth_input_text: String::new(),
             speech_output: SpeechOutput::default(),
             pending_speech: None,
-            daemon: None,
+            host: None,
             _started_host: None,
-            #[cfg(windows)]
-            restarting_for_update: false,
             connection_generation: 0,
             reconnect_attempt: 0,
             connecting: false,
             connection_in_flight: false,
-            remote_daemon: None,
+            remote_host: None,
             remote_bridge: None,
             remote_state: if remote_configured {
                 RemoteState::Offline
@@ -1521,19 +1507,19 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn active_daemon(&self) -> Option<&DaemonHandle> {
-        self.endpoint_daemon(self.active_endpoint)
+    fn active_host(&self) -> Option<&HostHandle> {
+        self.endpoint_host(self.active_endpoint)
     }
 
-    fn endpoint_daemon(&self, endpoint: ChatEndpoint) -> Option<&DaemonHandle> {
+    fn endpoint_host(&self, endpoint: ChatEndpoint) -> Option<&HostHandle> {
         match endpoint {
-            ChatEndpoint::Local => self.daemon.as_ref(),
-            ChatEndpoint::Remote => self.remote_daemon.as_ref(),
+            ChatEndpoint::Local => self.host.as_ref(),
+            ChatEndpoint::Remote => self.remote_host.as_ref(),
         }
     }
 
-    fn secrets_daemon(&self) -> Option<&DaemonHandle> {
-        self.active_daemon()
+    fn secrets_host(&self) -> Option<&HostHandle> {
+        self.active_host()
     }
 
     fn endpoint_model(&self, endpoint: ChatEndpoint) -> &AppModel {
@@ -1658,7 +1644,7 @@ impl XdDesktop {
     fn local_admin_reply(kind: &RequestKind) -> bool {
         matches!(
             kind,
-            RequestKind::DaemonUpdate { .. }
+            RequestKind::HostUpdate { .. }
                 | RequestKind::Devices
                 | RequestKind::PeerPairing
                 | RequestKind::PairRemote
@@ -1668,7 +1654,7 @@ impl XdDesktop {
     }
 
     fn local_admin_event(name: &str) -> bool {
-        name == "daemon-update"
+        name == "host-update"
     }
 
     fn switch_active_endpoint(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) {
@@ -1748,7 +1734,7 @@ impl XdDesktop {
         self.connection_in_flight = true;
         let connection = cx
             .background_executor()
-            .spawn(async { DaemonHandle::start_local() });
+            .spawn(async { HostHandle::start_local() });
         cx.spawn(async move |this, cx| {
             let result = connection.await;
             let _ = this.update(cx, |this, cx| {
@@ -1758,13 +1744,13 @@ impl XdDesktop {
                 this.connecting = false;
                 this.connection_in_flight = false;
                 match result {
-                    Ok((daemon, updates, started_host)) => {
-                        this.daemon = Some(daemon);
+                    Ok((host, updates, started_host)) => {
+                        this.host = Some(host);
                         this._started_host = Some(started_host);
                         this.reconnect_attempt = 0;
                         this.endpoint_model_mut(ChatEndpoint::Local)
                             .connection_error = None;
-                        this.listen_for_daemon(updates, generation, cx);
+                        this.listen_for_host(updates, generation, cx);
                     }
                     Err(error) => {
                         this.endpoint_model_mut(ChatEndpoint::Local).connected = false;
@@ -1779,9 +1765,9 @@ impl XdDesktop {
         .detach();
     }
 
-    fn listen_for_daemon(
+    fn listen_for_host(
         &mut self,
-        updates: async_channel::Receiver<DaemonUpdate>,
+        updates: async_channel::Receiver<HostUpdate>,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
@@ -1790,7 +1776,7 @@ impl XdDesktop {
                 if this
                     .update(cx, |this, cx| {
                         if this.connection_generation == generation {
-                            this.handle_daemon_update(update, generation, cx);
+                            this.handle_host_update(update, generation, cx);
                         }
                     })
                     .is_err()
@@ -1872,8 +1858,8 @@ impl XdDesktop {
         generation: u64,
         cx: &mut Context<Self>,
     ) {
-        let (daemon, updates, bridge) = session.into_parts();
-        self.remote_daemon = Some(daemon);
+        let (host, updates, bridge) = session.into_parts();
+        self.remote_host = Some(host);
         self.remote_bridge = Some(bridge);
         self.remote_state = RemoteState::Connected;
         self.remote_error = None;
@@ -1886,13 +1872,13 @@ impl XdDesktop {
             panel.error = None;
         }
         self.listen_for_remote(updates, generation, cx);
-        if let Some(daemon) = &self.remote_daemon
-            && let Err(error) = daemon.tree()
+        if let Some(host) = &self.remote_host
+            && let Err(error) = host.tree()
         {
             self.remote_error = Some(error);
         }
-        if let Some(daemon) = &self.remote_daemon {
-            let _ = daemon.agent_catalog();
+        if let Some(host) = &self.remote_host {
+            let _ = host.agent_catalog();
         }
         if self.active_endpoint == ChatEndpoint::Remote {
             self.refresh_selected_chat_after_connect(cx);
@@ -1901,7 +1887,7 @@ impl XdDesktop {
 
     fn listen_for_remote(
         &mut self,
-        updates: async_channel::Receiver<DaemonUpdate>,
+        updates: async_channel::Receiver<HostUpdate>,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
@@ -1924,18 +1910,18 @@ impl XdDesktop {
 
     fn handle_remote_update(
         &mut self,
-        update: DaemonUpdate,
+        update: HostUpdate,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
         match update {
-            DaemonUpdate::Connected { .. } => {}
-            DaemonUpdate::Disconnected { message } => {
+            HostUpdate::Connected { .. } => {}
+            HostUpdate::Disconnected { message } => {
                 if self.remote_generation != generation {
                     return;
                 }
                 self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
-                self.remote_daemon = None;
+                self.remote_host = None;
                 self.remote_bridge = None;
                 let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
                 remote_model.connected = false;
@@ -1979,7 +1965,7 @@ impl XdDesktop {
                 self.remote_reconnect_attempt = self.remote_reconnect_attempt.saturating_add(1);
                 self.schedule_remote_connect(reconnect_delay(self.remote_reconnect_attempt), cx);
             }
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind,
                 body,
                 attachments,
@@ -2001,7 +1987,7 @@ impl XdDesktop {
                     }
                 }
             }
-            DaemonUpdate::Event {
+            HostUpdate::Event {
                 name,
                 body,
                 attachments,
@@ -2026,9 +2012,9 @@ impl XdDesktop {
                         Self::apply_passive_event(&mut self.inactive_model, &name, &body);
                     }
                     if name == "turn-finished"
-                        && let Some(daemon) = &self.remote_daemon
+                        && let Some(host) = &self.remote_host
                     {
-                        let _ = daemon.tree();
+                        let _ = host.tree();
                     }
                 }
             }
@@ -2038,7 +2024,7 @@ impl XdDesktop {
 
     fn remote_connection_failed(&mut self, error: RemoteError, cx: &mut Context<Self>) {
         let message = error.to_string();
-        self.remote_daemon = None;
+        self.remote_host = None;
         self.remote_bridge = None;
         self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
         self.remote_state = RemoteState::Offline;
@@ -2062,16 +2048,16 @@ impl XdDesktop {
         }
         if self.active_endpoint == ChatEndpoint::Local {
             self.connection_generation = self.connection_generation.saturating_add(1);
-            self.daemon = None;
+            self.host = None;
             self.connecting = false;
             self.connection_in_flight = false;
             self.endpoint_model_mut(ChatEndpoint::Local).connected = false;
             self.switch_active_endpoint(ChatEndpoint::Remote, cx);
         }
         if self.remote_state == RemoteState::Connected {
-            if let Some(daemon) = &self.remote_daemon {
-                let _ = daemon.tree();
-                let _ = daemon.agent_catalog();
+            if let Some(host) = &self.remote_host {
+                let _ = host.tree();
+                let _ = host.agent_catalog();
             }
         } else {
             self.schedule_remote_connect(Duration::ZERO, cx);
@@ -2084,7 +2070,7 @@ impl XdDesktop {
             return;
         }
         self.remote_generation = self.remote_generation.saturating_add(1);
-        self.remote_daemon = None;
+        self.remote_host = None;
         self.remote_bridge = None;
         self.remote_state = if self.settings.remote_ssh_command.is_some() {
             RemoteState::Offline
@@ -2098,44 +2084,39 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn handle_daemon_update(
-        &mut self,
-        update: DaemonUpdate,
-        generation: u64,
-        cx: &mut Context<Self>,
-    ) {
+    fn handle_host_update(&mut self, update: HostUpdate, generation: u64, cx: &mut Context<Self>) {
         if generation != self.connection_generation {
             return;
         }
         if self.active_endpoint == ChatEndpoint::Remote {
             match update {
-                DaemonUpdate::Connected { .. } => {
+                HostUpdate::Connected { .. } => {
                     self.inactive_model.connected = true;
                     self.inactive_model.connection_error = None;
                     self.connecting = false;
                     self.connection_in_flight = false;
                     self.reconnect_attempt = 0;
-                    if let Some(daemon) = &self.daemon {
-                        let _ = daemon.tree();
-                        let _ = daemon.agent_catalog();
+                    if let Some(host) = &self.host {
+                        let _ = host.tree();
+                        let _ = host.agent_catalog();
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
-                            let _ = daemon.git_state(chat_id);
+                            let _ = host.git_state(chat_id);
                         }
                     }
                 }
-                DaemonUpdate::Disconnected { message } => {
+                HostUpdate::Disconnected { message } => {
                     if self.connection_generation != generation {
                         return;
                     }
                     self.terminal_cache_refresh.insert(ChatEndpoint::Local);
-                    self.daemon = None;
+                    self.host = None;
                     self.inactive_model.connected = false;
                     self.inactive_model.connection_error = Some(format!("{message} Reconnecting…"));
                     self.connecting = false;
                     self.connection_in_flight = false;
                     self.schedule_reconnect(cx);
                 }
-                DaemonUpdate::Reply {
+                HostUpdate::Reply {
                     kind,
                     body,
                     attachments,
@@ -2162,7 +2143,7 @@ impl XdDesktop {
                         }
                     }
                 }
-                DaemonUpdate::Event {
+                HostUpdate::Event {
                     name,
                     body,
                     attachments,
@@ -2185,9 +2166,9 @@ impl XdDesktop {
                             Self::apply_passive_event(&mut self.inactive_model, &name, &body);
                         }
                         if name == "turn-finished"
-                            && let Some(daemon) = &self.daemon
+                            && let Some(host) = &self.host
                         {
-                            let _ = daemon.tree();
+                            let _ = host.tree();
                         }
                     }
                 }
@@ -2196,7 +2177,7 @@ impl XdDesktop {
             return;
         }
         match update {
-            DaemonUpdate::Connected { .. } => {
+            HostUpdate::Connected { .. } => {
                 self.model.connected = true;
                 self.connecting = false;
                 self.connection_in_flight = false;
@@ -2206,17 +2187,12 @@ impl XdDesktop {
                 self.request_agent_catalog();
                 self.refresh_selected_chat_after_connect(cx);
             }
-            DaemonUpdate::Disconnected { message } => {
+            HostUpdate::Disconnected { message } => {
                 if self.connection_generation != generation {
                     return;
                 }
                 self.terminal_cache_refresh.insert(ChatEndpoint::Local);
-                #[cfg(windows)]
-                if self.restarting_for_update {
-                    cx.quit();
-                    return;
-                }
-                self.daemon = None;
+                self.host = None;
                 self.model.connected = false;
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
                 self.sending = false;
@@ -2279,12 +2255,12 @@ impl XdDesktop {
                 self.restore_pending_send(cx);
                 self.schedule_reconnect(cx);
             }
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind,
                 body,
                 attachments,
             } => self.handle_reply(kind, body, attachments, cx),
-            DaemonUpdate::Event {
+            HostUpdate::Event {
                 name,
                 body,
                 attachments,
@@ -2330,7 +2306,7 @@ impl XdDesktop {
                     | RequestKind::AgentSecrets { .. }
                     | RequestKind::SetAgentSecrets { .. }
                     | RequestKind::AgentClis
-                    | RequestKind::DaemonUpdate { .. }
+                    | RequestKind::HostUpdate { .. }
                     | RequestKind::Devices
                     | RequestKind::PeerPairing
                     | RequestKind::RenameDevice { .. }
@@ -2678,13 +2654,7 @@ impl XdDesktop {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
-                RequestKind::DaemonUpdate { action } => {
-                    #[cfg(not(windows))]
-                    let _ = action;
-                    #[cfg(windows)]
-                    if action == "restart" {
-                        self.restarting_for_update = false;
-                    }
+                RequestKind::HostUpdate { action: _ } => {
                     if let Some(panel) = &mut self.self_update_panel {
                         panel.busy = false;
                         panel.error = Some(
@@ -2886,17 +2856,8 @@ impl XdDesktop {
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
             RequestKind::AgentClis => self.apply_cli_versions(&value),
-            RequestKind::DaemonUpdate { action } => {
+            RequestKind::HostUpdate { action: _ } => {
                 self.apply_self_update(&value);
-                #[cfg(not(windows))]
-                let _ = action;
-                #[cfg(windows)]
-                if action == "restart"
-                    && self.restarting_for_update
-                    && value.get("ok").and_then(Value::as_bool) == Some(true)
-                {
-                    cx.quit();
-                }
             }
             RequestKind::AgentSecrets { folder_id }
                 if self
@@ -2941,8 +2902,8 @@ impl XdDesktop {
                     panel.submitting = false;
                     panel.loading = true;
                 }
-                if let Some(daemon) = self.secrets_daemon().cloned()
-                    && let Err(error) = daemon.agent_secrets(folder_id.as_deref())
+                if let Some(host) = self.secrets_host().cloned()
+                    && let Err(error) = host.agent_secrets(folder_id.as_deref())
                     && let Some(panel) = &mut self.secrets_panel
                 {
                     panel.loading = false;
@@ -3041,8 +3002,8 @@ impl XdDesktop {
                         if let Some(diff) = &mut self.diff_panel {
                             diff.base = Some(base.to_owned());
                         }
-                        if let Some(daemon) = self.active_daemon().cloned()
-                            && let Err(error) = daemon.diff_read(
+                        if let Some(host) = self.active_host().cloned()
+                            && let Err(error) = host.diff_read(
                                 &chat_id,
                                 "branch-status",
                                 Some(base),
@@ -3090,8 +3051,8 @@ impl XdDesktop {
                             }
                         }
                         if check_pull_request
-                            && let Some(daemon) = self.active_daemon().cloned()
-                            && let Err(error) = daemon.git_pull_request_status(&chat_id, generation)
+                            && let Some(host) = self.active_host().cloned()
+                            && let Err(error) = host.git_pull_request_status(&chat_id, generation)
                             && let Some(diff) = &mut self.diff_panel
                         {
                             diff.pr_loading = false;
@@ -4156,15 +4117,15 @@ impl XdDesktop {
             "folder-clone" => self.handle_folder_clone_event(self.active_endpoint, &body),
             "agent-auth-changed" => self.apply_auth_provider(&body),
             "agent-cli-changed" => self.apply_cli_version(&body),
-            "daemon-update" => self.apply_self_update(&body),
+            "host-update" => self.apply_self_update(&body),
             _ => {}
         }
         cx.notify();
     }
 
     fn request_tree(&mut self) {
-        if let Some(daemon) = self.active_daemon() {
-            if let Err(error) = daemon.tree() {
+        if let Some(host) = self.active_host() {
+            if let Err(error) = host.tree() {
                 self.model.connection_error = Some(error);
             }
         }
@@ -4346,8 +4307,8 @@ impl XdDesktop {
     }
 
     fn request_agent_catalog(&mut self) {
-        if let Some(daemon) = self.active_daemon()
-            && let Err(error) = daemon.agent_catalog()
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.agent_catalog()
         {
             self.model.connection_error = Some(error);
         }
@@ -4361,8 +4322,8 @@ impl XdDesktop {
         else {
             return;
         };
-        if let Some(daemon) = self.active_daemon()
-            && let Err(error) = daemon.shortcuts(Some(&folder_id))
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.shortcuts(Some(&folder_id))
         {
             self.model.connection_error = Some(error);
         }
@@ -4464,9 +4425,9 @@ impl XdDesktop {
         self.file_tree.set_loading(&path);
         let generation = self.tree_generation;
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| daemon.file_tree_list(&chat_id, &path, generation));
+            .and_then(|host| host.file_tree_list(&chat_id, &path, generation));
         if let Err(error) = result {
             self.file_tree.set_failed(&path);
             self.model.connection_error = Some(error);
@@ -4492,11 +4453,9 @@ impl XdDesktop {
         self.open_files.set_saving(&path);
         let generation = self.tree_generation;
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| {
-                daemon.file_tab_write(&chat_id, &path, &original, &sending, generation)
-            });
+            .and_then(|host| host.file_tab_write(&chat_id, &path, &original, &sending, generation));
         if let Err(error) = result {
             self.open_files.set_failed(&path, error);
         }
@@ -4522,9 +4481,9 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| daemon.new_folder(name, repo.as_deref(), repo_url.as_deref()));
+            .and_then(|host| host.new_folder(name, repo.as_deref(), repo_url.as_deref()));
         match result {
             Ok(()) => {
                 if let Some(repo_url) = &repo_url {
@@ -4578,9 +4537,9 @@ impl XdDesktop {
             input.set_text_selected(DEFAULT_CHAT_TITLE, cx)
         });
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| daemon.folder_settings(&folder_id));
+            .and_then(|host| host.folder_settings(&folder_id));
         if let Err(error) = result {
             self.chat_create_worktrees_loading = false;
             self.model.connection_error = Some(error);
@@ -4629,9 +4588,9 @@ impl XdDesktop {
         }
         let context = optional_trimmed(&self.workspace_context_text).map(str::to_owned);
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| daemon.set_folder_context(&folder_id, context.as_deref()));
+            .and_then(|host| host.set_folder_context(&folder_id, context.as_deref()));
         match result {
             Ok(()) => {
                 self.workspace_context_text = context.unwrap_or_default();
@@ -4742,7 +4701,7 @@ impl XdDesktop {
         }
         self.remote_generation = self.remote_generation.saturating_add(1);
         let generation = self.remote_generation;
-        self.remote_daemon = None;
+        self.remote_host = None;
         self.remote_bridge = None;
         self.remote_state = RemoteState::Connecting;
         self.remote_error = None;
@@ -4796,9 +4755,9 @@ impl XdDesktop {
     }
 
     fn request_devices(&mut self) {
-        match self.daemon.as_ref() {
-            Some(daemon) => {
-                if let Err(error) = daemon.devices()
+        match self.host.as_ref() {
+            Some(host) => {
+                if let Err(error) = host.devices()
                     && let Some(panel) = &mut self.devices_panel
                 {
                     panel.loading = false;
@@ -4832,8 +4791,8 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        match self.daemon.as_ref() {
-            Some(daemon) => match daemon.rename_device(&device_id, name) {
+        match self.host.as_ref() {
+            Some(host) => match host.rename_device(&device_id, name) {
                 Ok(()) => {
                     if let Some(panel) = &mut self.devices_panel {
                         panel.mutating = Some(device_id);
@@ -4877,8 +4836,8 @@ impl XdDesktop {
             .map(|existing| (existing.clone(), None))
             .collect::<Vec<_>>();
         entries.push((name.to_owned(), Some(panel.value)));
-        match self.secrets_daemon().cloned() {
-            Some(daemon) => match daemon.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
+        match self.secrets_host().cloned() {
+            Some(host) => match host.set_agent_secrets(panel.folder_id.as_deref(), &entries) {
                 Ok(()) => {
                     if let Some(current) = &mut self.secrets_panel {
                         current.submitting = true;
@@ -4913,9 +4872,8 @@ impl XdDesktop {
         if input.is_empty() {
             return;
         }
-        if let Some(daemon) = self.active_daemon().cloned()
-            && let Err(error) =
-                daemon.agent_auth_action("agent-auth-input", &provider, Some(&input))
+        if let Some(host) = self.active_host().cloned()
+            && let Err(error) = host.agent_auth_action("agent-auth-input", &provider, Some(&input))
         {
             self.model.connection_error = Some(error);
             return;
@@ -5169,7 +5127,7 @@ impl XdDesktop {
                 if self.settings.allow_all_permissions {
                     arguments.push("--dangerously-bypass-approvals-and-sandbox".into());
                 }
-                AgentCommand::new(program, arguments)
+                AgentCommand::new(program, arguments).discover_in_user_shell("Codex")
             }
             Some(AgentCli::Claude) => {
                 let executable = if remote {
@@ -5177,11 +5135,13 @@ impl XdDesktop {
                 } else {
                     env::var("XD_CLAUDE_EXECUTABLE").unwrap_or_else(|_| "claude".into())
                 };
-                let mut arguments = vec!["-u".into(), "TMUX".into(), executable];
+                let mut arguments: Vec<String> = Vec::new();
                 if self.settings.allow_all_permissions {
                     arguments.push("--dangerously-skip-permissions".into());
                 }
-                AgentCommand::new("env", arguments)
+                AgentCommand::new(executable, arguments)
+                    .unset_environment("TMUX")
+                    .discover_in_user_shell("Claude Code")
             }
             Some(AgentCli::Jcode) => AgentCommand::new(
                 if remote {
@@ -5190,7 +5150,8 @@ impl XdDesktop {
                     env::var("XD_JCODE_EXECUTABLE").unwrap_or_else(|_| "jcode".into())
                 },
                 ["--no-update"],
-            ),
+            )
+            .discover_in_user_shell("JCode"),
             None => AgentCommand::new(
                 if remote {
                     "sh".into()
@@ -5292,9 +5253,9 @@ impl XdDesktop {
             }
         };
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| daemon.terminal_paste_image(&terminal_id, &attachment));
+            .and_then(|host| host.terminal_paste_image(&terminal_id, &attachment));
         if let Err(error) = result
             && let Some(panel) = &mut self.terminal_panel
         {
@@ -5755,10 +5716,10 @@ impl XdDesktop {
         }
         let generation = self.diff_generation;
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| {
-                daemon.file_browse_write(&chat_id, &path, &original, &content, generation)
+            .and_then(|host| {
+                host.file_browse_write(&chat_id, &path, &original, &content, generation)
             });
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
@@ -5772,16 +5733,16 @@ impl XdDesktop {
     }
 
     fn refresh_git_status(&mut self) {
-        let (Some(chat_id), Some(daemon)) = (
+        let (Some(chat_id), Some(host)) = (
             self.model.selected_chat.clone(),
-            self.active_daemon().cloned(),
+            self.active_host().cloned(),
         ) else {
             return;
         };
         if let Some(diff) = &mut self.diff_panel {
             diff.status_loading = true;
         }
-        if let Err(error) = daemon.git_status(&chat_id, self.diff_generation)
+        if let Err(error) = host.git_status(&chat_id, self.diff_generation)
             && let Some(diff) = &mut self.diff_panel
         {
             diff.status_loading = false;
@@ -5814,9 +5775,9 @@ impl XdDesktop {
             diff.action_error = None;
         }
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| daemon.git_commit(&chat_id, &message, generation));
+            .and_then(|host| host.git_commit(&chat_id, &message, generation));
         if let Err(error) = result
             && let Some(diff) = &mut self.diff_panel
         {
@@ -5860,17 +5821,17 @@ impl XdDesktop {
         } else {
             return;
         }
-        match self.active_daemon().cloned() {
-            Some(daemon) => {
+        match self.active_host().cloned() {
+            Some(host) => {
                 let content = if files_mode {
                     let path = self
                         .diff_panel
                         .as_ref()
                         .map(|diff| diff.browse_path.as_str())
                         .unwrap_or_default();
-                    daemon.file_browse_list(&chat_id, path, generation)
+                    host.file_browse_list(&chat_id, path, generation)
                 } else {
-                    daemon.diff_read(
+                    host.diff_read(
                         &chat_id,
                         if branch { "base" } else { "working-status" },
                         None,
@@ -5885,7 +5846,7 @@ impl XdDesktop {
                     diff.error = Some(error);
                 }
                 if !files_mode {
-                    if let Err(error) = daemon.git_status(&chat_id, generation)
+                    if let Err(error) = host.git_status(&chat_id, generation)
                         && let Some(diff) = &mut self.diff_panel
                     {
                         diff.status_loading = false;
@@ -6053,10 +6014,10 @@ impl XdDesktop {
         });
         if let Some((read, base)) = request {
             let result = self
-                .active_daemon()
+                .active_host()
                 .ok_or_else(|| "xd is not connected to a host.".to_owned())
-                .and_then(|daemon| {
-                    daemon.diff_read(
+                .and_then(|host| {
+                    host.diff_read(
                         &chat_id,
                         &read,
                         base.as_deref(),
@@ -6162,11 +6123,11 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| match &target {
-                SidebarTarget::Folder(folder_id) => daemon.trash_folder(folder_id),
-                SidebarTarget::Chat(chat_id) => daemon.delete_chat(chat_id),
+            .and_then(|host| match &target {
+                SidebarTarget::Folder(folder_id) => host.trash_folder(folder_id),
+                SidebarTarget::Chat(chat_id) => host.delete_chat(chat_id),
             });
         match result {
             Ok(()) => self.sidebar_delete_submitting = true,
@@ -6201,9 +6162,9 @@ impl XdDesktop {
             self.cancel_sidebar_edit(cx);
             return;
         }
-        let result = self.active_daemon().map(|daemon| match &edit.target {
-            SidebarTarget::Folder(folder_id) => daemon.rename_folder(folder_id, text),
-            SidebarTarget::Chat(chat_id) => daemon.rename_chat(chat_id, text),
+        let result = self.active_host().map(|host| match &edit.target {
+            SidebarTarget::Folder(folder_id) => host.rename_folder(folder_id, text),
+            SidebarTarget::Chat(chat_id) => host.rename_chat(chat_id, text),
         });
         match result {
             Some(Ok(())) => {
@@ -6242,14 +6203,14 @@ impl XdDesktop {
     }
 
     fn request_chat(&mut self, chat_id: &str) {
-        if let Some(daemon) = self.active_daemon() {
-            if let Err(error) = daemon.chat(chat_id) {
+        if let Some(host) = self.active_host() {
+            if let Err(error) = host.chat(chat_id) {
                 self.model.connection_error = Some(error);
             }
         }
     }
 
-    /// Rehydrates the selected chat after its daemon connection comes back.
+    /// Rehydrates the selected chat after its host connection comes back.
     ///
     /// Keep the transcript already on screen and ask only for rows after its
     /// last message. If the first request was lost before any page arrived,
@@ -6272,8 +6233,8 @@ impl XdDesktop {
             self.list_tree_directory(path, cx);
         }
         self.refresh_terminal_sessions(cx);
-        if let Some(daemon) = self.active_daemon()
-            && let Err(error) = daemon.git_state(&chat_id)
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.git_state(&chat_id)
         {
             self.model.connection_error = Some(error);
         }
@@ -6300,9 +6261,9 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| daemon.messages(chat_id, cursor));
+            .and_then(|host| host.messages(chat_id, cursor));
         if let Err(error) = result {
             self.model.connection_error = Some(error);
             self.transcript_loading = false;
@@ -6336,9 +6297,9 @@ impl XdDesktop {
             return;
         }
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "The xd host is offline.".to_owned())
-            .and_then(|daemon| daemon.workflow_status(&marker));
+            .and_then(|host| host.workflow_status(&marker));
         if let Err(error) = result {
             Arc::make_mut(&mut self.workflow_pending).remove(&marker);
             Arc::make_mut(&mut self.workflow_statuses)
@@ -6427,11 +6388,11 @@ impl XdDesktop {
         if text.is_empty() && attachments.is_empty() {
             return;
         }
-        let Some(daemon) = self.active_daemon().cloned() else {
+        let Some(host) = self.active_host().cloned() else {
             self.model.connection_error = Some("xd is not connected to a host.".into());
             return;
         };
-        if let Err(error) = daemon.send_message(
+        if let Err(error) = host.send_message(
             &chat_id,
             &text,
             &attachments,
@@ -6457,7 +6418,7 @@ impl XdDesktop {
         self.attachments_dirty = true;
         self.attachment_generation = self.attachment_generation.saturating_add(1);
         self.draft_generation = self.draft_generation.saturating_add(1);
-        let _ = daemon.set_draft(&chat_id, "", Some(&[]), Some(self.attachment_generation));
+        let _ = host.set_draft(&chat_id, "", Some(&[]), Some(self.attachment_generation));
         cx.notify();
     }
 
@@ -6555,11 +6516,11 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return false;
         };
-        let Some(daemon) = self.active_daemon().cloned() else {
+        let Some(host) = self.active_host().cloned() else {
             self.model.connection_error = Some("xd is not connected to a host.".into());
             return false;
         };
-        if let Err(error) = daemon.send_message(
+        if let Err(error) = host.send_message(
             &chat_id,
             &prompt,
             &[],
@@ -6648,8 +6609,8 @@ impl XdDesktop {
             self.cancel_queue_edit(cx);
             return;
         }
-        if let Some(daemon) = self.active_daemon().cloned() {
-            if let Err(error) = daemon.edit_queue(&edit.chat_id, edit.index, &edit.original, text) {
+        if let Some(host) = self.active_host().cloned() {
+            if let Err(error) = host.edit_queue(&edit.chat_id, edit.index, &edit.original, text) {
                 self.model.connection_error = Some(error);
             } else {
                 if self.model.selected_chat.as_deref() == Some(edit.chat_id.as_str())
@@ -6777,13 +6738,13 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if let Some(daemon) = self.active_daemon().cloned() {
+        if let Some(host) = self.active_host().cloned() {
             let attachments = self
                 .attachments_dirty
                 .then_some(self.model.draft_attachments.as_slice());
             let attachment_generation = attachments.map(|_| self.attachment_generation);
             if let Err(error) =
-                daemon.set_draft(&chat_id, &self.composer, attachments, attachment_generation)
+                host.set_draft(&chat_id, &self.composer, attachments, attachment_generation)
             {
                 self.model.connection_error = Some(error);
             }
@@ -7060,10 +7021,10 @@ impl XdDesktop {
         let title = chat_create_title(&self.chat_create_title).to_owned();
         let agent = self.minimal_new_session_agent.protocol_name();
         let result = self
-            .active_daemon()
+            .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|daemon| {
-                daemon.new_chat_with_backend_in_worktree(&folder_id, &title, agent, &worktree)
+            .and_then(|host| {
+                host.new_chat_with_backend_in_worktree(&folder_id, &title, agent, &worktree)
             });
         match result {
             Ok(()) => {
@@ -10091,8 +10052,7 @@ impl Render for XdDesktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.expire_action_error(cx);
         let client_decorations = matches!(window.window_decorations(), Decorations::Client { .. });
-        let custom_titlebar =
-            client_decorations || cfg!(any(target_os = "windows", target_os = "macos"));
+        let custom_titlebar = client_decorations || cfg!(target_os = "macos");
         window.set_client_inset(if client_decorations { px(6.0) } else { px(0.0) });
         self.render_minimal(custom_titlebar, window, cx)
     }
@@ -10441,102 +10401,7 @@ fn notify_turn_finished(title: &str) {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn notify_turn_finished(title: &str) {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    static CURRENT: OnceLock<Arc<Mutex<Option<std::process::Child>>>> = OnceLock::new();
-    const NOTIFY_SCRIPT: &str = r#"
-$text = [Console]::In.ReadToEnd()
-if ($text.Length -eq 0) { exit 0 }
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$icon = New-Object System.Windows.Forms.NotifyIcon
-$icon.Icon = [System.Drawing.SystemIcons]::Information
-$icon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-$icon.BalloonTipTitle = 'xd'
-$icon.BalloonTipText = $text
-$icon.Visible = $true
-try {
-    $icon.ShowBalloonTip(8000)
-    Start-Sleep -Seconds 9
-} finally {
-    $icon.Dispose()
-}
-"#;
-    let body = format!(
-        "{} finished",
-        title
-            .chars()
-            .filter(|character| !character.is_control())
-            .take(120)
-            .collect::<String>()
-    );
-    let current = CURRENT.get_or_init(|| Arc::new(Mutex::new(None))).clone();
-    if let Ok(mut active) = current.lock()
-        && let Some(mut child) = active.take()
-    {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    let Ok(mut child) = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            NOTIFY_SCRIPT,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return;
-    };
-    let wrote_text = child
-        .stdin
-        .take()
-        .is_some_and(|mut input| input.write_all(body.as_bytes()).is_ok());
-    if !wrote_text {
-        let _ = child.kill();
-        let _ = child.wait();
-        return;
-    }
-    let id = child.id();
-    let Ok(mut active) = current.lock() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return;
-    };
-    *active = Some(child);
-    drop(active);
-    thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_millis(50));
-            let Ok(mut child) = current.lock() else {
-                return;
-            };
-            let Some(active) = child.as_mut() else {
-                return;
-            };
-            if active.id() != id {
-                return;
-            }
-            match active.try_wait() {
-                Ok(Some(_)) | Err(_) => {
-                    child.take();
-                    return;
-                }
-                Ok(None) => {}
-            }
-        }
-    });
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn notify_turn_finished(_: &str) {}
 
 fn optional_trimmed(value: &str) -> Option<&str> {
@@ -10590,18 +10455,18 @@ fn pairing_details(value: &Value) -> Result<(String, u16, String), String> {
         .get("host")
         .and_then(Value::as_str)
         .filter(|host| !host.is_empty())
-        .ok_or_else(|| "The daemon returned an invalid pairing address.".to_owned())?;
+        .ok_or_else(|| "The host returned an invalid pairing address.".to_owned())?;
     let port = value
         .get("port")
         .and_then(Value::as_u64)
         .and_then(|port| u16::try_from(port).ok())
         .filter(|port| *port > 0)
-        .ok_or_else(|| "The daemon returned an invalid pairing port.".to_owned())?;
+        .ok_or_else(|| "The host returned an invalid pairing port.".to_owned())?;
     let code = value
         .get("code")
         .and_then(Value::as_str)
         .filter(|code| !code.is_empty())
-        .ok_or_else(|| "The daemon returned an invalid pairing code.".to_owned())?;
+        .ok_or_else(|| "The host returned an invalid pairing code.".to_owned())?;
     Ok((host.to_owned(), port, code.to_owned()))
 }
 
@@ -10727,9 +10592,7 @@ mod tests {
             .split_once("fn load_png_attachments")
             .expect("end of desktop render implementation")
             .0;
-        assert!(render.contains(
-            "client_decorations || cfg!(any(target_os = \"windows\", target_os = \"macos\"))"
-        ));
+        assert!(render.contains("client_decorations || cfg!(target_os = \"macos\")"));
         assert!(render.contains("self.render_minimal(custom_titlebar, window, cx)"));
 
         let startup = source
@@ -11177,7 +11040,7 @@ mod tests {
         desktop.update(cx, |desktop, cx| {
             desktop.remote_state = RemoteState::Connected;
             desktop.handle_remote_update(
-                DaemonUpdate::Reply {
+                HostUpdate::Reply {
                     kind: RequestKind::Tree,
                     body: serde_json::json!({
                         "ok": true,
@@ -11277,7 +11140,7 @@ mod tests {
             &RequestKind::SetAgentSecrets { folder_id: None }
         ));
         assert!(!XdDesktop::remote_chat_reply(&RequestKind::Devices));
-        assert!(!XdDesktop::remote_chat_reply(&RequestKind::DaemonUpdate {
+        assert!(!XdDesktop::remote_chat_reply(&RequestKind::HostUpdate {
             action: "install".into(),
         }));
         assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentSecrets {
@@ -11289,7 +11152,7 @@ mod tests {
         assert!(XdDesktop::local_admin_reply(&RequestKind::Devices));
         assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentAuth));
         assert!(!XdDesktop::local_admin_event("agent-auth-changed"));
-        assert!(XdDesktop::local_admin_event("daemon-update"));
+        assert!(XdDesktop::local_admin_event("host-update"));
         assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
         assert!(XdDesktop::remote_read_event("terminal-activity"));
@@ -11536,7 +11399,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_reconnect_backoff_is_fast_then_bounded() {
+    fn host_reconnect_backoff_is_fast_then_bounded() {
         assert_eq!(reconnect_delay(0), Duration::ZERO);
         assert_eq!(reconnect_delay(1), Duration::from_millis(250));
         assert_eq!(reconnect_delay(2), Duration::from_millis(500));
@@ -11647,7 +11510,7 @@ mod tests {
 
         let mut empty = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Codex);
         // Measuring the viewport can race the terminal-list reply. Do not
-        // create a duplicate while the daemon may still report an existing
+        // create a duplicate while the host may still report an existing
         // session; an empty reply enables auto-open once it arrives.
         assert!(!empty.should_auto_open());
         empty.loading = false;
@@ -12280,7 +12143,7 @@ mod tests {
             "NewSessionWorktree::Existing",
             "Create new worktree",
             "Existing worktrees",
-            "daemon.folder_settings(&folder_id)",
+            "host.folder_settings(&folder_id)",
             "new_chat_with_backend_in_worktree",
         ] {
             assert!(production.contains(behavior), "missing {behavior}");

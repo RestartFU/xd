@@ -10,7 +10,7 @@ import com.restartfu.xd.net.PairResult
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.ChatOption
-import com.restartfu.xd.protocol.DaemonUpdateReply
+import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
@@ -63,12 +63,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val moving: StateFlow<Boolean> = _moving.asStateFlow()
     val shortcutEditor: StateFlow<ShortcutEditorState?> = _shortcutEditor.asStateFlow()
-    private val _daemon = MutableStateFlow<DaemonUpdateReply?>(null)
-    private val _daemonError = MutableStateFlow<String?>(null)
+    private val _host = MutableStateFlow<HostUpdateReply?>(null)
+    private val _hostError = MutableStateFlow<String?>(null)
     private val _updating = MutableStateFlow(false)
-    val daemon: StateFlow<DaemonUpdateReply?> = _daemon.asStateFlow()
-    val daemonError: StateFlow<String?> = _daemonError.asStateFlow()
-    val daemonBusy: StateFlow<Boolean> = _updating.asStateFlow()
+    val host: StateFlow<HostUpdateReply?> = _host.asStateFlow()
+    val hostError: StateFlow<String?> = _hostError.asStateFlow()
+    val hostBusy: StateFlow<Boolean> = _updating.asStateFlow()
 
     fun pair(
         host: String,
@@ -87,7 +87,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not pair with the daemon"
+                _error.value = error.message ?: "Could not pair with the host"
             } finally {
                 _pairing.value = false
             }
@@ -301,31 +301,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Drives the daemon update from the tree screen.
+     * Drives the host update from the tree screen.
      *
      * Install and restart are separate calls because they differ in cost:
      * replacing files is safe while turns run, restarting drops every attached
      * device and loses the turn.
      */
-    fun daemonUpdate(action: String = "status") {
+    fun hostUpdate(action: String = "status") {
         if (_updating.value) return
         _updating.value = true
         viewModelScope.launch {
             try {
-                _daemon.value = client.daemonUpdate(action)
+                _host.value = client.hostUpdate(action)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _daemonError.value = error.message ?: "Could not reach the daemon"
+                _hostError.value = error.message ?: "Could not reach the host"
             } finally {
                 _updating.value = false
             }
         }
     }
 
-    fun clearDaemonUpdate() {
-        _daemon.value = null
-        _daemonError.value = null
+    fun clearHostUpdate() {
+        _host.value = null
+        _hostError.value = null
     }
 
     fun consumeCreatedChat(chatId: String) {
@@ -488,7 +488,7 @@ class ChatViewModel(
     /**
      * Loads the catalog once per chat screen.
      *
-     * It is daemon state rather than app state: hard-coding the models would
+     * It is host state rather than app state: hard-coding the models would
      * drift the moment one is added or retired, and set-option validates the
      * id, so a stale client would simply be refused.
      */
@@ -523,7 +523,7 @@ class ChatViewModel(
     /**
      * Plan and Build are one setting: Build is simply Plan off.
      *
-     * The daemon overrides access while planning, so the access choice is not
+     * The host overrides access while planning, so the access choice is not
      * meaningful until this is off again.
      */
     fun setPlan(planning: Boolean) {
@@ -564,12 +564,12 @@ class ChatViewModel(
      * Redirects the running turn to a queued message, editing it first when
      * the text changed.
      *
-     * Both happen in one coroutine because the daemon matches the steer
+     * Both happen in one coroutine because the host matches the steer
      * against what is actually queued: sending them concurrently would race,
      * and the steer would be refused for not matching an edit that had not
      * landed yet.
      *
-     * The daemon promotes the message and cancels the turn, so this waits for
+     * The host promotes the message and cancels the turn, so this waits for
      * the turn to actually change rather than reporting success while the old
      * one is still winding down.
      */

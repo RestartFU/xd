@@ -8,7 +8,7 @@ package com.restartfu.xd.model
  * the one thing a reader compares between them.
  *
  * This clamps a negative elapsed time rather than leaving that to the caller.
- * A phone's clock can disagree with the daemon's,
+ * A phone's clock can disagree with the host's,
  * and "Working for -3s" is worse than a moment of "0s".
  */
 public object TurnTiming {

@@ -16,11 +16,11 @@ public data class ParsedAsk(
 /**
  * `<ask>` blocks in an assistant reply.
  *
- * The daemon stores the reply verbatim and every client parses it, so this
- * mirrors `daemon-rs/src/ask.rs` line for line. Getting it wrong shows raw tags
+ * The host stores the reply verbatim and every client parses it, so this
+ * mirrors `host/src/ask.rs` line for line. Getting it wrong shows raw tags
  * to the reader rather than the buttons the assistant asked for.
  *
- * Streaming needs no equivalent of the daemon's `visible_bytes`: `text` deltas
+ * Streaming needs no equivalent of the host's `visible_bytes`: `text` deltas
  * are already withheld until a block completes, so a live segment never
  * contains one.
  */
@@ -28,7 +28,7 @@ public object AskBlock {
     private const val OPEN = "<ask>"
     private const val CLOSE = "</ask>"
 
-    /** The daemon's cap. A list longer than this is not a short list. */
+    /** The host's cap. A list longer than this is not a short list. */
     public const val MAX_OPTIONS: Int = 6
 
     /**

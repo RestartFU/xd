@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::{
     channel,
-    daemon::{DaemonHandle, DaemonUpdate, StartedHost},
+    host::{HostHandle, HostUpdate, StartedHost},
     session_host::SshCommand,
 };
 
@@ -24,8 +24,8 @@ pub struct SshRemoteBridge {
 }
 
 pub struct SshRemoteSession {
-    daemon: DaemonHandle,
-    updates: async_channel::Receiver<DaemonUpdate>,
+    host: HostHandle,
+    updates: async_channel::Receiver<HostUpdate>,
     bridge: SshRemoteBridge,
 }
 
@@ -33,11 +33,11 @@ impl SshRemoteSession {
     pub fn into_parts(
         self,
     ) -> (
-        DaemonHandle,
-        async_channel::Receiver<DaemonUpdate>,
+        HostHandle,
+        async_channel::Receiver<HostUpdate>,
         SshRemoteBridge,
     ) {
-        (self.daemon, self.updates, self.bridge)
+        (self.host, self.updates, self.bridge)
     }
 }
 
@@ -50,11 +50,10 @@ pub fn connect_ssh(command: &SshCommand) -> Result<SshRemoteSession, RemoteError
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    channel::configure_background(&mut process);
-    let (daemon, updates, host) = DaemonHandle::connect_command(process, home)
+    let (handle, updates, host) = HostHandle::connect_command(process, home)
         .map_err(|error| RemoteError::Bridge(error.to_string()))?;
     Ok(SshRemoteSession {
-        daemon,
+        host: handle,
         updates,
         bridge: SshRemoteBridge { _host: host },
     })

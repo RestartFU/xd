@@ -35,7 +35,7 @@ import com.restartfu.xd.mobile.ChatViewModel
 /**
  * Chooses the assistant and model for a chat.
  *
- * The list comes from the daemon rather than the app, so a daemon that gains
+ * The list comes from the host rather than the app, so a host that gains
  * a model does not need a new build of this client to reach it.
  */
 @Composable

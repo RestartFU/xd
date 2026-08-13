@@ -14,7 +14,8 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::channel;
-use crate::local_socket::{UnixStream, path_is_socket};
+#[cfg(test)]
+use crate::local_socket::UnixStream;
 use crate::model::Attachment;
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
@@ -40,7 +41,7 @@ pub enum RequestKind {
     AgentAuth,
     AgentAuthMutation,
     AgentClis,
-    DaemonUpdate {
+    HostUpdate {
         action: String,
     },
     AgentSecrets {
@@ -248,7 +249,7 @@ pub enum RequestKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum DaemonUpdate {
+pub enum HostUpdate {
     Connected {
         path: PathBuf,
     },
@@ -269,8 +270,7 @@ pub enum DaemonUpdate {
 
 #[derive(Debug, Error)]
 pub enum ConnectError {
-    #[error("no legacy xd socket was found (looked in {0})")]
-    NotFound(String),
+    #[cfg(test)]
     #[error("could not connect to legacy xd socket at {path}: {source}")]
     Connect {
         path: PathBuf,
@@ -286,7 +286,7 @@ struct Command {
 }
 
 #[derive(Clone)]
-pub struct DaemonHandle {
+pub struct HostHandle {
     commands: mpsc::Sender<Command>,
 }
 
@@ -301,8 +301,8 @@ impl Drop for StartedHost {
     }
 }
 
-impl DaemonHandle {
-    pub fn start_local() -> Result<(Self, Receiver<DaemonUpdate>, StartedHost), ConnectError> {
+impl HostHandle {
+    pub fn start_local() -> Result<(Self, Receiver<HostUpdate>, StartedHost), ConnectError> {
         let mut failures = Vec::new();
         let data = data_root();
         for launcher in launcher_candidates() {
@@ -327,7 +327,7 @@ impl DaemonHandle {
     pub fn connect_command(
         mut command: ProcessCommand,
         identity: PathBuf,
-    ) -> Result<(Self, Receiver<DaemonUpdate>, StartedHost), ConnectError> {
+    ) -> Result<(Self, Receiver<HostUpdate>, StartedHost), ConnectError> {
         let mut child = command
             .spawn()
             .map_err(|error| ConnectError::Start(error.to_string()))?;
@@ -347,14 +347,14 @@ impl DaemonHandle {
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         identity: PathBuf,
-    ) -> (Self, Receiver<DaemonUpdate>) {
+    ) -> (Self, Receiver<HostUpdate>) {
         let (command_tx, command_rx) = mpsc::channel();
         let (update_tx, update_rx) = async_channel::bounded(1024);
         let pending = Arc::new(Mutex::new(HashMap::new()));
 
         spawn_writer(writer, command_rx, update_tx.clone(), pending.clone());
         spawn_reader(reader, update_tx.clone(), pending);
-        let _ = update_tx.try_send(DaemonUpdate::Connected { path: identity });
+        let _ = update_tx.try_send(HostUpdate::Connected { path: identity });
 
         (
             Self {
@@ -364,30 +364,8 @@ impl DaemonHandle {
         )
     }
 
-    pub fn connect_discovered() -> Result<(Self, Receiver<DaemonUpdate>), ConnectError> {
-        let candidates = socket_candidates();
-        let mut last_error = None;
-        for path in &candidates {
-            if !is_socket(path) {
-                continue;
-            }
-            match Self::connect(path.clone()) {
-                Ok(connection) => return Ok(connection),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error.unwrap_or_else(|| {
-            ConnectError::NotFound(
-                candidates
-                    .iter()
-                    .map(|candidate| candidate.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-        }))
-    }
-
-    pub fn connect(path: PathBuf) -> Result<(Self, Receiver<DaemonUpdate>), ConnectError> {
+    #[cfg(test)]
+    pub fn connect(path: PathBuf) -> Result<(Self, Receiver<HostUpdate>), ConnectError> {
         let stream = UnixStream::connect(&path).map_err(|source| ConnectError::Connect {
             path: path.clone(),
             source,
@@ -415,12 +393,12 @@ impl DaemonHandle {
         self.send(RequestKind::AgentClis, json!({"op": "agent-clis"}))
     }
 
-    pub fn daemon_update(&self, action: &str) -> Result<(), String> {
+    pub fn host_update(&self, action: &str) -> Result<(), String> {
         self.send(
-            RequestKind::DaemonUpdate {
+            RequestKind::HostUpdate {
                 action: action.to_owned(),
             },
-            json!({"op": "daemon-update", "action": action}),
+            json!({"op": "host-update", "action": action}),
         )
     }
 
@@ -1276,7 +1254,7 @@ impl DaemonHandle {
                 "op": "edit-queue",
                 "chat": chat_id,
                 "index": index,
-                // The daemon guards the edit against this key, hyphenated.
+                // The host guards the edit against this key, hyphenated.
                 "old-text": old_text,
                 "text": new_text,
             }),
@@ -1476,7 +1454,7 @@ impl DaemonHandle {
 fn spawn_writer(
     mut stream: impl Write + Send + 'static,
     commands: mpsc::Receiver<Command>,
-    updates: Sender<DaemonUpdate>,
+    updates: Sender<HostUpdate>,
     pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
 ) {
     thread::Builder::new()
@@ -1511,7 +1489,7 @@ fn spawn_writer(
 
 fn spawn_reader(
     stream: impl Read + Send + 'static,
-    updates: Sender<DaemonUpdate>,
+    updates: Sender<HostUpdate>,
     pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
 ) {
     thread::Builder::new()
@@ -1552,7 +1530,7 @@ fn spawn_reader(
                 let update = match frame {
                     Frame::Event { name, mut body } => {
                         let attachments = take_draft_attachments(&mut body);
-                        DaemonUpdate::Event {
+                        HostUpdate::Event {
                             name,
                             body,
                             attachments,
@@ -1575,7 +1553,7 @@ fn spawn_reader(
                             }
                             _ => take_draft_attachments(&mut body),
                         };
-                        DaemonUpdate::Reply {
+                        HostUpdate::Reply {
                             kind,
                             body,
                             attachments,
@@ -1611,20 +1589,11 @@ fn take_image(body: &mut Map<String, Value>, path: &str) -> Option<Attachment> {
     Attachment::from_value(&value)
 }
 
-fn disconnect(updates: &Sender<DaemonUpdate>, message: String) {
-    let _ = updates.send_blocking(DaemonUpdate::Disconnected { message });
+fn disconnect(updates: &Sender<HostUpdate>, message: String) {
+    let _ = updates.send_blocking(HostUpdate::Disconnected { message });
 }
 
-fn is_socket(path: &Path) -> bool {
-    path_is_socket(path)
-}
-
-pub fn socket_candidates() -> Vec<PathBuf> {
-    if let Some(path) = env::var_os("XD_SOCKET").filter(|path| !path.is_empty()) {
-        return vec![PathBuf::from(path)];
-    }
-
-    #[cfg(unix)]
+fn data_root() -> PathBuf {
     let data_home = env::var_os("XDG_DATA_HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
@@ -1634,33 +1603,8 @@ pub fn socket_candidates() -> Vec<PathBuf> {
                 .map(|home| PathBuf::from(home).join(".local/share"))
         })
         .unwrap_or_else(|| PathBuf::from(".local/share"));
-    #[cfg(windows)]
-    let data_home = env::var_os("LOCALAPPDATA")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
 
-    socket_candidates_for(data_home, None, Some(channel::data_name()))
-}
-
-fn socket_candidates_for(
-    data_home: PathBuf,
-    explicit_socket: Option<std::ffi::OsString>,
-    data_name: Option<std::ffi::OsString>,
-) -> Vec<PathBuf> {
-    if let Some(socket) = explicit_socket.filter(|path| !path.is_empty()) {
-        return vec![PathBuf::from(socket)];
-    }
-    let data_name = data_name.unwrap_or_else(|| "xd".into());
-    vec![data_home.join(data_name).join("daemon.sock")]
-}
-
-fn data_root() -> PathBuf {
-    socket_candidates()
-        .into_iter()
-        .next()
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."))
+    data_home.join(channel::data_name())
 }
 
 fn launcher_candidates() -> Vec<PathBuf> {
@@ -1671,20 +1615,12 @@ fn launcher_candidates() -> Vec<PathBuf> {
     if let Ok(current) = env::current_exe()
         && let Some(parent) = current.parent()
     {
-        let sibling = parent.join(if cfg!(windows) {
-            "xd-host.exe"
-        } else {
-            "xd-host"
-        });
+        let sibling = parent.join("xd-host");
         if sibling.is_file() {
             candidates.push(sibling);
         }
     }
-    candidates.push(PathBuf::from(if cfg!(windows) {
-        "xd-host.exe"
-    } else {
-        "xd-host"
-    }));
+    candidates.push(PathBuf::from("xd-host"));
     candidates
 }
 
@@ -1700,7 +1636,7 @@ mod tests {
             env::temp_dir().join(format!("xd-direct-cli-terminal-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1720,17 +1656,16 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon
-            .terminal_open_agent("chat-1", 120, 32, true, "claude", true, 0x202020, 0xfafafa)
+        host.terminal_open_agent("chat-1", 120, 32, true, "claude", true, 0x202020, 0xfafafa)
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::TerminalOpen { chat_id, reuse, agent },
                 ..
             } if chat_id == "chat-1" && reuse && agent.as_deref() == Some("claude")
@@ -1746,7 +1681,7 @@ mod tests {
             env::temp_dir().join(format!("xd-shell-terminal-palette-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1762,17 +1697,16 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon
-            .terminal_open("chat-1", 120, 32, false, 0xf1f1f1, 0x202020)
+        host.terminal_open("chat-1", 120, 32, false, 0xf1f1f1, 0x202020)
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::TerminalOpen { chat_id, reuse, agent },
                 ..
             } if chat_id == "chat-1" && !reuse && agent.is_none()
@@ -1784,10 +1718,10 @@ mod tests {
 
     #[test]
     fn correlates_replies_and_continues_delivering_events() {
-        let directory = env::temp_dir().join(format!("xd-daemon-{}", std::process::id()));
+        let directory = env::temp_dir().join(format!("xd-host-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1805,22 +1739,22 @@ mod tests {
             writeln!(stream, "{{\"event\":\"tree\"}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon.tree().unwrap();
+        host.tree().unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::Tree,
                 ..
             }
         ));
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Event { name, .. } if name == "tree"
+            HostUpdate::Event { name, .. } if name == "tree"
         ));
 
         server.join().unwrap();
@@ -1832,7 +1766,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-partial-frame-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1841,14 +1775,14 @@ mod tests {
                 .unwrap();
         });
 
-        let (_daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (_host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Disconnected { message }
+            HostUpdate::Disconnected { message }
                 if message == "xd host closed while sending a response"
         ));
 
@@ -1861,7 +1795,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-message-cursors-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1883,17 +1817,15 @@ mod tests {
             }
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon
-            .messages("chat-1", MessageCursor::Before(42))
-            .unwrap();
+        host.messages("chat-1", MessageCursor::Before(42)).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::Messages {
                     cursor: MessageCursor::Before(42),
                     ..
@@ -1901,10 +1833,10 @@ mod tests {
                 ..
             }
         ));
-        daemon.messages("chat-1", MessageCursor::After(84)).unwrap();
+        host.messages("chat-1", MessageCursor::After(84)).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::Messages {
                     cursor: MessageCursor::After(84),
                     ..
@@ -1922,7 +1854,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-remote-auth-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1949,23 +1881,23 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon.pair_remote("ABCD2345", "Laptop").unwrap();
+        host.pair_remote("ABCD2345", "Laptop").unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::PairRemote,
                 ..
             }
         ));
-        daemon.hello_remote("private").unwrap();
+        host.hello_remote("private").unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::HelloRemote,
                 ..
             }
@@ -1980,7 +1912,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-edit-queue-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1998,15 +1930,15 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon.edit_queue("chat-1", 2, "before", "after").unwrap();
+        host.edit_queue("chat-1", 2, "before", "after").unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::EditQueue {
                     chat_id,
                     index: 2,
@@ -2026,7 +1958,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-queue-message-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2057,25 +1989,24 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon.queue_message("chat-2", "shared context").unwrap();
+        host.queue_message("chat-2", "shared context").unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::QueueMutation { chat_id },
                 ..
             } if chat_id == "chat-2"
         ));
-        daemon
-            .reorder_queue("chat-2", 2, "third", 0, "first", false)
+        host.reorder_queue("chat-2", 2, "third", 0, "first", false)
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::QueueMutation { chat_id },
                 ..
             } if chat_id == "chat-2"
@@ -2090,7 +2021,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-reorder-chat-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2109,16 +2040,16 @@ mod tests {
             }
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
         for after in [false, true] {
-            daemon.reorder_chat("chat-1", "chat-2", after).unwrap();
+            host.reorder_chat("chat-1", "chat-2", after).unwrap();
             assert!(matches!(
                 updates.recv_blocking().unwrap(),
-                DaemonUpdate::Reply {
+                HostUpdate::Reply {
                     kind: RequestKind::MoveChat { chat_id, .. },
                     ..
                 } if chat_id == "chat-1"
@@ -2134,7 +2065,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-worktree-name-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2153,23 +2084,22 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon
-            .send_message(
-                "chat-1",
-                "fix the queue",
-                &[],
-                Some("claude"),
-                Some("claude-sonnet-5"),
-            )
-            .unwrap();
+        host.send_message(
+            "chat-1",
+            "fix the queue",
+            &[],
+            Some("claude"),
+            Some("claude-sonnet-5"),
+        )
+        .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::Send { chat_id, text },
                 ..
             } if chat_id == "chat-1" && text == "fix the queue"
@@ -2184,7 +2114,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-file-write-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2203,17 +2133,16 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon
-            .file_browse_write("chat-1", "src/main.rs", "before\n", "after\n", 12)
+        host.file_browse_write("chat-1", "src/main.rs", "before\n", "after\n", 12)
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::FileBrowseWrite {
                     chat_id,
                     path,
@@ -2229,11 +2158,11 @@ mod tests {
     }
 
     #[test]
-    fn requests_daemon_side_directories_for_remote_safe_browsing() {
+    fn requests_host_side_directories_for_remote_safe_browsing() {
         let directory = env::temp_dir().join(format!("xd-list-directory-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2248,15 +2177,15 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon.list_directory(Some("/srv/workspaces"), 14).unwrap();
+        host.list_directory(Some("/srv/workspaces"), 14).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::ListDirectory {
                     path: Some(path),
                     generation: 14,
@@ -2274,7 +2203,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-new-chat-workdir-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2327,21 +2256,20 @@ mod tests {
             }
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon
-            .new_chat(
-                "folder-1",
-                "Selected directory",
-                Some("/srv/workspaces/project"),
-            )
-            .unwrap();
+        host.new_chat(
+            "folder-1",
+            "Selected directory",
+            Some("/srv/workspaces/project"),
+        )
+        .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::NewChat {
                     folder_id,
                     title,
@@ -2352,12 +2280,11 @@ mod tests {
                 && title == "Selected directory"
                 && workdir == "/srv/workspaces/project"
         ));
-        daemon
-            .new_chat("folder-1", "Workspace default", None)
+        host.new_chat("folder-1", "Workspace default", None)
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::NewChat {
                     folder_id,
                     title,
@@ -2366,12 +2293,11 @@ mod tests {
                 ..
             } if folder_id == "folder-1" && title == "Workspace default"
         ));
-        daemon
-            .new_chat_with_backend("folder-1", "Direct Claude", None, "claude")
+        host.new_chat_with_backend("folder-1", "Direct Claude", None, "claude")
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::NewChat {
                     folder_id,
                     title,
@@ -2380,17 +2306,16 @@ mod tests {
                 ..
             } if folder_id == "folder-1" && title == "Direct Claude"
         ));
-        daemon
-            .new_chat_with_backend_in_worktree(
-                "folder-1",
-                "Fresh worktree",
-                "codex",
-                &NewSessionWorktree::New,
-            )
-            .unwrap();
+        host.new_chat_with_backend_in_worktree(
+            "folder-1",
+            "Fresh worktree",
+            "codex",
+            &NewSessionWorktree::New,
+        )
+        .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::NewChat {
                     folder_id,
                     title,
@@ -2399,17 +2324,16 @@ mod tests {
                 ..
             } if folder_id == "folder-1" && title == "Fresh worktree"
         ));
-        daemon
-            .new_chat_with_backend_in_worktree(
-                "folder-1",
-                "Existing worktree",
-                "claude",
-                &NewSessionWorktree::Existing("/srv/workspaces/feature".into()),
-            )
-            .unwrap();
+        host.new_chat_with_backend_in_worktree(
+            "folder-1",
+            "Existing worktree",
+            "claude",
+            &NewSessionWorktree::Existing("/srv/workspaces/feature".into()),
+        )
+        .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::NewChat {
                     folder_id,
                     title,
@@ -2428,7 +2352,7 @@ mod tests {
         let directory = env::temp_dir().join(format!("xd-secrets-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("daemon.sock");
+        let socket = directory.join("host.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -2448,23 +2372,22 @@ mod tests {
             writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
         });
 
-        let (daemon, updates) = DaemonHandle::connect(socket).unwrap();
+        let (host, updates) = HostHandle::connect(socket).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Connected { .. }
+            HostUpdate::Connected { .. }
         ));
-        daemon
-            .set_agent_secrets(
-                Some("folder-1"),
-                &[
-                    ("EXISTING".into(), None),
-                    ("NEW_TOKEN".into(), Some("private".into())),
-                ],
-            )
-            .unwrap();
+        host.set_agent_secrets(
+            Some("folder-1"),
+            &[
+                ("EXISTING".into(), None),
+                ("NEW_TOKEN".into(), Some("private".into())),
+            ],
+        )
+        .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
-            DaemonUpdate::Reply {
+            HostUpdate::Reply {
                 kind: RequestKind::SetAgentSecrets { folder_id },
                 ..
             } if folder_id.as_deref() == Some("folder-1")
@@ -2472,26 +2395,6 @@ mod tests {
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
-    }
-
-    #[test]
-    fn default_socket_uses_the_production_data_root() {
-        assert_eq!(
-            socket_candidates_for(PathBuf::from("/data"), None, None),
-            vec![PathBuf::from("/data/xd/daemon.sock")]
-        );
-        assert_eq!(
-            socket_candidates_for(
-                PathBuf::from("/data"),
-                Some("/run/custom.sock".into()),
-                None,
-            ),
-            vec![PathBuf::from("/run/custom.sock")]
-        );
-        assert_eq!(
-            socket_candidates_for(PathBuf::from("/data"), None, Some("preview".into())),
-            vec![PathBuf::from("/data/preview/daemon.sock")]
-        );
     }
 
     #[test]

@@ -56,7 +56,6 @@ FROM gpui-toolchain AS gpui-desktop-source
 
 WORKDIR /src/desktop
 COPY desktop/Cargo.toml desktop/Cargo.lock ./
-COPY desktop/build.rs ./build.rs
 COPY terminal-core/Cargo.toml /src/terminal-core/Cargo.toml
 RUN mkdir -p src /src/terminal-core/src \
  && touch src/lib.rs /src/terminal-core/src/lib.rs \
@@ -73,16 +72,6 @@ RUN cargo fmt --check \
  && cargo test --locked \
  && touch /gpui-tests-passed
 
-FROM gpui-desktop-source AS gpui-desktop-windows-check
-
-RUN apt-get update \
- && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
- && rm -rf /var/lib/apt/lists/* \
- && rustup target add x86_64-pc-windows-gnu
-
-RUN cargo check --locked --target x86_64-pc-windows-gnu \
- && touch /gpui-windows-check-passed
-
 FROM gpui-desktop-source AS gpui-desktop-release
 
 ARG COMMIT=development
@@ -92,36 +81,26 @@ ENV XD_COMMIT=$XD_COMMIT
 RUN cargo build --locked --release \
  && test -x target/release/xd-desktop
 
-FROM gpui-toolchain AS rust-daemon-source
+FROM gpui-toolchain AS rust-host-source
 
-WORKDIR /src/daemon-rs
-COPY daemon-rs/Cargo.toml daemon-rs/Cargo.lock ./
+WORKDIR /src/host
+COPY host/Cargo.toml host/Cargo.lock ./
 COPY terminal-core/Cargo.toml /src/terminal-core/Cargo.toml
 RUN mkdir -p src /src/terminal-core/src \
  && touch src/lib.rs /src/terminal-core/src/lib.rs \
  && cargo fetch --locked \
  && rm -rf src /src/terminal-core/src
 COPY terminal-core/src /src/terminal-core/src
-COPY daemon-rs/src ./src
+COPY host/src ./src
 COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl tests/fixtures/claude-stream.jsonl /src/tests/fixtures/
 
-FROM rust-daemon-source AS rust-daemon-tests
+FROM rust-host-source AS rust-host-tests
 
 RUN cargo fmt --check \
  && cargo test --locked \
- && touch /rust-daemon-tests-passed
+ && touch /rust-host-tests-passed
 
-FROM rust-daemon-source AS rust-daemon-windows-check
-
-RUN apt-get update \
- && apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 \
- && rm -rf /var/lib/apt/lists/* \
- && rustup target add x86_64-pc-windows-gnu
-
-RUN cargo build --locked --target x86_64-pc-windows-gnu \
- && touch /rust-daemon-windows-check-passed
-
-FROM rust-daemon-source AS rust-daemon-release
+FROM rust-host-source AS rust-host-release
 
 ARG COMMIT=development
 ARG XD_COMMIT=$COMMIT
@@ -134,11 +113,9 @@ FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7
 
 COPY --from=terminal-core-tests /terminal-core-tests-passed /terminal-core-tests-passed
 COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
-COPY --from=gpui-desktop-windows-check /gpui-windows-check-passed /gpui-windows-check-passed
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
-COPY --from=rust-daemon-tests /rust-daemon-tests-passed /rust-daemon-tests-passed
-COPY --from=rust-daemon-windows-check /rust-daemon-windows-check-passed /rust-daemon-windows-check-passed
-COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-host /xd-host
+COPY --from=rust-host-tests /rust-host-tests-passed /rust-host-tests-passed
+COPY --from=rust-host-release /src/host/target/release/xd-host /xd-host
 
 # --- bundle runtime closure ------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS bundle-tools
@@ -162,7 +139,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsqlite3-dev \
       libssl-dev \
       libvulkan1 \
-      mesa-vulkan-drivers \
       libwayland-client0 \
       libx11-data \
       libx11-xcb1 \
@@ -195,7 +171,7 @@ COPY scripts/openssl.sh /stage/usr/libexec/openssl
 RUN install -m0755 /usr/bin/tmux /stage/usr/libexec/tmux \
  && install -Dm0644 /usr/share/doc/tmux/copyright /stage/usr/share/licenses/tmux-LICENSE
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
-COPY --from=rust-daemon-release /src/daemon-rs/target/release/xd-host /stage/usr/libexec/xd-host
+COPY --from=rust-host-release /src/host/target/release/xd-host /stage/usr/libexec/xd-host
 
 RUN set -eux; \
     test "$PROFILE" = default || test "$PROFILE" = nightly; \
@@ -214,6 +190,9 @@ RUN set -eux; \
     install -m0644 \
       data/fonts/DMSans-Variable.ttf \
       /stage/usr/share/fonts/xd/DMSans-Variable.ttf; \
+    install -m0644 \
+      data/licenses/alacritty-terminal-LICENSE-APACHE \
+      /stage/usr/share/licenses/xd/alacritty-terminal-LICENSE-APACHE; \
     sed \
       -e "s|@APP_ID@|$app_id|g" \
       -e "s|@APP_NAME@|$app_name|g" \
