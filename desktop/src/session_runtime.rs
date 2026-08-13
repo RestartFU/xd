@@ -296,6 +296,7 @@ enum ActivityState {
 struct ActivityParser {
     state: ActivityState,
     payload: Vec<u8>,
+    working: Option<bool>,
 }
 
 impl ActivityParser {
@@ -337,7 +338,14 @@ impl ActivityParser {
             .strip_prefix(b"0;")
             .and_then(|title| match title {
                 b"Ready" => Some(false),
+                title if title == "✳ Claude Code".as_bytes() => Some(false),
                 b"Working" | b"Thinking" | b"Waiting" | b"Starting" => Some(true),
+                title
+                    if title == "◐ Claude Code".as_bytes()
+                        || title == "◑ Claude Code".as_bytes() =>
+                {
+                    Some(true)
+                }
                 _ => None,
             })
             .or_else(|| {
@@ -350,7 +358,10 @@ impl ActivityParser {
                     })
                     .flatten()
             });
-        if let Some(update) = update {
+        if let Some(update) = update
+            && self.working != Some(update)
+        {
+            self.working = Some(update);
             updates.push(update);
         }
         self.payload.clear();
@@ -391,6 +402,27 @@ mod tests {
         assert_eq!(parser.feed(b"\x1b]0;Ready\x1b\\"), vec![false]);
         assert_eq!(parser.feed(b"\x1b]9;4;3;42\x07"), vec![true]);
         assert_eq!(parser.feed(b"\x1b]9;4;0;\x07"), vec![false]);
+    }
+
+    #[test]
+    fn claude_background_agent_spinner_titles_are_working() {
+        let mut parser = ActivityParser::default();
+        assert_eq!(
+            parser.feed("\x1b]0;✳ Claude Code\x07".as_bytes()),
+            vec![false]
+        );
+        assert_eq!(
+            parser.feed("\x1b]0;◐ Claude Code\x07".as_bytes()),
+            vec![true]
+        );
+        assert_eq!(
+            parser.feed("\x1b]0;◑ Claude Code\x07".as_bytes()),
+            Vec::<bool>::new()
+        );
+        assert_eq!(
+            parser.feed("\x1b]0;✳ Claude Code\x07".as_bytes()),
+            vec![false]
+        );
     }
 
     #[test]
