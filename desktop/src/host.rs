@@ -20,6 +20,7 @@ use crate::model::Attachment;
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
+const PROCESS_STDERR_LIMIT: usize = 8 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageCursor {
@@ -339,7 +340,9 @@ impl HostHandle {
             .stdout
             .take()
             .ok_or_else(|| ConnectError::Start("host stdout is unavailable".into()))?;
-        let (handle, updates) = Self::connect_io(reader, writer, identity);
+        let process_errors = child.stderr.take().map(capture_process_errors);
+        let (handle, updates) =
+            Self::connect_io_with_errors(reader, writer, identity, process_errors);
         Ok((handle, updates, StartedHost { child }))
     }
 
@@ -348,12 +351,21 @@ impl HostHandle {
         writer: impl Write + Send + 'static,
         identity: PathBuf,
     ) -> (Self, Receiver<HostUpdate>) {
+        Self::connect_io_with_errors(reader, writer, identity, None)
+    }
+
+    fn connect_io_with_errors(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        identity: PathBuf,
+        process_errors: Option<Arc<Mutex<Vec<u8>>>>,
+    ) -> (Self, Receiver<HostUpdate>) {
         let (command_tx, command_rx) = mpsc::channel();
         let (update_tx, update_rx) = async_channel::bounded(1024);
         let pending = Arc::new(Mutex::new(HashMap::new()));
 
         spawn_writer(writer, command_rx, update_tx.clone(), pending.clone());
-        spawn_reader(reader, update_tx.clone(), pending);
+        spawn_reader(reader, update_tx.clone(), pending, process_errors);
         let _ = update_tx.try_send(HostUpdate::Connected { path: identity });
 
         (
@@ -1491,6 +1503,7 @@ fn spawn_reader(
     stream: impl Read + Send + 'static,
     updates: Sender<HostUpdate>,
     pending: Arc<Mutex<HashMap<u64, RequestKind>>>,
+    process_errors: Option<Arc<Mutex<Vec<u8>>>>,
 ) {
     thread::Builder::new()
         .name("xd-host-reader".into())
@@ -1504,7 +1517,13 @@ fn spawn_reader(
                     .read_until(b'\n', &mut line);
                 match read {
                     Ok(0) => {
-                        disconnect(&updates, "xd host closed the connection".into());
+                        disconnect(
+                            &updates,
+                            with_process_errors(
+                                "xd host closed the connection",
+                                process_errors.as_ref(),
+                            ),
+                        );
                         return;
                     }
                     Ok(_) => {}
@@ -1569,6 +1588,42 @@ fn spawn_reader(
             }
         })
         .expect("spawn xd host reader");
+}
+
+fn capture_process_errors(mut stream: impl Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> {
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let destination = errors.clone();
+    let _ = thread::Builder::new()
+        .name("xd-host-errors".into())
+        .spawn(move || {
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let count = match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(count) => count,
+                };
+                if let Ok(mut destination) = destination.lock() {
+                    destination.extend_from_slice(&buffer[..count]);
+                    if destination.len() > PROCESS_STDERR_LIMIT {
+                        let excess = destination.len() - PROCESS_STDERR_LIMIT;
+                        destination.drain(..excess);
+                    }
+                }
+            }
+        });
+    errors
+}
+
+fn with_process_errors(message: &str, errors: Option<&Arc<Mutex<Vec<u8>>>>) -> String {
+    let Some(error) = errors
+        .and_then(|errors| errors.lock().ok())
+        .filter(|errors| !errors.is_empty())
+        .map(|errors| String::from_utf8_lossy(&errors).trim().to_owned())
+        .filter(|error| !error.is_empty())
+    else {
+        return message.to_owned();
+    };
+    format!("{message}: {error}")
 }
 
 fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachment>> {

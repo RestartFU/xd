@@ -3221,6 +3221,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             )));
         }
         if version > 0 {
+            ensure_chat_host_working_column(database)?;
             ensure_chat_session_context_columns(database)?;
             ensure_chat_partial_reply_columns(database)?;
             ensure_workspace_sort_order(database)?;
@@ -3305,11 +3306,43 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
         [],
     )?;
     transaction.commit()?;
+    ensure_chat_host_working_column(database)?;
     ensure_chat_session_context_columns(database)?;
     ensure_chat_partial_reply_columns(database)?;
     ensure_workspace_sort_order(database)?;
     ensure_chat_sort_order(database)?;
     disable_claude_mode(database)?;
+    Ok(())
+}
+
+fn ensure_chat_host_working_column(database: &Connection) -> Result<(), StorageError> {
+    let has_chats: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chats')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_chats {
+        return Ok(());
+    }
+    let mut statement = database.prepare("PRAGMA table_info(chats)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
+    if columns.contains("host_working") {
+        return Ok(());
+    }
+    if columns.contains("daemon_working") {
+        database.execute(
+            "ALTER TABLE chats RENAME COLUMN daemon_working TO host_working",
+            [],
+        )?;
+    } else {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN host_working INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -7955,6 +7988,38 @@ mod tests {
                 .to_string()
                 .contains("needs a device id")
         );
+    }
+
+    #[test]
+    fn renames_the_pre_host_refactor_working_column() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        database
+            .execute(
+                "ALTER TABLE chats RENAME COLUMN host_working TO daemon_working",
+                [],
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', '24')",
+                [],
+            )
+            .unwrap();
+        drop(database);
+
+        StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        let columns = database
+            .prepare("PRAGMA table_info(chats)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<HashSet<_>, _>>()
+            .unwrap();
+        assert!(columns.contains("host_working"));
+        assert!(!columns.contains("daemon_working"));
     }
 
     struct Fixture {
