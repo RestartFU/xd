@@ -66,7 +66,7 @@ pub fn connect_ssh(command: &SshCommand) -> Result<SshRemoteSession, RemoteError
 }
 
 fn ssh_base_arguments(command: &SshCommand) -> Vec<String> {
-    let mut arguments = command.options().to_vec();
+    let mut arguments = command.connection_options();
     arguments.extend([
         "-o".into(),
         "BatchMode=yes".into(),
@@ -286,6 +286,12 @@ mod tests {
                 "-o",
                 "ServerAliveInterval=15",
                 "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPersist=10m",
+                "-o",
+                "ControlPath=~/.ssh/xd-%C",
+                "-o",
                 "BatchMode=yes",
                 "-o",
                 "ConnectTimeout=10",
@@ -303,6 +309,12 @@ mod tests {
                 "keys/zeno mc".into(),
                 "-o".into(),
                 "ServerAliveInterval=15".into(),
+                "-o".into(),
+                "ControlMaster=auto".into(),
+                "-o".into(),
+                "ControlPersist=10m".into(),
+                "-o".into(),
+                "ControlPath=~/.ssh/xd-%C".into(),
                 "-o".into(),
                 "BatchMode=yes".into(),
                 "-o".into(),

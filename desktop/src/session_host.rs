@@ -243,11 +243,27 @@ impl SshCommand {
     }
 
     pub fn connection_arguments(&self) -> Vec<String> {
-        self.options
-            .iter()
-            .cloned()
-            .chain(["--".to_owned(), self.destination.clone()])
-            .collect()
+        let mut arguments = self.connection_options();
+        arguments.extend(["--".to_owned(), self.destination.clone()]);
+        arguments
+    }
+
+    pub fn connection_options(&self) -> Vec<String> {
+        let mut arguments = self.options.clone();
+        if !has_ssh_config_option(&arguments, "ControlMaster") {
+            arguments.extend(["-o".into(), "ControlMaster=auto".into()]);
+        }
+        if !has_ssh_config_option(&arguments, "ControlPersist") {
+            arguments.extend(["-o".into(), "ControlPersist=10m".into()]);
+        }
+        if !has_ssh_config_option(&arguments, "ControlPath")
+            && !arguments
+                .iter()
+                .any(|argument| argument == "-S" || argument.starts_with("-S"))
+        {
+            arguments.extend(["-o".into(), "ControlPath=~/.ssh/xd-%C".into()]);
+        }
+        arguments
     }
 
     pub fn options(&self) -> &[String] {
@@ -257,6 +273,19 @@ impl SshCommand {
     pub fn destination(&self) -> &str {
         &self.destination
     }
+}
+
+fn has_ssh_config_option(arguments: &[String], name: &str) -> bool {
+    arguments.iter().enumerate().any(|(index, argument)| {
+        let option = if argument == "-o" {
+            arguments.get(index + 1).map(String::as_str)
+        } else {
+            argument.strip_prefix("-o")
+        };
+        option
+            .and_then(|option| option.split('=').next())
+            .is_some_and(|option| option.eq_ignore_ascii_case(name))
+    })
 }
 
 struct SshOption<'a> {
@@ -407,7 +436,7 @@ impl SessionHost {
                         )
                     ),
                 );
-                let mut arguments = command.options.clone();
+                let mut arguments = command.connection_options();
                 arguments.extend([
                     "-tt".to_owned(),
                     "--".to_owned(),
@@ -442,7 +471,7 @@ impl SessionHost {
                     crate::channel::data_name().to_string_lossy(),
                     shell_quote(&session),
                 );
-                let mut arguments = command.options.clone();
+                let mut arguments = command.connection_options();
                 arguments.extend(["--".to_owned(), command.destination.clone(), remote]);
                 ProcessSpec::new(&command.program, arguments)
             }
@@ -675,10 +704,95 @@ mod tests {
                 "keys/zeno mc",
                 "-o",
                 "ServerAliveInterval=15",
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPersist=10m",
+                "-o",
+                "ControlPath=~/.ssh/xd-%C",
                 "--",
                 "zenomc.org",
             ]
         );
+    }
+
+    #[test]
+    fn ssh_connections_are_multiplexed_across_host_and_terminal_processes() {
+        let command = SshCommand::parse("ssh -p 2222 user@example.com").unwrap();
+        let arguments = command.connection_arguments();
+
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| { pair == ["-o", "ControlMaster=auto"] })
+        );
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| { pair == ["-o", "ControlPersist=10m"] })
+        );
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| { pair == ["-o", "ControlPath=~/.ssh/xd-%C"] })
+        );
+    }
+
+    #[test]
+    fn explicit_ssh_multiplexing_options_are_not_overridden() {
+        let command = SshCommand::parse(
+            "ssh -o ControlMaster=no -oControlPersist=1m -S~/.ssh/custom-%C host",
+        )
+        .unwrap();
+        let arguments = command.connection_arguments();
+
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| argument.contains("ControlMaster="))
+                .count(),
+            1
+        );
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| argument.contains("ControlPersist="))
+                .count(),
+            1
+        );
+        assert!(!arguments.iter().any(|argument| argument.contains("xd-%C")));
+    }
+
+    #[test]
+    fn remote_terminal_attach_and_cleanup_use_persisted_ssh_connection_options() {
+        let host = SessionHost::ssh(
+            SshCommand::parse("ssh user@example.com").unwrap(),
+            ".local/share/xd/sessions",
+        );
+        let attach = host.attach(
+            "terminal",
+            Path::new("/workspace"),
+            &AgentCommand::user_shell(),
+        );
+        let cleanup = host.kill_process("terminal");
+
+        for spec in [attach, cleanup] {
+            assert!(
+                spec.arguments
+                    .windows(2)
+                    .any(|pair| pair == ["-o", "ControlMaster=auto"])
+            );
+            assert!(
+                spec.arguments
+                    .windows(2)
+                    .any(|pair| pair == ["-o", "ControlPersist=10m"])
+            );
+            assert!(
+                spec.arguments
+                    .windows(2)
+                    .any(|pair| pair == ["-o", "ControlPath=~/.ssh/xd-%C"])
+            );
+        }
     }
 
     #[test]
@@ -1011,11 +1125,24 @@ mod tests {
         );
 
         assert_eq!(spec.program, PathBuf::from("ssh"));
-        assert_eq!(
-            &spec.arguments[..5],
-            ["-p", "22", "-tt", "--", "zenomc.org"]
+        assert_eq!(&spec.arguments[..2], ["-p", "22"]);
+        for option in [
+            "ControlMaster=auto",
+            "ControlPersist=10m",
+            "ControlPath=~/.ssh/xd-%C",
+        ] {
+            assert!(
+                spec.arguments.windows(2).any(|pair| pair == ["-o", option]),
+                "missing {option}: {:?}",
+                spec.arguments
+            );
+        }
+        assert!(
+            spec.arguments
+                .windows(3)
+                .any(|args| args == ["-tt", "--", "zenomc.org"])
         );
-        let remote = &spec.arguments[5];
+        let remote = spec.arguments.last().unwrap();
         assert!(remote.contains("mkdir -p \"$RUNTIME/agent-sessions\""));
         assert!(
             !remote.contains("[ -f \"$CONF\" ]"),

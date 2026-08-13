@@ -60,6 +60,7 @@ pub(crate) enum MinimalRoute {
     Sessions {
         project_id: Option<String>,
     },
+    Terminal,
     Cli {
         project_id: String,
         chat_id: String,
@@ -167,6 +168,7 @@ pub(crate) fn reconcile_route(
                 .filter(|project_id| folders.iter().any(|folder| &folder.id == *project_id))
                 .cloned(),
         },
+        MinimalRoute::Terminal => MinimalRoute::Terminal,
         MinimalRoute::Cli {
             project_id,
             chat_id,
@@ -395,6 +397,14 @@ mod tests {
         assert_eq!(
             reconcile_route(&route, &[], &chats),
             MinimalRoute::default()
+        );
+    }
+
+    #[test]
+    fn terminal_route_survives_tree_reconciliation() {
+        assert_eq!(
+            reconcile_route(&MinimalRoute::Terminal, &[], &[]),
+            MinimalRoute::Terminal
         );
     }
 }

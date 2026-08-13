@@ -122,6 +122,8 @@ enum RequestedNewChatWorktree<'a> {
     Default,
     Existing(&'a str),
     New,
+    Branch { reference: &'a str, oid: &'a str },
+    PullRequest { number: u64, oid: &'a str },
 }
 
 impl MaterializedMessage {
@@ -975,6 +977,88 @@ impl StateStore {
             "inherited_model_from": inherited.model_from,
             "inherited_workdir_from": inherited.workdir_from,
             "inherited_repo_from": inherited.repo_from,
+        }))
+    }
+
+    pub fn new_chat_sources(&self, request: &Value) -> Result<Value, StorageError> {
+        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let workdir = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            resolve_workdir(&database, &self.workspace_root, folder_id, None, None)?
+        };
+        let root = git_repository_root(&workdir)?;
+        let branch_output = run_git(
+            &root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)%09%(objectname)%09%(refname:short)",
+                "refs/heads",
+                "refs/remotes",
+            ],
+        )?;
+        if !branch_output.0.success() {
+            return Err(StorageError::InvalidRequest(command_error(
+                &branch_output.2,
+                "git could not list branches",
+            )));
+        }
+        let branches = String::from_utf8_lossy(&branch_output.1)
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let reference = fields.next()?;
+                let oid = fields.next()?;
+                let name = fields.next()?;
+                (!reference.ends_with("/HEAD") && valid_git_oid(oid))
+                    .then(|| json!({"name": name, "reference": reference, "oid": oid}))
+            })
+            .collect::<Vec<_>>();
+
+        let pull_request_output = run_gh(
+            &root,
+            &[
+                "pr",
+                "list",
+                "--state",
+                "open",
+                "--limit",
+                "100",
+                "--json",
+                "number,title,headRefOid",
+            ],
+        );
+        let (pull_requests, pull_request_error) = match pull_request_output {
+            Ok((status, stdout, _)) if status.success() => {
+                let parsed = serde_json::from_slice::<Value>(&stdout)
+                    .ok()
+                    .and_then(|value| value.as_array().cloned())
+                    .unwrap_or_default();
+                let pull_requests = parsed
+                    .into_iter()
+                    .filter_map(|value| {
+                        let number = value.get("number")?.as_u64()?;
+                        let title = value.get("title")?.as_str()?;
+                        let oid = value.get("headRefOid")?.as_str()?;
+                        valid_git_oid(oid)
+                            .then(|| json!({"number": number, "title": title, "oid": oid}))
+                    })
+                    .collect::<Vec<_>>();
+                (pull_requests, None)
+            }
+            Ok((_, _, stderr)) => (
+                Vec::new(),
+                Some(command_error(
+                    &stderr,
+                    "GitHub CLI could not list pull requests",
+                )),
+            ),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+        Ok(json!({
+            "ok": true,
+            "branches": branches,
+            "pull_requests": pull_requests,
+            "pull_request_error": pull_request_error,
         }))
     }
 
@@ -2875,7 +2959,42 @@ impl StateStore {
             RequestedNewChatWorktree::New => {
                 let source =
                     resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                let created = create_worktree(&transaction, &source, &id, Some(title))?;
+                let created = create_worktree(&transaction, &source, &id, Some(title), None)?;
+                (Some(created), Some(source))
+            }
+            RequestedNewChatWorktree::Branch { reference, oid } => {
+                let source =
+                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                let root = git_repository_root(&source)?;
+                let resolved = git_resolve_commit(&root, reference)?;
+                if resolved != oid {
+                    return Err(StorageError::InvalidRequest(
+                        "That branch changed after it was selected. Refresh and try again.".into(),
+                    ));
+                }
+                let created = create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
+                (Some(created), Some(source))
+            }
+            RequestedNewChatWorktree::PullRequest { number, oid } => {
+                let source =
+                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                let root = git_repository_root(&source)?;
+                let reference = format!("refs/pull/{number}/head");
+                let fetched = run_git(&root, &["fetch", "origin", &reference])?;
+                if !fetched.0.success() {
+                    return Err(StorageError::InvalidRequest(command_error(
+                        &fetched.2,
+                        "git could not fetch that pull request",
+                    )));
+                }
+                let resolved = git_resolve_commit(&root, "FETCH_HEAD")?;
+                if resolved != oid {
+                    return Err(StorageError::InvalidRequest(
+                        "That pull request changed after it was selected. Refresh and try again."
+                            .into(),
+                    ));
+                }
+                let created = create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
                 (Some(created), Some(source))
             }
         };
@@ -4178,6 +4297,7 @@ fn create_worktree(
     workdir: &str,
     chat_id: &str,
     name_hint: Option<&str>,
+    start: Option<&str>,
 ) -> Result<String, StorageError> {
     let root = git_repository_root(workdir)?;
     let worktrees = list_git_worktrees(&root)?;
@@ -4235,7 +4355,17 @@ fn create_worktree(
             let result = if branch_exists {
                 run_git(&root, &["worktree", "add", target, &branch])?
             } else {
-                run_git(&root, &["worktree", "add", "-b", &branch, target, "HEAD"])?
+                run_git(
+                    &root,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        &branch,
+                        target,
+                        start.unwrap_or("HEAD"),
+                    ],
+                )?
             };
             if !result.0.success() {
                 let message = String::from_utf8_lossy(&result.2).trim().to_owned();
@@ -4293,6 +4423,37 @@ fn git_repository_root(workdir: &str) -> Result<PathBuf, StorageError> {
         ));
     }
     Ok(PathBuf::from(normalize_existing_path(Path::new(root))))
+}
+
+fn valid_git_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn command_error(stderr: &[u8], fallback: &str) -> String {
+    let message = String::from_utf8_lossy(stderr).trim().to_owned();
+    if message.is_empty() {
+        fallback.to_owned()
+    } else {
+        message
+    }
+}
+
+fn git_resolve_commit(root: &Path, reference: &str) -> Result<String, StorageError> {
+    let revision = format!("{reference}^{{commit}}");
+    let output = run_git(root, &["rev-parse", "--verify", &revision])?;
+    if !output.0.success() {
+        return Err(StorageError::InvalidRequest(command_error(
+            &output.2,
+            "The selected Git revision no longer exists",
+        )));
+    }
+    let oid = String::from_utf8_lossy(&output.1).trim().to_owned();
+    if !valid_git_oid(&oid) {
+        return Err(StorageError::InvalidRequest(
+            "Git returned an invalid commit for the selected source.".into(),
+        ));
+    }
+    Ok(oid)
 }
 
 fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
@@ -4383,7 +4544,8 @@ fn run_gh(
     workdir: &Path,
     arguments: &[&str],
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
-    let mut command = Command::new("gh");
+    let executable = env::var_os("XD_GH_EXECUTABLE").unwrap_or_else(|| "gh".into());
+    let mut command = Command::new(executable);
     command
         .args(arguments)
         .current_dir(workdir)
@@ -5246,6 +5408,7 @@ fn prepare_turn(
             &source,
             chat_id,
             worktree_name.or_else(|| text.lines().find(|line| !line.trim().is_empty())),
+            None,
         )?;
         let changed = transaction.execute(
             "UPDATE chats SET workdir = ?, original_workdir = COALESCE(original_workdir, ?), \
@@ -5487,8 +5650,44 @@ fn requested_new_chat_worktree(
             .ok_or_else(|| {
                 StorageError::InvalidRequest("An existing worktree path is required.".into())
             }),
+        Some("branch") => {
+            let reference = object
+                .get("ref")
+                .and_then(Value::as_str)
+                .filter(|reference| {
+                    reference.starts_with("refs/heads/") || reference.starts_with("refs/remotes/")
+                })
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("A full branch ref is required.".into())
+                })?;
+            let oid = object
+                .get("oid")
+                .and_then(Value::as_str)
+                .filter(|oid| valid_git_oid(oid))
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("A valid branch commit is required.".into())
+                })?;
+            Ok(RequestedNewChatWorktree::Branch { reference, oid })
+        }
+        Some("pull-request") => {
+            let number = object
+                .get("number")
+                .and_then(Value::as_u64)
+                .filter(|number| *number > 0)
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("A pull request number is required.".into())
+                })?;
+            let oid = object
+                .get("oid")
+                .and_then(Value::as_str)
+                .filter(|oid| valid_git_oid(oid))
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("A valid pull request commit is required.".into())
+                })?;
+            Ok(RequestedNewChatWorktree::PullRequest { number, oid })
+        }
         _ => Err(StorageError::InvalidRequest(
-            "A new chat worktree kind must be new or existing.".into(),
+            "A new chat worktree kind must be new, existing, branch, or pull-request.".into(),
         )),
     }
 }
@@ -7617,6 +7816,86 @@ mod tests {
         );
         assert!(
             Command::new("git")
+                .args(["switch", "-c", "feature/source-selection"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repository.join("FEATURE.md"), "branch source\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "FEATURE.md"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "feature source"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let feature_oid = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repository)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        assert!(
+            Command::new("git")
+                .args(["switch", "main"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let remote = fixture.root.join("remote.git");
+        assert!(
+            Command::new("git")
+                .args(["init", "--bare", remote.to_str().unwrap()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["remote", "add", "origin", remote.to_str().unwrap()])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["push", "origin", "main"])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "push",
+                    "origin",
+                    "feature/source-selection:refs/pull/42/head",
+                ])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
                 .args([
                     "worktree",
                     "add",
@@ -7658,6 +7937,63 @@ mod tests {
                     worktree["path"] == normalize_existing_path(&existing)
                         && worktree["branch"] == "existing"
                 })
+        );
+        let sources = store.new_chat_sources(&json!({"folder": "repo"})).unwrap();
+        assert!(
+            sources["branches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|branch| {
+                    branch["reference"] == "refs/heads/feature/source-selection"
+                        && branch["oid"] == feature_oid
+                })
+        );
+
+        let from_branch = store
+            .new_chat(&json!({
+                "folder": "repo",
+                "title": "From branch",
+                "worktree": {
+                    "kind": "branch",
+                    "ref": "refs/heads/feature/source-selection",
+                    "oid": feature_oid,
+                },
+            }))
+            .unwrap();
+        let from_branch = store.chat(from_branch["id"].as_str().unwrap()).unwrap();
+        let from_branch_path = PathBuf::from(from_branch["workdir"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(from_branch_path.join("FEATURE.md")).unwrap(),
+            "branch source\n"
+        );
+        assert_eq!(
+            git_resolve_commit(&from_branch_path, "HEAD").unwrap(),
+            feature_oid
+        );
+
+        let from_pull_request = store
+            .new_chat(&json!({
+                "folder": "repo",
+                "title": "From pull request",
+                "worktree": {
+                    "kind": "pull-request",
+                    "number": 42,
+                    "oid": feature_oid,
+                },
+            }))
+            .unwrap();
+        let from_pull_request = store
+            .chat(from_pull_request["id"].as_str().unwrap())
+            .unwrap();
+        let from_pull_request_path = PathBuf::from(from_pull_request["workdir"].as_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(from_pull_request_path.join("FEATURE.md")).unwrap(),
+            "branch source\n"
+        );
+        assert_eq!(
+            git_resolve_commit(&from_pull_request_path, "HEAD").unwrap(),
+            feature_oid
         );
 
         let selected = store

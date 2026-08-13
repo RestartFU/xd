@@ -33,6 +33,8 @@ pub enum MessageCursor {
 pub enum NewSessionWorktree {
     New,
     Existing(String),
+    Branch { reference: String, oid: String },
+    PullRequest { number: u64, oid: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,6 +178,9 @@ pub enum RequestKind {
         context: Option<String>,
     },
     FolderSettings {
+        folder_id: String,
+    },
+    NewChatSources {
         folder_id: String,
     },
     SetFolderSettings {
@@ -561,6 +566,15 @@ impl HostHandle {
         )
     }
 
+    pub fn new_chat_sources(&self, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::NewChatSources {
+                folder_id: folder_id.to_owned(),
+            },
+            json!({"op": "new-chat-sources", "folder": folder_id}),
+        )
+    }
+
     pub fn set_folder_settings(
         &self,
         folder_id: &str,
@@ -673,6 +687,12 @@ impl HostHandle {
                 NewSessionWorktree::New => json!({"kind": "new"}),
                 NewSessionWorktree::Existing(path) => {
                     json!({"kind": "existing", "path": path})
+                }
+                NewSessionWorktree::Branch { reference, oid } => {
+                    json!({"kind": "branch", "ref": reference, "oid": oid})
+                }
+                NewSessionWorktree::PullRequest { number, oid } => {
+                    json!({"kind": "pull-request", "number": number, "oid": oid})
                 }
             };
         }
@@ -2336,6 +2356,26 @@ mod tests {
                         "path": "/srv/workspaces/feature",
                     })),
                 ),
+                (
+                    "Branch worktree",
+                    None,
+                    Some("codex"),
+                    Some(json!({
+                        "kind": "branch",
+                        "ref": "refs/remotes/origin/feature",
+                        "oid": "0123456789abcdef0123456789abcdef01234567",
+                    })),
+                ),
+                (
+                    "Pull request worktree",
+                    None,
+                    Some("copilot"),
+                    Some(json!({
+                        "kind": "pull-request",
+                        "number": 42,
+                        "oid": "89abcdef0123456789abcdef0123456789abcdef",
+                    })),
+                ),
             ] {
                 let mut request = String::new();
                 reader.read_line(&mut request).unwrap();
@@ -2445,6 +2485,40 @@ mod tests {
                 },
                 ..
             } if folder_id == "folder-1" && title == "Existing worktree"
+        ));
+        host.new_chat_with_backend_in_worktree(
+            "folder-1",
+            "Branch worktree",
+            "codex",
+            &NewSessionWorktree::Branch {
+                reference: "refs/remotes/origin/feature".into(),
+                oid: "0123456789abcdef0123456789abcdef01234567".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::NewChat { title, .. },
+                ..
+            } if title == "Branch worktree"
+        ));
+        host.new_chat_with_backend_in_worktree(
+            "folder-1",
+            "Pull request worktree",
+            "copilot",
+            &NewSessionWorktree::PullRequest {
+                number: 42,
+                oid: "89abcdef0123456789abcdef0123456789abcdef".into(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::NewChat { title, .. },
+                ..
+            } if title == "Pull request worktree"
         ));
 
         server.join().unwrap();

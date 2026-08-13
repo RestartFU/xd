@@ -231,6 +231,7 @@ boundary, not an event cursor.
 |---|---|---|
 | `folder-context` | `folder: string` | `context: string \| null` |
 | `folder-settings` | `folder: string` | inherited folder settings |
+| `new-chat-sources` | `folder: string` | `branches:[{name,reference,oid}]`, `pull_requests:[{number,title,oid}]`, optional `pull_request_error`; branch discovery works without GitHub CLI |
 | `shortcuts` | optional `folder: string` | host-wide `global`, folder-owned `workspace`, and merged `effective` prompt arrays |
 | `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to host home, lists non-hidden directories |
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
@@ -256,14 +257,16 @@ acting at once are therefore ordered by the host rather than racing.
 ### `new-chat`
 
 ```json
-{"op":"new-chat","folder":"folder-1","title":"Optional","workdir":"/optional/path"}
+{"op":"new-chat","folder":"folder-1","title":"Optional","worktree":{"kind":"branch","ref":"refs/heads/feature","oid":"0123456789abcdef0123456789abcdef01234567"}}
 {"ok":true,"id":"chat-9"}
 ```
 
 `folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
-its folder's backend and model. When `workdir` is omitted it also inherits the
-folder's effective working directory; a supplied path selects a per-chat
-working directory on the host machine.
+its folder's backend and model. `worktree` may select `new`, an `existing` path,
+a full local or remote-tracking branch ref plus its listed commit, or a pull
+request number plus its listed head commit. Branch and pull request selections
+create an isolated managed `xd/*` worktree and are revalidated before checkout.
+The legacy `workdir` field remains supported when `worktree` is omitted.
 
 ### `set-shortcuts`
 

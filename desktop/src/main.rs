@@ -338,6 +338,7 @@ enum PendingTerminalEvent {
 
 struct TerminalPanel {
     chat_id: String,
+    workdir: Option<String>,
     agent: Option<AgentCli>,
     allow_agent_tabs: bool,
     sessions: Vec<TerminalTab>,
@@ -715,6 +716,37 @@ fn connection_state_key(endpoint: ChatEndpoint, remote: Option<&str>) -> String 
     }
 }
 
+fn global_terminal_panel_id(connection_key: &str) -> String {
+    format!("global:{connection_key}")
+}
+
+fn terminal_event_endpoint_for_chat(
+    chat_id: &str,
+    active_endpoint: ChatEndpoint,
+    active_has_chat: bool,
+    inactive_has_chat: bool,
+    remote_key: Option<&str>,
+) -> ChatEndpoint {
+    if chat_id == global_terminal_panel_id(&connection_state_key(ChatEndpoint::Local, remote_key)) {
+        return ChatEndpoint::Local;
+    }
+    if chat_id == global_terminal_panel_id(&connection_state_key(ChatEndpoint::Remote, remote_key))
+    {
+        return ChatEndpoint::Remote;
+    }
+    match (active_has_chat, inactive_has_chat) {
+        (false, true) => match active_endpoint {
+            ChatEndpoint::Local => ChatEndpoint::Remote,
+            ChatEndpoint::Remote => ChatEndpoint::Local,
+        },
+        _ => active_endpoint,
+    }
+}
+
+fn terminal_panel_cache_entry_is_live(chat_id: &str, live_chats: &HashSet<String>) -> bool {
+    chat_id.starts_with("global:") || live_chats.contains(chat_id)
+}
+
 struct PendingSpeech {
     chat_id: String,
     previous_assistant_id: Option<i64>,
@@ -909,6 +941,20 @@ struct RemotePanel {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct NewSessionBranch {
+    name: String,
+    reference: String,
+    oid: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct NewSessionPullRequest {
+    number: u64,
+    title: String,
+    oid: String,
+}
+
 struct XdDesktop {
     model: AppModel,
     inactive_model: AppModel,
@@ -1009,6 +1055,10 @@ struct XdDesktop {
     chat_create_worktrees: Vec<Worktree>,
     chat_create_worktrees_loading: bool,
     chat_create_can_new_worktree: bool,
+    chat_create_branches: Vec<NewSessionBranch>,
+    chat_create_pull_requests: Vec<NewSessionPullRequest>,
+    chat_create_sources_loading: bool,
+    chat_create_sources_error: Option<String>,
     workspace_context_folder: Option<String>,
     workspace_context_text: String,
     workspace_context_loading: bool,
@@ -1416,6 +1466,10 @@ impl XdDesktop {
             chat_create_worktrees: Vec::new(),
             chat_create_worktrees_loading: false,
             chat_create_can_new_worktree: false,
+            chat_create_branches: Vec::new(),
+            chat_create_pull_requests: Vec::new(),
+            chat_create_sources_loading: false,
+            chat_create_sources_error: None,
             workspace_context_folder: None,
             workspace_context_text: String::new(),
             workspace_context_loading: false,
@@ -1652,6 +1706,7 @@ impl XdDesktop {
                 | RequestKind::FolderContext { .. }
                 | RequestKind::SetFolderContext { .. }
                 | RequestKind::FolderSettings { .. }
+                | RequestKind::NewChatSources { .. }
                 | RequestKind::SetFolderSettings { .. }
                 | RequestKind::NewFolder { .. }
                 | RequestKind::NewChat { .. }
@@ -2429,6 +2484,11 @@ impl XdDesktop {
                     if self.creating_chat_folder.as_deref() == Some(folder_id.as_str()) =>
                 {
                     self.chat_create_worktrees_loading = false;
+                }
+                RequestKind::NewChatSources { folder_id }
+                    if self.creating_chat_folder.as_deref() == Some(folder_id.as_str()) =>
+                {
+                    self.chat_create_sources_loading = false;
                 }
                 RequestKind::SetFolderSettings { folder_id }
                     if self
@@ -3445,6 +3505,25 @@ impl XdDesktop {
                         .update(cx, |input, cx| input.set_text(workdir, cx));
                     self.workspace_repo_default_input
                         .update(cx, |input, cx| input.set_text(repo, cx));
+                }
+            }
+            RequestKind::NewChatSources { folder_id } => {
+                if self.creating_chat_folder.as_deref() == Some(folder_id.as_str()) {
+                    self.chat_create_branches = value
+                        .get("branches")
+                        .cloned()
+                        .and_then(|branches| serde_json::from_value(branches).ok())
+                        .unwrap_or_default();
+                    self.chat_create_pull_requests = value
+                        .get("pull_requests")
+                        .cloned()
+                        .and_then(|pull_requests| serde_json::from_value(pull_requests).ok())
+                        .unwrap_or_default();
+                    self.chat_create_sources_error = value
+                        .get("pull_request_error")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    self.chat_create_sources_loading = false;
                 }
             }
             RequestKind::SetFolderSettings { folder_id } => {
@@ -4633,16 +4712,26 @@ impl XdDesktop {
         self.chat_create_worktrees.clear();
         self.chat_create_worktrees_loading = true;
         self.chat_create_can_new_worktree = false;
+        self.chat_create_branches.clear();
+        self.chat_create_pull_requests.clear();
+        self.chat_create_sources_loading = true;
+        self.chat_create_sources_error = None;
         self.chat_create_input.update(cx, |input, cx| {
             input.set_text_selected(DEFAULT_CHAT_TITLE, cx)
         });
-        let result = self
-            .active_host()
-            .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|host| host.folder_settings(&folder_id));
-        if let Err(error) = result {
+        if let Some(host) = self.active_host().cloned() {
+            if let Err(error) = host.folder_settings(&folder_id) {
+                self.chat_create_worktrees_loading = false;
+                self.model.connection_error = Some(error);
+            }
+            if let Err(error) = host.new_chat_sources(&folder_id) {
+                self.chat_create_sources_loading = false;
+                self.chat_create_sources_error = Some(error);
+            }
+        } else {
             self.chat_create_worktrees_loading = false;
-            self.model.connection_error = Some(error);
+            self.chat_create_sources_loading = false;
+            self.model.connection_error = Some("xd is not connected to a host.".into());
         }
         let focus = self.chat_create_input.read(cx).focus_handle(cx);
         self.focus_minimal_popup(focus, window, cx);
@@ -4664,6 +4753,10 @@ impl XdDesktop {
         self.chat_create_worktrees.clear();
         self.chat_create_worktrees_loading = false;
         self.chat_create_can_new_worktree = false;
+        self.chat_create_branches.clear();
+        self.chat_create_pull_requests.clear();
+        self.chat_create_sources_loading = false;
+        self.chat_create_sources_error = None;
         self.chat_create_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         cx.notify();
@@ -4987,6 +5080,7 @@ impl XdDesktop {
     fn new_terminal_panel(chat_id: String) -> TerminalPanel {
         TerminalPanel {
             chat_id,
+            workdir: None,
             agent: None,
             allow_agent_tabs: false,
             sessions: Vec::new(),
@@ -5047,7 +5141,8 @@ impl XdDesktop {
             .collect::<HashSet<_>>();
         self.terminal_panel_cache
             .retain(|(cached_endpoint, chat_id), _| {
-                *cached_endpoint != endpoint || live_chats.contains(chat_id)
+                *cached_endpoint != endpoint
+                    || terminal_panel_cache_entry_is_live(chat_id, &live_chats)
             });
 
         for (chat_id, agent) in chats {
@@ -5085,6 +5180,28 @@ impl XdDesktop {
             .and_then(|command| SshCommand::parse(command).ok())
             .map(|command| command.destination().to_owned());
         connection_state_key(self.active_endpoint, remote.as_deref())
+    }
+
+    fn terminal_event_endpoint(&self, body: &Value) -> ChatEndpoint {
+        let Some(chat_id) = body.get("chat").and_then(Value::as_str) else {
+            return self.active_endpoint;
+        };
+        let remote = self
+            .settings
+            .remote_ssh_command
+            .as_deref()
+            .and_then(|command| SshCommand::parse(command).ok())
+            .map(|command| command.destination().to_owned());
+        terminal_event_endpoint_for_chat(
+            chat_id,
+            self.active_endpoint,
+            self.model.chats.iter().any(|chat| chat.id == chat_id),
+            self.inactive_model
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id),
+            remote.as_deref(),
+        )
     }
 
     fn cached_last_chat(&self) -> Option<String> {
@@ -5148,21 +5265,18 @@ impl XdDesktop {
                 if this
                     .update(cx, |this, cx| {
                         let (name, body) = terminal_runtime_event(event);
+                        let endpoint = this.terminal_event_endpoint(&body);
                         if name == "terminal-activity" {
                             if let (Some(chat_id), Some(working)) = (
                                 body.get("chat").and_then(Value::as_str),
                                 body.get("terminal_working").and_then(Value::as_bool),
                             ) {
-                                this.model.apply_desktop_terminal_activity(chat_id, working);
+                                this.endpoint_model_mut(endpoint)
+                                    .apply_desktop_terminal_activity(chat_id, working);
                             }
                             cx.notify();
                         } else {
-                            this.handle_terminal_screen_event(
-                                this.active_endpoint,
-                                name,
-                                &body,
-                                cx,
-                            );
+                            this.handle_terminal_screen_event(endpoint, name, &body, cx);
                         }
                     })
                     .is_err()
@@ -5467,7 +5581,7 @@ impl XdDesktop {
                 .as_nanos(),
         );
         let title = terminal_tab_title(agent);
-        let workdir = self.model.workdir.clone();
+        let workdir = panel.workdir.clone().or_else(|| self.model.workdir.clone());
         let result = workdir
             .ok_or_else(|| "The session working directory is still loading.".to_owned())
             .and_then(|workdir| {
@@ -6997,6 +7111,7 @@ impl XdDesktop {
         let project_id = match &self.minimal_route {
             MinimalRoute::Projects { project_id } => project_id.clone(),
             MinimalRoute::Sessions { project_id } => project_id.clone(),
+            MinimalRoute::Terminal => None,
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
         };
         self.minimal_route = MinimalRoute::Projects { project_id };
@@ -7012,6 +7127,7 @@ impl XdDesktop {
             MinimalRoute::Projects { project_id } | MinimalRoute::Sessions { project_id } => {
                 project_id.clone()
             }
+            MinimalRoute::Terminal => None,
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
         };
         let last_chat = self.cached_last_chat();
@@ -7028,6 +7144,42 @@ impl XdDesktop {
         self.stash_terminal_panel();
         self.model.selected_chat = None;
         self.sync_terminal_input_mode(cx);
+        cx.notify();
+    }
+
+    fn show_minimal_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panel_id = global_terminal_panel_id(&self.current_connection_key());
+        let same_panel = matches!(self.minimal_route, MinimalRoute::Terminal)
+            && self
+                .terminal_panel
+                .as_ref()
+                .is_some_and(|panel| panel.chat_id == panel_id);
+        self.minimal_route = MinimalRoute::Terminal;
+        self.minimal_new_tab_open = false;
+        self.model.selected_chat = None;
+        if !same_panel {
+            self.stash_terminal_panel();
+            let key = (self.active_endpoint, panel_id.clone());
+            let mut panel = self
+                .terminal_panel_cache
+                .remove(&key)
+                .unwrap_or_else(|| Self::new_terminal_panel(panel_id));
+            panel.workdir = Some(match self.active_endpoint {
+                ChatEndpoint::Remote => ".".into(),
+                ChatEndpoint::Local => env::var("HOME")
+                    .or_else(|_| env::var("USERPROFILE"))
+                    .unwrap_or_else(|_| ".".into()),
+            });
+            panel.agent = None;
+            panel.allow_agent_tabs = false;
+            panel.loading = false;
+            panel.auto_open = panel.sessions.is_empty();
+            self.terminal_panel = Some(panel);
+            self.sync_terminal_input_mode(cx);
+            self.terminal_scroll.scroll_to_bottom();
+        }
+        let focus = self.terminal_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
         cx.notify();
     }
 
@@ -7109,6 +7261,9 @@ impl XdDesktop {
             return;
         }
         match next.clone() {
+            MinimalRoute::Terminal => {
+                self.minimal_route = next;
+            }
             MinimalRoute::Cli {
                 project_id,
                 chat_id,
@@ -7217,6 +7372,7 @@ impl XdDesktop {
         };
 
         let selected_id = panel.selected.clone();
+        let allow_agent_tabs = panel.allow_agent_tabs;
         let output = panel
             .selected()
             .map(|session| session.screen.rendered_with_cursor());
@@ -7539,122 +7695,124 @@ impl XdDesktop {
                                 .child(div().w(px(18.0)).font_family(MONO).text_xs().child(">_"))
                                 .child("Terminal"),
                         )
-                        .child(
-                            div()
-                                .id("minimal-new-codex-tab")
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(colors.text))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_minimal_terminal_tab(
-                                        Some(AgentCli::Codex),
-                                        window,
-                                        cx,
+                        .when(allow_agent_tabs, |menu| {
+                            menu.child(
+                                div()
+                                    .id("minimal-new-codex-tab")
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .text_color(rgb(colors.text))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_minimal_terminal_tab(
+                                            Some(AgentCli::Codex),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(CODEX_ICON)
+                                            .size(px(18.0))
+                                            .text_color(rgb(colors.text)),
                                     )
-                                }))
-                                .child(
-                                    svg()
-                                        .path(CODEX_ICON)
-                                        .size(px(18.0))
-                                        .text_color(rgb(colors.text)),
-                                )
-                                .child("Codex"),
-                        )
-                        .child(
-                            div()
-                                .id("minimal-new-claude-tab")
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(colors.text))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_minimal_terminal_tab(
-                                        Some(AgentCli::Claude),
-                                        window,
-                                        cx,
+                                    .child("Codex"),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-new-claude-tab")
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .text_color(rgb(colors.text))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_minimal_terminal_tab(
+                                            Some(AgentCli::Claude),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(CLAUDE_ICON)
+                                            .size(px(18.0))
+                                            .text_color(rgb(colors.text)),
                                     )
-                                }))
-                                .child(
-                                    svg()
-                                        .path(CLAUDE_ICON)
-                                        .size(px(18.0))
-                                        .text_color(rgb(colors.text)),
-                                )
-                                .child("Claude"),
-                        )
-                        .child(
-                            div()
-                                .id("minimal-new-jcode-tab")
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(colors.text))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_minimal_terminal_tab(
-                                        Some(AgentCli::Jcode),
-                                        window,
-                                        cx,
+                                    .child("Claude"),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-new-jcode-tab")
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .text_color(rgb(colors.text))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_minimal_terminal_tab(
+                                            Some(AgentCli::Jcode),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(JCODE_ICON)
+                                            .size(px(18.0))
+                                            .text_color(rgb(colors.text)),
                                     )
-                                }))
-                                .child(
-                                    svg()
-                                        .path(JCODE_ICON)
-                                        .size(px(18.0))
-                                        .text_color(rgb(colors.text)),
-                                )
-                                .child("JCode"),
-                        )
-                        .child(
-                            div()
-                                .id("minimal-new-copilot-tab")
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .rounded_md()
-                                .text_sm()
-                                .text_color(rgb(colors.text))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_minimal_terminal_tab(
-                                        Some(AgentCli::Copilot),
-                                        window,
-                                        cx,
+                                    .child("JCode"),
+                            )
+                            .child(
+                                div()
+                                    .id("minimal-new-copilot-tab")
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .text_color(rgb(colors.text))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_minimal_terminal_tab(
+                                            Some(AgentCli::Copilot),
+                                            window,
+                                            cx,
+                                        )
+                                    }))
+                                    .child(
+                                        svg()
+                                            .path(COPILOT_ICON)
+                                            .size(px(18.0))
+                                            .text_color(rgb(colors.text)),
                                     )
-                                }))
-                                .child(
-                                    svg()
-                                        .path(COPILOT_ICON)
-                                        .size(px(18.0))
-                                        .text_color(rgb(colors.text)),
-                                )
-                                .child("Copilot"),
-                        ),
+                                    .child("Copilot"),
+                            )
+                        }),
                 )
             })
             .into_any_element()
@@ -7744,10 +7902,11 @@ impl XdDesktop {
             self.minimal_route,
             MinimalRoute::Sessions { .. } | MinimalRoute::Cli { .. }
         );
+        let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
         let create_session_for = match &self.minimal_route {
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
             MinimalRoute::Sessions { project_id } => project_id.clone(),
-            MinimalRoute::Projects { .. } => None,
+            MinimalRoute::Projects { .. } | MinimalRoute::Terminal => None,
         };
         let connected = self.model.connected;
         let remote_active = self.active_endpoint == ChatEndpoint::Remote;
@@ -7878,6 +8037,42 @@ impl XdDesktop {
                     )
                     .child(
                         div()
+                            .id("minimal-terminal-tab")
+                            .h(px(38.0))
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .rounded_full()
+                            .bg(rgb(if terminal_active {
+                                colors.surface_high
+                            } else {
+                                colors.surface
+                            }))
+                            .text_base()
+                            .font_weight(if terminal_active {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .text_color(rgb(if terminal_active {
+                                colors.text
+                            } else {
+                                colors.muted
+                            }))
+                            .cursor_pointer()
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(colors.surface_high))
+                                    .text_color(rgb(colors.text))
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_minimal_terminal(window, cx)
+                            }))
+                            .child("Terminal"),
+                    )
+                    .child(
+                        div()
                             .id("minimal-global-create")
                             .ml_1()
                             .size(px(38.0))
@@ -7985,6 +8180,7 @@ impl XdDesktop {
         let (project_id, route_agent, cli_active) = match &self.minimal_route {
             MinimalRoute::Projects { project_id } => (project_id.clone(), None, false),
             MinimalRoute::Sessions { project_id } => (project_id.clone(), None, false),
+            MinimalRoute::Terminal => (None, None, false),
             MinimalRoute::Cli {
                 project_id, agent, ..
             } => (Some(project_id.clone()), Some(*agent), true),
@@ -8438,6 +8634,7 @@ impl XdDesktop {
         let requested_project_id = match &self.minimal_route {
             MinimalRoute::Projects { project_id } => project_id.as_ref(),
             MinimalRoute::Sessions { project_id } => project_id.as_ref(),
+            MinimalRoute::Terminal => None,
             MinimalRoute::Cli { project_id, .. } => Some(project_id),
         };
         let selected_project_id = requested_project_id
@@ -8942,6 +9139,22 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    fn render_minimal_standalone_terminal(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let terminal = self.render_minimal_terminal(colors, window, cx);
+        div()
+            .size_full()
+            .min_h_0()
+            .p_4()
+            .bg(rgb(colors.background))
+            .child(terminal)
+            .into_any_element()
+    }
+
     fn render_minimal_empty_sessions(
         &mut self,
         colors: ThemeColors,
@@ -8988,6 +9201,7 @@ impl XdDesktop {
         let content = match route {
             MinimalRoute::Projects { .. } => self.render_minimal_home(colors, cx),
             MinimalRoute::Sessions { .. } => self.render_minimal_empty_sessions(colors, cx),
+            MinimalRoute::Terminal => self.render_minimal_standalone_terminal(colors, window, cx),
             MinimalRoute::Cli {
                 project_id,
                 chat_id,
@@ -9907,12 +10121,12 @@ impl XdDesktop {
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
-                                .child("Worktree"),
+                                .child("Start from"),
                         )
                         .child(
                             div()
                                 .id("minimal-session-worktrees")
-                                .max_h(px(236.0))
+                                .max_h(px(340.0))
                                 .overflow_y_scroll()
                                 .flex()
                                 .flex_col()
@@ -10038,6 +10252,102 @@ impl XdDesktop {
                                             },
                                         ),
                                     )
+                                })
+                                .when(self.chat_create_sources_loading, |list| {
+                                    list.child(
+                                        div()
+                                            .mt_1()
+                                            .px_3()
+                                            .py_2()
+                                            .text_sm()
+                                            .text_color(rgb(colors.muted))
+                                            .child("Loading branches and pull requests…"),
+                                    )
+                                })
+                                .when(!self.chat_create_branches.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .mt_1()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(colors.muted))
+                                            .child("Branches"),
+                                    )
+                                    .children(self.chat_create_branches.iter().enumerate().map(
+                                        |(index, branch)| {
+                                            let reference = branch.reference.clone();
+                                            let oid = branch.oid.clone();
+                                            let selected = matches!(
+                                                &selected_worktree,
+                                                Some(NewSessionWorktree::Branch {
+                                                    reference: selected_reference,
+                                                    oid: selected_oid,
+                                                }) if selected_reference == &reference && selected_oid == &oid
+                                            );
+                                            div()
+                                                .id(("minimal-session-branch", index))
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_lg()
+                                                .border_1()
+                                                .border_color(rgb(if selected { colors.accent } else { colors.border }))
+                                                .bg(rgb(if selected { colors.surface_high } else { colors.background }))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.chat_create_worktree = Some(NewSessionWorktree::Branch {
+                                                        reference: reference.clone(),
+                                                        oid: oid.clone(),
+                                                    });
+                                                    cx.notify();
+                                                }))
+                                                .child(div().text_sm().text_color(rgb(colors.text)).child(branch.name.clone()))
+                                        },
+                                    ))
+                                })
+                                .when(!self.chat_create_pull_requests.is_empty(), |list| {
+                                    list.child(
+                                        div()
+                                            .mt_1()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(colors.muted))
+                                            .child("Pull requests"),
+                                    )
+                                    .children(self.chat_create_pull_requests.iter().enumerate().map(
+                                        |(index, pull_request)| {
+                                            let number = pull_request.number;
+                                            let oid = pull_request.oid.clone();
+                                            let selected = matches!(
+                                                &selected_worktree,
+                                                Some(NewSessionWorktree::PullRequest {
+                                                    number: selected_number,
+                                                    oid: selected_oid,
+                                                }) if *selected_number == number && selected_oid == &oid
+                                            );
+                                            div()
+                                                .id(("minimal-session-pull-request", index))
+                                                .px_3()
+                                                .py_2()
+                                                .rounded_lg()
+                                                .border_1()
+                                                .border_color(rgb(if selected { colors.accent } else { colors.border }))
+                                                .bg(rgb(if selected { colors.surface_high } else { colors.background }))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.chat_create_worktree = Some(NewSessionWorktree::PullRequest {
+                                                        number,
+                                                        oid: oid.clone(),
+                                                    });
+                                                    cx.notify();
+                                                }))
+                                                .child(div().text_sm().text_color(rgb(colors.text)).child(format!("#{} {}", pull_request.number, pull_request.title)))
+                                        },
+                                    ))
+                                })
+                                .when_some(self.chat_create_sources_error.clone(), |list, error| {
+                                    list.child(div().px_3().py_2().text_xs().text_color(rgb(colors.muted)).child(error))
                                 }),
                         )
                         .child(
@@ -10840,8 +11150,10 @@ mod tests {
             "minimal-product-nav",
             ".child(\"Projects\")",
             ".child(\"Sessions\")",
+            ".child(\"Terminal\")",
             "this.show_minimal_projects(cx)",
             "this.show_minimal_sessions(window, cx)",
+            "this.show_minimal_terminal(window, cx)",
             "this.begin_workspace_create(window, cx)",
             "minimal-runtime",
             "minimal-theme",
@@ -10873,6 +11185,22 @@ mod tests {
             .1;
         assert!(render.contains("self.render_minimal_titlebar(colors, cx)"));
         assert!(render.contains("self.render_minimal_product_nav(colors, false, cx)"));
+        assert!(render.contains(
+            "MinimalRoute::Terminal => self.render_minimal_standalone_terminal(colors, window, cx)"
+        ));
+    }
+
+    #[test]
+    fn global_terminal_panels_survive_chat_cache_pruning() {
+        let live_chats = HashSet::new();
+        assert!(terminal_panel_cache_entry_is_live(
+            "global:remote:server",
+            &live_chats
+        ));
+        assert!(!terminal_panel_cache_entry_is_live(
+            "deleted-chat",
+            &live_chats
+        ));
     }
 
     #[test]
@@ -11252,6 +11580,40 @@ mod tests {
         assert_eq!(
             selected,
             Some(NewSessionWorktree::Existing("/plain-project".into()))
+        );
+    }
+
+    #[test]
+    fn terminal_runtime_events_follow_their_origin_endpoint_after_switching() {
+        assert_eq!(
+            terminal_event_endpoint_for_chat(
+                "remote-chat",
+                ChatEndpoint::Local,
+                false,
+                true,
+                Some("server"),
+            ),
+            ChatEndpoint::Remote,
+        );
+        assert_eq!(
+            terminal_event_endpoint_for_chat(
+                &global_terminal_panel_id("remote/server"),
+                ChatEndpoint::Local,
+                false,
+                false,
+                Some("server"),
+            ),
+            ChatEndpoint::Remote,
+        );
+        assert_eq!(
+            terminal_event_endpoint_for_chat(
+                &global_terminal_panel_id("local"),
+                ChatEndpoint::Remote,
+                false,
+                false,
+                Some("server"),
+            ),
+            ChatEndpoint::Local,
         );
     }
 
@@ -11739,6 +12101,7 @@ mod tests {
 
         let mut panel = TerminalPanel {
             chat_id: "chat".into(),
+            workdir: None,
             agent: None,
             allow_agent_tabs: false,
             sessions: vec![first, second],
@@ -12463,7 +12826,7 @@ mod tests {
     }
 
     #[test]
-    fn new_session_flow_chooses_an_existing_or_new_worktree_before_creation() {
+    fn new_session_flow_chooses_a_worktree_branch_or_pull_request_before_creation() {
         let source = include_str!("main.rs");
         let production = source
             .split_once("#[cfg(test)]")
@@ -12474,9 +12837,14 @@ mod tests {
             "chat_create_worktrees_loading",
             "NewSessionWorktree::New",
             "NewSessionWorktree::Existing",
+            "NewSessionWorktree::Branch",
+            "NewSessionWorktree::PullRequest",
             "Create new worktree",
             "Existing worktrees",
+            "Branches",
+            "Pull requests",
             "host.folder_settings(&folder_id)",
+            "host.new_chat_sources(&folder_id)",
             "new_chat_with_backend_in_worktree",
         ] {
             assert!(production.contains(behavior), "missing {behavior}");
