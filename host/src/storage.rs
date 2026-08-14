@@ -114,6 +114,7 @@ struct MaterializedMessage {
 
 struct GitWorktree {
     path: PathBuf,
+    head: Option<String>,
     branch: Option<String>,
     detached: bool,
 }
@@ -4304,6 +4305,10 @@ fn create_worktree(
     let main = worktrees
         .first()
         .ok_or_else(|| StorageError::InvalidRequest("Git returned no worktrees.".into()))?;
+    let source = source_worktree(&worktrees, &root).ok_or_else(|| {
+        StorageError::InvalidRequest("Git did not return the selected source worktree.".into())
+    })?;
+    let start = worktree_start_revision(start, source.head.as_deref())?;
     let repository_parent = main.path.parent().ok_or_else(|| {
         StorageError::InvalidRequest("Worktree selection needs a Git working directory.".into())
     })?;
@@ -4355,17 +4360,7 @@ fn create_worktree(
             let result = if branch_exists {
                 run_git(&root, &["worktree", "add", target, &branch])?
             } else {
-                run_git(
-                    &root,
-                    &[
-                        "worktree",
-                        "add",
-                        "-b",
-                        &branch,
-                        target,
-                        start.unwrap_or("HEAD"),
-                    ],
-                )?
+                run_git(&root, &["worktree", "add", "-b", &branch, target, start])?
             };
             if !result.0.success() {
                 let message = String::from_utf8_lossy(&result.2).trim().to_owned();
@@ -4429,6 +4424,24 @@ fn valid_git_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn source_worktree<'a>(worktrees: &'a [GitWorktree], root: &Path) -> Option<&'a GitWorktree> {
+    worktrees.iter().find(|worktree| worktree.path == root)
+}
+
+fn worktree_start_revision<'a>(
+    requested: Option<&'a str>,
+    source_head: Option<&'a str>,
+) -> Result<&'a str, StorageError> {
+    requested
+        .filter(|oid| valid_git_oid(oid))
+        .or_else(|| source_head.filter(|oid| valid_git_oid(oid)))
+        .ok_or_else(|| {
+            StorageError::InvalidRequest(
+                "The repository has no commit from which to create a worktree.".into(),
+            )
+        })
+}
+
 fn command_error(stderr: &[u8], fallback: &str) -> String {
     let message = String::from_utf8_lossy(stderr).trim().to_owned();
     if message.is_empty() {
@@ -4470,6 +4483,7 @@ fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
         .map_err(|_| StorageError::InvalidRequest("Git returned invalid text.".into()))?;
     let mut worktrees = Vec::new();
     let mut path = None;
+    let mut head = None;
     let mut branch = None;
     let mut detached = false;
     let mut prunable = false;
@@ -4479,16 +4493,20 @@ fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
                 if !prunable {
                     worktrees.push(GitWorktree {
                         path,
+                        head: head.take(),
                         branch: branch.take(),
                         detached,
                     });
                 }
             }
             branch = None;
+            head = None;
             detached = false;
             prunable = false;
         } else if let Some(value) = token.strip_prefix("worktree ") {
             path = Some(PathBuf::from(value));
+        } else if let Some(value) = token.strip_prefix("HEAD ") {
+            head = valid_git_oid(value).then(|| value.to_owned());
         } else if let Some(value) = token.strip_prefix("branch refs/heads/") {
             branch = Some(value.to_owned());
         } else if token == "detached" {
@@ -4502,6 +4520,7 @@ fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
     {
         worktrees.push(GitWorktree {
             path,
+            head,
             branch,
             detached,
         });
@@ -8073,6 +8092,36 @@ mod tests {
             .unwrap();
         let chat = store.chat(created["id"].as_str().unwrap()).unwrap();
         assert_eq!(chat["workdir"], normalize_existing_path(&project));
+    }
+
+    #[test]
+    fn generated_worktrees_use_the_concrete_main_commit_instead_of_symbolic_head() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(worktree_start_revision(None, Some(oid)).unwrap(), oid);
+        assert!(worktree_start_revision(None, None).is_err());
+    }
+
+    #[test]
+    fn generated_worktrees_use_the_selected_source_worktree_commit() {
+        let primary = GitWorktree {
+            path: PathBuf::from("/repo"),
+            head: Some("1111111111111111111111111111111111111111".into()),
+            branch: Some("main".into()),
+            detached: false,
+        };
+        let linked = GitWorktree {
+            path: PathBuf::from("/repo-linked"),
+            head: Some("2222222222222222222222222222222222222222".into()),
+            branch: Some("feature".into()),
+            detached: false,
+        };
+
+        let worktrees = [primary, linked];
+        assert_eq!(
+            source_worktree(&worktrees, Path::new("/repo-linked"))
+                .and_then(|worktree| worktree.head.as_deref()),
+            Some("2222222222222222222222222222222222222222")
+        );
     }
 
     #[test]
