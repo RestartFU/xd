@@ -743,6 +743,26 @@ fn terminal_event_endpoint_for_chat(
     }
 }
 
+fn update_terminal_activity_state(
+    activity: &mut HashMap<(ChatEndpoint, String, String), bool>,
+    endpoint: ChatEndpoint,
+    chat_id: &str,
+    terminal_id: &str,
+    working: Option<bool>,
+) -> bool {
+    let key = (endpoint, chat_id.to_owned(), terminal_id.to_owned());
+    if let Some(working) = working {
+        activity.insert(key, working);
+    } else {
+        activity.remove(&key);
+    }
+    activity
+        .iter()
+        .any(|((candidate_endpoint, candidate_chat, _), working)| {
+            *candidate_endpoint == endpoint && candidate_chat == chat_id && *working
+        })
+}
+
 fn terminal_panel_cache_entry_is_live(chat_id: &str, live_chats: &HashSet<String>) -> bool {
     chat_id.starts_with("global:") || live_chats.contains(chat_id)
 }
@@ -1068,6 +1088,7 @@ struct XdDesktop {
     terminal_panel: Option<TerminalPanel>,
     terminal_runtime: SessionRuntime,
     terminal_panel_cache: HashMap<(ChatEndpoint, String), TerminalPanel>,
+    terminal_activity_by_tab: HashMap<(ChatEndpoint, String, String), bool>,
     terminal_cache_refresh: HashSet<ChatEndpoint>,
     terminal_cursor_visible: bool,
     diff_generation: u64,
@@ -1479,6 +1500,7 @@ impl XdDesktop {
             terminal_panel: None,
             terminal_runtime,
             terminal_panel_cache: HashMap::new(),
+            terminal_activity_by_tab: HashMap::new(),
             terminal_cache_refresh: HashSet::new(),
             terminal_cursor_visible: true,
             diff_generation: 0,
@@ -2113,6 +2135,9 @@ impl XdDesktop {
                                 cx,
                             );
                         }
+                        if name == "terminal-activity" {
+                            self.record_terminal_tab_activity(ChatEndpoint::Remote, &body);
+                        }
                         Self::apply_passive_event(&mut self.inactive_model, &name, &body);
                     }
                     if name == "turn-finished"
@@ -2266,6 +2291,9 @@ impl XdDesktop {
                                     &body,
                                     cx,
                                 );
+                            }
+                            if name == "terminal-activity" {
+                                self.record_terminal_tab_activity(ChatEndpoint::Local, &body);
                             }
                             Self::apply_passive_event(&mut self.inactive_model, &name, &body);
                         }
@@ -4083,17 +4111,55 @@ impl XdDesktop {
                 self.sync_terminal_input_mode(cx);
             }
         }
-        if let Some(working) = terminal_working {
-            let unchanged = self
-                .endpoint_model(endpoint)
-                .chats
-                .iter()
-                .find(|chat| chat.id == chat_id)
-                .is_some_and(|chat| chat.terminal_working == working);
-            if !unchanged {
-                self.endpoint_model_mut(endpoint)
-                    .apply_desktop_terminal_activity(&chat_id, working);
-            }
+        if let (Some(terminal_id), Some(working)) = (terminal_id, terminal_working) {
+            self.apply_terminal_tab_activity(endpoint, &chat_id, terminal_id, Some(working));
+        }
+        if name == "terminal-closed"
+            && let Some(terminal_id) = terminal_id
+        {
+            self.apply_terminal_tab_activity(endpoint, &chat_id, terminal_id, None);
+        }
+    }
+
+    fn apply_terminal_tab_activity(
+        &mut self,
+        endpoint: ChatEndpoint,
+        chat_id: &str,
+        terminal_id: &str,
+        working: Option<bool>,
+    ) {
+        let terminal_working = update_terminal_activity_state(
+            &mut self.terminal_activity_by_tab,
+            endpoint,
+            chat_id,
+            terminal_id,
+            working,
+        );
+        let unchanged = self
+            .endpoint_model(endpoint)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .is_some_and(|chat| chat.terminal_working == terminal_working);
+        if !unchanged {
+            self.endpoint_model_mut(endpoint)
+                .apply_desktop_terminal_activity(chat_id, terminal_working);
+        }
+    }
+
+    fn record_terminal_tab_activity(&mut self, endpoint: ChatEndpoint, body: &Value) {
+        if let (Some(chat_id), Some(terminal_id), Some(working)) = (
+            body.get("chat").and_then(Value::as_str),
+            body.get("terminal").and_then(Value::as_str),
+            body.get("working").and_then(Value::as_bool),
+        ) {
+            update_terminal_activity_state(
+                &mut self.terminal_activity_by_tab,
+                endpoint,
+                chat_id,
+                terminal_id,
+                Some(working),
+            );
         }
     }
 
@@ -4125,7 +4191,10 @@ impl XdDesktop {
             self.request_tree();
         }
         match name {
-            "terminal-activity" => self.model.apply_event(name, &body),
+            "terminal-activity" => {
+                self.record_terminal_tab_activity(self.active_endpoint, &body);
+                self.model.apply_event(name, &body);
+            }
             "workflow-status" => {
                 if let Some(marker) = body.get("text").and_then(Value::as_str).map(str::to_owned)
                     && self
@@ -5144,6 +5213,10 @@ impl XdDesktop {
                 *cached_endpoint != endpoint
                     || terminal_panel_cache_entry_is_live(chat_id, &live_chats)
             });
+        self.terminal_activity_by_tab
+            .retain(|(activity_endpoint, chat_id, _), _| {
+                *activity_endpoint != endpoint || (!refresh_all && live_chats.contains(chat_id))
+            });
 
         for (chat_id, agent) in chats {
             let active = endpoint == self.active_endpoint
@@ -5267,12 +5340,17 @@ impl XdDesktop {
                         let (name, body) = terminal_runtime_event(event);
                         let endpoint = this.terminal_event_endpoint(&body);
                         if name == "terminal-activity" {
-                            if let (Some(chat_id), Some(working)) = (
+                            if let (Some(chat_id), Some(terminal_id), Some(working)) = (
                                 body.get("chat").and_then(Value::as_str),
-                                body.get("terminal_working").and_then(Value::as_bool),
+                                body.get("terminal").and_then(Value::as_str),
+                                body.get("working").and_then(Value::as_bool),
                             ) {
-                                this.endpoint_model_mut(endpoint)
-                                    .apply_desktop_terminal_activity(chat_id, working);
+                                this.apply_terminal_tab_activity(
+                                    endpoint,
+                                    chat_id,
+                                    terminal_id,
+                                    Some(working),
+                                );
                             }
                             cx.notify();
                         } else {
@@ -11936,6 +12014,139 @@ mod tests {
                     .unwrap()
                     .working
             );
+        });
+    }
+
+    #[test]
+    fn terminal_activity_is_aggregated_across_tabs_in_the_same_chat() {
+        let mut activity = HashMap::new();
+        let chat = "chat-1";
+
+        assert!(update_terminal_activity_state(
+            &mut activity,
+            ChatEndpoint::Local,
+            chat,
+            "claude",
+            Some(true),
+        ));
+        assert!(update_terminal_activity_state(
+            &mut activity,
+            ChatEndpoint::Local,
+            chat,
+            "jcode",
+            Some(false),
+        ));
+        assert!(!update_terminal_activity_state(
+            &mut activity,
+            ChatEndpoint::Local,
+            chat,
+            "claude",
+            Some(false),
+        ));
+    }
+
+    #[gpui::test]
+    fn closing_one_terminal_preserves_another_terminal_working_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-1".into(),
+                folder: "workspace".into(),
+                title: Some("Chat".into()),
+                backend: "claude".into(),
+                branch: Some("main".into()),
+                working: false,
+                terminal_working: false,
+            }];
+
+            desktop.handle_event(
+                "terminal-activity",
+                serde_json::json!({
+                    "chat": "chat-1",
+                    "terminal": "claude",
+                    "working": true,
+                    "terminal_working": true,
+                }),
+                None,
+                cx,
+            );
+            desktop.handle_event(
+                "terminal-activity",
+                serde_json::json!({
+                    "chat": "chat-1",
+                    "terminal": "jcode",
+                    "working": false,
+                    "terminal_working": true,
+                }),
+                None,
+                cx,
+            );
+            desktop.handle_event(
+                "terminal-closed",
+                serde_json::json!({
+                    "chat": "chat-1",
+                    "terminal": "jcode",
+                }),
+                None,
+                cx,
+            );
+
+            assert!(desktop.model.chats[0].terminal_working);
+        });
+    }
+
+    #[gpui::test]
+    fn inactive_endpoint_preserves_other_terminal_activity_on_close(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.inactive_model.chats = vec![ChatSummary {
+                id: "remote-chat".into(),
+                folder: "workspace".into(),
+                title: Some("Remote chat".into()),
+                backend: "claude".into(),
+                branch: Some("main".into()),
+                working: false,
+                terminal_working: false,
+            }];
+            let generation = desktop.remote_generation;
+            for (terminal, working, aggregate) in [("claude", true, true), ("jcode", false, true)] {
+                desktop.handle_remote_update(
+                    HostUpdate::Event {
+                        name: "terminal-activity".into(),
+                        body: serde_json::json!({
+                            "chat": "remote-chat",
+                            "terminal": terminal,
+                            "working": working,
+                            "terminal_working": aggregate,
+                        })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                        attachments: None,
+                    },
+                    generation,
+                    cx,
+                );
+            }
+            desktop.handle_remote_update(
+                HostUpdate::Event {
+                    name: "terminal-closed".into(),
+                    body: serde_json::json!({
+                        "chat": "remote-chat",
+                        "terminal": "jcode",
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                    attachments: None,
+                },
+                generation,
+                cx,
+            );
+
+            assert!(desktop.inactive_model.chats[0].terminal_working);
         });
     }
 
