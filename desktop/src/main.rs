@@ -33,7 +33,7 @@ use xd_desktop::{
     activity,
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
-    model::{AppModel, Attachment, Message, MessagePageDirection, Worktree},
+    model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, Worktree},
     remote::{self, RemoteError, SshRemoteBridge, SshRemoteSession},
     session_host::{AgentCommand, SessionHost, SshCommand, TMUX_CONFIGURATION},
     session_runtime::{SessionEvent, SessionRuntime},
@@ -887,6 +887,44 @@ struct SessionContextMenu {
     chat_id: String,
     title: String,
     position: Point<Pixels>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SessionDragPayload {
+    chat_id: String,
+    project_id: String,
+    source_index: usize,
+    title: String,
+}
+
+struct SessionDragPreview {
+    title: String,
+    position: Point<Pixels>,
+    colors: ThemeColors,
+}
+
+impl Render for SessionDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .pl(self.position.x - px(110.0))
+            .pt(self.position.y - px(28.0))
+            .child(
+                div()
+                    .w(px(220.0))
+                    .min_h(px(56.0))
+                    .px_3()
+                    .py_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(self.colors.accent))
+                    .bg(rgb(self.colors.surface_high))
+                    .shadow_md()
+                    .text_base()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(self.colors.text))
+                    .child(self.title.clone()),
+            )
+    }
 }
 
 #[derive(Clone)]
@@ -6417,6 +6455,34 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn reorder_session_from_drop(
+        &mut self,
+        drag: &SessionDragPayload,
+        target_project_id: &str,
+        target_index: usize,
+        target_chat_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reorder) =
+            chat_reorder_for_drop(drag, target_project_id, target_index, target_chat_id)
+        else {
+            return;
+        };
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| {
+                host.reorder_chat(&reorder.chat_id, &reorder.anchor_id, reorder.after)
+            });
+        match result {
+            Ok(()) => {
+                apply_optimistic_chat_reorder(&mut self.model.chats, &reorder);
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn close_session_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session_context_menu = None;
         self.restore_minimal_popup_focus(window);
@@ -8444,7 +8510,7 @@ impl XdDesktop {
             let sessions = project_sessions(&project.id, &self.model.chats);
             let mut cards = Vec::with_capacity(sessions.len());
 
-            for session in sessions {
+            for (session_index, session) in sessions.into_iter().enumerate() {
                 let instance = session_instance;
                 session_instance += 1;
                 let selected = active_chat_id == Some(session.id.as_str());
@@ -8453,6 +8519,14 @@ impl XdDesktop {
                 let chat_id = session.id.clone();
                 let context_chat_id = session.id.clone();
                 let context_title = session.title.clone();
+                let drag_payload = SessionDragPayload {
+                    chat_id: session.id.clone(),
+                    project_id: project.id.clone(),
+                    source_index: session_index,
+                    title: session.title.clone(),
+                };
+                let drop_project_id = project.id.clone();
+                let drop_chat_id = session.id.clone();
                 let agent = session.agent;
                 let done = !session.working && self.model.unread_chats.contains(&session.id);
                 let status_color = if session.working {
@@ -8520,7 +8594,7 @@ impl XdDesktop {
                         } else {
                             colors.surface
                         }))
-                        .cursor_pointer()
+                        .cursor_move()
                         .hover(|style| {
                             style
                                 .bg(rgb(if emphasized {
@@ -8556,6 +8630,39 @@ impl XdDesktop {
                                 );
                             }),
                         )
+                        .can_drop({
+                            let drop_project_id = drop_project_id.clone();
+                            let drop_chat_id = drop_chat_id.clone();
+                            move |value, _, _| {
+                                value
+                                    .downcast_ref::<SessionDragPayload>()
+                                    .is_some_and(|drag| {
+                                        drag.project_id == drop_project_id
+                                            && drag.chat_id != drop_chat_id
+                                    })
+                            }
+                        })
+                        .drag_over::<SessionDragPayload>(move |style, _, _, _| {
+                            style
+                                .border_color(rgb(colors.accent))
+                                .bg(rgb(colors.surface_high))
+                        })
+                        .on_drop(cx.listener(move |this, drag: &SessionDragPayload, _, cx| {
+                            this.reorder_session_from_drop(
+                                drag,
+                                &drop_project_id,
+                                session_index,
+                                &drop_chat_id,
+                                cx,
+                            );
+                        }))
+                        .on_drag(drag_payload, move |drag, position, _, cx| {
+                            cx.new(|_| SessionDragPreview {
+                                title: drag.title.clone(),
+                                position,
+                                colors,
+                            })
+                        })
                         .child(
                             div().flex().items_start().gap_2().child(
                                 div()
@@ -11101,6 +11208,50 @@ fn sidebar_move_applied(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChatReorder {
+    chat_id: String,
+    anchor_id: String,
+    after: bool,
+}
+
+fn chat_reorder_for_drop(
+    drag: &SessionDragPayload,
+    target_project_id: &str,
+    target_index: usize,
+    target_chat_id: &str,
+) -> Option<ChatReorder> {
+    if drag.project_id != target_project_id || drag.chat_id == target_chat_id {
+        return None;
+    }
+    Some(ChatReorder {
+        chat_id: drag.chat_id.clone(),
+        anchor_id: target_chat_id.to_owned(),
+        after: drag.source_index < target_index,
+    })
+}
+
+fn apply_optimistic_chat_reorder(chats: &mut Vec<ChatSummary>, reorder: &ChatReorder) -> bool {
+    let Some(source_index) = chats.iter().position(|chat| chat.id == reorder.chat_id) else {
+        return false;
+    };
+    if !chats.iter().any(|chat| chat.id == reorder.anchor_id) {
+        return false;
+    }
+    let chat = chats.remove(source_index);
+    let anchor_index = chats
+        .iter()
+        .position(|candidate| candidate.id == reorder.anchor_id)
+        .expect("the checked reorder anchor remains after removing another chat");
+    let insert_at = if reorder.after {
+        anchor_index + 1
+    } else {
+        anchor_index
+    };
+    chats.insert(insert_at, chat);
+    true
+}
+
 fn strip_source_build_controls(text: &str) -> String {
     let mut clean = Vec::with_capacity(text.len());
     let mut bytes = text.bytes();
@@ -11863,6 +12014,73 @@ mod tests {
         assert!(mark.contains("M3 7V6"));
         assert!(mark.contains("m7 12 2 2-2 2"));
         assert!(!mark.contains("rotate"));
+    }
+
+    #[test]
+    fn dragging_a_chat_chooses_before_or_after_from_its_relative_position() {
+        let drag = SessionDragPayload {
+            chat_id: "chat-b".into(),
+            project_id: "workspace".into(),
+            source_index: 1,
+            title: "Second".into(),
+        };
+
+        assert_eq!(
+            chat_reorder_for_drop(&drag, "workspace", 0, "chat-a"),
+            Some(ChatReorder {
+                chat_id: "chat-b".into(),
+                anchor_id: "chat-a".into(),
+                after: false,
+            })
+        );
+        assert_eq!(
+            chat_reorder_for_drop(&drag, "workspace", 2, "chat-c"),
+            Some(ChatReorder {
+                chat_id: "chat-b".into(),
+                anchor_id: "chat-c".into(),
+                after: true,
+            })
+        );
+        assert_eq!(
+            chat_reorder_for_drop(&drag, "other-workspace", 0, "chat-z"),
+            None
+        );
+        assert_eq!(chat_reorder_for_drop(&drag, "workspace", 1, "chat-b"), None);
+    }
+
+    #[test]
+    fn optimistic_chat_reorder_preserves_other_workspace_positions() {
+        let chat = |id: &str, folder: &str| ChatSummary {
+            id: id.into(),
+            folder: folder.into(),
+            title: Some(id.into()),
+            backend: "codex".into(),
+            branch: None,
+            working: false,
+            terminal_working: false,
+        };
+        let mut chats = vec![
+            chat("a", "workspace"),
+            chat("x", "other"),
+            chat("b", "workspace"),
+            chat("c", "workspace"),
+        ];
+
+        assert!(apply_optimistic_chat_reorder(
+            &mut chats,
+            &ChatReorder {
+                chat_id: "a".into(),
+                anchor_id: "c".into(),
+                after: true,
+            }
+        ));
+        assert_eq!(
+            chats
+                .iter()
+                .map(|chat| chat.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["x", "b", "c", "a"]
+        );
     }
 
     #[test]
