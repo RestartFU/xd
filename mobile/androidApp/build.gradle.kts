@@ -14,8 +14,8 @@ android {
         applicationId = "com.restartfu.xd.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1005
-        versionName = "0.1.5"
+        versionCode = 1006
+        versionName = "0.1.6"
         resValue("string", "app_name", "xd")
     }
 
