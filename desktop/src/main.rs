@@ -11854,14 +11854,14 @@ mod tests {
     }
 
     #[test]
-    fn product_mark_is_embedded_and_not_x_shaped() {
+    fn product_mark_is_embedded_as_a_folder_terminal_not_an_x() {
         let bytes = EmbeddedIcons
             .load(XD_MARK_ICON)
             .expect("embedded mark loads")
             .expect("the product mark exists");
         let mark = String::from_utf8_lossy(&bytes);
-        assert!(mark.contains("<rect"));
-        assert!(mark.contains("M8 4h10"));
+        assert!(mark.contains("M3 7V6"));
+        assert!(mark.contains("m7 12 2 2-2 2"));
         assert!(!mark.contains("rotate"));
     }
 
