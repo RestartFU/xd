@@ -2214,11 +2214,6 @@ impl XdDesktop {
             return;
         }
         if self.active_endpoint == ChatEndpoint::Local {
-            self.connection_generation = self.connection_generation.saturating_add(1);
-            self.host = None;
-            self.connecting = false;
-            self.connection_in_flight = false;
-            self.endpoint_model_mut(ChatEndpoint::Local).connected = false;
             self.switch_active_endpoint(ChatEndpoint::Remote, cx);
         }
         if self.remote_state == RemoteState::Connected {
@@ -11844,6 +11839,29 @@ mod tests {
             ),
             ChatEndpoint::Local,
         );
+    }
+
+    #[gpui::test]
+    fn switching_remote_and_back_keeps_the_local_runtime_subscribed(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.remote_ssh_command = Some("ssh dev.example".into());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.model.connected = true;
+            let connection_generation = desktop.connection_generation;
+
+            desktop.activate_remote_runtime(cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert!(desktop.inactive_model.connected);
+            assert_eq!(desktop.connection_generation, connection_generation);
+
+            desktop.disconnect_remote_runtime(cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert!(desktop.model.connected);
+            assert_eq!(desktop.connection_generation, connection_generation);
+        });
     }
 
     #[test]
