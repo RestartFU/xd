@@ -126,7 +126,7 @@ public fun xdColors(accent: AccentPreset = AccentPreset.BLUE): ColorScheme =
 /** The default desktop-matching palette for callers that do not need settings. */
 public val XdColors: ColorScheme = xdColors()
 
-/** The same three complete palettes exposed by the minimal desktop. */
+/** The same complete palettes exposed by the minimal desktop. */
 public enum class MinimalThemePreset(
     val key: String,
     val label: String,
@@ -135,6 +135,8 @@ public enum class MinimalThemePreset(
     DARK("dark", "Dark", Color(0xFF202020)),
     LIGHT("light", "Light", Color(0xFFF7F7F5)),
     WARM("warm", "Warm", Color(0xFF201711)),
+    NORD("nord", "Nord", Color(0xFF3B4252)),
+    DRACULA("dracula", "Dracula", Color(0xFF343746)),
     ;
 
     public companion object {
@@ -191,5 +193,37 @@ public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) 
         outline = Color(0xFF764733),
         outlineVariant = Color(0xFF49362A),
         error = Color(0xFFE05E55),
+    )
+    MinimalThemePreset.NORD -> darkColorScheme(
+        primary = Color(0xFF88C0D0),
+        onPrimary = Color(0xFF172027),
+        primaryContainer = Color(0xFF354253),
+        onPrimaryContainer = Color(0xFFECEFF4),
+        background = Color(0xFF2E3440),
+        onBackground = Color(0xFFECEFF4),
+        surface = Color(0xFF3B4252),
+        onSurface = Color(0xFFECEFF4),
+        surfaceContainerLow = Color(0xFF272C36),
+        surfaceContainerHigh = Color(0xFF434C5E),
+        onSurfaceVariant = Color(0xFFD8DEE9),
+        outline = Color(0xFF88C0D0),
+        outlineVariant = Color(0xFF4C566A),
+        error = Color(0xFFBF616A),
+    )
+    MinimalThemePreset.DRACULA -> darkColorScheme(
+        primary = Color(0xFFBD93F9),
+        onPrimary = Color(0xFF21162F),
+        primaryContainer = Color(0xFF3A3C4B),
+        onPrimaryContainer = Color(0xFFF8F8F2),
+        background = Color(0xFF282A36),
+        onBackground = Color(0xFFF8F8F2),
+        surface = Color(0xFF343746),
+        onSurface = Color(0xFFF8F8F2),
+        surfaceContainerLow = Color(0xFF21222C),
+        surfaceContainerHigh = Color(0xFF44475A),
+        onSurfaceVariant = Color(0xFFC7C8D8),
+        outline = Color(0xFFBD93F9),
+        outlineVariant = Color(0xFF44475A),
+        error = Color(0xFFFF5555),
     )
 }

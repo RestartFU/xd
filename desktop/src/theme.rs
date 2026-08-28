@@ -28,16 +28,26 @@ pub enum ThemePreset {
     Dark,
     Light,
     Warm,
+    Nord,
+    Dracula,
 }
 
 impl ThemePreset {
-    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Warm];
+    pub const ALL: [Self; 5] = [
+        Self::Dark,
+        Self::Light,
+        Self::Warm,
+        Self::Nord,
+        Self::Dracula,
+    ];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Dark => "Dark",
             Self::Light => "Light",
             Self::Warm => "Warm",
+            Self::Nord => "Nord",
+            Self::Dracula => "Dracula",
         }
     }
 
@@ -88,6 +98,36 @@ impl ThemePreset {
                 accent_hover: 0xf38a66,
                 accent_text: 0x1c0f08,
             },
+            Self::Nord => ThemeColors {
+                background: 0x2e3440,
+                sidebar: 0x272c36,
+                surface: 0x3b4252,
+                surface_high: 0x434c5e,
+                border: 0x4c566a,
+                selected_surface: 0x354253,
+                selected_border: 0x88c0d0,
+                text: 0xeceff4,
+                muted: 0xd8dee9,
+                accent: 0x88c0d0,
+                accent_ink: 0x88c0d0,
+                accent_hover: 0x8fbcbb,
+                accent_text: 0x172027,
+            },
+            Self::Dracula => ThemeColors {
+                background: 0x282a36,
+                sidebar: 0x21222c,
+                surface: 0x343746,
+                surface_high: 0x44475a,
+                border: 0x44475a,
+                selected_surface: 0x3a3c4b,
+                selected_border: 0xbd93f9,
+                text: 0xf8f8f2,
+                muted: 0xc7c8d8,
+                accent: 0xbd93f9,
+                accent_ink: 0xbd93f9,
+                accent_hover: 0xcaa8fa,
+                accent_text: 0x21162f,
+            },
         }
     }
 }
@@ -105,5 +145,13 @@ mod tests {
         assert_eq!(colors.surface, 0xfafafa);
         assert_eq!(colors.border, 0xebebeb);
         assert_eq!(colors.accent, 0xe96a43);
+    }
+
+    #[test]
+    fn known_theme_presets_include_nord_and_dracula() {
+        assert!(ThemePreset::ALL.contains(&ThemePreset::Nord));
+        assert!(ThemePreset::ALL.contains(&ThemePreset::Dracula));
+        assert_eq!(ThemePreset::Nord.label(), "Nord");
+        assert_eq!(ThemePreset::Dracula.label(), "Dracula");
     }
 }
