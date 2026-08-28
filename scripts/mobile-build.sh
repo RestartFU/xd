@@ -6,6 +6,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+./scripts/test-mobile-native-chat.sh
 mkdir -p dist/mobile
 ./scripts/runner-docker-build.sh \
   --target apk \

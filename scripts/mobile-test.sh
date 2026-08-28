@@ -6,6 +6,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+./scripts/test-mobile-native-chat.sh
 ./scripts/runner-docker-build.sh \
   --target test \
   --progress plain \

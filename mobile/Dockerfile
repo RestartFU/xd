@@ -49,7 +49,7 @@ RUN if grep -rlP '[aA][\d.\s,\-]*?\s0\s0[01][\d.\-]' \
     fi
 
 RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
-    ./gradlew --no-daemon :shared:allTests
+    ./gradlew --no-daemon :shared:allTests :androidApp:compileDebugKotlin
 
 FROM source AS verify
 

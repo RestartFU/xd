@@ -34,6 +34,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,7 +47,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,11 +54,12 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
-import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.model.MinimalProject
 import com.restartfu.xd.model.MinimalSession
@@ -66,11 +67,8 @@ import com.restartfu.xd.model.minimalProjects
 import com.restartfu.xd.model.minimalSessions
 import com.restartfu.xd.net.Link
 
-private data class DirectDestination(
-    val projectName: String,
+private data class SessionDestination(
     val chatId: String,
-    val title: String,
-    val agent: DirectAgent,
 )
 
 @Composable
@@ -81,28 +79,20 @@ internal fun MinimalMobileApp(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
-    var destination by remember { mutableStateOf<DirectDestination?>(null) }
+    var destination by remember { mutableStateOf<SessionDestination?>(null) }
     val projects = tree.minimalProjects()
 
-    LaunchedEffect(created, projects) {
+    LaunchedEffect(created) {
         created?.let { session ->
-            val projectName = projects.firstOrNull { it.id == session.projectId }?.name
-                ?: "Project"
-            destination = DirectDestination(
-                projectName = projectName,
-                chatId = session.chatId,
-                title = session.title,
-                agent = session.agent,
-            )
+            destination = SessionDestination(session.chatId)
             model.consumeCreatedDirectSession(session)
         }
     }
 
     destination?.let { active ->
-        MinimalDirectSession(
+        MinimalNativeSession(
             model = model,
             settings = settings,
-            link = link,
             destination = active,
             goBack = { destination = null },
         )
@@ -113,13 +103,8 @@ internal fun MinimalMobileApp(
         projects = projects,
         loading = tree.loading,
         treeError = tree.error,
-        open = { project, session ->
-            destination = DirectDestination(
-                projectName = project.name,
-                chatId = session.id,
-                title = session.title,
-                agent = session.agent,
-            )
+        open = { _, session ->
+            destination = SessionDestination(session.id)
         },
     )
 }
@@ -273,107 +258,25 @@ private fun MinimalProjectsHome(
 }
 
 @Composable
-private fun MinimalDirectSession(
+private fun MinimalNativeSession(
     model: MainViewModel,
     settings: MobileSettings,
-    link: Link,
-    destination: DirectDestination,
+    destination: SessionDestination,
     goBack: () -> Unit,
 ) {
-    val allowAllPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
-    val terminalOwner = remember(
-        destination.chatId,
-        destination.agent,
-        allowAllPermissions,
-    ) { DirectTerminalOwner() }
-    DisposableEffect(terminalOwner) {
-        onDispose { terminalOwner.viewModelStore.clear() }
+    val chatOwner = remember(destination.chatId) { NativeChatOwner() }
+    DisposableEffect(chatOwner) {
+        onDispose { chatOwner.viewModelStore.clear() }
     }
-    val terminal: TerminalViewModel = viewModel(
-        key = "direct-${destination.chatId}-${destination.agent.wire}-$allowAllPermissions",
-        viewModelStoreOwner = terminalOwner,
-        factory = TerminalViewModel.DirectFactory(
-            client = model.client,
-            chatId = destination.chatId,
-            agent = destination.agent,
-            allowAllPermissions = allowAllPermissions,
-        ),
-    )
-    LaunchedEffect(terminal) {
-        model.client.terminalEvents.collect(terminal::onEvent)
-    }
-
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .navigationBarsPadding(),
-    ) {
-        ProductHeader(
-            link = link,
-            sessionsActive = true,
-            onProjects = goBack,
-            onSessions = {},
-            onAdd = {},
-            onSettings = { settingsOpen = true },
-            showAdd = false,
+    CompositionLocalProvider(LocalViewModelStoreOwner provides chatOwner) {
+        val chat: ChatViewModel = viewModel(
+            key = "chat-${destination.chatId}",
+            factory = ChatViewModel.Factory(
+                client = model.client,
+                chatId = destination.chatId,
+            ),
         )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp)
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TextButton(onClick = goBack, contentPadding = PaddingValues(4.dp)) {
-                Text("←", fontSize = 22.sp)
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    destination.projectName,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    destination.title,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            AgentPill(destination.agent)
-            TextButton(onClick = terminal::kill) { Text("Stop", color = MaterialTheme.colorScheme.error) }
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(10.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .border(
-                    1.dp,
-                    MaterialTheme.colorScheme.outlineVariant,
-                    RoundedCornerShape(14.dp),
-                ),
-        ) {
-            TerminalPaneContent(terminal, showSessionBar = false)
-        }
-    }
-
-    if (settingsOpen) {
-        MinimalSettingsDialog(
-            settings = settings,
-            onDismiss = { settingsOpen = false },
-            onDisconnect = {
-                settingsOpen = false
-                model.forget()
-            },
-        )
+        ChatScreen(chat, settings, goBack)
     }
 }
 
@@ -575,24 +478,8 @@ private fun WorkingDots() {
     Dots(MaterialTheme.colorScheme.primary, contentDescription = "Working")
 }
 
-private class DirectTerminalOwner : ViewModelStoreOwner {
+private class NativeChatOwner : ViewModelStoreOwner {
     override val viewModelStore: ViewModelStore = ViewModelStore()
-}
-
-@Composable
-private fun AgentPill(agent: DirectAgent) {
-    Row(
-        modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-            .padding(horizontal = 9.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        BackendIcon(agent.wire, size = 15.dp)
-        Text(agent.wire, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-    }
 }
 
 @Composable
