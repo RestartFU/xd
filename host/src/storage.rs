@@ -1761,11 +1761,10 @@ impl StateStore {
         Ok(())
     }
 
-    /// A killed host leaves `host_working` set with no process behind it:
-    /// the chat looks busy forever, further messages only pile into the queue,
-    /// and Stop has nothing to kill. Clear those rows when the host comes
-    /// back and say so in the transcript. Queued messages are kept — they run
-    /// on the next turn rather than being started behind the user's back.
+    /// Explicitly repair every `host_working` row after an operator has proved
+    /// no stdio host still owns a turn. Normal stdio startup must not call this:
+    /// desktop and mobile processes share the store and another process may be
+    /// running those turns. Queued messages are preserved for a later turn.
     pub fn recover_interrupted_turns(&self) -> Result<Vec<String>, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
@@ -7620,7 +7619,7 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_lost_with_the_host_is_released_on_the_next_start() {
+    fn explicit_recovery_releases_a_turn_lost_with_its_host() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
         let database = Connection::open(&fixture.database).unwrap();
@@ -7638,7 +7637,7 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         drop(store);
 
-        // The host died mid-turn; the next one has to hand the chat back.
+        // The host died mid-turn; explicit recovery hands the chat back.
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         assert_eq!(store.recover_interrupted_turns().unwrap(), vec!["chat-1"]);

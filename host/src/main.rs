@@ -64,9 +64,10 @@ fn finish(result: Result<(), String>) -> ExitCode {
 fn host_stdio(options: HostOptions) -> Result<(), String> {
     let store = StateStore::open(&options.database, &options.workspaces)
         .map_err(|error| error.to_string())?;
-    if let Err(error) = store.recover_interrupted_turns() {
-        eprintln!("xd-host: cannot release interrupted chats: {error}");
-    }
+    // Every desktop and mobile SSH connection owns a separate stdio host.
+    // Another process may still own any `host_working` turn in this shared
+    // store, so merely connecting must never declare those turns abandoned.
+    // The explicit cancel path retains its single-chat stuck-turn repair.
     let data_directory = options
         .database
         .parent()
@@ -227,6 +228,20 @@ mod tests {
     fn rejects_removed_socket_server_commands() {
         assert!(arguments(["serve".into(), "--socket=/tmp/xd.sock".into()]).is_err());
         assert!(arguments(["pair".into(), "--port=4444".into()]).is_err());
+    }
+
+    #[test]
+    fn connecting_a_stdio_client_does_not_recover_other_hosts_turns() {
+        let source = include_str!("main.rs");
+        let startup = source
+            .split_once("fn host_stdio(")
+            .expect("stdio host startup")
+            .1
+            .split_once("fn arguments(")
+            .expect("end of stdio host startup")
+            .0;
+
+        assert!(!startup.contains("recover_interrupted_turns"));
     }
 
     #[test]

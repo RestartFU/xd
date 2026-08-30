@@ -24,13 +24,13 @@ use gpui::{
     KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render,
     ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
     TitlebarOptions, WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, point, prelude::*, px, rgb,
-    rgba, size, svg,
+    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, list, point, prelude::*, px,
+    rgb, rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
-    activity,
+    activity::{self, ActivityCard, ActivityKind},
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
     model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, Worktree},
@@ -178,6 +178,32 @@ fn xd_mark(color: u32) -> gpui::AnyElement {
         .size(px(20.0))
         .flex_none()
         .text_color(rgb(color))
+        .into_any_element()
+}
+
+fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
+    div()
+        .w(px(38.0))
+        .h(px(22.0))
+        .flex_none()
+        .rounded_full()
+        .bg(rgb(if enabled {
+            colors.accent
+        } else {
+            colors.surface_high
+        }))
+        .child(
+            div()
+                .mt(px(3.0))
+                .ml(px(if enabled { 19.0 } else { 3.0 }))
+                .size(px(16.0))
+                .rounded_full()
+                .bg(rgb(if enabled {
+                    colors.accent_text
+                } else {
+                    colors.muted
+                })),
+        )
         .into_any_element()
 }
 
@@ -1054,6 +1080,7 @@ struct XdDesktop {
     remote_generation: u64,
     remote_reconnect_attempt: u32,
     transcript: ListState,
+    transcript_scroll_handler_attached: bool,
     transcript_snapshot: TranscriptSnapshot,
     /// Whether the selected chat has returned at least one transcript page.
     /// This is deliberately separate from `messages.is_empty()`: a new chat is
@@ -1471,6 +1498,7 @@ impl XdDesktop {
             remote_generation: 0,
             remote_reconnect_attempt: 0,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
+            transcript_scroll_handler_attached: false,
             transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loaded: false,
             transcript_loading: false,
@@ -4065,6 +4093,9 @@ impl XdDesktop {
         body: &Value,
         cx: &mut Context<Self>,
     ) {
+        if self.settings.experiment_mode {
+            return;
+        }
         let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
             return;
         };
@@ -5228,6 +5259,10 @@ impl XdDesktop {
     }
 
     fn prime_terminal_cache(&mut self, endpoint: ChatEndpoint) {
+        if self.settings.experiment_mode {
+            self.terminal_cache_refresh.remove(&endpoint);
+            return;
+        }
         let refresh_all = self.terminal_cache_refresh.remove(&endpoint);
         let chats = self
             .endpoint_model(endpoint)
@@ -5670,6 +5705,9 @@ impl XdDesktop {
         agent: Option<AgentCli>,
         cx: &mut Context<Self>,
     ) {
+        if self.settings.experiment_mode {
+            return;
+        }
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
@@ -6633,6 +6671,44 @@ impl XdDesktop {
         self.request_message_page(chat_id, cursor);
     }
 
+    fn request_older_messages(&mut self) {
+        if !self.transcript_has_older || self.transcript_page_loading || self.transcript_loading {
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(cursor) = self
+            .model
+            .messages
+            .first()
+            .and_then(|message| message.id)
+            .map(MessageCursor::Before)
+        else {
+            return;
+        };
+        self.request_message_page(&chat_id, cursor);
+    }
+
+    fn request_newer_messages(&mut self) {
+        if !self.transcript_has_newer || self.transcript_page_loading || self.transcript_loading {
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(cursor) = self
+            .model
+            .messages
+            .last()
+            .and_then(|message| message.id)
+            .map(MessageCursor::After)
+        else {
+            return;
+        };
+        self.request_message_page(&chat_id, cursor);
+    }
+
     fn request_message_page(&mut self, chat_id: &str, cursor: MessageCursor) {
         if self.transcript_page_loading {
             return;
@@ -6917,6 +6993,72 @@ impl XdDesktop {
             optimistic,
         });
         true
+    }
+
+    fn queue_composer(&mut self, cx: &mut Context<Self>) {
+        let text = self.composer.trim().to_owned();
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if text.is_empty() || !self.model.draft_attachments.is_empty() {
+            return;
+        }
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        if let Err(error) = host.queue_message(&chat_id, &text) {
+            self.model.connection_error = Some(error);
+            cx.notify();
+            return;
+        }
+        self.model.queue.push(text);
+        self.set_composer_text(String::new(), cx);
+        self.draft_dirty = true;
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        let _ = host.set_draft(&chat_id, "", None, None);
+        cx.notify();
+    }
+
+    fn drop_queued(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        match host.drop_queue(&chat_id, index) {
+            Ok(()) if index < self.model.queue.len() => {
+                self.model.queue.remove(index);
+            }
+            Ok(()) => {}
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn cancel_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        match host.cancel(&chat_id) {
+            Ok(()) => {
+                self.model.stop_working();
+                if let Some(summary) = self.model.chats.iter_mut().find(|chat| chat.id == chat_id) {
+                    summary.working = false;
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
     }
 
     fn clear_question(&mut self, cx: &mut Context<Self>) {
@@ -7287,6 +7429,9 @@ impl XdDesktop {
     }
 
     fn show_minimal_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.experiment_mode {
+            return;
+        }
         let panel_id = global_terminal_panel_id(&self.current_connection_key());
         let same_panel = matches!(self.minimal_route, MinimalRoute::Terminal)
             && self
@@ -7331,7 +7476,11 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         self.select_minimal_session(project_id, chat_id, agent, cx);
-        let focus = self.terminal_input.read(cx).focus_handle(cx);
+        let focus = if self.settings.experiment_mode {
+            self.composer_input.read(cx).focus_handle(cx)
+        } else {
+            self.terminal_input.read(cx).focus_handle(cx)
+        };
         window.focus(&focus);
         cx.notify();
     }
@@ -7344,6 +7493,17 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         self.minimal_new_tab_open = false;
+        if self.settings.experiment_mode {
+            self.stash_terminal_panel();
+            self.select_native_chat(chat_id.clone(), cx);
+            self.minimal_route = MinimalRoute::Cli {
+                project_id,
+                chat_id,
+                agent,
+            };
+            cx.notify();
+            return;
+        }
         let same_panel = self
             .terminal_panel
             .as_ref()
@@ -7379,6 +7539,39 @@ impl XdDesktop {
         // request instead of leaving it stuck forever.
         self.refresh_terminal_sessions(cx);
         cx.notify();
+    }
+
+    fn select_native_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
+            if !self.transcript_loaded && !self.transcript_page_loading {
+                self.refresh_selected_chat_after_connect(cx);
+            }
+            return;
+        }
+        self.sync_draft();
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        self.model.select_chat(chat_id.clone());
+        self.remember_last_chat(&chat_id);
+        self.invalidate_live_render();
+        self.transcript_snapshot = TranscriptSnapshot::default();
+        self.transcript_loaded = false;
+        self.transcript_loading = true;
+        self.transcript_page_loading = false;
+        self.transcript_refresh_pending = false;
+        self.transcript_has_older = false;
+        self.transcript_has_newer = false;
+        self.transcript.reset(0);
+        self.set_composer_text(String::new(), cx);
+        self.draft_dirty = false;
+        self.attachments_dirty = false;
+        self.pending_send = None;
+        self.sending = false;
+        self.diff_panel = None;
+        self.clear_question(cx);
+        self.cancel_queue_edit(cx);
+        self.request_chat(&chat_id);
+        self.request_message_page(&chat_id, MessageCursor::Tail);
+        self.request_shortcuts();
     }
 
     fn reconcile_minimal_navigation(&mut self, cx: &mut Context<Self>) {
@@ -7482,6 +7675,31 @@ impl XdDesktop {
 
     fn toggle_minimal_all_permissions(&mut self, cx: &mut Context<Self>) {
         self.settings.allow_all_permissions = !self.settings.allow_all_permissions;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn toggle_experiment_mode(&mut self, cx: &mut Context<Self>) {
+        self.settings.experiment_mode = !self.settings.experiment_mode;
+        if self.settings.experiment_mode {
+            self.minimal_new_tab_open = false;
+            self.stash_terminal_panel();
+            if matches!(self.minimal_route, MinimalRoute::Terminal) {
+                self.minimal_route = MinimalRoute::default();
+            }
+            if let MinimalRoute::Cli { chat_id, .. } = self.minimal_route.clone() {
+                self.select_native_chat(chat_id, cx);
+            }
+        } else if let MinimalRoute::Cli {
+            project_id,
+            chat_id,
+            agent,
+        } = self.minimal_route.clone()
+        {
+            self.select_minimal_session(project_id, chat_id, agent, cx);
+        }
         if let Err(error) = self.settings.save() {
             self.model.connection_error = Some(error);
         }
@@ -8048,6 +8266,7 @@ impl XdDesktop {
             MinimalRoute::Projects { .. } | MinimalRoute::Terminal => None,
         };
         let connected = self.model.connected;
+        let experiment_mode = self.settings.experiment_mode;
         let remote_active = self.active_endpoint == ChatEndpoint::Remote;
         let runtime_label = if remote_active { "Remote" } else { "Local" };
 
@@ -8174,42 +8393,44 @@ impl XdDesktop {
                             }))
                             .child("Sessions"),
                     )
-                    .child(
-                        div()
-                            .id("minimal-terminal-tab")
-                            .h(px(38.0))
-                            .px_4()
-                            .flex()
-                            .items_center()
-                            .rounded_full()
-                            .bg(rgb(if terminal_active {
-                                colors.surface_high
-                            } else {
-                                colors.surface
-                            }))
-                            .text_base()
-                            .font_weight(if terminal_active {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .text_color(rgb(if terminal_active {
-                                colors.text
-                            } else {
-                                colors.muted
-                            }))
-                            .cursor_pointer()
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(colors.surface_high))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_minimal_terminal(window, cx)
-                            }))
-                            .child("Terminal"),
-                    )
+                    .when(!experiment_mode, |nav| {
+                        nav.child(
+                            div()
+                                .id("minimal-terminal-tab")
+                                .h(px(38.0))
+                                .px_4()
+                                .flex()
+                                .items_center()
+                                .rounded_full()
+                                .bg(rgb(if terminal_active {
+                                    colors.surface_high
+                                } else {
+                                    colors.surface
+                                }))
+                                .text_base()
+                                .font_weight(if terminal_active {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::MEDIUM
+                                })
+                                .text_color(rgb(if terminal_active {
+                                    colors.text
+                                } else {
+                                    colors.muted
+                                }))
+                                .cursor_pointer()
+                                .hover(|style| {
+                                    style
+                                        .bg(rgb(colors.surface_high))
+                                        .text_color(rgb(colors.text))
+                                })
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.show_minimal_terminal(window, cx)
+                                }))
+                                .child("Terminal"),
+                        )
+                    })
                     .child(
                         div()
                             .id("minimal-global-create")
@@ -9284,6 +9505,587 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    fn render_native_markdown_block(
+        colors: ThemeColors,
+        block: &markdown::Block,
+        index: usize,
+    ) -> gpui::AnyElement {
+        match block {
+            markdown::Block::Heading { level, content } => div()
+                .id(("native-heading", index))
+                .text_size(px(match level {
+                    1 => 22.0,
+                    2 => 19.0,
+                    _ => 16.0,
+                }))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(colors.text))
+                .child(content.text.clone())
+                .into_any_element(),
+            markdown::Block::Paragraph(content) => div()
+                .id(("native-paragraph", index))
+                .text_sm()
+                .line_height(px(22.0))
+                .text_color(rgb(colors.text))
+                .child(content.text.clone())
+                .into_any_element(),
+            markdown::Block::Quote(content) => div()
+                .id(("native-quote", index))
+                .pl_3()
+                .border_l_2()
+                .border_color(rgb(colors.border))
+                .text_sm()
+                .line_height(px(22.0))
+                .text_color(rgb(colors.muted))
+                .child(content.text.clone())
+                .into_any_element(),
+            markdown::Block::ListItem {
+                number,
+                depth,
+                content,
+            } => div()
+                .id(("native-list-item", index))
+                .pl(px(12.0 * f32::from(*depth)))
+                .flex()
+                .items_start()
+                .gap_2()
+                .text_sm()
+                .line_height(px(22.0))
+                .text_color(rgb(colors.text))
+                .child(number.map_or_else(|| "•".into(), |number| format!("{number}.")))
+                .child(content.text.clone())
+                .into_any_element(),
+            markdown::Block::Rule => div()
+                .id(("native-rule", index))
+                .h(px(1.0))
+                .w_full()
+                .my_1()
+                .bg(rgb(colors.border))
+                .into_any_element(),
+            markdown::Block::Code(code) => div()
+                .id(("native-code", index))
+                .w_full()
+                .p_3()
+                .rounded_lg()
+                .bg(rgb(colors.background))
+                .font_family(MONO)
+                .text_xs()
+                .line_height(px(19.0))
+                .text_color(rgb(colors.text))
+                .child(code.code.clone())
+                .into_any_element(),
+            markdown::Block::Table(table) => div()
+                .id(("native-table", index))
+                .w_full()
+                .p_3()
+                .rounded_lg()
+                .bg(rgb(colors.background))
+                .font_family(MONO)
+                .text_xs()
+                .line_height(px(19.0))
+                .text_color(rgb(colors.text))
+                .child(table.text.clone())
+                .into_any_element(),
+            markdown::Block::Analysis(blocks) => div()
+                .id(("native-analysis", index))
+                .w_full()
+                .p_3()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded_lg()
+                .bg(rgb(colors.background))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(colors.muted))
+                        .child("Analysis"),
+                )
+                .children(
+                    blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, block)| {
+                            Self::render_native_markdown_block(colors, block, index)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .into_any_element(),
+        }
+    }
+
+    fn render_native_activity(
+        colors: ThemeColors,
+        card: ActivityCard,
+        index: usize,
+    ) -> gpui::AnyElement {
+        let status_color = match card.kind {
+            ActivityKind::Running => colors.accent,
+            ActivityKind::Success => 0x72bd8b,
+            ActivityKind::Failure => 0xd86f7c,
+            ActivityKind::Finished => colors.muted,
+        };
+        let detail = card
+            .patch
+            .or_else(|| (!card.detail.is_empty()).then_some(card.detail));
+        let item_rows = card
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(item_index, item)| {
+                div()
+                    .id(("native-activity-item", item_index))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(rgb(colors.text))
+                    .child(div().min_w_0().flex_1().child(item.name))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(colors.muted))
+                            .child(item.status),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id(("native-activity", index))
+            .w_full()
+            .max_w(px(860.0))
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.surface_high))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.muted))
+                            .child(card.title),
+                    )
+                    .child(div().min_w_0().flex_1().text_sm().child(card.name))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(status_color))
+                            .child(card.status),
+                    ),
+            )
+            .when_some(detail, |activity, detail| {
+                activity.child(
+                    div()
+                        .id(("native-activity-detail", index))
+                        .w_full()
+                        .max_h(px(260.0))
+                        .overflow_y_scroll()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(colors.background))
+                        .font_family(MONO)
+                        .text_xs()
+                        .line_height(px(19.0))
+                        .text_color(rgb(colors.muted))
+                        .child(detail),
+                )
+            })
+            .children(item_rows)
+            .into_any_element()
+    }
+
+    fn render_native_message(
+        colors: ThemeColors,
+        message: &Message,
+        activity: Option<ActivityCard>,
+        index: usize,
+    ) -> gpui::AnyElement {
+        let role = message.role.as_str();
+        if role == "duration" {
+            let label = message
+                .content
+                .parse::<u64>()
+                .map(|seconds| format!("Finished in {seconds}s"))
+                .unwrap_or_else(|_| "Finished".into());
+            return div()
+                .id(("native-duration", index))
+                .w_full()
+                .py_2()
+                .text_center()
+                .text_xs()
+                .text_color(rgb(colors.muted))
+                .child(label)
+                .into_any_element();
+        }
+
+        if let Some(activity) = activity {
+            return Self::render_native_activity(colors, activity, index);
+        }
+
+        let user = role == "user";
+        let error = role == "error";
+        let label = if user {
+            "You".to_owned()
+        } else if error {
+            "Host".to_owned()
+        } else {
+            message.label.clone().unwrap_or_else(|| "Assistant".into())
+        };
+        let markdown = message.markdown();
+        let card = div()
+            .max_w(px(if user { 720.0 } else { 860.0 }))
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_xl()
+            .border_1()
+            .border_color(rgb(if error { 0x8f3f4b } else { colors.border }))
+            .bg(rgb(if user {
+                colors.selected_surface
+            } else {
+                colors.surface
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(if error { 0xd86f7c } else { colors.muted }))
+                    .child(label),
+            )
+            .child(
+                div().w_full().flex().flex_col().gap_2().children(
+                    markdown
+                        .blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, block)| {
+                            Self::render_native_markdown_block(colors, block, index)
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            );
+        div()
+            .id(("native-message", index))
+            .w_full()
+            .flex()
+            .when(user, |row| row.justify_end())
+            .child(card)
+            .into_any_element()
+    }
+
+    fn render_native_chat(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if !self.transcript_scroll_handler_attached {
+            self.transcript_scroll_handler_attached = true;
+            let desktop = cx.entity();
+            self.transcript
+                .set_scroll_handler(move |event, _window, cx| {
+                    let near_start = event.visible_range.start <= 8;
+                    let near_end = event.visible_range.end.saturating_add(8) >= event.count;
+                    let _ = desktop.update(cx, |this, _cx| {
+                        if near_start && this.transcript_has_older {
+                            this.request_older_messages();
+                        } else if near_end {
+                            this.request_newer_messages();
+                        }
+                    });
+                });
+        }
+        let messages = self.transcript_snapshot.clone();
+        let transcript_empty = messages.get(0).is_none();
+        let transcript_loading = self.transcript_loading;
+        let workflow_statuses = self.workflow_statuses.clone();
+        let workflow_pending = self.workflow_pending.clone();
+        let transcript = if transcript_loading {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(colors.muted))
+                .child("Loading transcript…")
+                .into_any_element()
+        } else if transcript_empty {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(rgb(colors.muted))
+                .child(if self.transcript_loaded {
+                    "Start this session with a message."
+                } else {
+                    "Conversation did not load. Select the session to retry."
+                })
+                .into_any_element()
+        } else {
+            list(self.transcript.clone(), move |index, _window, _cx| {
+                let message = messages
+                    .get(index)
+                    .expect("transcript list index must match its snapshot");
+                let activity = (message.role == "tool").then(|| {
+                    ActivityCard::parse(&message.content).with_workflow_status(
+                        workflow_statuses.get(&message.content),
+                        workflow_pending.contains(&message.content),
+                    )
+                });
+                Self::render_native_message(colors, message, activity, index)
+            })
+            .size_full()
+            .into_any_element()
+        };
+        let queued = self
+            .model
+            .queue
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                div()
+                    .id(("native-queued", index))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_lg()
+                    .bg(rgb(colors.surface_high))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.muted))
+                            .child(format!("Queued {}", index + 1)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(rgb(colors.text))
+                            .child(text),
+                    )
+                    .child(
+                        div()
+                            .id(("native-drop-queued", index))
+                            .size(px(26.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .text_sm()
+                            .text_color(rgb(colors.muted))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.background)))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.drop_queued(index, cx)),
+                            )
+                            .child("×"),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let composer_focus = self.composer_input.read(cx).focus_handle(cx);
+        let can_send = self.model.connected
+            && !self.sending
+            && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
+        let can_queue = self.model.connected
+            && !self.composer.trim().is_empty()
+            && self.model.draft_attachments.is_empty();
+        let working = self.model.working;
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(colors.background))
+            .child(
+                div()
+                    .id("native-transcript")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .px_5()
+                    .py_4()
+                    .child(transcript),
+            )
+            .when(working, |chat| {
+                chat.child(
+                    div()
+                        .mx_5()
+                        .mb_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_sm()
+                        .text_color(rgb(colors.muted))
+                        .child(working_dots(0, colors.muted))
+                        .child("Working"),
+                )
+            })
+            .when(!queued.is_empty(), |chat| {
+                chat.child(
+                    div()
+                        .id("native-queue")
+                        .max_h(px(150.0))
+                        .overflow_y_scroll()
+                        .mx_5()
+                        .mb_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(queued),
+                )
+            })
+            .child(
+                div()
+                    .id("native-composer-shell")
+                    .mx_5()
+                    .mb_4()
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_xl()
+                    .border_1()
+                    .border_color(rgb(if composer_focus.is_focused(window) {
+                        colors.accent
+                    } else {
+                        colors.border
+                    }))
+                    .bg(rgb(colors.surface))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let focus = this.composer_input.read(cx).focus_handle(cx);
+                        window.focus(&focus);
+                    }))
+                    .child(
+                        div()
+                            .id("native-composer")
+                            .min_h(px(44.0))
+                            .max_h(px(180.0))
+                            .px_2()
+                            .py_1()
+                            .track_focus(&composer_focus)
+                            .child(self.composer_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .when(working, |controls| {
+                                controls.child(
+                                    div()
+                                        .id("native-cancel-turn")
+                                        .h(px(34.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_lg()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xd86f7c))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.cancel_turn(cx)),
+                                        )
+                                        .child("Cancel"),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .id("native-queue-message")
+                                    .h(px(34.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .bg(rgb(if can_queue {
+                                        colors.surface_high
+                                    } else {
+                                        colors.background
+                                    }))
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(if can_queue {
+                                        colors.text
+                                    } else {
+                                        colors.muted
+                                    }))
+                                    .when(can_queue, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(colors.selected_surface)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_queue {
+                                            this.queue_composer(cx)
+                                        }
+                                    }))
+                                    .child("Queue"),
+                            )
+                            .child(
+                                div()
+                                    .id("native-send-message")
+                                    .h(px(34.0))
+                                    .px_4()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .bg(rgb(if can_send {
+                                        colors.accent
+                                    } else {
+                                        colors.surface_high
+                                    }))
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(if can_send {
+                                        colors.accent_text
+                                    } else {
+                                        colors.muted
+                                    }))
+                                    .when(can_send, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(rgb(colors.accent_hover)))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if can_send {
+                                            this.send_composer(cx)
+                                        }
+                                    }))
+                                    .child(if working { "Send next" } else { "Send" }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn render_minimal_cli(
         &mut self,
         colors: ThemeColors,
@@ -9295,7 +10097,11 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let toolbar = self.render_minimal_context_toolbar(colors, cx);
         let board = self.render_minimal_session_board(colors, Some(chat_id.as_str()), cx);
-        let terminal = self.render_minimal_terminal(colors, window, cx);
+        let content = if self.settings.experiment_mode {
+            self.render_native_chat(colors, window, cx)
+        } else {
+            self.render_minimal_terminal(colors, window, cx)
+        };
 
         div()
             .size_full()
@@ -9313,7 +10119,7 @@ impl XdDesktop {
                         .min_h_0()
                         .p_4()
                         .bg(rgb(colors.background))
-                        .child(terminal),
+                        .child(content),
                 ),
             )
             .into_any_element()
@@ -9471,6 +10277,7 @@ impl XdDesktop {
         });
         let theme_overlay = self.minimal_theme_open.then(|| {
             let allow_all_permissions = self.settings.allow_all_permissions;
+            let experiment_mode = self.settings.experiment_mode;
             let rows = ThemePreset::ALL
                 .into_iter()
                 .enumerate()
@@ -9546,6 +10353,42 @@ impl XdDesktop {
                         .child(div().mx_2().my_2().h(px(1.0)).bg(rgb(colors.border)))
                         .child(
                             div()
+                                .id("minimal-experiment-mode")
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .rounded_md()
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_experiment_mode(cx)
+                                }))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(colors.text))
+                                                .child("Experiment mode"),
+                                        )
+                                        .child(
+                                            div()
+                                                .mt_1()
+                                                .text_xs()
+                                                .text_color(rgb(colors.muted))
+                                                .child("Use the synchronized native chat instead of direct agent terminals."),
+                                        ),
+                                )
+                                .child(settings_switch(colors, experiment_mode)),
+                        )
+                        .child(
+                            div()
                                 .id("minimal-all-permissions")
                                 .w_full()
                                 .px_3()
@@ -9578,34 +10421,7 @@ impl XdDesktop {
                                                 .child("New agent tabs skip approvals and sandboxing when the CLI supports it."),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .w(px(38.0))
-                                        .h(px(22.0))
-                                        .flex_none()
-                                        .rounded_full()
-                                        .bg(rgb(if allow_all_permissions {
-                                            colors.accent
-                                        } else {
-                                            colors.surface_high
-                                        }))
-                                        .child(
-                                            div()
-                                                .mt(px(3.0))
-                                                .ml(px(if allow_all_permissions {
-                                                    19.0
-                                                } else {
-                                                    3.0
-                                                }))
-                                                .size(px(16.0))
-                                                .rounded_full()
-                                                .bg(rgb(if allow_all_permissions {
-                                                    colors.accent_text
-                                                } else {
-                                                    colors.muted
-                                                })),
-                                        ),
-                                ),
+                                .child(settings_switch(colors, allow_all_permissions)),
                         ),
                 )
                 .into_any_element()
@@ -11452,6 +12268,112 @@ mod tests {
     }
 
     #[test]
+    fn experiment_mode_is_labeled_and_routes_sessions_to_native_chat() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let settings = production
+            .split_once("let theme_overlay = self.minimal_theme_open.then(||")
+            .expect("minimal settings overlay")
+            .1
+            .split_once("let remote_overlay")
+            .expect("end of minimal settings overlay")
+            .0;
+        assert!(settings.contains(".child(\"Experiment mode\")"));
+        assert!(settings.contains("this.toggle_experiment_mode(cx)"));
+
+        let product_nav = production
+            .split_once("fn render_minimal_product_nav(")
+            .expect("product navigation renderer")
+            .1
+            .split_once("fn render_minimal_titlebar(")
+            .expect("end of product navigation renderer")
+            .0;
+        assert!(product_nav.contains("when(!experiment_mode"));
+
+        let session = production
+            .split_once("fn render_minimal_cli(")
+            .expect("session renderer")
+            .1
+            .split_once("fn render_minimal_standalone_terminal(")
+            .expect("end of session renderer")
+            .0;
+        assert!(session.contains("self.render_native_chat(colors, window, cx)"));
+    }
+
+    #[test]
+    fn native_chat_mounts_structured_transcript_and_host_backed_composer_controls() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let chat = production
+            .split_once("fn render_native_message(")
+            .expect("native message renderer")
+            .1
+            .split_once("fn render_minimal_cli(")
+            .expect("end of native chat renderer")
+            .0;
+        for behavior in [
+            "self.transcript_snapshot.clone()",
+            "list(self.transcript.clone()",
+            "ActivityCard::parse",
+            "message.markdown()",
+            "render_native_message",
+            "self.composer_input.clone()",
+            "this.send_composer(cx)",
+            "this.queue_composer(cx)",
+            "this.cancel_turn(cx)",
+            "this.drop_queued(index, cx)",
+        ] {
+            assert!(chat.contains(behavior), "missing {behavior}");
+        }
+
+        let actions = production
+            .split_once("fn queue_composer(")
+            .expect("native queue action")
+            .1
+            .split_once("fn clear_question(")
+            .expect("end of native composer actions")
+            .0;
+        assert!(actions.contains("host.queue_message(&chat_id, &text)"));
+        assert!(actions.contains("host.drop_queue(&chat_id, index)"));
+        assert!(actions.contains("host.cancel(&chat_id)"));
+    }
+
+    #[test]
+    fn experiment_transcript_pages_through_the_host_message_protocol() {
+        let source = include_str!("main.rs");
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let chat = production
+            .split_once("fn render_native_chat(")
+            .expect("native chat renderer")
+            .1
+            .split_once("fn render_minimal_cli(")
+            .expect("end of native chat renderer")
+            .0;
+        assert!(chat.contains("this.request_older_messages()"));
+        assert!(chat.contains("this.request_newer_messages()"));
+        assert!(chat.contains("near_start && this.transcript_has_older"));
+
+        let requests = production
+            .split_once("fn request_messages(")
+            .expect("message refresh requests")
+            .1
+            .split_once("fn request_workflow_statuses(")
+            .expect("end of message requests")
+            .0;
+        assert!(requests.contains("MessageCursor::Before"));
+        assert!(requests.contains("MessageCursor::After"));
+    }
+
+    #[test]
     fn minimal_settings_closes_when_the_backdrop_is_clicked() {
         let source = include_str!("main.rs");
         let production = source
@@ -11676,6 +12598,124 @@ mod tests {
             assert_eq!(panel.sessions[0].screen.rendered().text, "cached output");
             desktop.terminal_panel = None;
             desktop.terminal_panel_cache.clear();
+        });
+    }
+
+    #[gpui::test]
+    fn experiment_session_selection_does_not_create_or_restore_agent_terminals(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.experiment_mode = true;
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-a".into(),
+                folder: "project".into(),
+                title: Some("A".into()),
+                backend: "codex".into(),
+                branch: None,
+                working: false,
+                terminal_working: false,
+            }];
+            desktop.terminal_panel_cache.insert(
+                (desktop.active_endpoint, "chat-a".into()),
+                XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex),
+            );
+
+            desktop.select_minimal_session("project".into(), "chat-a".into(), AgentCli::Codex, cx);
+
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat-a"));
+            assert!(desktop.terminal_panel.is_none());
+            assert!(
+                desktop
+                    .terminal_panel_cache
+                    .contains_key(&(desktop.active_endpoint, "chat-a".into()))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn experiment_session_click_focuses_the_native_composer(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.experiment_mode = true;
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-a".into(),
+                folder: "project".into(),
+                title: Some("A".into()),
+                backend: "codex".into(),
+                branch: None,
+                working: false,
+                terminal_working: false,
+            }];
+
+            desktop.open_minimal_session(
+                "project".into(),
+                "chat-a".into(),
+                AgentCli::Codex,
+                window,
+                cx,
+            );
+
+            let composer_focus = desktop.composer_input.read(cx).focus_handle(cx);
+            let terminal_focus = desktop.terminal_input.read(cx).focus_handle(cx);
+            assert!(composer_focus.is_focused(window));
+            assert!(!terminal_focus.is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn experiment_tree_hydration_does_not_prime_agent_terminal_panels(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            desktop.settings.experiment_mode = true;
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-a".into(),
+                folder: "project".into(),
+                title: Some("A".into()),
+                backend: "codex".into(),
+                branch: None,
+                working: false,
+                terminal_working: false,
+            }];
+
+            desktop.prime_terminal_cache(desktop.active_endpoint);
+
+            assert!(desktop.terminal_panel_cache.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn experiment_terminal_events_do_not_materialize_agent_panels(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.experiment_mode = true;
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-a".into(),
+                folder: "project".into(),
+                title: Some("A".into()),
+                backend: "codex".into(),
+                branch: None,
+                working: false,
+                terminal_working: false,
+            }];
+
+            desktop.handle_terminal_screen_event(
+                desktop.active_endpoint,
+                "terminal-output",
+                &serde_json::json!({
+                    "chat": "chat-a",
+                    "terminal": "terminal-a",
+                    "sequence": 1,
+                    "data": "output"
+                }),
+                cx,
+            );
+
+            assert!(desktop.terminal_panel.is_none());
+            assert!(desktop.terminal_panel_cache.is_empty());
         });
     }
 
