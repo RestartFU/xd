@@ -25,11 +25,15 @@ public class MobileSettings(context: Context) {
     private val _theme = MutableStateFlow(
         MinimalThemePreset.fromKey(preferences.getString(KEY_THEME, null)),
     )
+    private val _experimentMode = MutableStateFlow(
+        preferences.getBoolean(KEY_EXPERIMENT_MODE, false),
+    )
 
     public val accent: StateFlow<AccentPreset> = _accent.asStateFlow()
     public val speechEnabled: StateFlow<Boolean> = _speechEnabled.asStateFlow()
     public val allowAllPermissions: StateFlow<Boolean> = _allowAllPermissions.asStateFlow()
     public val theme: StateFlow<MinimalThemePreset> = _theme.asStateFlow()
+    public val experimentMode: StateFlow<Boolean> = _experimentMode.asStateFlow()
 
     public fun setAccent(preset: AccentPreset) {
         preferences.edit().putString(KEY_ACCENT, preset.key).apply()
@@ -51,11 +55,17 @@ public class MobileSettings(context: Context) {
         _theme.value = theme
     }
 
+    public fun setExperimentMode(enabled: Boolean) {
+        preferences.edit().putBoolean(KEY_EXPERIMENT_MODE, enabled).apply()
+        _experimentMode.value = enabled
+    }
+
     private companion object {
         const val PREFERENCES = "xd_mobile_settings"
         const val KEY_ACCENT = "accent"
         const val KEY_SPEECH_ENABLED = "speech_enabled"
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
+        const val KEY_EXPERIMENT_MODE = "experiment_mode"
     }
 }

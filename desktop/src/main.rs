@@ -350,6 +350,7 @@ struct TerminalTab {
     id: String,
     title: String,
     agent: Option<AgentCli>,
+    native_chat_id: Option<String>,
     sequence: Option<u64>,
     screen: TerminalScreen,
 }
@@ -407,7 +408,7 @@ impl TerminalPanel {
     fn has_requested_session(&self) -> bool {
         self.sessions
             .iter()
-            .any(|session| session.agent == self.agent)
+            .any(|session| session.native_chat_id.is_none() && session.agent == self.agent)
     }
 
     fn should_auto_open(&self) -> bool {
@@ -1051,6 +1052,7 @@ struct XdDesktop {
     minimal_popup_focus_captured: bool,
     minimal_new_session_agent: AgentCli,
     pending_minimal_session: Option<(String, String)>,
+    pending_experiment_tab: Option<(String, AgentCli)>,
     settings: AppSettings,
     settings_open: bool,
     auth_open: bool,
@@ -1465,6 +1467,7 @@ impl XdDesktop {
             minimal_popup_focus_captured: false,
             minimal_new_session_agent: AgentCli::Codex,
             pending_minimal_session: None,
+            pending_experiment_tab: None,
             settings,
             settings_open: false,
             auth_open: false,
@@ -3633,6 +3636,34 @@ impl XdDesktop {
                     self.model.connection_error = Some("The host returned no chat id.".into());
                     return;
                 };
+                let response_agent = value
+                    .get("backend")
+                    .and_then(Value::as_str)
+                    .and_then(AgentCli::from_backend);
+                if let Some((panel_chat_id, pending_agent)) = self.pending_experiment_tab.clone()
+                    && response_agent == Some(pending_agent)
+                {
+                    self.pending_experiment_tab = None;
+                    self.request_tree();
+                    let chat_id = chat_id.to_owned();
+                    let active = self
+                        .terminal_panel
+                        .as_ref()
+                        .is_some_and(|panel| panel.chat_id == panel_chat_id);
+                    if active {
+                        if let Some(panel) = &mut self.terminal_panel {
+                            Self::select_native_agent_tab(panel, chat_id.clone(), pending_agent);
+                        }
+                        self.select_native_chat(chat_id, cx);
+                    } else if let Some(panel) = self
+                        .terminal_panel_cache
+                        .get_mut(&(self.active_endpoint, panel_chat_id))
+                    {
+                        Self::select_native_agent_tab(panel, chat_id, pending_agent);
+                    }
+                    cx.notify();
+                    return;
+                }
                 if self.creating_chat_folder.as_deref() == Some(folder_id.as_str())
                     && self.chat_create_title.trim() == title
                 {
@@ -4093,7 +4124,10 @@ impl XdDesktop {
         body: &Value,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.experiment_mode {
+        if self.settings.experiment_mode
+            && name == "terminal-opened"
+            && body.get("agent").and_then(Value::as_str).is_some()
+        {
             return;
         }
         let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
@@ -5236,6 +5270,28 @@ impl XdDesktop {
         }
     }
 
+    fn native_agent_tab(chat_id: String, agent: AgentCli) -> TerminalTab {
+        TerminalTab {
+            id: format!("native:{}:{}", agent.protocol_name(), chat_id),
+            title: agent.label().to_owned(),
+            agent: Some(agent),
+            native_chat_id: Some(chat_id),
+            sequence: None,
+            screen: TerminalScreen::new(120, 32),
+        }
+    }
+
+    fn select_native_agent_tab(panel: &mut TerminalPanel, chat_id: String, agent: AgentCli) {
+        let id = format!("native:{}:{}", agent.protocol_name(), chat_id);
+        if !panel.sessions.iter().any(|tab| tab.id == id) {
+            panel.sessions.push(Self::native_agent_tab(chat_id, agent));
+        }
+        panel.selected = Some(id);
+        panel.loading = false;
+        panel.auto_open = false;
+        panel.finish_opening();
+    }
+
     fn stash_terminal_panel(&mut self) {
         let Some(panel) = self.terminal_panel.take() else {
             return;
@@ -5259,10 +5315,6 @@ impl XdDesktop {
     }
 
     fn prime_terminal_cache(&mut self, endpoint: ChatEndpoint) {
-        if self.settings.experiment_mode {
-            self.terminal_cache_refresh.remove(&endpoint);
-            return;
-        }
         let refresh_all = self.terminal_cache_refresh.remove(&endpoint);
         let chats = self
             .endpoint_model(endpoint)
@@ -5305,6 +5357,9 @@ impl XdDesktop {
                 let mut panel = Self::new_agent_terminal_panel(chat_id.clone(), agent);
                 panel.auto_open = false;
                 panel.loading = false;
+                if self.settings.experiment_mode {
+                    Self::select_native_agent_tab(&mut panel, chat_id.clone(), agent);
+                }
                 self.terminal_panel_cache.insert(key.clone(), panel);
             } else if refresh_all && let Some(panel) = self.terminal_panel_cache.get_mut(&key) {
                 panel.loading = false;
@@ -5670,6 +5725,28 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn close_terminal_tab(&mut self, tab_id: String, cx: &mut Context<Self>) {
+        let native = self
+            .terminal_panel
+            .as_ref()
+            .and_then(|panel| panel.sessions.iter().find(|tab| tab.id == tab_id))
+            .and_then(|tab| tab.native_chat_id.clone());
+        if native.is_none() {
+            self.kill_terminal_id(tab_id, cx);
+            return;
+        }
+        let next_chat = if let Some(panel) = &mut self.terminal_panel {
+            panel.remove(&tab_id);
+            panel.selected().and_then(|tab| tab.native_chat_id.clone())
+        } else {
+            None
+        };
+        if let Some(chat_id) = next_chat {
+            self.select_native_chat(chat_id, cx);
+        }
+        cx.notify();
+    }
+
     fn start_terminal_session(&mut self, reuse: bool, cx: &mut Context<Self>) {
         let agent = self.terminal_panel.as_ref().and_then(|panel| panel.agent);
         self.start_terminal_session_as(reuse, agent, cx);
@@ -5695,8 +5772,44 @@ impl XdDesktop {
         self.minimal_new_tab_open = false;
         self.restore_minimal_popup_focus(window);
         self.start_terminal_session_as(false, agent, cx);
-        let focus = self.terminal_input.read(cx).focus_handle(cx);
+        let focus = if self.settings.experiment_mode && agent.is_some() {
+            self.composer_input.read(cx).focus_handle(cx)
+        } else {
+            self.terminal_input.read(cx).focus_handle(cx)
+        };
         window.focus(&focus);
+    }
+
+    fn open_experiment_agent_tab(&mut self, agent: AgentCli, cx: &mut Context<Self>) {
+        let Some(panel_chat_id) = self
+            .terminal_panel
+            .as_ref()
+            .map(|panel| panel.chat_id.clone())
+        else {
+            return;
+        };
+        let Some(folder_id) = (match &self.minimal_route {
+            MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
+            _ => None,
+        }) else {
+            return;
+        };
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| {
+                host.new_chat_with_backend(
+                    &folder_id,
+                    agent.label(),
+                    self.model.workdir.as_deref(),
+                    agent.protocol_name(),
+                )
+            });
+        match result {
+            Ok(()) => self.pending_experiment_tab = Some((panel_chat_id, agent)),
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
     }
 
     fn start_terminal_session_as(
@@ -5705,7 +5818,10 @@ impl XdDesktop {
         agent: Option<AgentCli>,
         cx: &mut Context<Self>,
     ) {
-        if self.settings.experiment_mode {
+        if self.settings.experiment_mode
+            && let Some(agent) = agent
+        {
+            self.open_experiment_agent_tab(agent, cx);
             return;
         }
         let Some(panel) = &mut self.terminal_panel else {
@@ -5805,7 +5921,17 @@ impl XdDesktop {
         {
             return;
         }
+        let native_chat_id = panel
+            .sessions
+            .iter()
+            .find(|session| session.id == terminal_id)
+            .and_then(|session| session.native_chat_id.clone());
         panel.selected = Some(terminal_id.clone());
+        if let Some(chat_id) = native_chat_id {
+            self.select_native_chat(chat_id, cx);
+            cx.notify();
+            return;
+        }
         self.terminal_scroll.scroll_to_bottom();
         let viewport = panel.viewport;
         if let Some((columns, rows)) = viewport
@@ -5857,6 +5983,7 @@ impl XdDesktop {
                 id: terminal_id.to_owned(),
                 title,
                 agent: event_agent,
+                native_chat_id: None,
                 sequence: body.get("sequence").and_then(Value::as_u64),
                 screen: TerminalScreen::new(columns, rows),
             });
@@ -5968,7 +6095,7 @@ impl XdDesktop {
         let pending_events = std::mem::take(&mut panel.pending_events);
         let previous = panel.selected.clone();
         let mut existing = std::mem::take(&mut panel.sessions);
-        let sessions = value
+        let mut sessions = value
             .get("terminals")
             .and_then(Value::as_array)
             .map(|items| {
@@ -6007,6 +6134,11 @@ impl XdDesktop {
                 sessions
             })
             .unwrap_or_default();
+        sessions.extend(
+            existing
+                .into_iter()
+                .filter(|session| session.native_chat_id.is_some()),
+        );
         panel.sessions = sessions;
         panel.selected = panel.selection_after_refresh(previous);
         for event in pending_events {
@@ -6070,6 +6202,7 @@ impl XdDesktop {
             id,
             title,
             agent,
+            native_chat_id: None,
             sequence,
             screen,
         })
@@ -7429,9 +7562,6 @@ impl XdDesktop {
     }
 
     fn show_minimal_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.experiment_mode {
-            return;
-        }
         let panel_id = global_terminal_panel_id(&self.current_connection_key());
         let same_panel = matches!(self.minimal_route, MinimalRoute::Terminal)
             && self
@@ -7494,13 +7624,31 @@ impl XdDesktop {
     ) {
         self.minimal_new_tab_open = false;
         if self.settings.experiment_mode {
-            self.stash_terminal_panel();
             self.select_native_chat(chat_id.clone(), cx);
             self.minimal_route = MinimalRoute::Cli {
-                project_id,
-                chat_id,
+                project_id: project_id.clone(),
+                chat_id: chat_id.clone(),
                 agent,
             };
+            let same_panel = self
+                .terminal_panel
+                .as_ref()
+                .is_some_and(|panel| panel.chat_id == chat_id);
+            if !same_panel {
+                self.stash_terminal_panel();
+                let key = (self.active_endpoint, chat_id.clone());
+                self.terminal_panel = Some(
+                    self.terminal_panel_cache
+                        .remove(&key)
+                        .unwrap_or_else(|| Self::new_agent_terminal_panel(chat_id.clone(), agent)),
+                );
+            }
+            if let Some(panel) = &mut self.terminal_panel {
+                panel.agent = Some(agent);
+                panel.allow_agent_tabs = true;
+                Self::select_native_agent_tab(panel, chat_id, agent);
+            }
+            self.sync_terminal_input_mode(cx);
             cx.notify();
             return;
         }
@@ -7683,16 +7831,8 @@ impl XdDesktop {
 
     fn toggle_experiment_mode(&mut self, cx: &mut Context<Self>) {
         self.settings.experiment_mode = !self.settings.experiment_mode;
-        if self.settings.experiment_mode {
-            self.minimal_new_tab_open = false;
-            self.stash_terminal_panel();
-            if matches!(self.minimal_route, MinimalRoute::Terminal) {
-                self.minimal_route = MinimalRoute::default();
-            }
-            if let MinimalRoute::Cli { chat_id, .. } = self.minimal_route.clone() {
-                self.select_native_chat(chat_id, cx);
-            }
-        } else if let MinimalRoute::Cli {
+        self.minimal_new_tab_open = false;
+        if let MinimalRoute::Cli {
             project_id,
             chat_id,
             agent,
@@ -7729,9 +7869,17 @@ impl XdDesktop {
         };
 
         let selected_id = panel.selected.clone();
+        let experiment_mode = self.settings.experiment_mode;
+        let panel_loading = panel.loading;
+        let panel_is_empty = panel.sessions.is_empty();
+        let panel_error = panel.error.clone();
+        let selected_native_chat_id = panel
+            .selected()
+            .and_then(|session| session.native_chat_id.clone());
         let allow_agent_tabs = panel.allow_agent_tabs;
         let output = panel
             .selected()
+            .filter(|session| session.native_chat_id.is_none())
             .map(|session| session.screen.rendered_with_cursor());
         let (output_text, output_spans, output_cursor, output_links) = output
             .map(|output| (output.text, output.spans, output.cursor, output.links))
@@ -7824,6 +7972,13 @@ impl XdDesktop {
         let tabs = panel
             .sessions
             .iter()
+            .filter(|session| {
+                if experiment_mode {
+                    session.native_chat_id.is_some() || session.agent.is_none()
+                } else {
+                    session.native_chat_id.is_none()
+                }
+            })
             .enumerate()
             .map(|(index, session)| {
                 let terminal_id = session.id.clone();
@@ -7858,7 +8013,7 @@ impl XdDesktop {
                             .hover(|style| style.bg(rgb(colors.surface_high)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.kill_terminal_id(close_id.clone(), cx);
+                                this.close_terminal_tab(close_id.clone(), cx);
                             }))
                             .child("×"),
                     )
@@ -7926,6 +8081,23 @@ impl XdDesktop {
             },
             |_, _, _, _| {},
         );
+        let viewport = if selected_native_chat_id.is_some() {
+            self.render_native_chat(colors, window, cx)
+        } else {
+            div()
+                .id("minimal-terminal-viewport")
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .font_family(MONO)
+                .text_size(px(13.0))
+                .line_height(px(19.0))
+                .text_color(rgb(colors.text))
+                .child(measurement_canvas.absolute().inset_0())
+                .child(output_scroller)
+                .child(terminal_input)
+                .into_any_element()
+        };
 
         div()
             .size_full()
@@ -7965,7 +8137,7 @@ impl XdDesktop {
                             .child(plus_icon(colors.text)),
                     ),
             )
-            .when(panel.loading && panel.sessions.is_empty(), |pane| {
+            .when(panel_loading && panel_is_empty, |pane| {
                 pane.child(
                     div()
                         .absolute()
@@ -7976,7 +8148,7 @@ impl XdDesktop {
                         .child("Starting CLI…"),
                 )
             })
-            .when_some(panel.error.clone(), |pane, error| {
+            .when_some(panel_error, |pane, error| {
                 pane.child(
                     div()
                         .absolute()
@@ -7988,20 +8160,7 @@ impl XdDesktop {
                         .child(error),
                 )
             })
-            .child(
-                div()
-                    .id("minimal-terminal-viewport")
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .font_family(MONO)
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
-                    .text_color(rgb(colors.text))
-                    .child(measurement_canvas.absolute().inset_0())
-                    .child(output_scroller)
-                    .child(terminal_input),
-            )
+            .child(viewport)
             .when(self.minimal_new_tab_open, |pane| {
                 pane.child(
                     div()
@@ -8109,7 +8268,7 @@ impl XdDesktop {
                                             .size(px(18.0))
                                             .text_color(rgb(colors.text)),
                                     )
-                                    .child("Claude"),
+                                    .child("Claude Code"),
                             )
                             .child(
                                 div()
@@ -8167,7 +8326,7 @@ impl XdDesktop {
                                             .size(px(18.0))
                                             .text_color(rgb(colors.text)),
                                     )
-                                    .child("Copilot"),
+                                    .child("GitHub Copilot"),
                             )
                         }),
                 )
@@ -8266,7 +8425,6 @@ impl XdDesktop {
             MinimalRoute::Projects { .. } | MinimalRoute::Terminal => None,
         };
         let connected = self.model.connected;
-        let experiment_mode = self.settings.experiment_mode;
         let remote_active = self.active_endpoint == ChatEndpoint::Remote;
         let runtime_label = if remote_active { "Remote" } else { "Local" };
 
@@ -8393,44 +8551,42 @@ impl XdDesktop {
                             }))
                             .child("Sessions"),
                     )
-                    .when(!experiment_mode, |nav| {
-                        nav.child(
-                            div()
-                                .id("minimal-terminal-tab")
-                                .h(px(38.0))
-                                .px_4()
-                                .flex()
-                                .items_center()
-                                .rounded_full()
-                                .bg(rgb(if terminal_active {
-                                    colors.surface_high
-                                } else {
-                                    colors.surface
-                                }))
-                                .text_base()
-                                .font_weight(if terminal_active {
-                                    FontWeight::SEMIBOLD
-                                } else {
-                                    FontWeight::MEDIUM
-                                })
-                                .text_color(rgb(if terminal_active {
-                                    colors.text
-                                } else {
-                                    colors.muted
-                                }))
-                                .cursor_pointer()
-                                .hover(|style| {
-                                    style
-                                        .bg(rgb(colors.surface_high))
-                                        .text_color(rgb(colors.text))
-                                })
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.show_minimal_terminal(window, cx)
-                                }))
-                                .child("Terminal"),
-                        )
-                    })
+                    .child(
+                        div()
+                            .id("minimal-terminal-tab")
+                            .h(px(38.0))
+                            .px_4()
+                            .flex()
+                            .items_center()
+                            .rounded_full()
+                            .bg(rgb(if terminal_active {
+                                colors.surface_high
+                            } else {
+                                colors.surface
+                            }))
+                            .text_base()
+                            .font_weight(if terminal_active {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .text_color(rgb(if terminal_active {
+                                colors.text
+                            } else {
+                                colors.muted
+                            }))
+                            .cursor_pointer()
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(colors.surface_high))
+                                    .text_color(rgb(colors.text))
+                            })
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_minimal_terminal(window, cx)
+                            }))
+                            .child("Terminal"),
+                    )
                     .child(
                         div()
                             .id("minimal-global-create")
@@ -8570,7 +8726,7 @@ impl XdDesktop {
             .terminal_panel
             .as_ref()
             .and_then(TerminalPanel::selected)
-            .is_some();
+            .is_some_and(|tab| tab.native_chat_id.is_none());
 
         div()
             .id("minimal-context-toolbar")
@@ -10097,11 +10253,7 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let toolbar = self.render_minimal_context_toolbar(colors, cx);
         let board = self.render_minimal_session_board(colors, Some(chat_id.as_str()), cx);
-        let content = if self.settings.experiment_mode {
-            self.render_native_chat(colors, window, cx)
-        } else {
-            self.render_minimal_terminal(colors, window, cx)
-        };
+        let content = self.render_minimal_terminal(colors, window, cx);
 
         div()
             .size_full()
@@ -12268,7 +12420,7 @@ mod tests {
     }
 
     #[test]
-    fn experiment_mode_is_labeled_and_routes_sessions_to_native_chat() {
+    fn experiment_mode_preserves_terminal_navigation_and_routes_agent_tabs_to_native_chat() {
         let source = include_str!("main.rs");
         let production = source
             .split_once("#[cfg(test)]")
@@ -12291,7 +12443,45 @@ mod tests {
             .split_once("fn render_minimal_titlebar(")
             .expect("end of product navigation renderer")
             .0;
-        assert!(product_nav.contains("when(!experiment_mode"));
+        assert!(product_nav.contains("minimal-terminal-tab"));
+        assert!(product_nav.contains("this.show_minimal_terminal(window, cx)"));
+        assert!(!product_nav.contains("when(!experiment_mode"));
+
+        let terminal_route = production
+            .split_once("fn show_minimal_terminal(")
+            .expect("plain terminal route")
+            .1
+            .split_once("fn open_minimal_session(")
+            .expect("end of plain terminal route")
+            .0;
+        assert!(!terminal_route.contains("self.settings.experiment_mode"));
+
+        let terminal_start = production
+            .split_once("fn start_terminal_session_as(")
+            .expect("terminal tab creation")
+            .1
+            .split_once("fn refresh_terminal_sessions(")
+            .expect("end of terminal tab creation")
+            .0;
+        assert!(terminal_start.contains("let Some(agent) = agent"));
+        assert!(terminal_start.contains("open_experiment_agent_tab"));
+
+        let terminal = production
+            .split_once("fn render_minimal_terminal(")
+            .expect("terminal renderer")
+            .1
+            .split_once("fn render_minimal_window_controls(")
+            .expect("end of terminal renderer")
+            .0;
+        for choice in [
+            ".child(\"Terminal\")",
+            ".child(\"Codex\")",
+            ".child(\"Claude Code\")",
+            ".child(\"GitHub Copilot\")",
+            ".child(\"JCode\")",
+        ] {
+            assert!(terminal.contains(choice), "missing add-tab choice {choice}");
+        }
 
         let session = production
             .split_once("fn render_minimal_cli(")
@@ -12300,7 +12490,7 @@ mod tests {
             .split_once("fn render_minimal_standalone_terminal(")
             .expect("end of session renderer")
             .0;
-        assert!(session.contains("self.render_native_chat(colors, window, cx)"));
+        assert!(session.contains("self.render_minimal_terminal(colors, window, cx)"));
     }
 
     #[test]
@@ -12582,6 +12772,7 @@ mod tests {
                 id: "terminal-a".into(),
                 title: "Codex".into(),
                 agent: Some(AgentCli::Codex),
+                native_chat_id: None,
                 sequence: Some(7),
                 screen,
             });
@@ -12602,7 +12793,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn experiment_session_selection_does_not_create_or_restore_agent_terminals(
+    fn experiment_session_selection_keeps_a_tab_panel_without_opening_an_agent_pty(
         cx: &mut gpui::TestAppContext,
     ) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
@@ -12625,12 +12816,16 @@ mod tests {
             desktop.select_minimal_session("project".into(), "chat-a".into(), AgentCli::Codex, cx);
 
             assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat-a"));
-            assert!(desktop.terminal_panel.is_none());
-            assert!(
-                desktop
-                    .terminal_panel_cache
-                    .contains_key(&(desktop.active_endpoint, "chat-a".into()))
+            let panel = desktop
+                .terminal_panel
+                .as_ref()
+                .expect("experiment tab panel");
+            assert_eq!(panel.chat_id, "chat-a");
+            assert_eq!(
+                panel.selected().and_then(|tab| tab.agent),
+                Some(AgentCli::Codex)
             );
+            assert!(!panel.opening, "native agent tabs must not open a PTY");
         });
     }
 
@@ -12665,7 +12860,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn experiment_tree_hydration_does_not_prime_agent_terminal_panels(
+    fn experiment_tree_hydration_primes_native_agent_tab_panels_without_opening_ptys(
         cx: &mut gpui::TestAppContext,
     ) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
@@ -12683,39 +12878,55 @@ mod tests {
 
             desktop.prime_terminal_cache(desktop.active_endpoint);
 
-            assert!(desktop.terminal_panel_cache.is_empty());
+            let panel = desktop
+                .terminal_panel_cache
+                .get(&(desktop.active_endpoint, "chat-a".into()))
+                .expect("native experiment panel");
+            assert_eq!(
+                panel.selected().and_then(|tab| tab.agent),
+                Some(AgentCli::Codex)
+            );
+            assert!(!panel.opening);
         });
     }
 
     #[gpui::test]
-    fn experiment_terminal_events_do_not_materialize_agent_panels(cx: &mut gpui::TestAppContext) {
+    fn experiment_plain_terminal_events_still_update_the_active_panel(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, cx| {
             desktop.settings.experiment_mode = true;
-            desktop.model.chats = vec![ChatSummary {
-                id: "chat-a".into(),
-                folder: "project".into(),
-                title: Some("A".into()),
-                backend: "codex".into(),
-                branch: None,
-                working: false,
-                terminal_working: false,
-            }];
+            let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
+            panel.loading = false;
+            panel.auto_open = false;
+            desktop.terminal_panel = Some(panel);
 
             desktop.handle_terminal_screen_event(
                 desktop.active_endpoint,
-                "terminal-output",
+                "terminal-opened",
                 &serde_json::json!({
                     "chat": "chat-a",
                     "terminal": "terminal-a",
                     "sequence": 1,
-                    "data": "output"
+                    "columns": 80,
+                    "rows": 24
                 }),
                 cx,
             );
 
-            assert!(desktop.terminal_panel.is_none());
-            assert!(desktop.terminal_panel_cache.is_empty());
+            let panel = desktop.terminal_panel.as_ref().expect("active panel");
+            assert!(panel.sessions.iter().any(|tab| tab.id == "terminal-a"));
+            assert_eq!(
+                panel
+                    .sessions
+                    .iter()
+                    .find(|tab| tab.id == "terminal-a")
+                    .unwrap()
+                    .agent,
+                None
+            );
+            desktop.terminal_panel = None;
         });
     }
 
@@ -12777,6 +12988,7 @@ mod tests {
                 id: "terminal-a".into(),
                 title: "Codex".into(),
                 agent: Some(AgentCli::Codex),
+                native_chat_id: None,
                 sequence: Some(7),
                 screen: TerminalScreen::new(80, 24),
             });
@@ -13786,9 +13998,9 @@ mod tests {
         for (id, label) in [
             ("minimal-new-shell-tab", "Terminal"),
             ("minimal-new-codex-tab", "Codex"),
-            ("minimal-new-claude-tab", "Claude"),
+            ("minimal-new-claude-tab", "Claude Code"),
             ("minimal-new-jcode-tab", "JCode"),
-            ("minimal-new-copilot-tab", "Copilot"),
+            ("minimal-new-copilot-tab", "GitHub Copilot"),
         ] {
             assert!(terminal.contains(id), "missing {label} tab choice");
             assert!(terminal.contains(&format!(".child(\"{label}\")")));

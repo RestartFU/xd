@@ -3,6 +3,7 @@ package com.restartfu.xd.mobile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.restartfu.xd.XdClient
 import com.restartfu.xd.store.ChatSession
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.terminal.Cell
@@ -41,6 +42,7 @@ class TerminalViewModel(
     private val chatId: String,
     private val agent: DirectAgent? = null,
     private val allowAllPermissions: Boolean = false,
+    private val closeSessionOnClear: Boolean = false,
 ) : ViewModel() {
     private val screen = TerminalScreen(COLUMNS, ROWS)
 
@@ -170,6 +172,11 @@ class TerminalViewModel(
         viewModelScope.launch { runCatching { session.killTerminal(id) } }
     }
 
+    override fun onCleared() {
+        if (closeSessionOnClear) session.close()
+        super.onCleared()
+    }
+
     class Factory(
         private val session: ChatSession,
         private val chatId: String,
@@ -179,6 +186,23 @@ class TerminalViewModel(
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             TerminalViewModel(session, chatId, agent, allowAllPermissions) as T
+    }
+
+    class DirectFactory(
+        private val client: XdClient,
+        private val chatId: String,
+        private val agent: DirectAgent,
+        private val allowAllPermissions: Boolean,
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T =
+            TerminalViewModel(
+                session = client.openChat(chatId),
+                chatId = chatId,
+                agent = agent,
+                allowAllPermissions = allowAllPermissions,
+                closeSessionOnClear = true,
+            ) as T
     }
 
     private companion object {

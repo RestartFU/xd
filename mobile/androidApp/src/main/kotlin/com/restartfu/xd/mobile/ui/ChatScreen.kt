@@ -82,12 +82,10 @@ import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
-import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.AskBlock
 import com.restartfu.xd.model.AssistantSection
 import com.restartfu.xd.model.AssistantSectionKind
 import com.restartfu.xd.model.AssistantSections
-import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.model.ToolGrouping
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
@@ -105,7 +103,6 @@ internal enum class Pane(val label: String) {
     CHAT("Chat"),
     DIFF("Diff"),
     FILES("Files"),
-    TERMINAL("Terminal"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -121,7 +118,6 @@ internal fun ChatScreen(
     val steering by model.steering.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
     val speechEnabled by settings.speechEnabled.collectAsStateWithLifecycle()
-    val allowAllPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
 
     SpeechOutput(model, speechEnabled)
     LaunchedEffect(speechEnabled) {
@@ -262,21 +258,6 @@ internal fun ChatScreen(
                             factory = FilesViewModel.Factory(model.session),
                         ),
                     )
-                    Pane.TERMINAL -> {
-                        val terminal: TerminalViewModel = viewModel(
-                            key = "terminal-${state.chatId}-${state.backend}-$allowAllPermissions",
-                            factory = TerminalViewModel.Factory(
-                                model.session,
-                                state.chatId,
-                                DirectAgent.fromBackend(state.backend),
-                                allowAllPermissions,
-                            ),
-                        )
-                        LaunchedEffect(terminal) {
-                            model.client.terminalEvents.collect(terminal::onEvent)
-                        }
-                        TerminalPaneContent(terminal)
-                    }
                     else -> Unit
                 }
             }
