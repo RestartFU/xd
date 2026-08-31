@@ -18,7 +18,7 @@ A local-first desktop workspace for user-installed Codex, Claude Code, JCode, an
 ## Highlights
 
 - Persistent agent and shell sessions backed by tmux.
-- Local or remote over your existing SSH command, with no network listener.
+- Local or remote over your existing SSH command, with no listening daemon.
 - Projects, Git worktrees, branches, and pull requests in one workspace.
 - Uses your installed CLI tools, authentication, and configuration.
 

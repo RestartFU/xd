@@ -4,7 +4,7 @@ The Android client under `mobile/` is a remote view onto an xd host. It now uses
 the same architecture as remote desktop mode:
 
 ```text
-Android ── SSH exec stdin/stdout ── xd-host stdio ── private Unix socket ── xd-host broker
+Android ── SSH exec stdin/stdout ── xd-host stdio
 ```
 
 There is no mobile daemon, pairing code, bearer token, TLS listener, local IPC,
@@ -32,7 +32,7 @@ a trust-anyway path after a key mismatch.
 The remote command is:
 
 ```sh
-exec "$HOME/.local/share/xd/runtime/v1/xd-host" stdio --persistent \
+exec "$HOME/.local/share/xd/runtime/v1/xd-host" stdio \
   --data "$HOME/.local/share/xd"
 ```
 
@@ -51,10 +51,8 @@ The shared Kotlin Multiplatform module owns JSON Lines framing, request matching
 reconnect policy, tree/chat stores, terminal events, and transcript state. The
 Android source set supplies SSH and encrypted credential storage.
 
-The app keeps no foreground service. Leaving it closes SSH, but the remote host
-broker continues to own active terminals and agent turns. Returning reconnects
-to that broker and takes fresh snapshots because the event stream itself is not
-resumable.
+The app keeps no foreground service. Leaving it closes SSH. Returning reconnects
+and takes fresh snapshots because the host has no resumable event log.
 
 The mobile client remains remote-only by design. Do not add local transport,
 on-device agents, an offline database, or a cache without revisiting this model.

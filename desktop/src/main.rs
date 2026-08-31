@@ -5788,6 +5788,34 @@ impl XdDesktop {
         else {
             return;
         };
+        let reusable_chat_id = self
+            .terminal_panel
+            .as_ref()
+            .and_then(|panel| {
+                panel
+                    .sessions
+                    .iter()
+                    .find(|tab| tab.agent == Some(agent) && tab.native_chat_id.is_some())
+                    .and_then(|tab| tab.native_chat_id.clone())
+            })
+            .or_else(|| {
+                self.model
+                    .chats
+                    .iter()
+                    .find(|chat| {
+                        chat.id == panel_chat_id
+                            && AgentCli::from_backend(&chat.backend) == Some(agent)
+                    })
+                    .map(|chat| chat.id.clone())
+            });
+        if let Some(chat_id) = reusable_chat_id {
+            if let Some(panel) = &mut self.terminal_panel {
+                Self::select_native_agent_tab(panel, chat_id.clone(), agent);
+            }
+            self.select_native_chat(chat_id, cx);
+            cx.notify();
+            return;
+        }
         let Some(folder_id) = (match &self.minimal_route {
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
             _ => None,
@@ -12876,6 +12904,49 @@ mod tests {
                 Some(AgentCli::Codex)
             );
             assert!(!panel.opening, "native agent tabs must not open a PTY");
+        });
+    }
+
+    #[gpui::test]
+    fn reopening_the_current_experiment_agent_reuses_its_chat_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.experiment_mode = true;
+            desktop.model.chats = vec![ChatSummary {
+                id: "chat-a".into(),
+                folder: "project".into(),
+                title: Some("A".into()),
+                backend: "codex".into(),
+                branch: None,
+                working: false,
+                terminal_working: false,
+            }];
+            desktop.model.selected_chat = Some("chat-a".into());
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "project".into(),
+                chat_id: "chat-a".into(),
+                agent: AgentCli::Codex,
+            };
+            let mut panel =
+                XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
+            panel.loading = false;
+            panel.auto_open = false;
+            desktop.terminal_panel = Some(panel);
+
+            desktop.open_experiment_agent_tab(AgentCli::Codex, cx);
+
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat-a"));
+            assert_eq!(desktop.pending_experiment_tab, None);
+            let selected = desktop
+                .terminal_panel
+                .as_ref()
+                .and_then(TerminalPanel::selected)
+                .expect("reopened native tab");
+            assert_eq!(selected.native_chat_id.as_deref(), Some("chat-a"));
+            assert_eq!(selected.agent, Some(AgentCli::Codex));
+            desktop.terminal_panel = None;
         });
     }
 

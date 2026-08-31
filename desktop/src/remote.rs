@@ -18,8 +18,9 @@ pub enum RemoteError {
     Bridge(String),
 }
 
-/// Owns the SSH stdio bridge. Dropping it closes this connection immediately;
-/// the remote broker keeps active host-owned sessions alive for reconnects.
+/// Owns the SSH stdio process. Dropping it closes the remote host immediately.
+/// Each connection gets a direct host so SSH startup cannot depend on a
+/// separately detached broker being healthy on the remote machine.
 pub struct SshRemoteBridge {
     _host: StartedHost,
 }
@@ -92,7 +93,7 @@ fn host_arguments(command: &SshCommand, home: &Path) -> Vec<String> {
     let host = home.join(remote_host_relative_path());
     let data = home.join(".local/share").join(channel::data_name());
     let script = format!(
-        "exec {} stdio --persistent --data {}",
+        "exec {} stdio --data {}",
         shell_quote(&host.to_string_lossy()),
         shell_quote(&data.to_string_lossy()),
     );
@@ -321,7 +322,7 @@ mod tests {
                 "ConnectTimeout=10".into(),
                 "--".into(),
                 "zenomc.org".into(),
-                "exec '/home/zeno/.local/share/xd/runtime/v1/xd-host' stdio --persistent --data '/home/zeno/.local/share/xd'".into(),
+                "exec '/home/zeno/.local/share/xd/runtime/v1/xd-host' stdio --data '/home/zeno/.local/share/xd'".into(),
             ])
         );
     }
