@@ -638,9 +638,9 @@ class ChatViewModel(
         }
     }
 
-    fun selectModel(backend: String, model: String) {
+    fun selectModel(model: String) {
         launchGuarded(_selectingModel) {
-            session.selectModel(backend, model)
+            session.selectModel(model)
         }
     }
 

@@ -293,25 +293,15 @@ public object Ops {
         put("action", action)
     }
 
-    /**
-     * Selects an assistant and model together.
-     *
-     * The host only validates and reconciles when both travel in one
-     * request: it checks the model belongs to the backend, clears an effort
-     * the new backend does not support, and records the visible switch. Sent
-     * without a backend it would simply store the string.
-     */
+    /** Selects a model without changing the assistant fixed to this chat. */
     public fun selectModel(
         chatId: String,
-        backend: String,
         model: String,
     ): JsonObject = buildJsonObject {
-        require(backend.isNotBlank()) { "A model needs its assistant" }
         require(model.isNotBlank()) { "A model id is required" }
         put("op", "set-option")
         put("chat", chatId)
         put("option", ChatOption.MODEL.wire)
-        put("backend", backend)
         put("value", model)
     }
 

@@ -170,24 +170,19 @@ class OpsTest {
     }
 
     @Test
-    fun selectingAModelSendsItsAssistantToo() {
-        // Without a backend the host stores the string unvalidated and skips
-        // the effort reconciliation and the visible switch event.
-        val request = Ops.selectModel("chat-1", "codex", "gpt-5.5")
+    fun selectingAModelCannotChangeTheChatsAssistant() {
+        val request = Ops.selectModel("chat-1", "gpt-5.5")
 
         assertEquals("set-option", request.getValue("op").jsonPrimitive.content)
         assertEquals("model", request.getValue("option").jsonPrimitive.content)
-        assertEquals("codex", request.getValue("backend").jsonPrimitive.content)
+        assertFalse("backend" in request)
         assertEquals("gpt-5.5", request.getValue("value").jsonPrimitive.content)
     }
 
     @Test
-    fun aModelWithoutAnAssistantIsRejected() {
+    fun aBlankModelIsRejected() {
         assertFailsWith<IllegalArgumentException> {
-            Ops.selectModel("chat-1", "", "gpt-5.5")
-        }
-        assertFailsWith<IllegalArgumentException> {
-            Ops.selectModel("chat-1", "codex", " ")
+            Ops.selectModel("chat-1", " ")
         }
     }
 

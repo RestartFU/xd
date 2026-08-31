@@ -33,7 +33,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ChatViewModel
 
 /**
- * Chooses the assistant and model for a chat.
+ * Chooses a model for the assistant fixed to this chat.
  *
  * The list comes from the host rather than the app, so a host that gains
  * a model does not need a new build of this client to reach it.
@@ -55,6 +55,7 @@ internal fun ModelPicker(
 
     LaunchedEffect(Unit) { model.loadCatalog() }
 
+    val currentAssistant = catalog.firstOrNull { it.id == currentBackend }
     val effortBackend = catalog.firstOrNull { it.id == effortBackendId }
     val efforts = effortBackend?.efforts.orEmpty()
     val modelReady = effortBackend != null &&
@@ -64,7 +65,7 @@ internal fun ModelPicker(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(if (effortBackendId == null) "Assistant and model" else "Reasoning effort")
+            Text(if (effortBackendId == null) "Model" else "Reasoning effort")
         },
         text = {
             when {
@@ -105,61 +106,63 @@ internal fun ModelPicker(
                     color = MaterialTheme.colorScheme.error,
                 )
 
+                currentAssistant == null -> Text(
+                    "No models are available for this assistant.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+
                 else -> LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                    catalog.forEach { backend ->
-                        item(key = "backend-${backend.id}") {
-                            Row(
-                                modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                BackendIcon(backend.id, size = 16.dp)
-                                Text(
-                                    backend.name,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.outline,
-                                )
-                            }
-                            HorizontalDivider()
+                    item(key = "backend-${currentAssistant.id}") {
+                        Row(
+                            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            BackendIcon(currentAssistant.id, size = 16.dp)
+                            Text(
+                                currentAssistant.name,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.outline,
+                            )
                         }
-                        items(backend.models, key = { "${backend.id}-${it.id}" }) { entry ->
-                            // A chat's model only means something alongside its
-                            // assistant: the same name could exist under both.
-                            val selected = backend.id == currentBackend &&
-                                entry.id == (currentModel ?: backend.defaultModel)
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        if (!selected) {
-                                            model.selectModel(backend.id, entry.id)
-                                        }
-                                        effortBackendId = backend.id
-                                        effortModelId = entry.id
-                                    }
-                                    .padding(vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(if (selected) "✓" else " ", Modifier.width(24.dp))
-                                Column(Modifier.weight(1f)) {
+                        HorizontalDivider()
+                    }
+                    items(
+                        currentAssistant.models,
+                        key = { "${currentAssistant.id}-${it.id}" },
+                    ) { entry ->
+                        val selected =
+                            entry.id == (currentModel ?: currentAssistant.defaultModel)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (!selected) model.selectModel(entry.id)
+                                    effortBackendId = currentAssistant.id
+                                    effortModelId = entry.id
+                                }
+                                .padding(vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(if (selected) "✓" else " ", Modifier.width(24.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    entry.name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = if (selected) FontWeight.Bold else null,
+                                )
+                                if (entry.contextWindow > 0) {
                                     Text(
-                                        entry.name,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        fontWeight = if (selected) FontWeight.Bold else null,
+                                        "${entry.contextWindow / 1000}k context",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.outline,
                                     )
-                                    if (entry.contextWindow > 0) {
-                                        Text(
-                                            "${entry.contextWindow / 1000}k context",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.outline,
-                                        )
-                                    }
                                 }
                             }
                         }
-                        item(key = "gap-${backend.id}") { Spacer(Modifier.width(1.dp)) }
                     }
+                    item(key = "gap-${currentAssistant.id}") { Spacer(Modifier.width(1.dp)) }
                 }
             }
         },

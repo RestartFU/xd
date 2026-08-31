@@ -1385,7 +1385,7 @@ impl HostHandle {
         )
     }
 
-    pub fn set_model(&self, chat_id: &str, backend: &str, model: &str) -> Result<(), String> {
+    pub fn set_model(&self, chat_id: &str, model: &str) -> Result<(), String> {
         self.send(
             RequestKind::SetOption {
                 chat_id: chat_id.to_owned(),
@@ -1394,7 +1394,6 @@ impl HostHandle {
                 "op": "set-option",
                 "chat": chat_id,
                 "option": "model",
-                "backend": backend,
                 "value": model,
             }),
         )

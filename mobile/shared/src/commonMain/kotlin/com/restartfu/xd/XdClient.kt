@@ -150,7 +150,11 @@ public class XdClient(
             if (sessions.compareAndSet(before, after)) break
             created?.shutdown()
         }
-        if (chosen.state.value.title.isEmpty() && actor.link.value is Link.Up) {
+        if (
+            !chatId.startsWith("global:") &&
+            chosen.state.value.title.isEmpty() &&
+            actor.link.value is Link.Up
+        ) {
             chosen.requestReload()
         }
         return ChatSession(chosen) { releaseChat(chatId, chosen) }

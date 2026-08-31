@@ -291,27 +291,17 @@ impl FileEditor {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
+        let item = cx.read_from_clipboard();
+        match preferred_clipboard_content(item.as_ref(), self.allow_images, platform_clipboard_png)
+        {
+            Some(ClipboardContent::Text(text)) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 self.replace_text_in_range(None, &text, window, cx);
-                return;
             }
-            if self.allow_images
-                && let Some((format, bytes)) = clipboard_image(&item)
-            {
+            Some(ClipboardContent::Image(format, bytes)) => {
                 cx.emit(EditorEvent::PasteImage { format, bytes });
-                return;
             }
-        }
-
-        if self.allow_images
-            && let Some(bytes) = platform_clipboard_png()
-        {
-            cx.emit(EditorEvent::PasteImage {
-                format: ImageFormat::Png,
-                bytes,
-            });
+            None => {}
         }
     }
 
@@ -478,6 +468,28 @@ pub(crate) fn clipboard_image(item: &ClipboardItem) -> Option<(ImageFormat, Vec<
         ClipboardEntry::Image(image) => Some((image.format(), image.bytes().to_vec())),
         ClipboardEntry::String(_) => None,
     })
+}
+
+pub(crate) enum ClipboardContent {
+    Text(String),
+    Image(ImageFormat, Vec<u8>),
+}
+
+pub(crate) fn preferred_clipboard_content(
+    item: Option<&ClipboardItem>,
+    allow_images: bool,
+    fallback_png: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<ClipboardContent> {
+    if allow_images {
+        if let Some((format, bytes)) = item.and_then(clipboard_image) {
+            return Some(ClipboardContent::Image(format, bytes));
+        }
+        if let Some(bytes) = fallback_png() {
+            return Some(ClipboardContent::Image(ImageFormat::Png, bytes));
+        }
+    }
+    item.and_then(ClipboardItem::text)
+        .map(ClipboardContent::Text)
 }
 
 impl EntityInputHandler for FileEditor {
@@ -982,8 +994,35 @@ fn syntax_color(kind: CodeKind) -> u32 {
     }
 }
 
+fn encode_clipboard_rgba_as_png(
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> Result<Vec<u8>, String> {
+    use image::ImageEncoder;
+
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "Clipboard image dimensions are too large.".to_owned())?;
+    if width == 0 || height == 0 || rgba.len() != expected_len {
+        return Err("Clipboard image dimensions do not match its pixels.".to_owned());
+    }
+    let width =
+        u32::try_from(width).map_err(|_| "Clipboard image width is too large.".to_owned())?;
+    let height =
+        u32::try_from(height).map_err(|_| "Clipboard image height is too large.".to_owned())?;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|error| format!("Cannot encode clipboard image: {error}"))?;
+    Ok(png)
+}
+
 pub(crate) fn platform_clipboard_png() -> Option<Vec<u8>> {
-    None
+    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let image = clipboard.get_image().ok()?;
+    encode_clipboard_rgba_as_png(image.width, image.height, image.bytes.as_ref()).ok()
 }
 
 impl Focusable for FileEditor {
@@ -1163,5 +1202,23 @@ mod tests {
     fn an_empty_message_editor_styles_its_whole_placeholder() {
         assert_eq!(display_run_len(&(0..0), Some("Message xd…".len())), 13);
         assert_eq!(display_run_len(&(4..9), None), 5);
+    }
+
+    #[test]
+    fn clipboard_pixels_are_encoded_as_png_attachments() {
+        let png = encode_clipboard_rgba_as_png(1, 1, &[0x12, 0x34, 0x56, 0xff])
+            .expect("encode a one-pixel clipboard image");
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert!(encode_clipboard_rgba_as_png(2, 1, &[0; 4]).is_err());
+    }
+
+    #[test]
+    fn image_capable_paste_prefers_raw_pixels_over_clipboard_alt_text() {
+        let item = ClipboardItem::new_string("screenshot".into());
+        let content = preferred_clipboard_content(Some(&item), true, || Some(vec![1, 2, 3]));
+        assert!(matches!(
+            content,
+            Some(ClipboardContent::Image(ImageFormat::Png, bytes)) if bytes == vec![1, 2, 3]
+        ));
     }
 }

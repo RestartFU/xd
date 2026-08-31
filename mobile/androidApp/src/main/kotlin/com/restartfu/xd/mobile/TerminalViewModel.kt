@@ -205,6 +205,19 @@ class TerminalViewModel(
             ) as T
     }
 
+    class ShellFactory(
+        private val client: XdClient,
+        private val chatId: String,
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T =
+            TerminalViewModel(
+                session = client.openChat(chatId),
+                chatId = chatId,
+                closeSessionOnClear = true,
+            ) as T
+    }
+
     private companion object {
         const val COLUMNS = 80
         const val ROWS = 24

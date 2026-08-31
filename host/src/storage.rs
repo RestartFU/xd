@@ -762,6 +762,15 @@ impl StateStore {
     }
 
     pub fn terminal_workdir(&self, chat_id: &str) -> Result<PathBuf, StorageError> {
+        if chat_id.starts_with("global:") {
+            return env::var_os("HOME")
+                .or_else(|| env::var_os("USERPROFILE"))
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+                .ok_or_else(|| {
+                    StorageError::InvalidRequest("The host home directory is unavailable.".into())
+                });
+        }
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         resolve_chat_workdir(&database, &self.workspace_root, chat_id).map(PathBuf::from)
     }
@@ -1159,8 +1168,18 @@ impl StateStore {
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
         let now = now_seconds();
         let changed = match option {
-            "model" if request.get("backend").is_some() => {
-                let backend = required_string(request, "backend", "A backend value is required.")?;
+            "model" => {
+                let backend = previous.0.as_str();
+                if request
+                    .get("backend")
+                    .and_then(Value::as_str)
+                    .is_some_and(|requested| requested != backend)
+                {
+                    return Err(StorageError::InvalidRequest(
+                        "A chat's assistant cannot be changed. Open a new agent tab instead."
+                            .into(),
+                    ));
+                }
                 let model = value.filter(|model| !model.is_empty()).ok_or_else(|| {
                     StorageError::InvalidRequest("A model value is required.".into())
                 })?;
@@ -1170,13 +1189,10 @@ impl StateStore {
                     .as_deref()
                     .filter(|effort| effort_supported(backend, effort));
                 let changed = transaction.execute(
-                    "UPDATE chats SET backend = ?, model = ?, effort = ?, \
-                     fast = CASE WHEN ? = 'codex' THEN fast ELSE 0 END, \
-                     claude_mode = 0, \
-                     updated_at = ? WHERE id = ?",
-                    params![backend, model, effort, backend, now, chat_id],
+                    "UPDATE chats SET model = ?, effort = ?, updated_at = ? WHERE id = ?",
+                    params![model, effort, now, chat_id],
                 )?;
-                if previous.0 != backend || previous.1.as_deref() != Some(model) {
+                if previous.1.as_deref() != Some(model) {
                     transaction.execute(
                         "INSERT INTO messages (chat_id, role, content, created_at) \
                          VALUES (?, 'event', ?, ?)",
@@ -1189,10 +1205,6 @@ impl StateStore {
                 }
                 changed
             }
-            "model" => transaction.execute(
-                "UPDATE chats SET model = ?, updated_at = ? WHERE id = ?",
-                params![value, now, chat_id],
-            )?,
             "effort" => {
                 if let Some(effort) = value {
                     if !effort_supported(&previous.0, effort) {
@@ -1223,17 +1235,9 @@ impl StateStore {
                 update_boolean_option(&transaction, chat_id, "fast", enabled, now)?
             }
             "backend" => {
-                let backend = value.filter(|backend| !backend.is_empty()).ok_or_else(|| {
-                    StorageError::InvalidRequest("A backend value is required.".into())
-                })?;
-                validate_backend(backend)?;
-                transaction.execute(
-                    "UPDATE chats SET backend = ?, \
-                     fast = CASE WHEN ? = 'codex' THEN fast ELSE 0 END, \
-                     claude_mode = 0, \
-                     updated_at = ? WHERE id = ?",
-                    params![backend, backend, now, chat_id],
-                )?
+                return Err(StorageError::InvalidRequest(
+                    "A chat's assistant cannot be changed. Open a new agent tab instead.".into(),
+                ));
             }
             "new-worktree" => transaction.execute(
                 "UPDATE chats SET new_worktree = ?, updated_at = ? WHERE id = ? \
@@ -7346,20 +7350,21 @@ mod tests {
         drop(database);
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
 
-        for backend in store.agent_catalog().unwrap()["backends"]
+        let catalog = store.agent_catalog().unwrap();
+        let backend = catalog["backends"]
             .as_array()
             .unwrap()
-        {
-            for model in backend["models"].as_array().unwrap() {
-                store
-                    .set_option(&json!({
-                        "chat": "chat-1",
-                        "option": "model",
-                        "backend": backend["id"],
-                        "value": model["id"],
-                    }))
-                    .unwrap();
-            }
+            .iter()
+            .find(|backend| backend["id"] == "codex")
+            .unwrap();
+        for model in backend["models"].as_array().unwrap() {
+            store
+                .set_option(&json!({
+                    "chat": "chat-1",
+                    "option": "model",
+                    "value": model["id"],
+                }))
+                .unwrap();
         }
     }
 
@@ -7384,18 +7389,42 @@ mod tests {
         assert_eq!(chat["backend"], "codex");
         assert_eq!(chat["model"], "gpt-5.6-sol");
         assert_eq!(chat["effort"], "ultra");
-        store
-            .set_option(&json!({"chat": "chat-1", "option": "backend", "value": "claude"}))
-            .unwrap();
-        let chat = store.chat("chat-1").unwrap();
-        assert_eq!(chat["backend"], "claude");
-        assert_eq!(chat["fast"], false);
         let events = store.messages(&json!({"chat": "chat-1"})).unwrap()["messages"]
             .as_array()
             .unwrap()
             .clone();
         assert_eq!(events[0]["role"], "event");
         assert_eq!(events[0]["content"], "Switched to GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn a_chat_keeps_the_assistant_it_was_created_with() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let model_error = store
+            .set_option(&json!({
+                "chat": "chat-1",
+                "option": "model",
+                "backend": "claude",
+                "value": "claude-opus-5",
+            }))
+            .unwrap_err();
+        assert!(model_error.to_string().contains("cannot be changed"));
+
+        let backend_error = store
+            .set_option(&json!({
+                "chat": "chat-1",
+                "option": "backend",
+                "value": "claude",
+            }))
+            .unwrap_err();
+        assert!(backend_error.to_string().contains("cannot be changed"));
+        assert_eq!(store.chat("chat-1").unwrap()["backend"], "codex");
     }
 
     #[test]
@@ -7409,7 +7438,7 @@ mod tests {
 
         store
             .set_option(&json!({
-                "chat": "chat-1", "option": "model", "backend": "claude", "value": "claude-opus-5"
+                "chat": "chat-1", "option": "model", "value": "gpt-5.5"
             }))
             .unwrap();
 
@@ -7553,13 +7582,15 @@ mod tests {
         let database = Connection::open(&fixture.database).unwrap();
         fixture.schema(&database);
         fixture.insert_chat(&database, "chat-1", "folder");
+        database
+            .execute(
+                "UPDATE chats SET backend = 'claude', model = 'claude-opus-5', effort = 'high' \
+                 WHERE id = 'chat-1'",
+                [],
+            )
+            .unwrap();
         drop(database);
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        store
-            .set_option(&json!({
-                "chat": "chat-1", "option": "backend", "value": "claude"
-            }))
-            .unwrap();
 
         let error = store
             .set_option(&json!({
@@ -7756,7 +7787,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_switched_mid_turn_takes_the_next_turn() {
+    fn an_agent_cannot_be_switched_mid_turn_or_for_the_queued_turn() {
         let fixture = Fixture::new();
         fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
         let database = Connection::open(&fixture.database).unwrap();
@@ -7776,14 +7807,16 @@ mod tests {
             .prepare_send(&json!({"chat": "chat-1", "text": "second"}))
             .unwrap();
 
-        // Switching while the turn runs leaves it alone and lands on the next.
-        store
+        // A queued message belongs to the same chat and therefore the same
+        // assistant. A different assistant gets its own chat/tab.
+        let error = store
             .set_option(&json!({
                 "chat": "chat-1", "option": "model",
                 "backend": "claude", "value": "claude-opus-5"
             }))
-            .unwrap();
-        assert_eq!(store.chat("chat-1").unwrap()["backend"], "claude");
+            .unwrap_err();
+        assert!(error.to_string().contains("cannot be changed"));
+        assert_eq!(store.chat("chat-1").unwrap()["backend"], "codex");
 
         let next = store
             .finish_turn("chat-1", true, None, 2, false)
@@ -7791,8 +7824,8 @@ mod tests {
             .next
             .expect("queued turn");
         assert_eq!(next.prompt, "second");
-        assert_eq!(next.backend, "claude");
-        assert_eq!(next.model, "claude-opus-5");
+        assert_eq!(next.backend, "codex");
+        assert_eq!(next.model, "gpt-5.6-sol");
     }
 
     #[test]

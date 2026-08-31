@@ -10,7 +10,10 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::{
-    editor::{clipboard_image, next_word_boundary, platform_clipboard_png, previous_word_boundary},
+    editor::{
+        ClipboardContent, next_word_boundary, platform_clipboard_png, preferred_clipboard_content,
+        previous_word_boundary,
+    },
     selection::TextSelection,
 };
 
@@ -498,8 +501,9 @@ impl ComposerInput {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(item) = cx.read_from_clipboard() {
-            if let Some(text) = item.text() {
+        let item = cx.read_from_clipboard();
+        match preferred_clipboard_content(item.as_ref(), self.terminal, platform_clipboard_png) {
+            Some(ClipboardContent::Text(text)) => {
                 if self.terminal_bytes(
                     terminal_paste_bytes(&text, self.terminal_bracketed_paste),
                     cx,
@@ -507,22 +511,11 @@ impl ComposerInput {
                     return;
                 }
                 self.replace_text_in_range(None, &text.replace(['\r', '\n'], " "), window, cx);
-                return;
             }
-            if self.terminal
-                && let Some((format, bytes)) = clipboard_image(&item)
-            {
+            Some(ClipboardContent::Image(format, bytes)) => {
                 cx.emit(ComposerEvent::PasteImage { format, bytes });
-                return;
             }
-        }
-        if self.terminal
-            && let Some(bytes) = platform_clipboard_png()
-        {
-            cx.emit(ComposerEvent::PasteImage {
-                format: gpui::ImageFormat::Png,
-                bytes,
-            });
+            None => {}
         }
     }
 

@@ -178,9 +178,9 @@ public class ChatSession internal constructor(
             it.decodeReply<AgentCatalogReply>().backends
         }
 
-    /** Selects assistant and model together, which is the validated path. */
-    public suspend fun selectModel(backend: String, model: String): Unit =
-        core.call(Ops.selectModel(core.chatId, backend, model))
+    /** Selects a model from the assistant fixed to this chat. */
+    public suspend fun selectModel(model: String): Unit =
+        core.call(Ops.selectModel(core.chatId, model))
 
     override fun close() {
         if (closed) return

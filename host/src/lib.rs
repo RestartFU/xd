@@ -1802,6 +1802,27 @@ mod tests {
     }
 
     #[test]
+    fn global_terminal_opens_without_a_chat() {
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(store);
+
+        let opened = engine.dispatch(json!({
+            "op": "terminal-open",
+            "chat": "global:mobile",
+            "columns": 80,
+            "rows": 24,
+            "reuse": true,
+        }));
+
+        assert_eq!(opened["ok"], true, "{opened}");
+        let terminal = opened["id"].as_str().expect("global terminal id");
+        let _ = engine.dispatch(json!({"op": "terminal-kill", "terminal": terminal}));
+        drop(engine);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn deleting_a_chat_waits_for_its_agent_execution_gate() {
         let engine = Arc::new(Engine::transport_only());
         let gate = engine.chat_execution_gate("missing").unwrap();

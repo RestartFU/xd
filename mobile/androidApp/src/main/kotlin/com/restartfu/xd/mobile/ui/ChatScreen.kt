@@ -82,6 +82,7 @@ import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
+import com.restartfu.xd.mobile.TerminalViewModel
 import com.restartfu.xd.model.AskBlock
 import com.restartfu.xd.model.AssistantSection
 import com.restartfu.xd.model.AssistantSectionKind
@@ -103,6 +104,7 @@ internal enum class Pane(val label: String) {
     CHAT("Chat"),
     DIFF("Diff"),
     FILES("Files"),
+    TERMINAL("Terminal"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -111,6 +113,8 @@ internal fun ChatScreen(
     model: ChatViewModel,
     settings: MobileSettings,
     goBack: () -> Unit,
+    productHeader: @Composable () -> Unit = {},
+    sessionTabs: @Composable () -> Unit = {},
 ) {
     val state by model.state.collectAsStateWithLifecycle()
     val sending by model.sending.collectAsStateWithLifecycle()
@@ -187,6 +191,7 @@ internal fun ChatScreen(
     Scaffold(
         topBar = {
             Column {
+                productHeader()
                 TopAppBar(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -219,6 +224,7 @@ internal fun ChatScreen(
                         }
                     },
                 )
+                sessionTabs()
                 TabRow(selectedTabIndex = pane.ordinal) {
                     Pane.entries.forEach { candidate ->
                         Tab(
@@ -258,6 +264,16 @@ internal fun ChatScreen(
                             factory = FilesViewModel.Factory(model.session),
                         ),
                     )
+                    Pane.TERMINAL -> {
+                        val terminal: TerminalViewModel = viewModel(
+                            key = "terminal-${state.chatId}",
+                            factory = TerminalViewModel.Factory(model.session, state.chatId),
+                        )
+                        LaunchedEffect(terminal) {
+                            model.client.terminalEvents.collect(terminal::onEvent)
+                        }
+                        TerminalPaneContent(terminal)
+                    }
                     else -> Unit
                 }
             }

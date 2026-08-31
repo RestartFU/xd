@@ -9902,6 +9902,7 @@ impl XdDesktop {
         };
         let markdown = message.markdown();
         let card = div()
+            .min_w_0()
             .max_w(px(if user { 720.0 } else { 860.0 }))
             .px_4()
             .py_3()
@@ -12253,6 +12254,55 @@ mod tests {
         assert_eq!(working_dot_alphas(2), [0xff, 0xff, 0x4d]);
         assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
+    }
+
+    #[gpui::test]
+    fn native_message_list_reserves_the_height_of_wrapped_text(cx: &mut gpui::TestAppContext) {
+        struct MessageList {
+            state: ListState,
+            message: Message,
+            colors: ThemeColors,
+        }
+
+        impl Render for MessageList {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let message = self.message.clone();
+                let colors = self.colors;
+                list(self.state.clone(), move |index, _, _| {
+                    XdDesktop::render_native_message(colors, &message, None, index)
+                })
+                .size_full()
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let state = ListState::new(1, ListAlignment::Top, px(0.0));
+        let message = Message::new(
+            None,
+            "user",
+            "This message must wrap inside a narrow chat bubble instead of painting its second and third lines outside the measured message card. ".repeat(3),
+            None,
+        );
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(400.0), px(400.0)),
+            |_, cx| {
+                cx.new(|_| MessageList {
+                    state: state.clone(),
+                    message,
+                    colors: ThemePreset::default().colors(),
+                })
+            },
+        );
+
+        let bounds = state
+            .bounds_for_item(0)
+            .expect("the rendered message must have measured list bounds");
+        assert!(
+            bounds.size.height >= px(120.0),
+            "wrapped text was painted into a card only {}px tall",
+            f32::from(bounds.size.height)
+        );
     }
 
     #[test]
