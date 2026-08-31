@@ -77,7 +77,7 @@ export XDG_DATA_DIRS="$HERE/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export XCURSOR_PATH="$HERE/share/icons:${XCURSOR_PATH:-$HOME/.icons:/usr/share/icons}"
 export PATH="$HERE/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 
-# Project state is served by a short-lived stdio host owned by the window.
+# Local project state is served by a short-lived stdio host owned by the window.
 export XD_HOST_EXECUTABLE="$HERE/libexec/xd-host"
 export XD_TMUX_EXECUTABLE="$HERE/libexec/tmux"
 export XD_SESSION_RUNTIME="$RUNTIME/sessions"

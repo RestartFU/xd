@@ -11,13 +11,15 @@ state and agent orchestration are provided by the bundled `xd-host` process.
 
 ## Process model
 
-There is no background xd daemon or listening socket.
+There is no network-facing xd daemon or listening port.
 
 - Local mode starts `xd-host stdio` as a child of the desktop and stops it when
   the window closes.
-- Remote mode runs `xd-host stdio` through the user's persisted SSH command.
-- Codex, Claude Code, JCode, GitHub Copilot, and terminal tabs run in bundled tmux sessions on the
-  selected local or remote machine so they can be reattached after reconnects.
+- Remote mode runs `xd-host stdio` through the user's persisted SSH command;
+  it bridges to an on-demand private broker that survives SSH reconnects.
+- Direct Codex, Claude Code, JCode, GitHub Copilot, and terminal tabs run in bundled tmux sessions
+  on the selected machine. Native chat turns and host-managed terminals are
+  retained by the remote broker.
 - Local and remote modes never coexist in one window.
 
 See [remote desktop over SSH](../docs/remote.md) for the remote process shape.

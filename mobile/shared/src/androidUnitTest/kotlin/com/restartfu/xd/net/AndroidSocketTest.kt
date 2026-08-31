@@ -33,7 +33,7 @@ class AndroidSocketTest {
     @Test
     fun hostCommandRunsTheCurrentSshStdioEndpoint() {
         assertEquals(
-            "exec \"\$HOME/.local/share/xd/runtime/v1/xd-host\" stdio " +
+            "exec \"\$HOME/.local/share/xd/runtime/v1/xd-host\" stdio --persistent " +
                 "--data \"\$HOME/.local/share/xd\"",
             XD_HOST_COMMAND,
         )

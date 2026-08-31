@@ -90,9 +90,11 @@ turn output by arrival order; use the turn watermark described under `chat`.
 
 Authentication and machine identity are established by the transport before
 `xd-host stdio` starts. A local desktop owns the child process directly. Remote
-desktop and mobile clients authenticate with SSH and verify the SSH host key.
-There is no application-level `pair` or `hello` operation and no bearer token.
-The first application frame may be any supported request.
+desktop and mobile clients authenticate with SSH and verify the SSH host key;
+their stdio process proxies frames to a private per-account Unix socket so the
+host engine can outlive an SSH connection. There is no application-level `pair`
+or `hello` operation and no bearer token. The first application frame may be
+any supported request.
 
 The SSH account has the same authority as the host process. Clients must pin or
 otherwise strictly verify the SSH host key before sending password or private-key

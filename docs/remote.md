@@ -1,6 +1,6 @@
 # Remote desktop over SSH
 
-xd has no network daemon, pairing code, listening port, or background service.
+xd has no network-facing daemon, pairing code, or listening port.
 Remote mode uses the SSH command configured on the home screen, for example:
 
 ```sh
@@ -17,17 +17,19 @@ Local and remote modes are mutually exclusive. The selected mode is persisted,
 and **Disconnect** returns the app to local mode.
 
 In local mode the desktop starts its bundled `xd-host stdio` process and owns
-it for the lifetime of the window. In remote mode the desktop runs the same
-host through SSH:
+it for the lifetime of the window. In remote mode the stdio process is a bridge
+to an on-demand host broker on the remote machine:
 
 ```text
-desktop ── stdin/stdout ── ssh host ── xd-host stdio
+desktop ── stdin/stdout ── ssh host ── xd-host stdio ── private Unix socket ── xd-host broker
 ```
 
-There is no Unix-socket forwarding and nothing listens after the SSH session
-ends. The remote machine must have the matching stable or nightly xd bundle
-installed under `~/.local/opt/xd*/`; its state stays under the corresponding
-`~/.local/share/xd*/` directory.
+There is no Unix-socket forwarding or network listener. The broker is detached
+from the SSH connection and its socket is accessible only to the SSH account,
+so terminals and native agent turns keep running when a client sleeps or its
+connection drops. The remote machine must have the matching stable or nightly
+xd bundle installed under `~/.local/opt/xd*/`; its state stays under the
+corresponding `~/.local/share/xd*/` directory.
 
 ## Agent and terminal sessions
 
@@ -38,8 +40,9 @@ detail: users do not need to install or configure it separately.
 
 The desktop keeps one event stream open while connected and refreshes its
 cached tree, conversations, and terminal sessions after reconnecting. Closing
-the app closes the stdio host; active terminal and agent processes remain in
-their tmux sessions.
+the app closes only its SSH/stdin bridge. Direct terminal tabs remain in tmux,
+while host-managed terminals and native agent turns remain owned by the remote
+broker.
 
 ## Security
 

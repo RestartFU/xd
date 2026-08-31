@@ -2,6 +2,8 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
+    os::unix::fs::FileTypeExt,
+    path::Path,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -40,7 +42,7 @@ mod worktree_name;
 use auth::AuthManager;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
-use local_socket::UnixStream;
+use local_socket::{UnixListener, UnixStream};
 use pairing::{PairingService, Transport, generate_token, token_hash};
 use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
@@ -1108,7 +1110,6 @@ impl Engine {
         }
     }
 
-    #[cfg(test)]
     fn subscribe_transport(
         &self,
         sender: SyncSender<Value>,
@@ -1334,7 +1335,6 @@ pub fn serve_connection(stream: UnixStream) -> std::io::Result<()> {
     serve_connection_with_engine(stream, Arc::new(Engine::transport_only()), Transport::Local)
 }
 
-#[cfg(test)]
 fn serve_connection_with_engine(
     stream: UnixStream,
     engine: Arc<Engine>,
@@ -1358,8 +1358,88 @@ fn serve_connection_with_engine(
     result.and(writer_result)
 }
 
-/// Serve one desktop connection over stdin/stdout. The process owns no socket
-/// and exits when its controlling desktop or SSH connection closes.
+/// Owns the private local endpoint for one durable host engine.
+///
+/// Persistent stdio processes are only transports into this endpoint; dropping
+/// one of those clients must not drop the engine that owns turns and terminal
+/// sessions.
+pub struct HostServer {
+    listener: UnixListener,
+    socket: PathBuf,
+}
+
+impl HostServer {
+    pub fn bind(socket: impl Into<PathBuf>) -> std::io::Result<Self> {
+        let socket = socket.into();
+        let parent = socket
+            .parent()
+            .ok_or_else(|| std::io::Error::other("host socket has no parent directory"))?;
+        fs::create_dir_all(parent)?;
+        crate::private_fs::secure_directory(parent)?;
+
+        match fs::symlink_metadata(&socket) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                if UnixStream::connect(&socket).is_ok() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!("a host broker is already listening on {}", socket.display()),
+                    ));
+                }
+                fs::remove_file(&socket)?;
+            }
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("refusing to replace non-socket path {}", socket.display()),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        let listener = UnixListener::bind(&socket)?;
+        if let Err(error) = crate::private_fs::secure_file(&socket) {
+            drop(listener);
+            let _ = fs::remove_file(&socket);
+            return Err(error);
+        }
+        Ok(Self { listener, socket })
+    }
+
+    pub fn run(self, engine: Engine) -> std::io::Result<()> {
+        let engine = Arc::new(engine);
+        loop {
+            let (stream, _) = match self.listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
+            let engine = engine.clone();
+            thread::Builder::new()
+                .name("xd-host-client".into())
+                .spawn(move || {
+                    if let Err(error) =
+                        serve_connection_with_engine(stream, engine, Transport::Local)
+                    {
+                        eprintln!("xd-host: client connection failed: {error}");
+                    }
+                })?;
+        }
+    }
+
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+}
+
+impl Drop for HostServer {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.socket);
+    }
+}
+
+/// Serve one local desktop connection over stdin/stdout. The process owns no
+/// socket and exits when its controlling desktop closes.
 pub fn serve_stdio(
     engine: Engine,
     reader: impl Read,

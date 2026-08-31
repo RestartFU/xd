@@ -150,8 +150,8 @@ case "$(uname -m)" in
   *) die "only x86_64 is published so far; found $(uname -m)." ;;
 esac
 
-# Remove the service installed by older builds. Current xd has no daemon: its
-# local host belongs to the window and remote mode is an SSH stdio process.
+# Remove the service installed by older builds. Current xd has no installed
+# service: local hosts belong to their window and remote brokers start on demand.
 if have_user_manager; then
   systemctl --user disable --now "$SERVICE_NAME" >/dev/null 2>&1 || true
 fi

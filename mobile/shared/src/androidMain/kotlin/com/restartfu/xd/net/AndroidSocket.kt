@@ -262,7 +262,7 @@ private fun Throwable.toSocketFailure(presented: SshHostKey?): SocketFailure {
 }
 
 internal const val XD_HOST_COMMAND: String =
-    "exec \"\$HOME/.local/share/xd/runtime/v1/xd-host\" stdio " +
+    "exec \"\$HOME/.local/share/xd/runtime/v1/xd-host\" stdio --persistent " +
         "--data \"\$HOME/.local/share/xd\""
 
 private const val MAX_STDERR_BYTES = 16 * 1024
