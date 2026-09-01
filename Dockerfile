@@ -93,7 +93,6 @@ RUN mkdir -p src /src/terminal-core/src \
  && rm -rf src /src/terminal-core/src
 COPY terminal-core/src /src/terminal-core/src
 COPY host/src ./src
-COPY host/tests ./tests
 COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl tests/fixtures/claude-stream.jsonl /src/tests/fixtures/
 
 FROM rust-host-source AS rust-host-tests

@@ -273,7 +273,39 @@ jobs:
           ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
 
+      - name: Check Android signing credentials
+        id: android_signing
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          credentials=(
+            "$ANDROID_RELEASE_KEYSTORE_BASE64"
+            "$XD_ANDROID_STORE_PASSWORD"
+            "$XD_ANDROID_KEY_ALIAS"
+            "$XD_ANDROID_KEY_PASSWORD"
+          )
+          present=0
+          for credential in "${credentials[@]}"; do
+            if [[ -n "$credential" ]]; then
+              ((present += 1))
+            fi
+          done
+          if (( present == 0 )); then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Android signing secrets are absent; omitting the Android artifact."
+          elif (( present != ${#credentials[@]} )); then
+            echo "::error::Android signing secrets are only partially configured."
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build the Android APK
+        if: steps.android_signing.outputs.available == 'true'
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           XD_MOBILE_RELEASE: 1
@@ -296,12 +328,14 @@ jobs:
             --secret id=android_key_password,env=XD_ANDROID_KEY_PASSWORD
 
       - name: Name it for the release
+        if: steps.android_signing.outputs.available == 'true'
         run: |
           set -euo pipefail
           mv dist/mobile/xd-mobile-release.apk xd-android.apk
           sha256sum xd-android.apk > xd-android.apk.sha256
 
       - uses: actions/upload-artifact@v4
+        if: steps.android_signing.outputs.available == 'true'
         with:
           name: android
           path: |
@@ -335,6 +369,33 @@ jobs:
 
           tag="${{ needs.prepare.outputs.tag }}"
 
+          assets=(
+            xd-linux-x86_64.tar.gz
+            xd-linux-x86_64.tar.gz.sha256
+            xd-macos-*.zip
+            xd-macos-*.zip.sha256
+            scripts/install.sh
+            scripts/install-macos.sh
+          )
+          if [[ -f xd-android.apk ]]; then
+            assets+=(xd-android.apk xd-android.apk.sha256)
+            android_notes=$(cat <<'EOF'
+          Android:
+
+          Download `xd-android.apk` from this release. Android connects
+          directly over SSH and requires the stable xd host on the remote machine.
+          EOF
+            )
+          else
+            android_notes=$(cat <<'EOF'
+          Android:
+
+          No Android APK is published because protected signing credentials are
+          not configured for this repository.
+          EOF
+            )
+          fi
+
           notes=$(cat <<EOF
           Linux:
 
@@ -348,10 +409,7 @@ jobs:
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
           \`\`\`
 
-          Android:
-
-          Download \`xd-android.apk\` from this release. Android connects
-          directly over SSH and requires the stable xd host on the remote machine.
+          $android_notes
 
           Linux and macOS are self-contained.
           EOF
@@ -368,22 +426,11 @@ jobs:
               xd-windows-x86_64-msi.payload xd-windows-x86_64-cab.payload; do
               gh release delete-asset "$tag" "$legacy" --yes || true
             done
-            gh release upload "$tag" --clobber \
-              xd-linux-x86_64.tar.gz xd-linux-x86_64.tar.gz.sha256 \
-              xd-macos-*.zip xd-macos-*.zip.sha256 \
-              xd-android.apk xd-android.apk.sha256 \
-              scripts/install.sh scripts/install-macos.sh
+            gh release upload "$tag" --clobber "${assets[@]}"
           else
             gh release create "$tag" \
               --verify-tag \
               --title "$tag" \
               --notes "$notes" \
-              xd-linux-x86_64.tar.gz \
-              xd-linux-x86_64.tar.gz.sha256 \
-              xd-macos-*.zip \
-              xd-macos-*.zip.sha256 \
-              xd-android.apk \
-              xd-android.apk.sha256 \
-              scripts/install.sh \
-              scripts/install-macos.sh
+              "${assets[@]}"
           fi
