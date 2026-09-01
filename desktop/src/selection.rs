@@ -400,9 +400,12 @@ fn selection_edge_scroll(
     bottom: Pixels,
 ) -> Option<Pixels> {
     let step = px(19.);
-    let next = if pointer < top {
+    // Start while the pointer is still inside the viewport. A terminal can
+    // touch a window edge, where the OS cannot report a pointer position past
+    // the scroll bounds, making an outside-only trigger impossible to reach.
+    let next = if pointer < top + step {
         (current + step).min(px(0.))
-    } else if pointer > bottom {
+    } else if pointer > bottom - step {
         (current - step).max(-maximum)
     } else {
         return None;
@@ -584,8 +587,8 @@ impl Element for Selectable {
 mod tests {
     use super::*;
     use gpui::{
-        Context, ListAlignment, ListState, Modifiers, Render, Styled, StyledText, TestAppContext,
-        list, px,
+        Context, ListAlignment, ListState, Modifiers, Render, ScrollHandle, Styled, StyledText,
+        TestAppContext, div, list, prelude::*, px,
     };
 
     #[test]
@@ -643,6 +646,65 @@ mod tests {
         cx.simulate_mouse_up(link, MouseButton::Left, Modifiers::default());
 
         assert_eq!(cx.opened_url().as_deref(), Some("https://example.com"));
+    }
+
+    #[gpui::test]
+    fn dragging_a_selection_above_a_scroller_reveals_earlier_lines(cx: &mut TestAppContext) {
+        struct ScrollSelection {
+            scroll: ScrollHandle,
+        }
+
+        impl Render for ScrollSelection {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let value: SharedString = (0..80)
+                    .map(|line| format!("line {line:02}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .into();
+                let text = StyledText::new(value.clone());
+                let layout = text.layout().clone();
+                let range = 0..value.len();
+
+                div()
+                    .id("selection-scroll-test")
+                    .w(px(240.0))
+                    .h(px(120.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(
+                        selectable_in_document(1, 1, value, range, layout, text)
+                            .with_selection_scroll(self.scroll.clone()),
+                    )
+            }
+        }
+
+        let scroll = ScrollHandle::new();
+        scroll.scroll_to_bottom();
+        let (_, cx) = cx.add_window_view({
+            let scroll = scroll.clone();
+            move |_, _| ScrollSelection { scroll }
+        });
+        cx.run_until_parked();
+        let bottom = scroll.offset().y;
+        assert!(bottom < px(0.0), "test content must overflow its viewport");
+
+        cx.simulate_mouse_move(point(px(30.0), px(90.0)), None, Modifiers::default());
+        cx.simulate_mouse_down(
+            point(px(30.0), px(90.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(
+            point(px(30.0), px(5.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.run_until_parked();
+
+        assert!(
+            scroll.offset().y > bottom,
+            "dragging above the viewport should scroll toward older output"
+        );
     }
 
     #[test]
@@ -743,6 +805,18 @@ mod tests {
         assert_eq!(
             selection_edge_scroll(px(-195.), px(200.), px(100.), px(10.), px(90.)),
             Some(px(-200.))
+        );
+    }
+
+    #[test]
+    fn dragging_selection_into_the_viewport_edge_zone_scrolls_before_the_window_boundary() {
+        assert_eq!(
+            selection_edge_scroll(px(-40.), px(200.), px(15.), px(10.), px(90.)),
+            Some(px(-21.))
+        );
+        assert_eq!(
+            selection_edge_scroll(px(-40.), px(200.), px(85.), px(10.), px(90.)),
+            Some(px(-59.))
         );
     }
 
