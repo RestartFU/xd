@@ -60,6 +60,38 @@ RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
  && "${ANDROID_HOME}/build-tools/34.0.0/zipalign" -c 4 \
       androidApp/build/outputs/apk/debug/androidApp-debug.apk
 
+FROM source AS release
+
+ARG XD_MOBILE_CHANNEL=release
+
+RUN --mount=type=cache,id=xd-mobile-gradle,target=/root/.gradle \
+    --mount=type=secret,id=android_keystore,required=true \
+    --mount=type=secret,id=android_store_password,required=true \
+    --mount=type=secret,id=android_key_alias,required=true \
+    --mount=type=secret,id=android_key_password,required=true \
+    XD_ANDROID_KEYSTORE=/run/secrets/android_keystore \
+    XD_ANDROID_STORE_PASSWORD="$(cat /run/secrets/android_store_password)" \
+    XD_ANDROID_KEY_ALIAS="$(cat /run/secrets/android_key_alias)" \
+    XD_ANDROID_KEY_PASSWORD="$(cat /run/secrets/android_key_password)" \
+    ./gradlew --no-daemon \
+      --no-configuration-cache \
+      --no-build-cache \
+      -Pxd.channel="${XD_MOBILE_CHANNEL}" \
+      :shared:allTests \
+      :androidApp:assembleRelease \
+ && ./verify-release.sh \
+      androidApp/build/outputs/apk/release/androidApp-release.apk \
+      "${ANDROID_HOME}/build-tools/34.0.0/apksigner" \
+      "${ANDROID_HOME}/build-tools/34.0.0/aapt2" \
+ && "${ANDROID_HOME}/build-tools/34.0.0/zipalign" -c 4 \
+      androidApp/build/outputs/apk/release/androidApp-release.apk
+
+FROM scratch AS release-apk
+
+COPY --from=release \
+  /src/androidApp/build/outputs/apk/release/androidApp-release.apk \
+  /xd-mobile-release.apk
+
 FROM scratch AS apk
 
 COPY --from=verify \

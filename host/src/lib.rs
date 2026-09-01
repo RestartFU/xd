@@ -2,8 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
-    os::unix::fs::FileTypeExt,
-    path::Path,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -42,7 +40,7 @@ mod worktree_name;
 use auth::AuthManager;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
-use local_socket::{UnixListener, UnixStream};
+use local_socket::UnixStream;
 use pairing::{PairingService, Transport, generate_token, token_hash};
 use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
@@ -1110,6 +1108,7 @@ impl Engine {
         }
     }
 
+    #[cfg(test)]
     fn subscribe_transport(
         &self,
         sender: SyncSender<Value>,
@@ -1261,6 +1260,12 @@ impl EventBus {
             }
         }
     }
+
+    fn subscribed(&self, subscriber_id: u64) -> bool {
+        self.subscribers
+            .lock()
+            .is_ok_and(|subscribers| subscribers.contains_key(&subscriber_id))
+    }
 }
 
 impl SharedEventMonitor {
@@ -1335,6 +1340,7 @@ pub fn serve_connection(stream: UnixStream) -> std::io::Result<()> {
     serve_connection_with_engine(stream, Arc::new(Engine::transport_only()), Transport::Local)
 }
 
+#[cfg(test)]
 fn serve_connection_with_engine(
     stream: UnixStream,
     engine: Arc<Engine>,
@@ -1358,92 +1364,12 @@ fn serve_connection_with_engine(
     result.and(writer_result)
 }
 
-/// Owns the private local endpoint for one durable host engine.
-///
-/// Persistent stdio processes are only transports into this endpoint; dropping
-/// one of those clients must not drop the engine that owns turns and terminal
-/// sessions.
-pub struct HostServer {
-    listener: UnixListener,
-    socket: PathBuf,
-}
-
-impl HostServer {
-    pub fn bind(socket: impl Into<PathBuf>) -> std::io::Result<Self> {
-        let socket = socket.into();
-        let parent = socket
-            .parent()
-            .ok_or_else(|| std::io::Error::other("host socket has no parent directory"))?;
-        fs::create_dir_all(parent)?;
-        crate::private_fs::secure_directory(parent)?;
-
-        match fs::symlink_metadata(&socket) {
-            Ok(metadata) if metadata.file_type().is_socket() => {
-                if UnixStream::connect(&socket).is_ok() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::AddrInUse,
-                        format!("a host broker is already listening on {}", socket.display()),
-                    ));
-                }
-                fs::remove_file(&socket)?;
-            }
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!("refusing to replace non-socket path {}", socket.display()),
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-
-        let listener = UnixListener::bind(&socket)?;
-        if let Err(error) = crate::private_fs::secure_file(&socket) {
-            drop(listener);
-            let _ = fs::remove_file(&socket);
-            return Err(error);
-        }
-        Ok(Self { listener, socket })
-    }
-
-    pub fn run(self, engine: Engine) -> std::io::Result<()> {
-        let engine = Arc::new(engine);
-        loop {
-            let (stream, _) = match self.listener.accept() {
-                Ok(connection) => connection,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            };
-            let engine = engine.clone();
-            thread::Builder::new()
-                .name("xd-host-client".into())
-                .spawn(move || {
-                    if let Err(error) =
-                        serve_connection_with_engine(stream, engine, Transport::Local)
-                    {
-                        eprintln!("xd-host: client connection failed: {error}");
-                    }
-                })?;
-        }
-    }
-
-    pub fn socket(&self) -> &Path {
-        &self.socket
-    }
-}
-
-impl Drop for HostServer {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.socket);
-    }
-}
-
 /// Serve one local desktop connection over stdin/stdout. The process owns no
 /// socket and exits when its controlling desktop closes.
 pub fn serve_stdio(
     engine: Engine,
     reader: impl Read,
-    writer: impl Write + Send,
+    writer: impl Write + Send + 'static,
 ) -> std::io::Result<()> {
     let engine = Arc::new(engine);
     let mut reader = BufReader::new(reader);
@@ -1451,17 +1377,22 @@ pub fn serve_stdio(
     let subscriber = engine
         .subscribe_stdio(outbound.clone())
         .map_err(std::io::Error::other)?;
-    let writer = thread::scope(|scope| {
-        let writer = scope.spawn(move || write_frames(writer, frames));
-        let result = read_requests(&mut reader, &engine, subscriber, &outbound);
-        engine.unsubscribe(subscriber);
-        drop(outbound);
-        let writer_result = writer
-            .join()
-            .map_err(|_| std::io::Error::other("host writer panicked"))?;
-        result.and(writer_result)
-    });
-    writer
+    let writer = thread::Builder::new()
+        .name("xd-rust-stdio-writer".into())
+        .spawn(move || write_frames(writer, frames))?;
+    let result = read_requests(&mut reader, &engine, subscriber, &outbound);
+    engine.unsubscribe(subscriber);
+    drop(outbound);
+    if result.is_err() {
+        // A full event queue usually means stdout itself is blocked. Waiting
+        // for that writer here would keep a dead stdio transport alive forever;
+        // returning lets the dedicated host process exit and the client resync.
+        return result;
+    }
+    let writer_result = writer
+        .join()
+        .map_err(|_| std::io::Error::other("host writer panicked"))?;
+    result.and(writer_result)
 }
 
 fn read_requests(
@@ -1484,6 +1415,12 @@ fn read_requests(
         if count == 0 {
             return Ok(());
         }
+        if !engine.events.subscribed(subscriber) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "client event queue overflowed",
+            ));
+        }
         if line.len() > frame_limit {
             return Ok(());
         }
@@ -1501,9 +1438,15 @@ fn read_requests(
             Ok(request) => engine.dispatch_for(subscriber, request),
             Err(error) => json!({"ok": false, "error": format!("Invalid JSON request: {error}")}),
         };
-        outbound
-            .send(reply)
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client closed"))?;
+        outbound.try_send(reply).map_err(|error| match error {
+            TrySendError::Full(_) => std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "client output queue overflowed",
+            ),
+            TrySendError::Disconnected(_) => {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client closed")
+            }
+        })?;
     }
 }
 
@@ -2119,6 +2062,112 @@ mod tests {
             peer.write(b"probe").unwrap_err().kind(),
             std::io::ErrorKind::BrokenPipe
         );
+    }
+
+    #[test]
+    fn overflowed_stdio_subscription_rejects_later_requests() {
+        let engine = Engine::transport_only();
+        let (events, frames) = sync_channel(1);
+        let subscriber = engine.subscribe_stdio(events.clone()).unwrap();
+        engine.events.publish(json!({"event": "tree"}));
+        engine.events.publish(json!({"event": "tree"}));
+        assert!(engine.events.subscribers.lock().unwrap().is_empty());
+
+        let _queued = frames.recv().unwrap();
+        let mut requests = BufReader::new(b"{\"op\":\"ping\",\"_xd_request\":1}\n".as_slice());
+        let error = read_requests(&mut requests, &engine, subscriber, &events).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(
+            frames.try_recv().is_err(),
+            "overflowed transport replied after unsubscribe"
+        );
+    }
+
+    #[test]
+    fn reply_only_stdio_backpressure_disconnects_instead_of_blocking() {
+        let engine = Engine::transport_only();
+        let (outbound, frames) = sync_channel(1);
+        let subscriber = engine.subscribe_stdio(outbound.clone()).unwrap();
+        outbound.send(json!({"ok": true, "queued": true})).unwrap();
+        let (done, result) = sync_channel(1);
+        let worker = thread::spawn(move || {
+            let mut requests = BufReader::new(b"{\"op\":\"ping\"}\n".as_slice());
+            done.send(read_requests(&mut requests, &engine, subscriber, &outbound))
+                .unwrap();
+        });
+
+        let returned = result.recv_timeout(Duration::from_millis(250));
+        if returned.is_err() {
+            let _ = frames.recv();
+        }
+        worker.join().unwrap();
+
+        let error = returned
+            .expect("reply enqueue blocked behind the full stdio queue")
+            .expect_err("full stdio queue should disconnect the transport");
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    struct OverflowingStdioReader {
+        events: Arc<EventBus>,
+        request: std::io::Cursor<Vec<u8>>,
+        published: bool,
+    }
+
+    impl Read for OverflowingStdioReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if !self.published {
+                self.published = true;
+                for _ in 0..512 {
+                    self.events.publish(json!({"event": "tree"}));
+                }
+            }
+            self.request.read(buffer)
+        }
+    }
+
+    struct BlockedStdioWriter {
+        released: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl Write for BlockedStdioWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            let (released, wake) = &*self.released;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn overflowed_stdio_returns_without_waiting_for_a_blocked_writer() {
+        let engine = Engine::transport_only();
+        let events = engine.events.clone();
+        let released = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let writer = BlockedStdioWriter {
+            released: released.clone(),
+        };
+        let reader = OverflowingStdioReader {
+            events,
+            request: std::io::Cursor::new(b"{\"op\":\"ping\"}\n".to_vec()),
+            published: false,
+        };
+        let (done, result) = sync_channel(1);
+        let worker = thread::spawn(move || done.send(serve_stdio(engine, reader, writer)).unwrap());
+
+        let returned = result.recv_timeout(Duration::from_millis(250)).is_ok();
+        let (released, wake) = &*released;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        worker.join().unwrap();
+
+        assert!(returned, "stdio waited forever for its black-holed writer");
     }
 
     #[test]

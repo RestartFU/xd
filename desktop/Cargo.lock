@@ -7093,6 +7093,7 @@ dependencies = [
  "base64",
  "gpui",
  "image",
+ "libc",
  "portable-pty",
  "serde",
  "serde_json",

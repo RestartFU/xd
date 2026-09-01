@@ -15,7 +15,9 @@ class XdApplication : Application() {
 
     val client: XdClient by lazy {
         XdClient(
-            socketFactory = AndroidSshSocketFactory(),
+            socketFactory = AndroidSshSocketFactory(
+                remoteDataName = getString(R.string.remote_data_name),
+            ),
             credentials = AndroidCredentialStore(this),
             scope = applicationScope,
         )

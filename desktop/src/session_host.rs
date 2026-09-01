@@ -101,6 +101,7 @@ impl AgentCommand {
         self
     }
 
+    #[cfg(test)]
     fn shell_command(&self) -> String {
         self.shell_command_with_marker(None)
     }
@@ -256,6 +257,12 @@ impl SshCommand {
         if !has_ssh_config_option(&arguments, "ControlPersist") {
             arguments.extend(["-o".into(), "ControlPersist=10m".into()]);
         }
+        if !has_ssh_config_option(&arguments, "ServerAliveInterval") {
+            arguments.extend(["-o".into(), "ServerAliveInterval=15".into()]);
+        }
+        if !has_ssh_config_option(&arguments, "ServerAliveCountMax") {
+            arguments.extend(["-o".into(), "ServerAliveCountMax=3".into()]);
+        }
         if !has_ssh_config_option(&arguments, "ControlPath")
             && !arguments
                 .iter()
@@ -296,7 +303,19 @@ struct SshOption<'a> {
 fn ssh_option(word: &str) -> Result<SshOption<'_>, String> {
     if matches!(
         word,
-        "-N" | "-T" | "-G" | "-s" | "-f" | "-D" | "-L" | "-M" | "-O" | "-R" | "-W"
+        "-N" | "-T"
+            | "-G"
+            | "-s"
+            | "-f"
+            | "-n"
+            | "-t"
+            | "-tt"
+            | "-D"
+            | "-L"
+            | "-M"
+            | "-O"
+            | "-R"
+            | "-W"
     ) {
         return Err(format!(
             "SSH option {word} cannot be used for an interactive XD session."
@@ -306,7 +325,7 @@ fn ssh_option(word: &str) -> Result<SshOption<'_>, String> {
     let Some(option) = option else {
         return Err(format!("Invalid SSH option {word}."));
     };
-    if "NTGsfDLMORW".contains(option) {
+    if "NTGsfntDLMORW".contains(option) {
         return Err(format!(
             "SSH option -{option} cannot be used for an interactive XD session."
         ));
@@ -709,6 +728,8 @@ mod tests {
                 "-o",
                 "ControlPersist=10m",
                 "-o",
+                "ServerAliveCountMax=3",
+                "-o",
                 "ControlPath=~/.ssh/xd-%C",
                 "--",
                 "zenomc.org",
@@ -802,6 +823,52 @@ mod tests {
         assert!(SshCommand::parse("ssh").is_err());
         assert!(SshCommand::parse("ssh -W other:22 host.example").is_err());
         assert!(SshCommand::parse("ssh -L 4001:localhost:4001 host.example").is_err());
+    }
+
+    #[test]
+    fn ssh_protocol_transport_rejects_stdin_and_tty_overrides() {
+        for command in [
+            "ssh -n host.example",
+            "ssh -t host.example",
+            "ssh -tt host.example",
+        ] {
+            assert!(SshCommand::parse(command).is_err(), "accepted {command}");
+        }
+    }
+
+    #[test]
+    fn ssh_connections_have_default_liveness_detection() {
+        let command = SshCommand::parse("ssh host.example").unwrap();
+        let arguments = command.connection_options();
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveInterval=15"])
+        );
+        assert!(
+            arguments
+                .windows(2)
+                .any(|pair| pair == ["-o", "ServerAliveCountMax=3"])
+        );
+
+        let explicit =
+            SshCommand::parse("ssh -o ServerAliveInterval=60 -oServerAliveCountMax=2 host.example")
+                .unwrap()
+                .connection_options();
+        assert_eq!(
+            explicit
+                .iter()
+                .filter(|argument| argument.contains("ServerAliveInterval="))
+                .count(),
+            1
+        );
+        assert_eq!(
+            explicit
+                .iter()
+                .filter(|argument| argument.contains("ServerAliveCountMax="))
+                .count(),
+            1
+        );
     }
 
     #[test]

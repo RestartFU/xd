@@ -1,6 +1,7 @@
 package com.restartfu.xd.net
 
 import com.restartfu.xd.credentials.MemoryCredentialStore
+import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.SshAuthentication
 import com.restartfu.xd.credentials.SshConnection
 import com.restartfu.xd.credentials.SshHostKey
@@ -14,7 +15,10 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -22,6 +26,42 @@ import kotlinx.serialization.json.jsonPrimitive
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionActorTest {
+    @Test
+    fun credentialLoadFailureStillMakesTheActorReadyForANewConnection() = runTest {
+        var saved: StoredCredentials? = null
+        val store = object : CredentialStore {
+            override suspend fun load(): StoredCredentials? = error("keystore unavailable")
+
+            override suspend fun save(credentials: StoredCredentials) {
+                saved = credentials
+            }
+
+            override suspend fun clear() {
+                saved = null
+            }
+        }
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, store, backgroundScope)
+        runCurrent()
+
+        assertTrue(actor.credentialsReady.value)
+        assertFalse(actor.hasCredentials.value)
+        assertEquals(Link.Idle, actor.link.value)
+
+        val request = connection(
+            hostKey = SshHostKey("ssh-ed25519", byteArrayOf(1), "SHA256:new"),
+        )
+        val result = async { actor.connect(request) }
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receive(treeReply())
+        runCurrent()
+
+        assertEquals(ConnectResult.Success("alice@host"), result.await())
+        assertEquals(request, saved?.connection)
+    }
+
     @Test
     fun storedTransportIsNotReadyUntilHostProtocolReplies() = runTest {
         val hostKey = byteArrayOf(9, 8, 7)
@@ -328,15 +368,22 @@ class ConnectionActorTest {
     }
 
     @Test
-    fun inboundBufferOverflowClosesSocket() = runTest {
+    fun aStalledEventCollectorCannotBlockTheConnectionActor() = runTest {
         val factory = FakeSocketFactory()
-        connectedActor(factory)
+        val actor = connectedActor(factory)
+        val stalled = CompletableDeferred<Unit>()
+        backgroundScope.launch {
+            actor.events.collect { stalled.await() }
+        }
+        runCurrent()
 
         repeat(1_100) {
             factory.latest.receive("""{"event":"changed"}""")
+            runCurrent()
         }
 
         assertTrue(factory.latest.closed)
+        assertEquals("Inbound event buffer overflow", assertIs<Link.Down>(actor.link.value).message)
     }
 
     @Test

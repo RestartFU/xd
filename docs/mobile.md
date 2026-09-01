@@ -84,14 +84,19 @@ Install it with:
 adb install -r dist/mobile/xd-mobile-debug.apk
 ```
 
-## Nightly APK
+## Published APKs
 
 The rolling nightly release publishes `xd-nightly-android.apk` beside the Linux
-and macOS artifacts. Debug and nightly APKs use the checked-in
-`mobile/androidApp/debug.p12` key so updates install over earlier builds.
+and macOS artifacts. Published stable and nightly APKs require the protected CI
+release key and are checked after building for a valid non-debug signature and
+non-debuggable manifest. Nightly, stable, and dev builds use separate package
+IDs and matching remote data channels.
 
-That key is intentionally public and proves nothing about who built the APK. A
-production release would require a consistently protected release key.
+APKs published before protected signing used the public debug certificate. They
+cannot safely update in place to a private trust root, so the protected build
+uses a new package ID and installs beside the legacy app. Remove the legacy app
+after reconnecting the protected build; Android does not migrate its saved SSH
+credentials automatically.
 
 ## iOS targets
 

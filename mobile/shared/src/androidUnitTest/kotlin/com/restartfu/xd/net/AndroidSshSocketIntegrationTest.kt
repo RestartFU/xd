@@ -75,7 +75,7 @@ class AndroidSshSocketIntegrationTest {
 
         socket.connect(fixture.connection(SshAuthentication.Password("secret")), listener)
         listener.awaitConnectedOrFail()
-        assertEquals(XD_HOST_COMMAND, fixture.command.awaitCommand())
+        assertEquals(xdHostCommand("xd"), fixture.command.awaitCommand())
 
         socket.send("ping".encodeToByteArray())
         assertTrue(listener.awaitBytesContaining("remote-ready\nping".encodeToByteArray()))
@@ -101,7 +101,7 @@ class AndroidSshSocketIntegrationTest {
             listener,
         )
         listener.awaitConnectedOrFail()
-        assertEquals(XD_HOST_COMMAND, fixture.command.awaitCommand())
+        assertEquals(xdHostCommand("xd"), fixture.command.awaitCommand())
         assertTrue(listener.awaitBytesContaining("remote-ready\n".encodeToByteArray()))
 
         socket.close()

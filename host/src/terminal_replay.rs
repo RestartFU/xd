@@ -120,6 +120,30 @@ impl TerminalState {
         item_limit > 0 && self.replay.len() < item_limit
     }
 
+    fn reset_replay_bounded(
+        &mut self,
+        data: Option<Vec<u8>>,
+        byte_limit: usize,
+        item_limit: usize,
+    ) {
+        self.replay.clear();
+        self.replay_bytes = 0;
+        if item_limit == 0 {
+            return;
+        }
+
+        let mut reset = b"\x1bc\x1b[H\x1b[2J\x1b[3J".to_vec();
+        if let Some(data) = data
+            && data.len() <= byte_limit.saturating_sub(reset.len())
+        {
+            reset.extend_from_slice(&data);
+        }
+        if reset.len() <= byte_limit {
+            self.replay_bytes = reset.len();
+            self.replay.push_back(ReplayFrame::Output(reset));
+        }
+    }
+
     pub(crate) fn record_output_bounded(
         &mut self,
         data: Vec<u8>,
@@ -135,8 +159,7 @@ impl TerminalState {
             self.replay_bytes = self.replay_bytes.saturating_add(data.len());
             self.replay.push_back(ReplayFrame::Output(data));
         } else if !self.compact_replay(byte_limit, item_limit) {
-            self.replay_bytes = self.replay_bytes.saturating_add(data.len());
-            self.replay.push_back(ReplayFrame::Output(data));
+            self.reset_replay_bounded(Some(data), byte_limit, item_limit);
         }
         self.sequence = self.sequence.saturating_add(1);
         RecordOutcome::Accepted(self.sequence)
@@ -161,7 +184,7 @@ impl TerminalState {
         if self.item_fits(item_limit) {
             self.replay.push_back(ReplayFrame::Resize { columns, rows });
         } else if !self.compact_replay(HISTORY_LIMIT, item_limit) {
-            self.replay.push_back(ReplayFrame::Resize { columns, rows });
+            self.reset_replay_bounded(None, HISTORY_LIMIT, item_limit);
         }
         self.sequence = self.sequence.saturating_add(1);
         RecordOutcome::Accepted(self.sequence)
@@ -309,5 +332,25 @@ mod tests {
             state.replay.back(),
             Some(ReplayFrame::Checkpoint { .. })
         ));
+    }
+
+    #[test]
+    fn failed_compaction_still_enforces_the_hard_replay_limits() {
+        let mut state = TerminalState::new(8, 2);
+        let byte_limit = 128;
+        let item_limit = 4;
+
+        for index in 0..32 {
+            let output = format!(
+                "\x1b]8;;https://example.com/{index}/{}\x1b\\x\x1b]8;;\x1b\\",
+                "a".repeat(96)
+            );
+            assert!(matches!(
+                state.record_output_bounded(output.into_bytes(), byte_limit, item_limit),
+                RecordOutcome::Accepted(_)
+            ));
+            assert!(state.replay_bytes <= byte_limit);
+            assert!(state.replay.len() <= item_limit);
+        }
     }
 }

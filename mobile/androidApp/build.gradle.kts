@@ -6,36 +6,75 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val xdChannel = providers.gradleProperty("xd.channel").orElse("release").get()
+val xdRemoteDataName = when (xdChannel) {
+    "release" -> "xd"
+    "nightly" -> "xd-nightly"
+    "dev" -> "xd-dev"
+    else -> error("xd.channel must be release, nightly, or dev")
+}
+val xdApplicationId = when (xdChannel) {
+    "release" -> "com.restartfu.xd.app"
+    "nightly" -> "com.restartfu.xd.app.nightly"
+    "dev" -> "com.restartfu.xd.app.dev"
+    else -> error("xd.channel must be release, nightly, or dev")
+}
+val xdDisplayName = when (xdChannel) {
+    "release" -> "xd"
+    "nightly" -> "xd nightly"
+    "dev" -> "xd dev"
+    else -> error("xd.channel must be release, nightly, or dev")
+}
+
 android {
     namespace = "com.restartfu.xd.mobile"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.restartfu.xd.mobile"
+        // Protected signing starts with a new package identity. APKs published
+        // before this change used a public debug key and cannot safely rotate
+        // in place; a distinct ID makes the migration an explicit side-by-side
+        // install instead of an opaque Android signature-conflict failure.
+        applicationId = xdApplicationId
         minSdk = 26
         targetSdk = 35
         versionCode = 1010
         versionName = "0.1.10"
-        resValue("string", "app_name", "xd")
+        resValue("string", "app_name", xdDisplayName)
+        resValue("string", "remote_data_name", xdRemoteDataName)
     }
 
-    // A fixed key, checked in on purpose.
-    //
-    // Gradle otherwise generates one per machine, and a CI runner starts
-    // empty, so every published APK would be signed differently and Android
-    // would refuse to update an installed build: "package conflicts with an
-    // existing package". Signing every build with the same key makes updates
-    // work across nightly and stable release assets.
-    //
-    // This is not a secret and must never be treated as one. It is the same
-    // idea as Android's own debug keystore, whose password is public: it
-    // provides update continuity, not proof of who built the APK.
-    signingConfigs {
+    val releaseRequested = gradle.startParameter.taskNames.any {
+        it.contains("Release", ignoreCase = true)
+    }
+    val releaseKeystore = System.getenv("XD_ANDROID_KEYSTORE")
+    val releaseStorePassword = System.getenv("XD_ANDROID_STORE_PASSWORD")
+    val releaseKeyAlias = System.getenv("XD_ANDROID_KEY_ALIAS")
+    val releaseKeyPassword = System.getenv("XD_ANDROID_KEY_PASSWORD")
+    if (releaseRequested) {
+        require(!releaseKeystore.isNullOrBlank()) { "XD_ANDROID_KEYSTORE is required" }
+        require(!releaseStorePassword.isNullOrEmpty()) { "XD_ANDROID_STORE_PASSWORD is required" }
+        require(!releaseKeyAlias.isNullOrBlank()) { "XD_ANDROID_KEY_ALIAS is required" }
+        require(!releaseKeyPassword.isNullOrEmpty()) { "XD_ANDROID_KEY_PASSWORD is required" }
+    }
+    val releaseSigning = signingConfigs.create("release") {
+        releaseKeystore?.let { storeFile = file(it) }
+        storePassword = releaseStorePassword
+        keyAlias = releaseKeyAlias
+        keyPassword = releaseKeyPassword
+        storeType = "PKCS12"
+    }
+
+    buildTypes {
         getByName("debug") {
-            storeFile = file("debug.p12")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+            // A locally signed APK must never claim the protected stable ID,
+            // or installing it would block the real release (and vice versa).
+            applicationIdSuffix = ".debug"
+            resValue("string", "app_name", "xd dev")
+        }
+        getByName("release") {
+            signingConfig = releaseSigning
+            isDebuggable = false
         }
     }
 

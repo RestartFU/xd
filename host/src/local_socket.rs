@@ -1,1 +1,1 @@
-pub use std::os::unix::net::{UnixListener, UnixStream};
+pub use std::os::unix::net::UnixStream;

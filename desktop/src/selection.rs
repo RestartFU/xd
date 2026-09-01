@@ -200,11 +200,7 @@ impl Selectable {
             }
             let index = index_at(&layout, event.position);
             let text = layout.text();
-            let range = if event.click_count > 1 {
-                word_range(&text, index)
-            } else {
-                index..index
-            };
+            let range = range_for_click(&text, index, event.click_count);
             cx.set_global(TextSelection {
                 block: Some(document),
                 text: document_text.clone(),
@@ -465,6 +461,36 @@ fn word_range(text: &str, index: usize) -> Range<usize> {
     start..end
 }
 
+fn range_for_click(text: &str, index: usize, click_count: usize) -> Range<usize> {
+    match click_count {
+        1 => index..index,
+        2 => word_range(text, index),
+        _ => line_range(text, index),
+    }
+}
+
+/// The complete newline-delimited row under a pointer. Terminal snapshots
+/// encode each visual row on its own line, so this is also the terminal's
+/// triple-click selection unit.
+fn line_range(text: &str, index: usize) -> Range<usize> {
+    if text.is_empty() {
+        return 0..0;
+    }
+
+    let mut target = index.min(text.len());
+    while target > 0 && !text.is_char_boundary(target) {
+        target -= 1;
+    }
+    let start = text[..target].rfind('\n').map_or(0, |newline| newline + 1);
+    let mut end = text[target..]
+        .find('\n')
+        .map_or(text.len(), |newline| target + newline);
+    if end > start && text.as_bytes().get(end - 1) == Some(&b'\r') {
+        end -= 1;
+    }
+    start..end
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CharacterClass {
     Word,
@@ -680,6 +706,20 @@ mod tests {
     fn a_word_selection_does_not_cross_a_newline() {
         assert_eq!(word_range("one\n  two", 3), 3..4);
         assert_eq!(word_range("one\n  two", 4), 4..6);
+    }
+
+    #[test]
+    fn a_triple_click_selects_the_entire_line() {
+        assert_eq!(
+            range_for_click("first line\nsecond line\nthird", 14, 3),
+            11..22
+        );
+        assert_eq!(
+            range_for_click("first line\nsecond line\nthird", 14, 2),
+            11..17
+        );
+        assert_eq!(line_range("first line\nsecond line\nthird", 0), 0..10);
+        assert_eq!(line_range("first line\nsecond line\nthird", 28), 23..28);
     }
 
     #[test]

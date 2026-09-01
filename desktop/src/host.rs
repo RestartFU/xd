@@ -21,6 +21,7 @@ use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
 const PROCESS_STDERR_LIMIT: usize = 8 * 1024;
+const COMMAND_QUEUE_LIMIT: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageCursor {
@@ -296,7 +297,7 @@ struct Command {
 
 #[derive(Clone)]
 pub struct HostHandle {
-    commands: mpsc::Sender<Command>,
+    commands: mpsc::SyncSender<Command>,
 }
 
 pub struct StartedHost {
@@ -354,6 +355,7 @@ impl HostHandle {
         Ok((handle, updates, StartedHost { child }))
     }
 
+    #[cfg(test)]
     fn connect_io(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
@@ -368,7 +370,7 @@ impl HostHandle {
         identity: PathBuf,
         process_errors: Option<Arc<Mutex<Vec<u8>>>>,
     ) -> (Self, Receiver<HostUpdate>) {
-        let (command_tx, command_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::sync_channel(COMMAND_QUEUE_LIMIT);
         let (update_tx, update_rx) = async_channel::bounded(1024);
         let pending = Arc::new(Mutex::new(HashMap::new()));
 
@@ -1480,8 +1482,13 @@ impl HostHandle {
 
     fn send(&self, kind: RequestKind, body: Value) -> Result<(), String> {
         self.commands
-            .send(Command { kind, body })
-            .map_err(|_| "the xd state connection is closed".to_owned())
+            .try_send(Command { kind, body })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => "the xd state command queue is full".to_owned(),
+                mpsc::TrySendError::Disconnected(_) => {
+                    "the xd state connection is closed".to_owned()
+                }
+            })
     }
 }
 
@@ -1705,7 +1712,65 @@ fn launcher_candidates() -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use crate::local_socket::UnixListener;
-    use std::fs;
+    use std::{
+        fs, io,
+        sync::{Arc, Condvar, Mutex},
+    };
+
+    #[derive(Default)]
+    struct WriteGate {
+        entered: bool,
+        released: bool,
+    }
+
+    struct BlockingWriter {
+        gate: Arc<(Mutex<WriteGate>, Condvar)>,
+    }
+
+    impl Write for BlockingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            let (state, wake) = &*self.gate;
+            let mut state = state.lock().unwrap();
+            state.entered = true;
+            wake.notify_all();
+            while !state.released {
+                state = wake.wait(state).unwrap();
+            }
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn black_holed_host_writer_eventually_rejects_more_commands() {
+        let gate = Arc::new((Mutex::new(WriteGate::default()), Condvar::new()));
+        let (host, _updates) = HostHandle::connect_io(
+            io::empty(),
+            BlockingWriter { gate: gate.clone() },
+            PathBuf::from("blocked-host"),
+        );
+        host.tree().unwrap();
+        let (gate_state, wake) = &*gate;
+        let mut state = gate_state.lock().unwrap();
+        while !state.entered {
+            state = wake.wait(state).unwrap();
+        }
+        drop(state);
+
+        let failure = (0..2_048).find_map(|_| host.tree().err());
+        let mut state = gate_state.lock().unwrap();
+        state.released = true;
+        wake.notify_all();
+        drop(state);
+
+        assert_eq!(
+            failure.as_deref(),
+            Some("the xd state command queue is full")
+        );
+    }
 
     #[test]
     fn direct_cli_terminals_name_the_requested_agent_on_the_wire() {

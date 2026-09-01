@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -212,6 +214,8 @@ impl AgentCommand<'_> {
             _ => self.build_codex(),
         };
         command.envs(self.environment.iter().map(|(name, value)| (name, value)));
+        #[cfg(unix)]
+        command.process_group(0);
         command
     }
 
@@ -1193,6 +1197,52 @@ fn error_message(root: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn built_agents_start_as_process_group_leaders() {
+        use std::{fs, os::unix::fs::PermissionsExt, time::SystemTime};
+
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let executable = env::temp_dir().join(format!(
+            "xd-agent-process-group-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let previous = env::var_os("XD_JCODE_EXECUTABLE");
+        // SAFETY: no other agent tests mutate the JCode executable override.
+        unsafe { env::set_var("XD_JCODE_EXECUTABLE", &executable) };
+        let mut child = AgentCommand {
+            backend: "jcode",
+            prompt: "test",
+            system_prompt: None,
+            workdir: "/tmp",
+            model: "default",
+            effort: "medium",
+            access: "read",
+            fast: false,
+            session_id: None,
+            environment: &[],
+        }
+        .build()
+        .spawn()
+        .unwrap();
+        match previous {
+            Some(previous) => unsafe { env::set_var("XD_JCODE_EXECUTABLE", previous) },
+            None => unsafe { env::remove_var("XD_JCODE_EXECUTABLE") },
+        }
+
+        let pid = child.id() as libc::pid_t;
+        let process_group = unsafe { libc::getpgid(pid) };
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = fs::remove_file(executable);
+        assert_eq!(process_group, pid);
+    }
 
     #[test]
     fn only_claude_keeps_its_process_between_turns() {

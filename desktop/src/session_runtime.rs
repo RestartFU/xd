@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     io::{Read, Write},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -7,16 +7,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_channel::{Receiver, Sender};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::session_host::ProcessSpec;
 
 const MAX_COLUMNS: usize = 500;
 const MAX_ROWS: usize = 200;
+const MAX_BUFFERED_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_BUFFERED_EVENTS: usize = 2_048;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionEndpoint {
+    Local,
+    Remote,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SessionEvent {
+pub struct SessionEvent {
+    pub endpoint: SessionEndpoint,
+    pub kind: SessionEventKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionEventKind {
     Opened {
         chat_id: String,
         terminal_id: String,
@@ -47,13 +60,172 @@ pub enum SessionEvent {
     },
 }
 
+impl SessionEvent {
+    fn new(endpoint: SessionEndpoint, kind: SessionEventKind) -> Self {
+        Self { endpoint, kind }
+    }
+
+    pub fn endpoint(&self) -> SessionEndpoint {
+        self.endpoint
+    }
+
+    fn terminal_id(&self) -> &str {
+        match &self.kind {
+            SessionEventKind::Opened { terminal_id, .. }
+            | SessionEventKind::Output { terminal_id, .. }
+            | SessionEventKind::Resized { terminal_id, .. }
+            | SessionEventKind::Activity { terminal_id, .. }
+            | SessionEventKind::Closed { terminal_id, .. } => terminal_id,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionRuntime {
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
-    events: Sender<SessionEvent>,
+    events: SessionEventSender,
+}
+
+struct SessionEventQueue {
+    events: VecDeque<SessionEvent>,
+    output_bytes: usize,
+}
+
+#[derive(Clone)]
+struct SessionEventSender {
+    queue: Arc<Mutex<SessionEventQueue>>,
+    wake: async_channel::Sender<()>,
+}
+
+pub struct SessionEventReceiver {
+    queue: Arc<Mutex<SessionEventQueue>>,
+    wake: async_channel::Receiver<()>,
+}
+
+fn session_event_channel() -> (SessionEventSender, SessionEventReceiver) {
+    let queue = Arc::new(Mutex::new(SessionEventQueue {
+        events: VecDeque::new(),
+        output_bytes: 0,
+    }));
+    let (wake, awakened) = async_channel::bounded(1);
+    (
+        SessionEventSender {
+            queue: queue.clone(),
+            wake,
+        },
+        SessionEventReceiver {
+            queue,
+            wake: awakened,
+        },
+    )
+}
+
+impl SessionEventSender {
+    fn send(&self, event: SessionEvent) -> Result<(), ()> {
+        let mut queue = self.queue.lock().map_err(|_| ())?;
+        if matches!(
+            &event.kind,
+            SessionEventKind::Activity { .. } | SessionEventKind::Resized { .. }
+        ) && let Some(index) = queue.events.iter().position(|queued| {
+            std::mem::discriminant(&queued.kind) == std::mem::discriminant(&event.kind)
+                && queued.endpoint() == event.endpoint()
+                && queued.terminal_id() == event.terminal_id()
+        }) {
+            queue.events[index] = event;
+            drop(queue);
+            let _ = self.wake.try_send(());
+            return Ok(());
+        }
+        if let SessionEventKind::Output { data, .. } = &event.kind {
+            while queue.output_bytes.saturating_add(data.len()) > MAX_BUFFERED_OUTPUT_BYTES {
+                let Some(index) = queue
+                    .events
+                    .iter()
+                    .position(|queued| matches!(&queued.kind, SessionEventKind::Output { .. }))
+                else {
+                    break;
+                };
+                if let Some(SessionEvent {
+                    kind: SessionEventKind::Output { data, .. },
+                    ..
+                }) = queue.events.remove(index)
+                {
+                    queue.output_bytes = queue.output_bytes.saturating_sub(data.len());
+                }
+            }
+            if data.len() > MAX_BUFFERED_OUTPUT_BYTES {
+                return Ok(());
+            }
+            queue.output_bytes += data.len();
+        }
+        while queue.events.len() >= MAX_BUFFERED_EVENTS {
+            let Some(index) = queue
+                .events
+                .iter()
+                .position(|queued| !matches!(&queued.kind, SessionEventKind::Closed { .. }))
+            else {
+                if !matches!(&event.kind, SessionEventKind::Closed { .. }) {
+                    return Ok(());
+                }
+                break;
+            };
+            if let Some(SessionEvent {
+                kind: SessionEventKind::Output { data, .. },
+                ..
+            }) = queue.events.remove(index)
+            {
+                queue.output_bytes = queue.output_bytes.saturating_sub(data.len());
+            }
+        }
+        queue.events.push_back(event);
+        drop(queue);
+        let _ = self.wake.try_send(());
+        Ok(())
+    }
+}
+
+impl SessionEventReceiver {
+    pub async fn recv(&self) -> Result<SessionEvent, async_channel::RecvError> {
+        loop {
+            if let Ok(event) = self.try_recv() {
+                return Ok(event);
+            }
+            self.wake.recv().await?;
+        }
+    }
+
+    pub fn recv_blocking(&self) -> Result<SessionEvent, async_channel::RecvError> {
+        loop {
+            if let Ok(event) = self.try_recv() {
+                return Ok(event);
+            }
+            self.wake.recv_blocking()?;
+        }
+    }
+
+    pub fn try_recv(&self) -> Result<SessionEvent, async_channel::TryRecvError> {
+        let mut queue = self
+            .queue
+            .lock()
+            .map_err(|_| async_channel::TryRecvError::Closed)?;
+        let event = queue
+            .events
+            .pop_front()
+            .ok_or(async_channel::TryRecvError::Empty)?;
+        if let SessionEventKind::Output { data, .. } = &event.kind {
+            queue.output_bytes = queue.output_bytes.saturating_sub(data.len());
+        }
+        Ok(event)
+    }
+
+    #[cfg(test)]
+    fn buffered_output_bytes(&self) -> usize {
+        self.queue.lock().map_or(0, |queue| queue.output_bytes)
+    }
 }
 
 struct Session {
+    endpoint: SessionEndpoint,
     chat_id: String,
     terminal_id: String,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
@@ -68,8 +240,8 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 const CLEANUP_TIMEOUT: Duration = Duration::from_millis(100);
 
 impl SessionRuntime {
-    pub fn new() -> (Self, Receiver<SessionEvent>) {
-        let (events, updates) = async_channel::unbounded();
+    pub fn new() -> (Self, SessionEventReceiver) {
+        let (events, updates) = session_event_channel();
         (
             Self {
                 sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -82,6 +254,32 @@ impl SessionRuntime {
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         &self,
+        chat_id: &str,
+        terminal_id: &str,
+        title: &str,
+        agent: Option<&str>,
+        spec: ProcessSpec,
+        cleanup: Option<ProcessSpec>,
+        columns: usize,
+        rows: usize,
+    ) -> Result<(), String> {
+        self.open_for(
+            SessionEndpoint::Local,
+            chat_id,
+            terminal_id,
+            title,
+            agent,
+            spec,
+            cleanup,
+            columns,
+            rows,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_for(
+        &self,
+        endpoint: SessionEndpoint,
         chat_id: &str,
         terminal_id: &str,
         title: &str,
@@ -128,6 +326,7 @@ impl SessionRuntime {
             .take_writer()
             .map_err(|error| format!("Cannot prepare terminal input: {error}."))?;
         let session = Arc::new(Session {
+            endpoint,
             chat_id: chat_id.to_owned(),
             terminal_id: terminal_id.to_owned(),
             master: Mutex::new(Some(pair.master)),
@@ -139,14 +338,17 @@ impl SessionRuntime {
         drop(sessions);
 
         self.events
-            .send_blocking(SessionEvent::Opened {
-                chat_id: chat_id.to_owned(),
-                terminal_id: terminal_id.to_owned(),
-                title: title.to_owned(),
-                agent: agent.map(str::to_owned),
-                columns,
-                rows,
-            })
+            .send(SessionEvent::new(
+                endpoint,
+                SessionEventKind::Opened {
+                    chat_id: chat_id.to_owned(),
+                    terminal_id: terminal_id.to_owned(),
+                    title: title.to_owned(),
+                    agent: agent.map(str::to_owned),
+                    columns,
+                    rows,
+                },
+            ))
             .map_err(|_| "Terminal event receiver is closed.".to_owned())?;
         start_reader(session, reader, self.sessions.clone(), self.events.clone());
         Ok(())
@@ -184,12 +386,15 @@ impl SessionRuntime {
                 pixel_height: 0,
             })
             .map_err(|error| format!("Cannot resize terminal: {error}."))?;
-        let _ = self.events.send_blocking(SessionEvent::Resized {
-            chat_id: session.chat_id.clone(),
-            terminal_id: session.terminal_id.clone(),
-            columns,
-            rows,
-        });
+        let _ = self.events.send(SessionEvent::new(
+            session.endpoint,
+            SessionEventKind::Resized {
+                chat_id: session.chat_id.clone(),
+                terminal_id: session.terminal_id.clone(),
+                columns,
+                rows,
+            },
+        ));
         Ok(())
     }
 
@@ -203,10 +408,13 @@ impl SessionRuntime {
             Some(session) => session,
             None => return Ok(()),
         };
-        let _ = self.events.send_blocking(SessionEvent::Closed {
-            chat_id: session.chat_id.clone(),
-            terminal_id: session.terminal_id.clone(),
-        });
+        let _ = self.events.send(SessionEvent::new(
+            session.endpoint,
+            SessionEventKind::Closed {
+                chat_id: session.chat_id.clone(),
+                terminal_id: session.terminal_id.clone(),
+            },
+        ));
         let _ = thread::Builder::new()
             .name("xd-terminal-cleanup".into())
             .spawn(move || {
@@ -216,6 +424,45 @@ impl SessionRuntime {
                 }
             });
         Ok(())
+    }
+
+    pub fn kill_chats(
+        &self,
+        endpoint: SessionEndpoint,
+        chat_ids: &HashSet<String>,
+    ) -> Result<(), String> {
+        let terminal_ids = self
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?
+            .values()
+            .filter(|session| session.endpoint == endpoint && chat_ids.contains(&session.chat_id))
+            .map(|session| session.terminal_id.clone())
+            .collect::<Vec<_>>();
+        for terminal_id in terminal_ids {
+            self.kill(&terminal_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn reconcile_chats(
+        &self,
+        endpoint: SessionEndpoint,
+        live_chats: &HashSet<String>,
+    ) -> Result<(), String> {
+        let removed = self
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?
+            .values()
+            .filter(|session| {
+                session.endpoint == endpoint
+                    && !session.chat_id.starts_with("global:")
+                    && !live_chats.contains(&session.chat_id)
+            })
+            .map(|session| session.chat_id.clone())
+            .collect::<HashSet<_>>();
+        self.kill_chats(endpoint, &removed)
     }
 
     fn session(&self, terminal_id: &str) -> Result<Arc<Session>, String> {
@@ -290,7 +537,7 @@ fn start_reader(
     session: Arc<Session>,
     mut reader: Box<dyn Read + Send>,
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
-    events: Sender<SessionEvent>,
+    events: SessionEventSender,
 ) {
     thread::Builder::new()
         .name(format!("xd-terminal-{}", session.terminal_id))
@@ -303,21 +550,27 @@ fn start_reader(
                     Ok(count) => count,
                 };
                 if events
-                    .send_blocking(SessionEvent::Output {
-                        chat_id: session.chat_id.clone(),
-                        terminal_id: session.terminal_id.clone(),
-                        data: buffer[..count].to_vec(),
-                    })
+                    .send(SessionEvent::new(
+                        session.endpoint,
+                        SessionEventKind::Output {
+                            chat_id: session.chat_id.clone(),
+                            terminal_id: session.terminal_id.clone(),
+                            data: buffer[..count].to_vec(),
+                        },
+                    ))
                     .is_err()
                 {
                     break;
                 }
                 for working in activity.feed(&buffer[..count]) {
-                    let _ = events.send_blocking(SessionEvent::Activity {
-                        chat_id: session.chat_id.clone(),
-                        terminal_id: session.terminal_id.clone(),
-                        working,
-                    });
+                    let _ = events.send(SessionEvent::new(
+                        session.endpoint,
+                        SessionEventKind::Activity {
+                            chat_id: session.chat_id.clone(),
+                            terminal_id: session.terminal_id.clone(),
+                            working,
+                        },
+                    ));
                 }
             }
             session.close();
@@ -331,10 +584,13 @@ fn start_reader(
                 is_current
             });
             if should_close {
-                let _ = events.send_blocking(SessionEvent::Closed {
-                    chat_id: session.chat_id.clone(),
-                    terminal_id: session.terminal_id.clone(),
-                });
+                let _ = events.send(SessionEvent::new(
+                    session.endpoint,
+                    SessionEventKind::Closed {
+                        chat_id: session.chat_id.clone(),
+                        terminal_id: session.terminal_id.clone(),
+                    },
+                ));
             }
         })
         .expect("terminal reader thread should start");
@@ -451,7 +707,108 @@ mod tests {
 
     use crate::session_host::ProcessSpec;
 
-    use super::{ActivityParser, SessionEvent, SessionRuntime};
+    use super::{ActivityParser, SessionEndpoint, SessionEvent, SessionEventKind, SessionRuntime};
+
+    #[test]
+    fn chat_reconciliation_is_scoped_to_the_sessions_origin_endpoint() {
+        let (runtime, events) = SessionRuntime::new();
+        for (endpoint, terminal_id) in [
+            (SessionEndpoint::Local, "terminal-local"),
+            (SessionEndpoint::Remote, "terminal-remote"),
+        ] {
+            runtime
+                .open_for(
+                    endpoint,
+                    "same-chat",
+                    terminal_id,
+                    "Terminal",
+                    None,
+                    ProcessSpec::new("/bin/sh", ["-c", "sleep 30"]),
+                    None,
+                    80,
+                    24,
+                )
+                .unwrap();
+            let opened = events.recv_blocking().unwrap();
+            assert_eq!(opened.endpoint(), endpoint);
+        }
+
+        runtime
+            .reconcile_chats(SessionEndpoint::Local, &std::collections::HashSet::new())
+            .unwrap();
+
+        assert!(runtime.input("terminal-local", b"x").is_err());
+        assert!(runtime.input("terminal-remote", b"x").is_ok());
+        runtime.kill("terminal-remote").unwrap();
+    }
+
+    #[test]
+    fn terminal_output_queue_is_bounded_and_never_drops_closure() {
+        let (events, updates) = super::session_event_channel();
+        for _ in 0..(super::MAX_BUFFERED_OUTPUT_BYTES / 8_192 + 32) {
+            events
+                .send(SessionEvent::new(
+                    super::SessionEndpoint::Local,
+                    SessionEventKind::Output {
+                        chat_id: "chat".into(),
+                        terminal_id: "terminal".into(),
+                        data: vec![b'x'; 8_192],
+                    },
+                ))
+                .unwrap();
+        }
+        events
+            .send(SessionEvent::new(
+                super::SessionEndpoint::Local,
+                SessionEventKind::Closed {
+                    chat_id: "chat".into(),
+                    terminal_id: "terminal".into(),
+                },
+            ))
+            .unwrap();
+
+        assert!(updates.buffered_output_bytes() <= super::MAX_BUFFERED_OUTPUT_BYTES);
+        let mut saw_closed = false;
+        while let Ok(event) = updates.try_recv() {
+            saw_closed |= matches!(event.kind, SessionEventKind::Closed { .. });
+        }
+        assert!(saw_closed);
+    }
+
+    #[test]
+    fn terminal_activity_flood_is_coalesced_without_dropping_closure() {
+        let (events, updates) = super::session_event_channel();
+        for index in 0..10_000 {
+            events
+                .send(SessionEvent::new(
+                    super::SessionEndpoint::Local,
+                    SessionEventKind::Activity {
+                        chat_id: "chat".into(),
+                        terminal_id: "terminal".into(),
+                        working: index % 2 == 0,
+                    },
+                ))
+                .unwrap();
+        }
+        events
+            .send(SessionEvent::new(
+                super::SessionEndpoint::Local,
+                SessionEventKind::Closed {
+                    chat_id: "chat".into(),
+                    terminal_id: "terminal".into(),
+                },
+            ))
+            .unwrap();
+
+        let mut count = 0;
+        let mut saw_closed = false;
+        while let Ok(event) = updates.try_recv() {
+            count += 1;
+            saw_closed |= matches!(event.kind, SessionEventKind::Closed { .. });
+        }
+        assert!(count <= 64, "activity events were not bounded: {count}");
+        assert!(saw_closed);
+    }
 
     #[test]
     fn cli_terminal_titles_drive_activity_without_host_events() {
@@ -517,14 +874,14 @@ mod tests {
             .unwrap();
 
         let opened = events.recv_blocking().unwrap();
-        assert!(matches!(opened, SessionEvent::Opened { .. }));
+        assert!(matches!(opened.kind, SessionEventKind::Opened { .. }));
         assert!(recv_output_containing(&events, "ready"));
 
         runtime.input("terminal-one", b"hello\n").unwrap();
         assert!(recv_output_containing(&events, ":hello"));
 
         let closed = events.recv_blocking().unwrap();
-        assert!(matches!(closed, SessionEvent::Closed { .. }));
+        assert!(matches!(closed.kind, SessionEventKind::Closed { .. }));
         assert!(runtime.wait_until_empty(Duration::from_secs(1)));
     }
 
@@ -555,8 +912,8 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            events.recv_blocking().unwrap(),
-            SessionEvent::Opened { .. }
+            events.recv_blocking().unwrap().kind,
+            SessionEventKind::Opened { .. }
         ));
 
         let started = std::time::Instant::now();
@@ -585,13 +942,14 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            events.recv_blocking().unwrap(),
-            SessionEvent::Opened { .. }
+            events.recv_blocking().unwrap().kind,
+            SessionEventKind::Opened { .. }
         ));
         runtime.kill("stable-agent").unwrap();
-        assert!(
-            (0..16).any(|_| matches!(events.recv_blocking().unwrap(), SessionEvent::Closed { .. }))
-        );
+        assert!((0..16).any(|_| matches!(
+            events.recv_blocking().unwrap().kind,
+            SessionEventKind::Closed { .. }
+        )));
 
         runtime
             .open(
@@ -605,25 +963,23 @@ mod tests {
                 24,
             )
             .unwrap();
-        assert!(
-            (0..16).any(|_| matches!(events.recv_blocking().unwrap(), SessionEvent::Opened { .. }))
-        );
+        assert!((0..16).any(|_| matches!(
+            events.recv_blocking().unwrap().kind,
+            SessionEventKind::Opened { .. }
+        )));
         assert!(recv_output_containing(&events, "reopened"));
         runtime.kill("stable-agent").unwrap();
     }
 
-    fn recv_output_containing(
-        events: &async_channel::Receiver<SessionEvent>,
-        expected: &str,
-    ) -> bool {
+    fn recv_output_containing(events: &super::SessionEventReceiver, expected: &str) -> bool {
         for _ in 0..8 {
-            match events.recv_blocking().unwrap() {
-                SessionEvent::Output { data, .. }
+            match events.recv_blocking().unwrap().kind {
+                SessionEventKind::Output { data, .. }
                     if String::from_utf8_lossy(&data).contains(expected) =>
                 {
                     return true;
                 }
-                SessionEvent::Closed { .. } => return false,
+                SessionEventKind::Closed { .. } => return false,
                 _ => {}
             }
         }

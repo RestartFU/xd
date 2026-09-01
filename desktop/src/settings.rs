@@ -78,6 +78,8 @@ pub struct AppSettings {
     pub window_height: u16,
     pub window_maximized: bool,
     pub pane_states: HashMap<String, u8>,
+    #[serde(skip)]
+    load_error: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -109,6 +111,7 @@ impl Default for AppSettings {
             window_height: 780,
             window_maximized: false,
             pane_states: HashMap::new(),
+            load_error: None,
         }
     }
 }
@@ -117,18 +120,41 @@ impl AppSettings {
     pub fn load() -> Self {
         let path = settings_path();
         match fs::symlink_metadata(&path) {
-            Ok(_) => load_from(&path).unwrap_or_default(),
+            Ok(_) => Self::load_preserving(&path),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let settings = Self::default();
                 let _ = save_to(&path, &settings);
                 settings
             }
-            Err(_) => Self::default(),
+            Err(error) => Self {
+                load_error: Some(format!("Cannot inspect app settings: {error}")),
+                ..Self::default()
+            },
         }
     }
 
     pub fn save(&self) -> Result<(), String> {
-        save_to(&settings_path(), self)
+        self.save_preserving(&settings_path())
+    }
+
+    fn load_preserving(path: &Path) -> Self {
+        load_from(path).unwrap_or_else(|error| Self {
+            load_error: Some(error),
+            ..Self::default()
+        })
+    }
+
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    fn save_preserving(&self, path: &Path) -> Result<(), String> {
+        if let Some(error) = &self.load_error {
+            return Err(format!(
+                "App settings were not saved because the existing file is invalid: {error}"
+            ));
+        }
+        save_to(path, self)
     }
 }
 
@@ -196,6 +222,29 @@ mod tests {
     use xd_desktop::theme::ThemePreset;
 
     #[test]
+    fn malformed_settings_are_not_replaced_by_defaults() {
+        let directory = env::temp_dir().join(format!(
+            "xd-malformed-settings-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("settings.json");
+        fs::create_dir_all(&directory).unwrap();
+        let malformed = br#"{"theme":"dark""#;
+        fs::write(&path, malformed).unwrap();
+
+        let settings = AppSettings::load_preserving(&path);
+        assert!(settings.load_error().is_some());
+        assert!(settings.save_preserving(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), malformed);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn settings_round_trip_and_unknown_fields_are_ignored() {
         let directory = env::temp_dir().join(format!(
             "xd-settings-{}-{}",
@@ -251,6 +300,7 @@ mod tests {
                 ("local/chat-restore".into(), 5),
                 ("remote/dev.example:4001/chat-remote".into(), 1),
             ]),
+            load_error: None,
         };
         save_to(&path, &settings).unwrap();
         assert_eq!(load_from(&path).unwrap(), settings);

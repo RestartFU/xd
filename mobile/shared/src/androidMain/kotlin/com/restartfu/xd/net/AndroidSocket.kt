@@ -21,26 +21,33 @@ import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 public class AndroidSshSocketFactory(
     private val connectTimeoutMillis: Int = 10_000,
+    private val remoteDataName: String = "xd",
 ) : PlatformSocketFactory {
     init {
         require(connectTimeoutMillis > 0) { "Connect timeout must be positive" }
+        require(remoteDataName in REMOTE_DATA_NAMES) { "Unknown remote data name" }
     }
 
-    override fun create(): PlatformSocket = AndroidSshSocket(connectTimeoutMillis)
+    override fun create(): PlatformSocket = AndroidSshSocket(
+        connectTimeoutMillis,
+        xdHostCommand(remoteDataName),
+    )
 }
 
 internal class AndroidSshSocket(
     private val connectTimeoutMillis: Int,
+    private val hostCommand: String = xdHostCommand("xd"),
 ) : PlatformSocket {
     private val closed = AtomicBoolean(false)
     private val callbackFinished = AtomicBoolean(false)
-    private val writes = LinkedBlockingQueue<ByteArray>()
+    private val writes = OutboundWriteQueue()
 
     @Volatile
     private var listener: PlatformSocketListener? = null
@@ -68,7 +75,15 @@ internal class AndroidSshSocket(
     override fun send(bytes: ByteArray) {
         check(!closed.get()) { "SSH connection is closed" }
         check(channel?.isConnected == true) { "SSH channel is not connected" }
-        writes.add(bytes.copyOf())
+        if (!writes.offer(bytes)) {
+            val failure = SocketFailure(
+                SocketFailureKind.IO,
+                "Outbound SSH buffer exceeded ${MAX_OUTBOUND_BYTES / (1024 * 1024)} MiB",
+            )
+            close()
+            finish(failure)
+            throw IOException(failure.message)
+        }
     }
 
     override fun close() {
@@ -76,6 +91,7 @@ internal class AndroidSshSocket(
         writer?.interrupt()
         channel?.disconnect()
         session?.disconnect()
+        writes.clear()
     }
 
     private fun runConnection(connection: SshConnection) {
@@ -103,7 +119,7 @@ internal class AndroidSshSocket(
 
             val activeChannel = activeSession.openChannel("exec") as ChannelExec
             channel = activeChannel
-            activeChannel.setCommand(XD_HOST_COMMAND)
+            activeChannel.setCommand(hostCommand)
             val stdout = activeChannel.inputStream
             val stderr = activeChannel.extInputStream
             val stdin = activeChannel.outputStream
@@ -158,8 +174,12 @@ internal class AndroidSshSocket(
         try {
             while (!closed.get()) {
                 val bytes = writes.take()
-                output.write(bytes)
-                output.flush()
+                try {
+                    output.write(bytes)
+                    output.flush()
+                } finally {
+                    writes.complete(bytes)
+                }
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
@@ -198,6 +218,48 @@ internal class AndroidSshSocket(
 
     private fun finish(reason: SocketFailure?) {
         if (callbackFinished.compareAndSet(false, true)) listener?.onClosed(reason)
+    }
+}
+
+/**
+ * Keeps both queued and currently-writing frames within a fixed byte budget.
+ * The item cap also prevents an unlimited number of empty or tiny writes.
+ */
+internal class OutboundWriteQueue(
+    maxBytes: Int = MAX_OUTBOUND_BYTES,
+    maxItems: Int = MAX_OUTBOUND_ITEMS,
+) {
+    private val bytePermits: Semaphore
+    private val queue: ArrayBlockingQueue<ByteArray>
+
+    init {
+        require(maxBytes > 0) { "Outbound byte limit must be positive" }
+        require(maxItems > 0) { "Outbound item limit must be positive" }
+        bytePermits = Semaphore(maxBytes, true)
+        queue = ArrayBlockingQueue(maxItems)
+    }
+
+    fun offer(bytes: ByteArray): Boolean {
+        if (!bytePermits.tryAcquire(bytes.size)) return false
+        val copy = bytes.copyOf()
+        if (queue.offer(copy)) return true
+        bytePermits.release(bytes.size)
+        copy.fill(0)
+        return false
+    }
+
+    fun take(): ByteArray = queue.take()
+
+    fun complete(bytes: ByteArray) {
+        bytePermits.release(bytes.size)
+    }
+
+    fun clear() {
+        while (true) {
+            val bytes = queue.poll() ?: return
+            bytePermits.release(bytes.size)
+            bytes.fill(0)
+        }
     }
 }
 
@@ -261,8 +323,13 @@ private fun Throwable.toSocketFailure(presented: SshHostKey?): SocketFailure {
     }
 }
 
-internal const val XD_HOST_COMMAND: String =
-    "exec \"\$HOME/.local/share/xd/runtime/v1/xd-host\" stdio " +
-        "--data \"\$HOME/.local/share/xd\""
+internal fun xdHostCommand(dataName: String): String {
+    require(dataName in REMOTE_DATA_NAMES) { "Unknown remote data name" }
+    return "exec \"\$HOME/.local/share/$dataName/runtime/v1/xd-host\" stdio " +
+        "--data \"\$HOME/.local/share/$dataName\""
+}
 
 private const val MAX_STDERR_BYTES = 16 * 1024
+private const val MAX_OUTBOUND_BYTES = 32 * 1024 * 1024
+private const val MAX_OUTBOUND_ITEMS = 64
+private val REMOTE_DATA_NAMES = setOf("xd", "xd-nightly", "xd-dev")

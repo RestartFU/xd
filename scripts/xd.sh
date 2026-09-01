@@ -45,7 +45,21 @@ mkdir -p "$RUNTIME"
 
 # This cache stores an absolute path, so it is rewritten per launch from an
 # @BUNDLE@ template; that is what keeps the bundle relocatable.
-sed "s|@BUNDLE@|$HERE|g" "$HERE/etc/fonts.conf.in"    > "$RUNTIME/fonts.conf"
+FONTCONFIG_HERE=$(printf '%s' "$HERE" | sed \
+  -e 's/&/\&amp;/g' \
+  -e 's/</\&lt;/g' \
+  -e 's/>/\&gt;/g' \
+  -e 's/"/\&quot;/g' \
+  -e "s/'/\&apos;/g")
+while IFS= read -r template_line || [ -n "$template_line" ]; do
+  template_rest=$template_line
+  while [ "${template_rest#*@BUNDLE@}" != "$template_rest" ]; do
+    template_prefix=${template_rest%%@BUNDLE@*}
+    printf '%s%s' "$template_prefix" "$FONTCONFIG_HERE"
+    template_rest=${template_rest#*@BUNDLE@}
+  done
+  printf '%s\n' "$template_rest"
+done < "$HERE/etc/fonts.conf.in" > "$RUNTIME/fonts.conf"
 
 # Anything xd launches for the user -- a terminal, an editor -- must run in the
 # host's environment, not the bundle's. Remember the values before they are

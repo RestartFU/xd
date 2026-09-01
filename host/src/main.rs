@@ -1,24 +1,19 @@
 use std::{
-    env, fs, io,
-    os::unix::{net::UnixStream, process::CommandExt},
+    env, io,
     path::{Path, PathBuf},
-    process::{Command, ExitCode, Stdio},
-    thread,
-    time::{Duration, Instant},
+    process::ExitCode,
 };
 
-use xd_host::{Engine, HostServer, StateStore, serve_stdio};
+use xd_host::{Engine, StateStore, serve_stdio};
 
 #[derive(Clone)]
 struct HostOptions {
     database: PathBuf,
     workspaces: PathBuf,
-    persistent: bool,
 }
 
 enum CliCommand {
     Stdio(HostOptions),
-    Broker(HostOptions),
     RecordAgentSession {
         database: PathBuf,
         chat: String,
@@ -40,7 +35,6 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(CliCommand::Stdio(options)) => finish(host_stdio(options)),
-        Ok(CliCommand::Broker(options)) => finish(host_broker(options)),
         Ok(CliCommand::RecordAgentSession {
             database,
             chat,
@@ -69,14 +63,6 @@ fn finish(result: Result<(), String>) -> ExitCode {
 }
 
 fn host_stdio(options: HostOptions) -> Result<(), String> {
-    if !options.persistent {
-        return host_local_stdio(options);
-    }
-    let stream = connect_or_start_broker(&options)?;
-    proxy_stdio(stream).map_err(|error| format!("host broker connection failed: {error}"))
-}
-
-fn host_local_stdio(options: HostOptions) -> Result<(), String> {
     let store = StateStore::open(&options.database, &options.workspaces)
         .map_err(|error| error.to_string())?;
     let data_directory = options
@@ -88,122 +74,14 @@ fn host_local_stdio(options: HostOptions) -> Result<(), String> {
     serve_stdio(engine, io::stdin(), io::stdout()).map_err(|error| error.to_string())
 }
 
-fn host_broker(options: HostOptions) -> Result<(), String> {
-    let server = HostServer::bind(host_socket(&options))
-        .map_err(|error| format!("cannot bind the host broker: {error}"))?;
-    let store = StateStore::open(&options.database, &options.workspaces)
-        .map_err(|error| error.to_string())?;
-    if let Err(error) = store.recover_interrupted_turns() {
-        eprintln!("xd-host: cannot recover turns left by an earlier broker: {error}");
-    }
-    let data_directory = options
-        .database
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "--database must have a parent directory".to_owned())?;
-    let engine = Engine::with_store_and_data(store, Some(data_directory));
-    server
-        .run(engine)
-        .map_err(|error| format!("host broker failed: {error}"))
-}
-
-fn connect_or_start_broker(options: &HostOptions) -> Result<UnixStream, String> {
-    let socket = host_socket(options);
-    match UnixStream::connect(&socket) {
-        Ok(stream) => return Ok(stream),
-        Err(error)
-            if !matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Err(format!(
-                "cannot connect to host broker {}: {error}",
-                socket.display()
-            ));
-        }
-        Err(_) => {}
-    }
-
-    let parent = socket
-        .parent()
-        .ok_or_else(|| "host socket has no parent directory".to_owned())?;
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("cannot create host runtime {}: {error}", parent.display()))?;
-    let executable = env::current_exe()
-        .map_err(|error| format!("cannot locate the host executable: {error}"))?;
-    let mut command = Command::new(executable);
-    command
-        .args(["broker", "--database"])
-        .arg(&options.database)
-        .arg("--workspaces")
-        .arg(&options.workspaces)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // The broker belongs to the state directory, not to this desktop or SSH
-    // process group. In particular, sshd may hang up the exec session while a
-    // phone sleeps; that must not signal the broker or its agents.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("cannot start the host broker: {error}"))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match UnixStream::connect(&socket) {
-            Ok(stream) => return Ok(stream),
-            Err(error) if Instant::now() >= deadline => {
-                return Err(format!(
-                    "host broker did not create {}: {error}",
-                    socket.display()
-                ));
-            }
-            Err(_) => {}
-        }
-        // Another simultaneous client may have won the bind race. Its broker
-        // will become connectable even if our child has already exited.
-        let _ = child.try_wait();
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn proxy_stdio(mut stream: UnixStream) -> io::Result<()> {
-    let mut writer = stream.try_clone()?;
-    thread::Builder::new()
-        .name("xd-host-input".into())
-        .spawn(move || {
-            let _ = io::copy(&mut io::stdin().lock(), &mut writer);
-            let _ = writer.shutdown(std::net::Shutdown::Both);
-        })?;
-    io::copy(&mut stream, &mut io::stdout().lock())?;
-    Ok(())
-}
-
-fn host_socket(options: &HostOptions) -> PathBuf {
-    options
-        .database
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("runtime/v1/host.sock")
-}
-
 fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, String> {
     let mut arguments = arguments.into_iter();
     match arguments.next().as_deref() {
         Some("stdio") => host_arguments(arguments).map(CliCommand::Stdio),
-        Some("broker") => host_arguments(arguments).map(CliCommand::Broker),
         Some("record-agent-session") => record_agent_session_arguments(arguments),
         Some("--version" | "-v") if arguments.next().is_none() => Ok(CliCommand::Version),
         Some("--help" | "-h") if arguments.next().is_none() => Ok(CliCommand::Help),
-        Some("serve" | "pair") => {
+        Some("serve" | "pair" | "broker") => {
             Err("socket serving and pairing were removed; connect with SSH".into())
         }
         _ => Err("expected the stdio command".into()),
@@ -214,10 +92,8 @@ fn host_arguments(mut arguments: impl Iterator<Item = String>) -> Result<HostOpt
     let mut data = None;
     let mut database = None;
     let mut workspaces = None;
-    let mut persistent = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--persistent" => persistent = true,
             "--data" => {
                 data = Some(PathBuf::from(
                     arguments.next().ok_or("--data needs a directory")?,
@@ -258,7 +134,6 @@ fn host_arguments(mut arguments: impl Iterator<Item = String>) -> Result<HostOpt
     Ok(HostOptions {
         database: database.ok_or("stdio needs --data or --database")?,
         workspaces: workspaces.ok_or("stdio needs --data or --workspaces")?,
-        persistent,
     })
 }
 
@@ -317,7 +192,7 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-host stdio [--persistent] --data DIR\n\
+    "usage: xd-host stdio --data DIR\n\
      \n\
      The host reads JSON frames from stdin and writes replies/events to stdout."
 }
@@ -341,16 +216,14 @@ mod tests {
             options.workspaces,
             PathBuf::from("/state/xd-nightly/Workspaces")
         );
-        assert!(!options.persistent);
-        let CliCommand::Stdio(options) = arguments([
-            "stdio".into(),
-            "--persistent".into(),
-            "--data=/state/xd-nightly".into(),
-        ])
-        .unwrap() else {
-            panic!("expected stdio command");
-        };
-        assert!(options.persistent);
+        assert!(
+            arguments([
+                "stdio".into(),
+                "--persistent".into(),
+                "--data=/state/xd-nightly".into(),
+            ])
+            .is_err()
+        );
         assert!(arguments(["stdio".into(), "--bind=::".into()]).is_err());
         assert!(arguments(["stdio".into(), "--socket=/tmp/xd.sock".into()]).is_err());
     }
@@ -359,20 +232,7 @@ mod tests {
     fn rejects_removed_socket_server_commands() {
         assert!(arguments(["serve".into(), "--socket=/tmp/xd.sock".into()]).is_err());
         assert!(arguments(["pair".into(), "--port=4444".into()]).is_err());
-    }
-
-    #[test]
-    fn connecting_a_stdio_client_does_not_recover_the_brokers_turns() {
-        let source = include_str!("main.rs");
-        let startup = source
-            .split_once("fn host_stdio(")
-            .expect("stdio host startup")
-            .1
-            .split_once("fn host_broker(")
-            .expect("end of stdio host startup")
-            .0;
-
-        assert!(!startup.contains("recover_interrupted_turns"));
+        assert!(arguments(["broker".into(), "--data=/state/xd".into()]).is_err());
     }
 
     #[test]

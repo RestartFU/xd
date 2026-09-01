@@ -1,7 +1,12 @@
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -11,6 +16,10 @@ use crate::{
     host::{HostHandle, HostUpdate, StartedHost},
     session_host::SshCommand,
 };
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_OUTPUT_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum RemoteError {
@@ -110,11 +119,10 @@ struct RemoteInfo {
 }
 
 fn probe_remote(command: &SshCommand) -> Result<RemoteInfo, RemoteError> {
-    let output = Command::new(command.program())
-        .args(probe_arguments(command))
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| RemoteError::Bridge(format!("cannot launch SSH: {error}")))?;
+    let mut process = Command::new(command.program());
+    process.args(probe_arguments(command)).stdin(Stdio::null());
+    let output = bounded_output(&mut process, COMMAND_TIMEOUT, COMMAND_OUTPUT_LIMIT)
+        .map_err(|error| RemoteError::Bridge(format!("cannot probe SSH: {error}")))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(RemoteError::Bridge(if error.is_empty() {
@@ -171,9 +179,9 @@ fn local_host_executable() -> Result<PathBuf, RemoteError> {
 }
 
 fn host_version(host: &Path) -> Result<String, RemoteError> {
-    let output = Command::new(host)
-        .arg("--version")
-        .output()
+    let mut command = Command::new(host);
+    command.arg("--version").stdin(Stdio::null());
+    let output = bounded_output(&mut command, VERSION_TIMEOUT, COMMAND_OUTPUT_LIMIT)
         .map_err(|error| RemoteError::Bridge(format!("cannot inspect xd host: {error}")))?;
     if !output.status.success() {
         return Err(RemoteError::Bridge(format!(
@@ -214,11 +222,10 @@ fn deploy_remote_host(
     arguments.extend(["--".into(), command.destination().into(), script]);
     let file = fs::File::open(local_host)
         .map_err(|error| RemoteError::Bridge(format!("cannot read xd host: {error}")))?;
-    let output = Command::new(command.program())
-        .args(arguments)
-        .stdin(Stdio::from(file))
-        .output()
-        .map_err(|error| RemoteError::Bridge(format!("cannot launch SSH: {error}")))?;
+    let mut process = Command::new(command.program());
+    process.args(arguments).stdin(Stdio::from(file));
+    let output = bounded_output(&mut process, COMMAND_TIMEOUT, COMMAND_OUTPUT_LIMIT)
+        .map_err(|error| RemoteError::Bridge(format!("cannot install over SSH: {error}")))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(RemoteError::Bridge(if error.is_empty() {
@@ -230,13 +237,123 @@ fn deploy_remote_host(
             format!("cannot install the remote xd host: {error}")
         }));
     }
-    let installed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if installed != local_version {
+    if !installed_version_matches(&output.stdout, local_version) {
+        let installed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         return Err(RemoteError::Bridge(format!(
             "the remote xd host reported {installed:?} after installing {local_version:?}"
         )));
     }
     Ok(())
+}
+
+fn installed_version_matches(output: &[u8], expected: &str) -> bool {
+    String::from_utf8_lossy(output)
+        .lines()
+        .any(|line| line.trim() == expected)
+}
+
+fn bounded_output(
+    command: &mut Command,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<Output, String> {
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "cannot capture command output".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "cannot capture command errors".to_owned())?;
+    let stdout = thread::spawn(move || read_bounded(stdout, output_limit));
+    let stderr = thread::spawn(move || read_bounded(stderr, output_limit));
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                terminate_command(&mut child);
+                let _ = stdout.join();
+                let _ = stderr.join();
+                return Err(format!(
+                    "command timed out after {} seconds",
+                    timeout.as_secs_f32()
+                ));
+            }
+            Err(error) => {
+                terminate_command(&mut child);
+                let _ = stdout.join();
+                let _ = stderr.join();
+                return Err(format!("cannot wait for command: {error}"));
+            }
+        }
+    };
+    while (!stdout.is_finished() || !stderr.is_finished()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !stdout.is_finished() || !stderr.is_finished() {
+        terminate_command(&mut child);
+        let _ = stdout.join();
+        let _ = stderr.join();
+        return Err(format!(
+            "command timed out after {} seconds",
+            timeout.as_secs_f32()
+        ));
+    }
+    let (stdout, stdout_truncated) = stdout
+        .join()
+        .map_err(|_| "command output reader failed".to_owned())?;
+    let (stderr, stderr_truncated) = stderr
+        .join()
+        .map_err(|_| "command error reader failed".to_owned())?;
+    if stdout_truncated || stderr_truncated {
+        return Err(format!(
+            "command produced too much output (limit: {output_limit} bytes per stream)"
+        ));
+    }
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn terminate_command(child: &mut Child) {
+    #[cfg(unix)]
+    let killed_group = libc::pid_t::try_from(child.id())
+        .is_ok_and(|pid| unsafe { libc::kill(-pid, libc::SIGKILL) } == 0);
+    #[cfg(not(unix))]
+    let killed_group = false;
+    if !killed_group {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn read_bounded(mut input: impl Read, limit: usize) -> (Vec<u8>, bool) {
+    let mut kept = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let mut truncated = false;
+    loop {
+        let Ok(count) = input.read(&mut buffer) else {
+            break;
+        };
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(kept.len());
+        kept.extend_from_slice(&buffer[..count.min(remaining)]);
+        truncated |= count > remaining;
+    }
+    (kept, truncated)
 }
 
 fn remote_host_relative_directory() -> PathBuf {
@@ -291,6 +408,8 @@ mod tests {
                 "-o",
                 "ControlPersist=10m",
                 "-o",
+                "ServerAliveCountMax=3",
+                "-o",
                 "ControlPath=~/.ssh/xd-%C",
                 "-o",
                 "BatchMode=yes",
@@ -315,6 +434,8 @@ mod tests {
                 "-o".into(),
                 "ControlPersist=10m".into(),
                 "-o".into(),
+                "ServerAliveCountMax=3".into(),
+                "-o".into(),
                 "ControlPath=~/.ssh/xd-%C".into(),
                 "-o".into(),
                 "BatchMode=yes".into(),
@@ -338,5 +459,89 @@ mod tests {
         };
         assert!(same_platform(system, architecture));
         assert!(!same_platform("Plan9", architecture));
+    }
+
+    #[test]
+    fn deployment_version_check_ignores_remote_shell_banner_output() {
+        let expected = "xd-host 0.1.10 (742f275)";
+        assert!(installed_version_matches(
+            b"Welcome to the build server\nxd-host 0.1.10 (742f275)\n",
+            expected,
+        ));
+        assert!(!installed_version_matches(
+            b"Welcome to the build server\nxd-host 0.1.9 (6ab3faf)\n",
+            expected,
+        ));
+    }
+
+    #[test]
+    fn remote_commands_have_a_wall_clock_timeout() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+        let started = std::time::Instant::now();
+        let error =
+            bounded_output(&mut command, std::time::Duration::from_millis(50), 1024).unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_timeout_kills_descendants_that_retain_output_pipes() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let descendant_file = env::temp_dir().join(format!(
+            "xd-remote-timeout-{}-{nonce}.pid",
+            std::process::id()
+        ));
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "sleep 30 & descendant=$!; printf '%s\\n' \"$descendant\" > {}; exit 0",
+                shell_quote(&descendant_file.to_string_lossy())
+            ),
+        ]);
+        let (done, result) = std::sync::mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            done.send(bounded_output(
+                &mut command,
+                Duration::from_millis(50),
+                1024,
+            ))
+            .unwrap();
+        });
+
+        let returned = result.recv_timeout(Duration::from_secs(1));
+        if returned.is_err()
+            && let Ok(pid) = fs::read_to_string(&descendant_file)
+                .unwrap_or_default()
+                .trim()
+                .parse::<u32>()
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        worker.join().unwrap();
+        let _ = fs::remove_file(descendant_file);
+
+        let error = returned
+            .expect("timeout waited for a descendant-held output pipe")
+            .expect_err("command should time out");
+        assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn remote_command_output_is_bounded() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes x | head -c 65536"]);
+        let error =
+            bounded_output(&mut command, std::time::Duration::from_secs(2), 1024).unwrap_err();
+        assert!(error.contains("too much output"), "{error}");
     }
 }

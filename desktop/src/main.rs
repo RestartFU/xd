@@ -36,7 +36,9 @@ use xd_desktop::{
     model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, Worktree},
     remote::{self, RemoteError, SshRemoteBridge, SshRemoteSession},
     session_host::{AgentCommand, SessionHost, SshCommand, TMUX_CONFIGURATION},
-    session_runtime::{SessionEvent, SessionRuntime},
+    session_runtime::{
+        SessionEndpoint, SessionEvent, SessionEventKind, SessionEventReceiver, SessionRuntime,
+    },
     theme::ThemeColors,
 };
 
@@ -510,9 +512,10 @@ fn jcode_terminal_screen_working(screen: &str) -> Option<bool> {
     }
 }
 
-fn terminal_runtime_event(event: SessionEvent) -> (&'static str, Value) {
-    match event {
-        SessionEvent::Opened {
+fn terminal_runtime_event(event: SessionEvent) -> (ChatEndpoint, &'static str, Value) {
+    let endpoint = event.endpoint().into();
+    let (name, body) = match event.kind {
+        SessionEventKind::Opened {
             chat_id,
             terminal_id,
             title,
@@ -530,7 +533,7 @@ fn terminal_runtime_event(event: SessionEvent) -> (&'static str, Value) {
                 "rows": rows,
             }),
         ),
-        SessionEvent::Output {
+        SessionEventKind::Output {
             chat_id,
             terminal_id,
             data,
@@ -542,7 +545,7 @@ fn terminal_runtime_event(event: SessionEvent) -> (&'static str, Value) {
                 "data": STANDARD.encode(data),
             }),
         ),
-        SessionEvent::Resized {
+        SessionEventKind::Resized {
             chat_id,
             terminal_id,
             columns,
@@ -556,7 +559,7 @@ fn terminal_runtime_event(event: SessionEvent) -> (&'static str, Value) {
                 "rows": rows,
             }),
         ),
-        SessionEvent::Activity {
+        SessionEventKind::Activity {
             chat_id,
             terminal_id,
             working,
@@ -569,14 +572,15 @@ fn terminal_runtime_event(event: SessionEvent) -> (&'static str, Value) {
                 "terminal_working": working,
             }),
         ),
-        SessionEvent::Closed {
+        SessionEventKind::Closed {
             chat_id,
             terminal_id,
         } => (
             "terminal-closed",
             serde_json::json!({"chat": chat_id, "terminal": terminal_id}),
         ),
-    }
+    };
+    (endpoint, name, body)
 }
 
 fn insert_terminal_cursor_highlight(
@@ -747,29 +751,6 @@ fn global_terminal_panel_id(connection_key: &str) -> String {
     format!("global:{connection_key}")
 }
 
-fn terminal_event_endpoint_for_chat(
-    chat_id: &str,
-    active_endpoint: ChatEndpoint,
-    active_has_chat: bool,
-    inactive_has_chat: bool,
-    remote_key: Option<&str>,
-) -> ChatEndpoint {
-    if chat_id == global_terminal_panel_id(&connection_state_key(ChatEndpoint::Local, remote_key)) {
-        return ChatEndpoint::Local;
-    }
-    if chat_id == global_terminal_panel_id(&connection_state_key(ChatEndpoint::Remote, remote_key))
-    {
-        return ChatEndpoint::Remote;
-    }
-    match (active_has_chat, inactive_has_chat) {
-        (false, true) => match active_endpoint {
-            ChatEndpoint::Local => ChatEndpoint::Remote,
-            ChatEndpoint::Remote => ChatEndpoint::Local,
-        },
-        _ => active_endpoint,
-    }
-}
-
 fn update_terminal_activity_state(
     activity: &mut HashMap<(ChatEndpoint, String, String), bool>,
     endpoint: ChatEndpoint,
@@ -797,6 +778,13 @@ fn terminal_panel_cache_entry_is_live(chat_id: &str, live_chats: &HashSet<String
 struct PendingSpeech {
     chat_id: String,
     previous_assistant_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingExperimentTab {
+    endpoint: ChatEndpoint,
+    panel_chat_id: String,
+    agent: AgentCli,
 }
 
 /// Where a row sits inside a run of consecutive plain activity, so the run reads
@@ -1012,6 +1000,24 @@ enum ChatEndpoint {
 
 impl ChatEndpoint {}
 
+impl From<ChatEndpoint> for SessionEndpoint {
+    fn from(endpoint: ChatEndpoint) -> Self {
+        match endpoint {
+            ChatEndpoint::Local => Self::Local,
+            ChatEndpoint::Remote => Self::Remote,
+        }
+    }
+}
+
+impl From<SessionEndpoint> for ChatEndpoint {
+    fn from(endpoint: SessionEndpoint) -> Self {
+        match endpoint {
+            SessionEndpoint::Local => Self::Local,
+            SessionEndpoint::Remote => Self::Remote,
+        }
+    }
+}
+
 fn persisted_runtime(saved: Option<&str>, remote_key: Option<&str>) -> ChatEndpoint {
     match (saved, remote_key) {
         (Some(saved), Some(remote)) if saved == remote => ChatEndpoint::Remote,
@@ -1052,7 +1058,7 @@ struct XdDesktop {
     minimal_popup_focus_captured: bool,
     minimal_new_session_agent: AgentCli,
     pending_minimal_session: Option<(String, String)>,
-    pending_experiment_tab: Option<(String, AgentCli)>,
+    pending_experiment_tab: Option<PendingExperimentTab>,
     settings: AppSettings,
     settings_open: bool,
     auth_open: bool,
@@ -1446,12 +1452,14 @@ impl XdDesktop {
         let corrected_active_connection =
             settings.active_connection.as_deref() != Some(active_connection.as_str());
         settings.active_connection = Some(active_connection);
+        let settings_load_error = settings.load_error().map(str::to_owned);
         let remote_configured = settings.remote_ssh_command.is_some();
         let minimal_popup_focus = cx.focus_handle();
         let (terminal_runtime, terminal_updates) = SessionRuntime::new();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
+                connection_error: settings_load_error,
                 ..Default::default()
             },
             inactive_model: AppModel {
@@ -1731,6 +1739,29 @@ impl XdDesktop {
         }
     }
 
+    fn clear_pending_experiment_for_endpoint(&mut self, endpoint: ChatEndpoint) {
+        if self
+            .pending_experiment_tab
+            .as_ref()
+            .is_some_and(|pending| pending.endpoint == endpoint)
+        {
+            self.pending_experiment_tab = None;
+        }
+    }
+
+    fn reconcile_passive_experiment_reply(&mut self, endpoint: ChatEndpoint, kind: &RequestKind) {
+        let RequestKind::NewChat { title, .. } = kind else {
+            return;
+        };
+        if self
+            .pending_experiment_tab
+            .as_ref()
+            .is_some_and(|pending| pending.endpoint == endpoint && pending.agent.label() == title)
+        {
+            self.pending_experiment_tab = None;
+        }
+    }
+
     fn apply_passive_event(model: &mut AppModel, name: &str, body: &Value) {
         if name == "tree" {
             let _ = model.apply_tree(body);
@@ -1852,13 +1883,15 @@ impl XdDesktop {
         name == "host-update"
     }
 
-    fn switch_active_endpoint(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) {
+    fn switch_active_endpoint(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) -> bool {
         if endpoint == self.active_endpoint {
-            return;
+            return true;
+        }
+        self.pending_experiment_tab = None;
+        if !self.flush_draft_before_navigation() {
+            return false;
         }
         self.stash_terminal_panel();
-        self.sync_draft();
-        self.draft_generation = self.draft_generation.saturating_add(1);
         std::mem::swap(&mut self.model, &mut self.inactive_model);
         self.active_endpoint = endpoint;
         self.remember_active_connection();
@@ -1899,6 +1932,7 @@ impl XdDesktop {
         self.minimal_route = MinimalRoute::default();
         self.pending_minimal_session = None;
         self.request_agent_catalog();
+        true
     }
 
     fn schedule_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
@@ -2116,6 +2150,7 @@ impl XdDesktop {
                     return;
                 }
                 self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
+                self.clear_pending_experiment_for_endpoint(ChatEndpoint::Remote);
                 self.remote_host = None;
                 self.remote_bridge = None;
                 let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
@@ -2170,6 +2205,7 @@ impl XdDesktop {
                         self.handle_reply(kind, body, attachments, cx);
                     }
                 } else {
+                    self.reconcile_passive_experiment_reply(ChatEndpoint::Remote, &kind);
                     let value = Value::Object(body);
                     let tree = matches!(&kind, RequestKind::Tree);
                     if !self.handle_workspace_create_reply(ChatEndpoint::Remote, &kind, &value, cx)
@@ -2245,7 +2281,10 @@ impl XdDesktop {
             return;
         }
         if self.active_endpoint == ChatEndpoint::Local {
-            self.switch_active_endpoint(ChatEndpoint::Remote, cx);
+            if !self.switch_active_endpoint(ChatEndpoint::Remote, cx) {
+                cx.notify();
+                return;
+            }
         }
         if self.remote_state == RemoteState::Connected {
             if let Some(host) = &self.remote_host {
@@ -2262,6 +2301,10 @@ impl XdDesktop {
         if self.active_endpoint != ChatEndpoint::Remote {
             return;
         }
+        if !self.switch_active_endpoint(ChatEndpoint::Local, cx) {
+            cx.notify();
+            return;
+        }
         self.remote_generation = self.remote_generation.saturating_add(1);
         self.remote_host = None;
         self.remote_bridge = None;
@@ -2272,7 +2315,6 @@ impl XdDesktop {
         };
         self.remote_reconnect_attempt = 0;
         self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
-        self.switch_active_endpoint(ChatEndpoint::Local, cx);
         self.schedule_connect(Duration::ZERO, cx);
         cx.notify();
     }
@@ -2302,6 +2344,7 @@ impl XdDesktop {
                         return;
                     }
                     self.terminal_cache_refresh.insert(ChatEndpoint::Local);
+                    self.clear_pending_experiment_for_endpoint(ChatEndpoint::Local);
                     self.host = None;
                     self.inactive_model.connected = false;
                     self.inactive_model.connection_error = Some(format!("{message} Reconnecting…"));
@@ -2317,6 +2360,7 @@ impl XdDesktop {
                     if Self::local_admin_reply(&kind) {
                         self.handle_reply(kind, body, attachments, cx);
                     } else {
+                        self.reconcile_passive_experiment_reply(ChatEndpoint::Local, &kind);
                         let value = Value::Object(body);
                         let tree = matches!(&kind, RequestKind::Tree);
                         if !self.handle_workspace_create_reply(
@@ -2388,6 +2432,7 @@ impl XdDesktop {
                     return;
                 }
                 self.terminal_cache_refresh.insert(ChatEndpoint::Local);
+                self.clear_pending_experiment_for_endpoint(ChatEndpoint::Local);
                 self.host = None;
                 self.model.connected = false;
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
@@ -2547,10 +2592,17 @@ impl XdDesktop {
                 }
                 RequestKind::NewChat {
                     folder_id, title, ..
-                } if self.creating_chat_folder.as_deref() == Some(folder_id)
-                    && self.chat_create_title.trim() == title =>
-                {
-                    self.chat_create_submitting = false;
+                } => {
+                    if self.pending_experiment_tab.as_ref().is_some_and(|pending| {
+                        pending.endpoint == self.active_endpoint && pending.agent.label() == title
+                    }) {
+                        self.pending_experiment_tab = None;
+                    }
+                    if self.creating_chat_folder.as_deref() == Some(folder_id)
+                        && self.chat_create_title.trim() == title
+                    {
+                        self.chat_create_submitting = false;
+                    }
                 }
                 RequestKind::FolderContext { folder_id }
                     if self.workspace_context_folder.as_deref() == Some(folder_id) =>
@@ -2936,6 +2988,14 @@ impl XdDesktop {
                     {
                         self.sidebar_delete_submitting = false;
                     }
+                    let removed = self
+                        .model
+                        .chats
+                        .iter()
+                        .filter(|chat| chat.folder.as_str() == folder_id.as_str())
+                        .map(|chat| chat.id.clone())
+                        .collect::<HashSet<_>>();
+                    self.stop_terminal_sessions_for_chats(self.active_endpoint, &removed);
                     self.request_tree();
                 }
                 RequestKind::DeleteChat { chat_id } => {
@@ -2944,6 +3004,10 @@ impl XdDesktop {
                     {
                         self.sidebar_delete_submitting = false;
                     }
+                    self.stop_terminal_sessions_for_chats(
+                        self.active_endpoint,
+                        &HashSet::from([chat_id.clone()]),
+                    );
                     self.request_tree();
                 }
                 _ => {}
@@ -3632,6 +3696,11 @@ impl XdDesktop {
                 folder_id, title, ..
             } => {
                 let Some(chat_id) = value.get("id").and_then(Value::as_str) else {
+                    if self.pending_experiment_tab.as_ref().is_some_and(|pending| {
+                        pending.endpoint == self.active_endpoint && pending.agent.label() == title
+                    }) {
+                        self.pending_experiment_tab = None;
+                    }
                     self.chat_create_submitting = false;
                     self.model.connection_error = Some("The host returned no chat id.".into());
                     return;
@@ -3640,26 +3709,35 @@ impl XdDesktop {
                     .get("backend")
                     .and_then(Value::as_str)
                     .and_then(AgentCli::from_backend);
-                if let Some((panel_chat_id, pending_agent)) = self.pending_experiment_tab.clone()
-                    && response_agent == Some(pending_agent)
+                if let Some(pending) = self.pending_experiment_tab.clone()
+                    && pending.endpoint == self.active_endpoint
+                    && pending.agent.label() == title
                 {
                     self.pending_experiment_tab = None;
+                    if response_agent != Some(pending.agent) {
+                        self.model.connection_error = Some(
+                            "The host created the experiment chat with the wrong agent.".into(),
+                        );
+                        self.request_tree();
+                        cx.notify();
+                        return;
+                    }
                     self.request_tree();
                     let chat_id = chat_id.to_owned();
                     let active = self
                         .terminal_panel
                         .as_ref()
-                        .is_some_and(|panel| panel.chat_id == panel_chat_id);
+                        .is_some_and(|panel| panel.chat_id == pending.panel_chat_id);
                     if active {
                         if let Some(panel) = &mut self.terminal_panel {
-                            Self::select_native_agent_tab(panel, chat_id.clone(), pending_agent);
+                            Self::select_native_agent_tab(panel, chat_id.clone(), pending.agent);
                         }
                         self.select_native_chat(chat_id, cx);
                     } else if let Some(panel) = self
                         .terminal_panel_cache
-                        .get_mut(&(self.active_endpoint, panel_chat_id))
+                        .get_mut(&(self.active_endpoint, pending.panel_chat_id))
                     {
-                        Self::select_native_agent_tab(panel, chat_id, pending_agent);
+                        Self::select_native_agent_tab(panel, chat_id, pending.agent);
                     }
                     cx.notify();
                     return;
@@ -4133,6 +4211,22 @@ impl XdDesktop {
         let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
             return;
         };
+        if !chat_id.starts_with("global:")
+            && !self
+                .endpoint_model(endpoint)
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id)
+            && !self
+                .terminal_panel
+                .as_ref()
+                .is_some_and(|panel| panel.chat_id == chat_id)
+            && !self
+                .terminal_panel_cache
+                .contains_key(&(endpoint, chat_id.clone()))
+        {
+            return;
+        }
         let active = endpoint == self.active_endpoint
             && self
                 .terminal_panel
@@ -5314,6 +5408,16 @@ impl XdDesktop {
         true
     }
 
+    fn stop_terminal_sessions_for_chats(
+        &mut self,
+        endpoint: ChatEndpoint,
+        chat_ids: &HashSet<String>,
+    ) {
+        if let Err(error) = self.terminal_runtime.kill_chats(endpoint.into(), chat_ids) {
+            self.endpoint_model_mut(endpoint).connection_error = Some(error);
+        }
+    }
+
     fn prime_terminal_cache(&mut self, endpoint: ChatEndpoint) {
         let refresh_all = self.terminal_cache_refresh.remove(&endpoint);
         let chats = self
@@ -5328,6 +5432,12 @@ impl XdDesktop {
             .iter()
             .map(|(chat_id, _)| chat_id.clone())
             .collect::<HashSet<_>>();
+        if let Err(error) = self
+            .terminal_runtime
+            .reconcile_chats(endpoint.into(), &live_chats)
+        {
+            self.endpoint_model_mut(endpoint).connection_error = Some(error);
+        }
         self.terminal_panel_cache
             .retain(|(cached_endpoint, chat_id), _| {
                 *cached_endpoint != endpoint
@@ -5376,28 +5486,6 @@ impl XdDesktop {
             .and_then(|command| SshCommand::parse(command).ok())
             .map(|command| command.destination().to_owned());
         connection_state_key(self.active_endpoint, remote.as_deref())
-    }
-
-    fn terminal_event_endpoint(&self, body: &Value) -> ChatEndpoint {
-        let Some(chat_id) = body.get("chat").and_then(Value::as_str) else {
-            return self.active_endpoint;
-        };
-        let remote = self
-            .settings
-            .remote_ssh_command
-            .as_deref()
-            .and_then(|command| SshCommand::parse(command).ok())
-            .map(|command| command.destination().to_owned());
-        terminal_event_endpoint_for_chat(
-            chat_id,
-            self.active_endpoint,
-            self.model.chats.iter().any(|chat| chat.id == chat_id),
-            self.inactive_model
-                .chats
-                .iter()
-                .any(|chat| chat.id == chat_id),
-            remote.as_deref(),
-        )
     }
 
     fn cached_last_chat(&self) -> Option<String> {
@@ -5453,15 +5541,14 @@ impl XdDesktop {
 
     fn listen_for_terminal_runtime(
         &mut self,
-        updates: async_channel::Receiver<SessionEvent>,
+        updates: SessionEventReceiver,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
             while let Ok(event) = updates.recv().await {
                 if this
                     .update(cx, |this, cx| {
-                        let (name, body) = terminal_runtime_event(event);
-                        let endpoint = this.terminal_event_endpoint(&body);
+                        let (endpoint, name, body) = terminal_runtime_event(event);
                         if name == "terminal-activity" {
                             if let (Some(chat_id), Some(terminal_id), Some(working)) = (
                                 body.get("chat").and_then(Value::as_str),
@@ -5816,6 +5903,9 @@ impl XdDesktop {
             cx.notify();
             return;
         }
+        if self.pending_experiment_tab.is_some() {
+            return;
+        }
         let Some(folder_id) = (match &self.minimal_route {
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
             _ => None,
@@ -5834,7 +5924,13 @@ impl XdDesktop {
                 )
             });
         match result {
-            Ok(()) => self.pending_experiment_tab = Some((panel_chat_id, agent)),
+            Ok(()) => {
+                self.pending_experiment_tab = Some(PendingExperimentTab {
+                    endpoint: self.active_endpoint,
+                    panel_chat_id,
+                    agent,
+                })
+            }
             Err(error) => self.model.connection_error = Some(error),
         }
         cx.notify();
@@ -5852,6 +5948,7 @@ impl XdDesktop {
             self.open_experiment_agent_tab(agent, cx);
             return;
         }
+        let endpoint = self.active_endpoint;
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
@@ -5882,7 +5979,8 @@ impl XdDesktop {
                 let command = self.terminal_agent_command(agent, &terminal_id);
                 let process = host.attach(&terminal_id, Path::new(&workdir), &command);
                 let cleanup = host.kill_process(&terminal_id);
-                self.terminal_runtime.open(
+                self.terminal_runtime.open_for(
+                    endpoint.into(),
                     &chat_id,
                     &terminal_id,
                     &title,
@@ -7404,31 +7502,46 @@ impl XdDesktop {
             Timer::after(Duration::from_millis(250)).await;
             let _ = this.update(cx, |this, _cx| {
                 if this.draft_generation == generation {
-                    this.sync_draft();
+                    let _ = this.sync_draft();
                 }
             });
         })
         .detach();
     }
 
-    fn sync_draft(&mut self) {
+    fn sync_draft(&mut self) -> bool {
         if !self.draft_dirty && !self.attachments_dirty {
-            return;
+            return true;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
-            return;
+            return false;
         };
-        if let Some(host) = self.active_host().cloned() {
-            let attachments = self
-                .attachments_dirty
-                .then_some(self.model.draft_attachments.as_slice());
-            let attachment_generation = attachments.map(|_| self.attachment_generation);
-            if let Err(error) =
-                host.set_draft(&chat_id, &self.composer, attachments, attachment_generation)
-            {
-                self.model.connection_error = Some(error);
-            }
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error =
+                Some("The draft is still local because xd is disconnected.".into());
+            return false;
+        };
+        let attachments = self
+            .attachments_dirty
+            .then_some(self.model.draft_attachments.as_slice());
+        let attachment_generation = attachments.map(|_| self.attachment_generation);
+        if let Err(error) =
+            host.set_draft(&chat_id, &self.composer, attachments, attachment_generation)
+        {
+            self.model.connection_error = Some(error);
+            return false;
         }
+        true
+    }
+
+    fn flush_draft_before_navigation(&mut self) -> bool {
+        self.draft_generation = self.draft_generation.saturating_add(1);
+        if !self.sync_draft() {
+            return false;
+        }
+        self.draft_dirty = false;
+        self.attachments_dirty = false;
+        true
     }
 
     fn event_is_active(&self, body: &Value) -> bool {
@@ -7556,6 +7669,10 @@ impl XdDesktop {
             MinimalRoute::Terminal => None,
             MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
         };
+        if !self.flush_draft_before_navigation() {
+            cx.notify();
+            return;
+        }
         self.minimal_route = MinimalRoute::Projects { project_id };
         self.minimal_new_tab_open = false;
         self.stash_terminal_panel();
@@ -7579,10 +7696,15 @@ impl XdDesktop {
             self.open_minimal_session(project_id, chat_id, agent, window, cx);
             return;
         }
-        self.minimal_route = MinimalRoute::Sessions {
+        let next_route = MinimalRoute::Sessions {
             project_id: requested_project_id
                 .or_else(|| self.model.folders.first().map(|folder| folder.id.clone())),
         };
+        if !self.flush_draft_before_navigation() {
+            cx.notify();
+            return;
+        }
+        self.minimal_route = next_route;
         self.stash_terminal_panel();
         self.model.selected_chat = None;
         self.sync_terminal_input_mode(cx);
@@ -7596,6 +7718,10 @@ impl XdDesktop {
                 .terminal_panel
                 .as_ref()
                 .is_some_and(|panel| panel.chat_id == panel_id);
+        if !self.flush_draft_before_navigation() {
+            cx.notify();
+            return;
+        }
         self.minimal_route = MinimalRoute::Terminal;
         self.minimal_new_tab_open = false;
         self.model.selected_chat = None;
@@ -7724,7 +7850,10 @@ impl XdDesktop {
             }
             return;
         }
-        self.sync_draft();
+        if !self.sync_draft() {
+            cx.notify();
+            return;
+        }
         self.draft_generation = self.draft_generation.saturating_add(1);
         self.model.select_chat(chat_id.clone());
         self.remember_last_chat(&chat_id);
@@ -12908,9 +13037,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn reopening_the_current_experiment_agent_reuses_its_chat_id(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn reopening_the_current_experiment_agent_reuses_its_chat_id(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, cx| {
             desktop.settings.experiment_mode = true;
@@ -12929,8 +13056,7 @@ mod tests {
                 chat_id: "chat-a".into(),
                 agent: AgentCli::Codex,
             };
-            let mut panel =
-                XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
+            let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
             panel.loading = false;
             panel.auto_open = false;
             desktop.terminal_panel = Some(panel);
@@ -12947,6 +13073,256 @@ mod tests {
             assert_eq!(selected.native_chat_id.as_deref(), Some("chat-a"));
             assert_eq!(selected.agent, Some(AgentCli::Codex));
             desktop.terminal_panel = None;
+        });
+    }
+
+    #[gpui::test]
+    fn experiment_agent_creation_is_serialized_while_a_chat_is_pending(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.experiment_mode = true;
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "project".into(),
+                chat_id: "panel".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.terminal_panel = Some(XdDesktop::new_agent_terminal_panel(
+                "panel".into(),
+                AgentCli::Codex,
+            ));
+            desktop.pending_experiment_tab = Some(PendingExperimentTab {
+                endpoint: desktop.active_endpoint,
+                panel_chat_id: "panel".into(),
+                agent: AgentCli::Claude,
+            });
+            let previous_error = desktop.model.connection_error.clone();
+
+            desktop.open_experiment_agent_tab(AgentCli::Jcode, cx);
+
+            assert_eq!(
+                desktop.pending_experiment_tab,
+                Some(PendingExperimentTab {
+                    endpoint: ChatEndpoint::Local,
+                    panel_chat_id: "panel".into(),
+                    agent: AgentCli::Claude,
+                })
+            );
+            assert_eq!(desktop.model.connection_error, previous_error);
+            desktop.terminal_panel = None;
+        });
+    }
+
+    #[gpui::test]
+    fn mismatched_experiment_creation_reply_clears_the_pending_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.pending_experiment_tab = Some(PendingExperimentTab {
+                endpoint: desktop.active_endpoint,
+                panel_chat_id: "panel".into(),
+                agent: AgentCli::Claude,
+            });
+            desktop.handle_reply(
+                RequestKind::NewChat {
+                    folder_id: "project".into(),
+                    title: AgentCli::Claude.label().into(),
+                    workdir: None,
+                },
+                serde_json::json!({
+                    "ok": true,
+                    "id": "wrong-chat",
+                    "backend": "codex"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                None,
+                cx,
+            );
+
+            assert_eq!(desktop.pending_experiment_tab, None);
+            assert!(
+                desktop
+                    .model
+                    .connection_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("wrong agent"))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn failed_draft_persistence_keeps_the_native_chat_selected(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("chat-a".into());
+            desktop.composer = "unsaved".into();
+            desktop.draft_dirty = true;
+            desktop.draft_generation = 7;
+
+            desktop.show_minimal_projects(cx);
+
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat-a"));
+            assert_eq!(desktop.composer, "unsaved");
+            assert!(desktop.draft_dirty);
+            assert_eq!(desktop.draft_generation, 8);
+        });
+    }
+
+    #[gpui::test]
+    fn authoritative_tree_reconciliation_stops_removed_chat_processes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            desktop
+                .terminal_runtime
+                .open(
+                    "chat-removed",
+                    "terminal-reconciled",
+                    "Terminal",
+                    None,
+                    xd_desktop::session_host::ProcessSpec::new("/bin/sh", ["-c", "sleep 30"]),
+                    None,
+                    80,
+                    24,
+                )
+                .unwrap();
+            desktop.model.chats.clear();
+
+            desktop.prime_terminal_cache(ChatEndpoint::Local);
+
+            assert!(
+                desktop
+                    .terminal_runtime
+                    .input("terminal-reconciled", b"x")
+                    .is_err()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn switching_endpoints_clears_a_pending_experiment_creation(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.pending_experiment_tab = Some(PendingExperimentTab {
+                endpoint: desktop.active_endpoint,
+                panel_chat_id: "panel".into(),
+                agent: AgentCli::Claude,
+            });
+
+            assert!(desktop.switch_active_endpoint(ChatEndpoint::Remote, cx));
+
+            assert_eq!(desktop.pending_experiment_tab, None);
+        });
+    }
+
+    #[gpui::test]
+    fn passive_creation_reply_clears_only_its_endpoints_pending_request(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            desktop.pending_experiment_tab = Some(PendingExperimentTab {
+                endpoint: ChatEndpoint::Remote,
+                panel_chat_id: "panel".into(),
+                agent: AgentCli::Claude,
+            });
+            let reply = RequestKind::NewChat {
+                folder_id: "project".into(),
+                title: AgentCli::Claude.label().into(),
+                workdir: None,
+            };
+
+            desktop.reconcile_passive_experiment_reply(ChatEndpoint::Local, &reply);
+            assert!(desktop.pending_experiment_tab.is_some());
+            desktop.reconcile_passive_experiment_reply(ChatEndpoint::Remote, &reply);
+            assert_eq!(desktop.pending_experiment_tab, None);
+        });
+    }
+
+    #[gpui::test]
+    fn disconnect_clears_its_pending_experiment_creation(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.pending_experiment_tab = Some(PendingExperimentTab {
+                endpoint: ChatEndpoint::Remote,
+                panel_chat_id: "panel".into(),
+                agent: AgentCli::Claude,
+            });
+            let generation = desktop.remote_generation;
+
+            desktop.handle_remote_update(
+                HostUpdate::Disconnected {
+                    message: "lost".into(),
+                },
+                generation,
+                cx,
+            );
+
+            assert_eq!(desktop.pending_experiment_tab, None);
+        });
+    }
+
+    #[gpui::test]
+    fn deleting_a_chat_stops_only_that_endpoints_terminal_processes(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            for (chat_id, terminal_id) in [
+                ("chat-removed", "terminal-removed"),
+                ("chat-other", "terminal-other"),
+            ] {
+                desktop
+                    .terminal_runtime
+                    .open(
+                        chat_id,
+                        terminal_id,
+                        "Terminal",
+                        None,
+                        xd_desktop::session_host::ProcessSpec::new("/bin/sh", ["-c", "sleep 30"]),
+                        None,
+                        80,
+                        24,
+                    )
+                    .unwrap();
+            }
+            desktop.terminal_panel_cache.insert(
+                (ChatEndpoint::Local, "chat-removed".into()),
+                TerminalPanel {
+                    chat_id: "chat-removed".into(),
+                    sessions: vec![TerminalTab {
+                        id: "terminal-removed".into(),
+                        title: "Terminal".into(),
+                        agent: None,
+                        native_chat_id: None,
+                        sequence: None,
+                        screen: TerminalScreen::new(80, 24),
+                    }],
+                    ..XdDesktop::new_agent_terminal_panel("chat-removed".into(), AgentCli::Codex)
+                },
+            );
+
+            desktop.stop_terminal_sessions_for_chats(
+                ChatEndpoint::Local,
+                &HashSet::from(["chat-removed".into()]),
+            );
+
+            assert!(
+                desktop
+                    .terminal_runtime
+                    .input("terminal-removed", b"x")
+                    .is_err()
+            );
+            assert!(
+                desktop
+                    .terminal_runtime
+                    .input("terminal-other", b"x")
+                    .is_ok()
+            );
+            desktop.terminal_runtime.kill("terminal-other").unwrap();
         });
     }
 
@@ -13182,36 +13558,17 @@ mod tests {
 
     #[test]
     fn terminal_runtime_events_follow_their_origin_endpoint_after_switching() {
-        assert_eq!(
-            terminal_event_endpoint_for_chat(
-                "remote-chat",
-                ChatEndpoint::Local,
-                false,
-                true,
-                Some("server"),
-            ),
-            ChatEndpoint::Remote,
-        );
-        assert_eq!(
-            terminal_event_endpoint_for_chat(
-                &global_terminal_panel_id("remote/server"),
-                ChatEndpoint::Local,
-                false,
-                false,
-                Some("server"),
-            ),
-            ChatEndpoint::Remote,
-        );
-        assert_eq!(
-            terminal_event_endpoint_for_chat(
-                &global_terminal_panel_id("local"),
-                ChatEndpoint::Remote,
-                false,
-                false,
-                Some("server"),
-            ),
-            ChatEndpoint::Local,
-        );
+        let (endpoint, name, body) = terminal_runtime_event(SessionEvent {
+            endpoint: SessionEndpoint::Remote,
+            kind: SessionEventKind::Closed {
+                chat_id: "chat-removed-from-both-trees".into(),
+                terminal_id: "terminal".into(),
+            },
+        });
+
+        assert_eq!(endpoint, ChatEndpoint::Remote);
+        assert_eq!(name, "terminal-closed");
+        assert_eq!(body["chat"], "chat-removed-from-both-trees");
     }
 
     #[gpui::test]

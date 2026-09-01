@@ -72,7 +72,7 @@ impl Drop for RuntimeInner {
             for process in active.values() {
                 process.cancelled.store(true, Ordering::Release);
                 if let Ok(mut child) = process.child.lock() {
-                    let _ = child.kill();
+                    let _ = terminate_agent(&mut child);
                 }
             }
         }
@@ -81,7 +81,7 @@ impl Drop for RuntimeInner {
         if let Ok(mut sessions) = self.sessions.lock() {
             for session in sessions.values_mut() {
                 if let Ok(mut child) = session.child.lock() {
-                    let _ = child.kill();
+                    let _ = terminate_agent(&mut child);
                 }
             }
             sessions.clear();
@@ -236,7 +236,7 @@ impl TurnRuntime {
                 .map_err(|_| "Agent state is unavailable.".to_string())?;
             if active.contains_key(&turn.chat_id) {
                 if let Ok(mut process) = child.lock() {
-                    let _ = process.kill();
+                    let _ = terminate_agent(&mut process);
                 }
                 return Err("That chat already has a running turn.".into());
             }
@@ -281,7 +281,7 @@ impl TurnRuntime {
             }
             cancelled.store(true, Ordering::Release);
             if let Ok(mut child) = child.lock() {
-                let _ = child.kill();
+                let _ = terminate_agent(&mut child);
             }
             return Err(format!("Cannot supervise {backend}: {error}"));
         }
@@ -312,7 +312,7 @@ impl TurnRuntime {
             process
                 .child
                 .lock()
-                .is_ok_and(|mut child| child.kill().is_ok())
+                .is_ok_and(|mut child| terminate_agent(&mut child).is_ok())
         };
         if killed {
             self.drop_session(chat_id);
@@ -390,7 +390,7 @@ impl TurnRuntime {
             if let Some(mut gone) = sessions.remove(chat_id)
                 && let Ok(mut child) = gone.child.lock()
             {
-                let _ = child.kill();
+                let _ = terminate_agent(&mut child);
                 gone.stdout.take();
             }
         }
@@ -447,7 +447,7 @@ impl TurnRuntime {
             && let Some(session) = sessions.remove(chat_id)
             && let Ok(mut child) = session.child.lock()
         {
-            let _ = child.kill();
+            let _ = terminate_agent(&mut child);
             let _ = child.wait();
         }
     }
@@ -898,6 +898,18 @@ fn todos_from_json(json: &str) -> Option<Vec<TodoItem>> {
         .collect()
 }
 
+fn terminate_agent(child: &mut Child) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        if let Ok(pid) = libc::pid_t::try_from(child.id())
+            && unsafe { libc::kill(-pid, libc::SIGKILL) } == 0
+        {
+            return Ok(());
+        }
+    }
+    child.kill()
+}
+
 /// Reads a process's stderr for as long as it lives, keeping the tail.
 ///
 /// A kept process outlives every turn, and stderr that nobody reads fills its
@@ -944,6 +956,72 @@ fn usage_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_kills_the_agent_process_group() {
+        use std::{env, fs, os::unix::process::CommandExt, process::Command};
+
+        let root = env::temp_dir().join(format!(
+            "xd-runtime-process-group-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let descendant_file = root.join("descendant.pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "sleep 30 & descendant=$!; printf '%s\\n' \"$descendant\" > \"$1\"; wait",
+            "xd-process-group-test",
+            descendant_file.to_str().unwrap(),
+        ]);
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let group = child.id() as libc::pid_t;
+        thread::sleep(Duration::from_millis(100));
+        let descendant = fs::read_to_string(&descendant_file)
+            .expect("descendant did not start")
+            .trim()
+            .parse::<libc::pid_t>()
+            .unwrap();
+
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let runtime = TurnRuntime::new(
+            store,
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        );
+        runtime.inner.active.lock().unwrap().insert(
+            "chat".to_owned(),
+            ActiveProcess {
+                turn_id: 1,
+                child: Arc::new(Mutex::new(child)),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                started: Instant::now(),
+                label: "test".to_owned(),
+                progress: Arc::new(TurnProgress::default()),
+            },
+        );
+
+        assert!(runtime.cancel("chat"));
+        let stopped = (0..100).any(|_| {
+            let result = unsafe { libc::kill(descendant, 0) };
+            if result == -1 {
+                true
+            } else {
+                thread::sleep(Duration::from_millis(10));
+                false
+            }
+        });
+        if !stopped {
+            unsafe { libc::kill(-group, libc::SIGKILL) };
+        }
+        assert!(stopped, "agent descendant survived cancellation");
+        drop(runtime);
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn turn_progress_numbers_every_published_event_and_holds_the_latest_segment() {

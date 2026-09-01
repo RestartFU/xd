@@ -16,14 +16,14 @@ on:
     branches: [master]
   workflow_dispatch:
 
-# One at a time, newest wins. Two commits landing together would otherwise race
-# to replace the same release, and the loser could be the newer one.
+# One at a time. Publishing is intentionally never cancelled, because an
+# interrupted rolling-release update can otherwise leave an incomplete release.
 concurrency:
   group: nightly
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   linux:
@@ -31,6 +31,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       # Everything is built in Docker, so the runner needs nothing else. Both
       # builds share layers, which is why the tests are cheap to gate on.
@@ -70,6 +72,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install the pinned Rust toolchain
         run: >-
@@ -130,16 +134,35 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
-      # A test build signed with the repository's fixed public debug key, so it
-      # installs over the previous nightly without an uninstall.
       - name: Build the Android APK
-        run: ./scripts/mobile-build.sh
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          XD_MOBILE_RELEASE: 1
+          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_RELEASE_KEYSTORE_BASE64:?Android release keystore secret is required}"
+          : "${XD_ANDROID_STORE_PASSWORD:?Android store password secret is required}"
+          : "${XD_ANDROID_KEY_ALIAS:?Android key alias secret is required}"
+          : "${XD_ANDROID_KEY_PASSWORD:?Android key password secret is required}"
+          keystore="$RUNNER_TEMP/xd-android-release.p12"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          XD_MOBILE_CHANNEL=nightly ./scripts/mobile-build.sh \
+            --secret "id=android_keystore,src=$keystore" \
+            --secret id=android_store_password,env=XD_ANDROID_STORE_PASSWORD \
+            --secret id=android_key_alias,env=XD_ANDROID_KEY_ALIAS \
+            --secret id=android_key_password,env=XD_ANDROID_KEY_PASSWORD
 
       - name: Name it for the release
         run: |
           set -euo pipefail
-          mv dist/mobile/xd-mobile-debug.apk xd-nightly-android.apk
+          mv dist/mobile/xd-mobile-release.apk xd-nightly-android.apk
           sha256sum xd-nightly-android.apk > xd-nightly-android.apk.sha256
 
       - uses: actions/upload-artifact@v4
@@ -156,9 +179,13 @@ jobs:
     # self-hosted runner that gigabyte crosses a home connection twice; here it
     # never leaves GitHub's network.
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v5
         with:
@@ -196,27 +223,91 @@ jobs:
 
           Android connects directly over SSH with password or imported-key
           authentication and explicit SSH host-key fingerprint verification.
-          The remote machine must already have the stable xd host installed.
+          The remote machine must already have the xd nightly host installed.
 
           Linux and macOS are self-contained.
           EOF
           )
 
-          # Replaced rather than edited: the tag has to move to this commit,
-          # and a release whose tag points somewhere else is a lie about what
-          # is in it.
-          gh release delete nightly --cleanup-tag --yes || true
-
-          gh release create nightly \
-            --prerelease \
-            --target "$GITHUB_SHA" \
-            --title "Nightly $(date -u +%Y-%m-%d)" \
-            --notes "$notes" \
-            xd-nightly-linux-x86_64.tar.gz \
-            xd-nightly-linux-x86_64.tar.gz.sha256 \
-            xd-nightly-macos-*.zip \
-            xd-nightly-macos-*.zip.sha256 \
-            xd-nightly-android.apk \
-            xd-nightly-android.apk.sha256 \
-            scripts/install.sh \
+          assets=(
+            xd-nightly-linux-x86_64.tar.gz
+            xd-nightly-linux-x86_64.tar.gz.sha256
+            xd-nightly-macos-*.zip
+            xd-nightly-macos-*.zip.sha256
+            xd-nightly-android.apk
+            xd-nightly-android.apk.sha256
+            scripts/install.sh
             scripts/install-macos.sh
+          )
+
+          # Stage every asset on a private draft first. `release upload
+          # --clobber` deletes public assets before their replacements finish
+          # uploading, which can leave a mixed or incomplete nightly.
+          candidate="nightly-candidate-${GITHUB_SHA}"
+          gh release delete "$candidate" --yes >/dev/null 2>&1 || true
+          gh api --method DELETE \
+            "repos/$GITHUB_REPOSITORY/git/refs/tags/$candidate" \
+            >/dev/null 2>&1 || true
+          gh release create "$candidate" --draft \
+            --target "$GITHUB_SHA" \
+            --title "Nightly candidate" \
+            --notes "$notes" \
+            "${assets[@]}"
+
+          # All candidate assets now exist. Retag the old release instead of
+          # deleting it, and restore both its release name and tag target if
+          # any operation in the short publication swap fails.
+          previous=""
+          previous_sha=""
+          rollback_nightly() {
+            status=$?
+            trap - ERR
+            if [ -n "$previous" ]; then
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
+                -f sha="$previous_sha" \
+                -F force=true >/dev/null || true
+              gh release edit "$previous" --tag nightly >/dev/null || true
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/git/refs/tags/$previous" \
+                >/dev/null 2>&1 || true
+            fi
+            return "$status"
+          }
+          trap rollback_nightly ERR
+          if gh release view nightly >/dev/null 2>&1; then
+            previous="nightly-previous-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            previous_sha=$(gh api \
+              "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" \
+              --jq .object.sha)
+            gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$previous" \
+              -f sha="$previous_sha" >/dev/null
+            gh release edit nightly --tag "$previous"
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" \
+              >/dev/null 2>&1; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
+              -f sha="$GITHUB_SHA" \
+              -F force=true >/dev/null
+          else
+            gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref=refs/tags/nightly \
+              -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          gh release edit "$candidate" \
+            --tag nightly \
+            --draft=false \
+            --prerelease \
+            --title "Nightly $(date -u +%Y-%m-%d)" \
+            --notes "$notes"
+          trap - ERR
+          if [ -n "$previous" ]; then
+            gh release delete "$previous" --cleanup-tag --yes
+          fi
+          gh api --method DELETE \
+            "repos/$GITHUB_REPOSITORY/git/refs/tags/$candidate" \
+            >/dev/null 2>&1 || true

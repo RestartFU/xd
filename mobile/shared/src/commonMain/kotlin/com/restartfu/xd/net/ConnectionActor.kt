@@ -178,7 +178,15 @@ internal class ConnectionActor(
     }
 
     private suspend fun run() {
-        credentials = credentialStore.load()
+        credentials = try {
+            credentialStore.load()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            // A missing, invalidated, or unreadable credential record must not
+            // kill the actor. The setup screen remains available to replace it.
+            null
+        }
         _hasCredentials.value = credentials != null
         _credentialsReady.value = true
         mailbox.trySend(Message.Poke)
@@ -405,7 +413,18 @@ internal class ConnectionActor(
                 val sequence = ++inboundSequence
                 val objectValue = WireJson.parseToJsonElement(line).jsonObject
                 if ("event" in objectValue) {
-                    _events.emit(SequencedEvent(sequence, objectValue))
+                    if (!_events.tryEmit(SequencedEvent(sequence, objectValue))) {
+                        handleClosed(
+                            Message.SocketClosed(
+                                generation,
+                                SocketFailure(
+                                    SocketFailureKind.IO,
+                                    "Inbound event buffer overflow",
+                                ),
+                            ),
+                        )
+                        return
+                    }
                 } else {
                     calls.acceptReply(SequencedReply(sequence, objectValue))
                         ?.let { answered -> callTimeouts.remove(answered)?.cancel() }

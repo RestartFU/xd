@@ -24,6 +24,7 @@ while [ "$#" -gt 0 ]; do
             SOURCE=$2; shift ;;
     --from=*) SOURCE=${1#--from=} ;;
     --uninstall) UNINSTALL=yes ;;
+    *) die "unknown option: $1" ;;
   esac
   shift
 done

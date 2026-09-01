@@ -55,6 +55,7 @@ while [ "$#" -gt 0 ]; do
     --from=*) SOURCE=${1#--from=} ;;
     --uninstall) UNINSTALL=yes ;;
     --no-service) : ;; # accepted for compatibility; there is no service now
+    *) die "unknown option: $1" ;;
   esac
   shift
 done
@@ -288,15 +289,29 @@ if [ -f "$ICON_SOURCE" ]; then
 fi
 
 if [ -f "$OPT/share/applications/$APP_ID.desktop" ]; then
-  sed -e "s|^Exec=.*|Exec=$BIN|" \
-      -e "s|^Icon=.*|Icon=$APP_ID|" \
-      "$OPT/share/applications/$APP_ID.desktop" > "$DESKTOP"
+  desktop_exec=$(printf '%s' "$BIN" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/"/\\"/g' \
+    -e 's/`/\\`/g' \
+    -e 's/\$/\\$/g')
+  while IFS= read -r desktop_line || [ -n "$desktop_line" ]; do
+    case "$desktop_line" in
+      Exec=*) printf 'Exec="%s"\n' "$desktop_exec" ;;
+      Icon=*) printf 'Icon=%s\n' "$APP_ID" ;;
+      *) printf '%s\n' "$desktop_line" ;;
+    esac
+  done < "$OPT/share/applications/$APP_ID.desktop" > "$DESKTOP"
 else
+  desktop_exec=$(printf '%s' "$BIN" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/"/\\"/g' \
+    -e 's/`/\\`/g' \
+    -e 's/\$/\\$/g')
   cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Name=$DISPLAY_NAME
 Comment=Workspace-organized AI conversations
-Exec=$BIN
+Exec="$desktop_exec"
 Icon=$APP_ID
 Terminal=false
 Type=Application
