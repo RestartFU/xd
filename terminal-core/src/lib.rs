@@ -16,6 +16,48 @@ const CHECKPOINT_HEADER: &[u8] = b"XDTS\x02";
 const CHECKPOINT_FIXED_BYTES: usize = 5 + 2 + 2 + 4 + 8;
 const MAX_PENDING_BYTES: usize = 2 * 1024 * 1024;
 
+/// Converts agent-owned terminal titles into activity transitions. Codex's
+/// animated title has no explicit idle token, so the following spinnerless
+/// title closes the active interval.
+#[derive(Default)]
+pub struct TerminalTitleActivity {
+    codex_spinner_working: bool,
+}
+
+impl TerminalTitleActivity {
+    pub fn update(&mut self, title: &[u8]) -> Option<bool> {
+        let codex_spinner_working = codex_spinner_title(title);
+        let codex_spinner_stopped = self.codex_spinner_working && !codex_spinner_working;
+        let update = match title {
+            b"Ready" => Some(false),
+            title
+                if title.starts_with("✳ ".as_bytes())
+                    || title.starts_with(b"[ ! ] Action Required")
+                    || title.starts_with(b"[ . ] Action Required") =>
+            {
+                Some(false)
+            }
+            b"Working" | b"Thinking" | b"Waiting" | b"Starting" => Some(true),
+            title
+                if title.starts_with("◐ ".as_bytes())
+                    || title.starts_with("◑ ".as_bytes())
+                    || codex_spinner_working =>
+            {
+                Some(true)
+            }
+            _ => codex_spinner_stopped.then_some(false),
+        };
+        self.codex_spinner_working = codex_spinner_working;
+        update
+    }
+}
+
+fn codex_spinner_title(title: &[u8]) -> bool {
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        .iter()
+        .any(|frame| title.starts_with(frame.as_bytes()))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TerminalStyle {
     pub foreground: Option<u32>,

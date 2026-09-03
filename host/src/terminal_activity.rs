@@ -1,3 +1,5 @@
+use xd_terminal::TerminalTitleActivity;
+
 const ESCAPE: u8 = 0x1b;
 const BELL: u8 = 0x07;
 const MAX_OSC_PAYLOAD: usize = 256;
@@ -20,6 +22,7 @@ enum ParseState {
 pub(crate) struct TerminalActivityParser {
     state: ParseState,
     payload: Vec<u8>,
+    titles: TerminalTitleActivity,
 }
 
 impl TerminalActivityParser {
@@ -87,7 +90,12 @@ impl TerminalActivityParser {
     }
 
     fn finish(&mut self, activity: &mut Vec<bool>) {
-        if let Some(working) = parse_activity(&self.payload) {
+        let working = self
+            .payload
+            .strip_prefix(b"0;")
+            .and_then(|title| self.titles.update(title))
+            .or_else(|| parse_progress_activity(&self.payload));
+        if let Some(working) = working {
             activity.push(working);
         }
         self.payload.clear();
@@ -100,15 +108,7 @@ impl TerminalActivityParser {
     }
 }
 
-fn parse_activity(payload: &[u8]) -> Option<bool> {
-    if let Some(title) = payload.strip_prefix(b"0;") {
-        return match title {
-            b"Ready" => Some(false),
-            b"Working" | b"Thinking" | b"Waiting" | b"Starting" => Some(true),
-            _ => None,
-        };
-    }
-
+fn parse_progress_activity(payload: &[u8]) -> Option<bool> {
     let mut fields = payload.split(|byte| *byte == b';');
     if fields.next()? != b"9" || fields.next()? != b"4" {
         return None;
@@ -134,6 +134,22 @@ mod tests {
         assert_eq!(parser.feed(b"\x1b]0;Ready\x07"), vec![false]);
         assert_eq!(parser.feed(b"\x1b]9;4;3;42\x07"), vec![true]);
         assert_eq!(parser.feed(b"\x1b]9;4;0;\x1b\\"), vec![false]);
+    }
+
+    #[test]
+    fn parses_current_codex_and_claude_title_activity() {
+        let mut parser = TerminalActivityParser::default();
+
+        assert_eq!(parser.feed("\x1b]0;⠋ xd\x07".as_bytes()), vec![true]);
+        assert_eq!(parser.feed(b"\x1b]0;xd\x07"), vec![false]);
+        assert_eq!(
+            parser.feed("\x1b]0;◐ Fix confirmed bugs\x07".as_bytes()),
+            vec![true]
+        );
+        assert_eq!(
+            parser.feed("\x1b]0;✳ Fix confirmed bugs\x07".as_bytes()),
+            vec![false]
+        );
     }
 
     #[test]

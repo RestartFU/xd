@@ -8,6 +8,7 @@ use std::{
 };
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use xd_terminal::TerminalTitleActivity;
 
 use crate::session_host::ProcessSpec;
 
@@ -123,14 +124,34 @@ fn session_event_channel() -> (SessionEventSender, SessionEventReceiver) {
 impl SessionEventSender {
     fn send(&self, event: SessionEvent) -> Result<(), ()> {
         let mut queue = self.queue.lock().map_err(|_| ())?;
-        if matches!(
-            &event.kind,
-            SessionEventKind::Activity { .. } | SessionEventKind::Resized { .. }
-        ) && let Some(index) = queue.events.iter().position(|queued| {
-            std::mem::discriminant(&queued.kind) == std::mem::discriminant(&event.kind)
-                && queued.endpoint() == event.endpoint()
-                && queued.terminal_id() == event.terminal_id()
-        }) {
+        let coalescible = match &event.kind {
+            // Equal activity reports are redundant, but opposite values are a
+            // semantic transition: the model needs true -> false to mark Done.
+            SessionEventKind::Activity { working, .. } => queue
+                .events
+                .iter()
+                .rposition(|queued| {
+                    queued.endpoint() == event.endpoint()
+                        && queued.terminal_id() == event.terminal_id()
+                        && matches!(&queued.kind, SessionEventKind::Activity { .. })
+                })
+                .filter(|index| {
+                    matches!(
+                        &queue.events[*index].kind,
+                        SessionEventKind::Activity {
+                            working: queued_working,
+                            ..
+                        } if queued_working == working
+                    )
+                }),
+            SessionEventKind::Resized { .. } => queue.events.iter().position(|queued| {
+                matches!(&queued.kind, SessionEventKind::Resized { .. })
+                    && queued.endpoint() == event.endpoint()
+                    && queued.terminal_id() == event.terminal_id()
+            }),
+            _ => None,
+        };
+        if let Some(index) = coalescible {
             queue.events[index] = event;
             drop(queue);
             let _ = self.wake.try_send(());
@@ -159,12 +180,40 @@ impl SessionEventSender {
             queue.output_bytes += data.len();
         }
         while queue.events.len() >= MAX_BUFFERED_EVENTS {
+            // Screen output is reconstructable and may arrive in a flood. Keep
+            // lifecycle and activity transitions until no disposable UI event
+            // remains, otherwise a busy -> idle pair can collapse into Idle.
             let Some(index) = queue
                 .events
                 .iter()
-                .position(|queued| !matches!(&queued.kind, SessionEventKind::Closed { .. }))
+                .position(|queued| matches!(&queued.kind, SessionEventKind::Output { .. }))
+                .or_else(|| {
+                    queue
+                        .events
+                        .iter()
+                        .position(|queued| matches!(&queued.kind, SessionEventKind::Resized { .. }))
+                })
+                .or_else(|| {
+                    queue.events.iter().position(|queued| {
+                        matches!(&queued.kind, SessionEventKind::Activity { .. })
+                    })
+                })
+                .or_else(|| {
+                    queue.events.iter().position(|queued| {
+                        !matches!(
+                            &queued.kind,
+                            SessionEventKind::Opened { .. } | SessionEventKind::Closed { .. }
+                        )
+                    })
+                })
             else {
-                if !matches!(&event.kind, SessionEventKind::Closed { .. }) {
+                // Opening and closure are the two edges that create and remove
+                // UI tabs. A short lifecycle-only overflow is safer than losing
+                // either edge and leaving the UI permanently out of sync.
+                if !matches!(
+                    &event.kind,
+                    SessionEventKind::Opened { .. } | SessionEventKind::Closed { .. }
+                ) {
                     return Ok(());
                 }
                 break;
@@ -295,8 +344,36 @@ impl SessionRuntime {
             .sessions
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_owned())?;
-        if sessions.contains_key(terminal_id) {
-            return Ok(());
+        if let Some(session) = sessions.get(terminal_id).cloned() {
+            let same_session = session.endpoint == endpoint && session.chat_id == chat_id;
+            drop(sessions);
+            if !same_session {
+                return Err("That terminal id is already in use by another session.".to_owned());
+            }
+            if let Ok(master) = session.master.lock()
+                && let Some(master) = master.as_ref()
+            {
+                let _ = master.resize(PtySize {
+                    rows: rows as u16,
+                    cols: columns as u16,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+            return self
+                .events
+                .send(SessionEvent::new(
+                    endpoint,
+                    SessionEventKind::Opened {
+                        chat_id: chat_id.to_owned(),
+                        terminal_id: terminal_id.to_owned(),
+                        title: title.to_owned(),
+                        agent: agent.map(str::to_owned),
+                        columns,
+                        rows,
+                    },
+                ))
+                .map_err(|_| "Terminal event receiver is closed.".to_owned());
         }
 
         let pair = native_pty_system()
@@ -612,6 +689,7 @@ struct ActivityParser {
     state: ActivityState,
     payload: Vec<u8>,
     working: Option<bool>,
+    titles: TerminalTitleActivity,
 }
 
 impl ActivityParser {
@@ -651,17 +729,7 @@ impl ActivityParser {
         let update = self
             .payload
             .strip_prefix(b"0;")
-            .and_then(|title| match title {
-                b"Ready" => Some(false),
-                title if title.starts_with("✳ ".as_bytes()) => Some(false),
-                b"Working" | b"Thinking" | b"Waiting" | b"Starting" => Some(true),
-                title
-                    if title.starts_with("◐ ".as_bytes()) || title.starts_with("◑ ".as_bytes()) =>
-                {
-                    Some(true)
-                }
-                _ => None,
-            })
+            .and_then(|title| self.titles.update(title))
             .or_else(|| {
                 let mut fields = self.payload.split(|byte| *byte == b';');
                 (fields.next() == Some(b"9".as_slice()) && fields.next() == Some(b"4".as_slice()))
@@ -776,16 +844,50 @@ mod tests {
     }
 
     #[test]
+    fn terminal_event_queue_never_drops_opened_lifecycle_events() {
+        let (events, updates) = super::session_event_channel();
+        events
+            .send(SessionEvent::new(
+                super::SessionEndpoint::Local,
+                SessionEventKind::Opened {
+                    chat_id: "chat".into(),
+                    terminal_id: "opening".into(),
+                    title: "Terminal".into(),
+                    agent: None,
+                    columns: 80,
+                    rows: 24,
+                },
+            ))
+            .unwrap();
+        for index in 0..super::MAX_BUFFERED_EVENTS {
+            events
+                .send(SessionEvent::new(
+                    super::SessionEndpoint::Local,
+                    SessionEventKind::Closed {
+                        chat_id: "chat".into(),
+                        terminal_id: format!("closed-{index}"),
+                    },
+                ))
+                .unwrap();
+        }
+
+        assert!((0..=super::MAX_BUFFERED_EVENTS).any(|_| matches!(
+            updates.try_recv().map(|event| event.kind),
+            Ok(SessionEventKind::Opened { terminal_id, .. }) if terminal_id == "opening"
+        )));
+    }
+
+    #[test]
     fn terminal_activity_flood_is_coalesced_without_dropping_closure() {
         let (events, updates) = super::session_event_channel();
-        for index in 0..10_000 {
+        for _ in 0..10_000 {
             events
                 .send(SessionEvent::new(
                     super::SessionEndpoint::Local,
                     SessionEventKind::Activity {
                         chat_id: "chat".into(),
                         terminal_id: "terminal".into(),
-                        working: index % 2 == 0,
+                        working: true,
                     },
                 ))
                 .unwrap();
@@ -811,12 +913,93 @@ mod tests {
     }
 
     #[test]
+    fn terminal_activity_coalescing_preserves_working_to_idle_transition() {
+        let (events, updates) = super::session_event_channel();
+        for working in [true, true, false, false] {
+            events
+                .send(SessionEvent::new(
+                    super::SessionEndpoint::Local,
+                    SessionEventKind::Activity {
+                        chat_id: "chat".into(),
+                        terminal_id: "terminal".into(),
+                        working,
+                    },
+                ))
+                .unwrap();
+        }
+
+        let activity = std::iter::from_fn(|| updates.try_recv().ok())
+            .filter_map(|event| match event.kind {
+                SessionEventKind::Activity { working, .. } => Some(working),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(activity, vec![true, false]);
+    }
+
+    #[test]
+    fn terminal_output_flood_does_not_evict_activity_transitions() {
+        let (events, updates) = super::session_event_channel();
+        events
+            .send(SessionEvent::new(
+                super::SessionEndpoint::Local,
+                SessionEventKind::Activity {
+                    chat_id: "chat".into(),
+                    terminal_id: "terminal".into(),
+                    working: true,
+                },
+            ))
+            .unwrap();
+        for _ in 0..super::MAX_BUFFERED_EVENTS + 100 {
+            events
+                .send(SessionEvent::new(
+                    super::SessionEndpoint::Local,
+                    SessionEventKind::Output {
+                        chat_id: "chat".into(),
+                        terminal_id: "terminal".into(),
+                        data: vec![b'x'],
+                    },
+                ))
+                .unwrap();
+        }
+        events
+            .send(SessionEvent::new(
+                super::SessionEndpoint::Local,
+                SessionEventKind::Activity {
+                    chat_id: "chat".into(),
+                    terminal_id: "terminal".into(),
+                    working: false,
+                },
+            ))
+            .unwrap();
+
+        let activity = std::iter::from_fn(|| updates.try_recv().ok())
+            .filter_map(|event| match event.kind {
+                SessionEventKind::Activity { working, .. } => Some(working),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(activity, vec![true, false]);
+    }
+
+    #[test]
     fn cli_terminal_titles_drive_activity_without_host_events() {
         let mut parser = ActivityParser::default();
         assert_eq!(parser.feed(b"\x1b]0;Working\x07"), vec![true]);
         assert_eq!(parser.feed(b"\x1b]0;Ready\x1b\\"), vec![false]);
         assert_eq!(parser.feed(b"\x1b]9;4;3;42\x07"), vec![true]);
         assert_eq!(parser.feed(b"\x1b]9;4;0;\x07"), vec![false]);
+    }
+
+    #[test]
+    fn current_codex_spinner_titles_drive_working_and_idle_activity() {
+        let mut parser = ActivityParser::default();
+
+        assert_eq!(parser.feed("\x1b]0;⠋ xd\x07".as_bytes()), vec![true]);
+        assert!(parser.feed("\x1b]0;⠙ xd\x07".as_bytes()).is_empty());
+        assert_eq!(parser.feed(b"\x1b]0;xd\x07"), vec![false]);
     }
 
     #[test]
@@ -968,6 +1151,50 @@ mod tests {
             SessionEventKind::Opened { .. }
         )));
         assert!(recv_output_containing(&events, "reopened"));
+        runtime.kill("stable-agent").unwrap();
+    }
+
+    #[test]
+    fn opening_an_existing_session_replays_its_opened_event() {
+        let (runtime, events) = SessionRuntime::new();
+        runtime
+            .open(
+                "chat-one",
+                "stable-agent",
+                "Claude",
+                Some("claude"),
+                ProcessSpec::new("/bin/sh", ["-c", "sleep 30"]),
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        assert!(matches!(
+            events.recv_blocking().unwrap().kind,
+            SessionEventKind::Opened { .. }
+        ));
+
+        runtime
+            .open(
+                "chat-one",
+                "stable-agent",
+                "Claude",
+                Some("claude"),
+                ProcessSpec::new("/bin/sh", ["-c", "exit 99"]),
+                None,
+                120,
+                40,
+            )
+            .unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap().kind,
+            SessionEventKind::Opened {
+                terminal_id,
+                columns: 120,
+                rows: 40,
+                ..
+            } if terminal_id == "stable-agent"
+        ));
         runtime.kill("stable-agent").unwrap();
     }
 

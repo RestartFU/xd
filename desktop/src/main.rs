@@ -111,6 +111,7 @@ const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
+const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
@@ -376,6 +377,7 @@ struct TerminalPanel {
     auto_open: bool,
     opening: bool,
     opening_agent: Option<AgentCli>,
+    opening_generation: u64,
     loading: bool,
     pending_events: Vec<PendingTerminalEvent>,
     error: Option<String>,
@@ -400,6 +402,21 @@ impl TerminalPanel {
     fn finish_opening(&mut self) {
         self.opening = false;
         self.opening_agent = None;
+    }
+
+    fn begin_opening(&mut self, agent: Option<AgentCli>) -> u64 {
+        self.opening_generation = self.opening_generation.wrapping_add(1);
+        self.opening = true;
+        self.opening_agent = agent;
+        self.opening_generation
+    }
+
+    fn expire_opening(&mut self, generation: u64) -> bool {
+        if !self.opening || self.opening_generation != generation {
+            return false;
+        }
+        self.finish_opening();
+        true
     }
 
     fn selected(&self) -> Option<&TerminalTab> {
@@ -5350,6 +5367,7 @@ impl XdDesktop {
             auto_open: true,
             opening: false,
             opening_agent: None,
+            opening_generation: 0,
             loading: true,
             pending_events: Vec::new(),
             error: None,
@@ -5958,8 +5976,7 @@ impl XdDesktop {
         let (columns, rows) = panel.viewport.unwrap_or((120, 32));
         let chat_id = panel.chat_id.clone();
         panel.auto_open = false;
-        panel.opening = true;
-        panel.opening_agent = agent;
+        let opening_generation = panel.begin_opening(agent);
         panel.error = None;
         let terminal_id = terminal_session_id(
             &chat_id,
@@ -5991,11 +6008,39 @@ impl XdDesktop {
                     rows,
                 )
             });
-        if let Err(error) = result
-            && let Some(panel) = &mut self.terminal_panel
-        {
-            panel.finish_opening();
-            panel.error = Some(error);
+        match result {
+            Err(error) => {
+                if let Some(panel) = &mut self.terminal_panel {
+                    panel.finish_opening();
+                    panel.error = Some(error);
+                }
+            }
+            Ok(()) => {
+                cx.spawn(async move |this, cx| {
+                    Timer::after(TERMINAL_OPEN_TIMEOUT).await;
+                    let _ = this.update(cx, |this, cx| {
+                        let active = this.active_endpoint == endpoint
+                            && this
+                                .terminal_panel
+                                .as_ref()
+                                .is_some_and(|panel| panel.chat_id == chat_id);
+                        let panel = if active {
+                            this.terminal_panel.as_mut()
+                        } else {
+                            this.terminal_panel_cache
+                                .get_mut(&(endpoint, chat_id.clone()))
+                        };
+                        if let Some(panel) = panel
+                            && panel.expire_opening(opening_generation)
+                        {
+                            panel.error =
+                                Some("Terminal startup timed out. Try opening it again.".into());
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
         }
         cx.notify();
     }
@@ -14287,6 +14332,7 @@ mod tests {
             auto_open: false,
             opening: false,
             opening_agent: None,
+            opening_generation: 0,
             loading: false,
             pending_events: Vec::new(),
             error: Some("Terminal disconnected.".into()),
@@ -14425,6 +14471,22 @@ mod tests {
         assert!(
             !panel.opening,
             "the opened event must allow another terminal or agent tab to start"
+        );
+    }
+
+    #[test]
+    fn terminal_open_timeout_only_releases_the_attempt_it_watched() {
+        let mut panel = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Codex);
+        let first = panel.begin_opening(Some(AgentCli::Codex));
+        panel.finish_opening();
+        let second = panel.begin_opening(Some(AgentCli::Codex));
+
+        assert!(!panel.expire_opening(first));
+        assert!(panel.opening, "an old timeout must not cancel a retry");
+        assert!(panel.expire_opening(second));
+        assert!(
+            !panel.opening,
+            "a stuck current attempt must become retryable"
         );
     }
 
