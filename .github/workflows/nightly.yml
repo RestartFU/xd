@@ -311,49 +311,65 @@ jobs:
             --notes "$notes" \
             "${assets[@]}"
 
-          # All candidate assets now exist. Retag the old release instead of
-          # deleting it, and restore both its release name and tag target if
-          # any operation in the short publication swap fails.
-          previous=""
-          previous_sha=""
+          # Archive the previous release as a draft without creating a tag
+          # on its historical commit. GITHUB_TOKEN cannot write refs pointing
+          # at older workflow versions. Keep nightly's existing ref until the
+          # final operation, so rollback only needs to restore release metadata.
+          candidate_id=$(gh release view "$candidate" --json databaseId --jq .databaseId)
+          previous_id=$(gh release view nightly --json databaseId --jq .databaseId \
+            2>/dev/null || true)
+          previous="nightly-previous-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          promoted=false
+          cleanup_nightly() {
+            if [ -n "$previous_id" ]; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/releases/$previous_id" >/dev/null \
+                || echo "::warning::Could not remove archived nightly draft $previous_id."
+            fi
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/git/refs/tags/$candidate" \
+              >/dev/null 2>&1 || true
+          }
           rollback_nightly() {
             status=$?
             trap - ERR
-            if [ -n "$previous" ]; then
+            if [ "$promoted" = true ]; then
+              current_sha=$(gh api \
+                "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" \
+                --jq .object.sha 2>/dev/null || true)
+              candidate_live=$(gh api \
+                "repos/$GITHUB_REPOSITORY/releases/$candidate_id" \
+                --jq '.tag_name == "nightly" and .draft == false' 2>/dev/null || true)
+              if [ "$current_sha" = "$GITHUB_SHA" ] && [ "$candidate_live" = true ]; then
+                echo "::warning::The publication response failed, but the complete nightly and its tag are verified."
+                cleanup_nightly
+                exit 0
+              fi
+            fi
+            # IDs remain valid if a PATCH changed the release's tag before
+            # returning an error. Retire the candidate before restoring nightly.
+            if ! gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/releases/$candidate_id" \
+                -F draft=true -f tag_name="$candidate" \
+                -f target_commitish="$GITHUB_SHA" >/dev/null; then
+              echo "::error::Could not retire the candidate; the previous release is retained as draft $previous_id."
+              return "$status"
+            fi
+            if [ -n "$previous_id" ]; then
               gh api --method PATCH \
-                "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
-                -f sha="$previous_sha" \
-                -F force=true >/dev/null || true
-              gh release edit "$previous" --tag nightly >/dev/null || true
-              gh api --method DELETE \
-                "repos/$GITHUB_REPOSITORY/git/refs/tags/$previous" \
-                >/dev/null 2>&1 || true
+                "repos/$GITHUB_REPOSITORY/releases/$previous_id" \
+                -f tag_name=nightly -F draft=false \
+                -f target_commitish="$GITHUB_SHA" >/dev/null \
+                || echo "::error::Could not restore the previous release $previous_id."
             fi
             return "$status"
           }
           trap rollback_nightly ERR
-          if gh release view nightly >/dev/null 2>&1; then
-            previous="nightly-previous-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            previous_sha=$(gh api \
-              "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" \
-              --jq .object.sha)
-            gh api --method POST \
-              "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref="refs/tags/$previous" \
-              -f sha="$previous_sha" >/dev/null
-            gh release edit nightly --tag "$previous"
-          fi
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" \
-              >/dev/null 2>&1; then
+          if [ -n "$previous_id" ]; then
             gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
-              -f sha="$GITHUB_SHA" \
-              -F force=true >/dev/null
-          else
-            gh api --method POST \
-              "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref=refs/tags/nightly \
-              -f sha="$GITHUB_SHA" >/dev/null
+              "repos/$GITHUB_REPOSITORY/releases/$previous_id" \
+              -F draft=true -f tag_name="$previous" \
+              -f target_commitish="$GITHUB_SHA" >/dev/null
           fi
           gh release edit "$candidate" \
             --tag nightly \
@@ -361,10 +377,9 @@ jobs:
             --prerelease \
             --title "Nightly $(date -u +%Y-%m-%d)" \
             --notes "$notes"
+          promoted=true
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
+            -f sha="$GITHUB_SHA" -F force=true >/dev/null
           trap - ERR
-          if [ -n "$previous" ]; then
-            gh release delete "$previous" --cleanup-tag --yes
-          fi
-          gh api --method DELETE \
-            "repos/$GITHUB_REPOSITORY/git/refs/tags/$candidate" \
-            >/dev/null 2>&1 || true
+          cleanup_nightly
