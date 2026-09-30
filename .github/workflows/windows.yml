@@ -81,7 +81,8 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           --target x86_64-pc-windows-msvc --no-self-update
 
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: cargo_cache
         with:
           path: |
             ~/.cargo/registry/index
@@ -141,6 +142,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows terminal tests failed.' }
 
       - name: Build and smoke-test the native Windows package
+        id: native_package
         run: |
           ./scripts/build-windows.ps1 -Profile '${{ inputs.profile }}' -HostPayload .build-cache/windows-host/xd-host-linux
           "GPUI_FXC_PATH=$env:GPUI_FXC_PATH" >> $env:GITHUB_ENV
@@ -148,13 +150,20 @@ jobs:
           ./scripts/smoke-windows.ps1 -Archive "dist/windows/$name-windows-x86_64.zip"
           ./installer/windows/install-webview2.ps1
 
-      - name: Test the native desktop and WSL stdio connection
+      - name: Test the native Windows desktop
         env:
           XD_BUILD_PROFILE: ${{ inputs.profile }}
         run: |
           $env:XD_COMMIT = (git rev-parse HEAD).Trim()
           cargo test --locked --release --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --lib --bin xd-desktop
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows desktop tests failed.' }
+
+      - name: Test the native desktop to WSL connection
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
+        env:
+          XD_BUILD_PROFILE: ${{ inputs.profile }}
+        run: |
+          $env:XD_COMMIT = (git rev-parse HEAD).Trim()
           cargo test --locked --release --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test windows_wsl -- --ignored --nocapture
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows to WSL host integration failed.' }
 
@@ -165,6 +174,19 @@ jobs:
             dist/windows/*-windows-x86_64.zip
             dist/windows/*-windows-x86_64.zip.sha256
           if-no-files-found: error
+
+      # Keep the dependency compile even if a test fails. A failed first run
+      # otherwise leaves the next runner rebuilding every native dependency.
+      - uses: actions/cache/save@v4
+        if: ${{ !cancelled() && steps.cargo_cache.outcome == 'success' && steps.cargo_cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            terminal-core/target
+          key: ${{ steps.cargo_cache.outputs.cache-primary-key }}
 
       - name: Remove the isolated WSL test distribution
         if: always()

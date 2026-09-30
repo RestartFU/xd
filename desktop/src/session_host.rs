@@ -101,7 +101,7 @@ impl AgentCommand {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn shell_command(&self) -> String {
         self.shell_command_with_marker(None)
     }
@@ -591,7 +591,10 @@ mod wsl_tests {
             .unwrap()
             + 1;
         let script = &spec.arguments[script];
-        assert!(script.contains("$HOME/.local/share/xd/runtime/v1"));
+        assert!(script.contains(&format!(
+            "$HOME/.local/share/{}/runtime/v1",
+            crate::channel::data_name().to_string_lossy(),
+        )));
         assert!(script.contains("WORKDIR='/home/user/a project'\"'\"'s files'"));
         assert!(script.contains("XD_AGENT_SESSION_MARKER"));
         assert!(script.contains("-c \"$WORKDIR\""));

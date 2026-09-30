@@ -582,9 +582,13 @@ mod tests {
     fn remote_paths_use_posix_separators_on_every_desktop_platform() {
         let command = SshCommand::parse("ssh user@example.com").unwrap();
         let arguments = host_arguments(&command, Path::new("/home/a person"));
+        let data_name = channel::data_name();
+        let data_name = data_name.to_string_lossy();
         assert_eq!(
             arguments.last().unwrap(),
-            "exec '/home/a person/.local/share/xd/runtime/v1/xd-host' stdio --data '/home/a person/.local/share/xd'",
+            &format!(
+                "exec '/home/a person/.local/share/{data_name}/runtime/v1/xd-host' stdio --data '/home/a person/.local/share/{data_name}'",
+            ),
         );
     }
 }

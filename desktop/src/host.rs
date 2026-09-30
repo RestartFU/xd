@@ -394,7 +394,7 @@ impl HostHandle {
         Ok((handle, updates, StartedHost { child }))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn connect_io(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
