@@ -79,7 +79,7 @@ pub struct BrowserPane {
     native_visible: bool,
     colors: ThemeColors,
     events: Sender<NativeEvent>,
-    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    bounds: Rc<Cell<Option<NativeAllocation>>>,
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
@@ -631,9 +631,11 @@ impl NativeBrowser {
     }
 }
 
+type NativeAllocation = (Bounds<Pixels>, f32, gpui::Point<Pixels>);
+
 struct NativeSurface {
     native: Rc<NativeBrowser>,
-    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    bounds: Rc<Cell<Option<NativeAllocation>>>,
     events: Sender<NativeEvent>,
     visible: bool,
 }
@@ -680,7 +682,8 @@ impl gpui::Element for NativeSurface {
         window: &mut Window,
         _: &mut App,
     ) -> Hitbox {
-        if self.visible && self.bounds.get() != Some(bounds) {
+        let allocation = (bounds, window.scale_factor(), window.bounds().origin);
+        if self.visible && self.bounds.get() != Some(allocation) {
             let rect = Rect {
                 position: wry::dpi::LogicalPosition::new(
                     f64::from(bounds.origin.x),
@@ -693,8 +696,19 @@ impl gpui::Element for NativeSurface {
                 )
                 .into(),
             };
-            match self.native.with_view(|view| view.set_bounds(rect)) {
-                Some(Ok(())) => self.bounds.set(Some(bounds)),
+            match self.native.with_view(|view| {
+                let result = view.set_bounds(rect);
+                #[cfg(target_os = "windows")]
+                {
+                    use wry::WebViewExtWindows;
+                    // Child embedding leaves parent move notifications to us.
+                    unsafe {
+                        let _ = view.controller().NotifyParentWindowPositionChanged();
+                    }
+                }
+                result
+            }) {
+                Some(Ok(())) => self.bounds.set(Some(allocation)),
                 Some(Err(error)) => {
                     let _ = self.events.try_send(NativeEvent::Error(error.to_string()));
                 }

@@ -1,9 +1,9 @@
 use std::{
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
-    process::Command,
 };
+#[cfg(not(windows))]
+use std::{fs, process::Command};
 
 pub const TMUX_CONFIGURATION: &str = concat!(
     "set -g default-terminal screen-256color\n",
@@ -194,7 +194,7 @@ impl SshCommand {
             .file_name()
             .and_then(OsStr::to_str)
             .unwrap_or_default();
-        if executable != "ssh" {
+        if executable != "ssh" && executable != "ssh.exe" {
             return Err("The remote command must start with ssh.".into());
         }
 
@@ -251,10 +251,10 @@ impl SshCommand {
 
     pub fn connection_options(&self) -> Vec<String> {
         let mut arguments = self.options.clone();
-        if !has_ssh_config_option(&arguments, "ControlMaster") {
+        if !cfg!(windows) && !has_ssh_config_option(&arguments, "ControlMaster") {
             arguments.extend(["-o".into(), "ControlMaster=auto".into()]);
         }
-        if !has_ssh_config_option(&arguments, "ControlPersist") {
+        if !cfg!(windows) && !has_ssh_config_option(&arguments, "ControlPersist") {
             arguments.extend(["-o".into(), "ControlPersist=10m".into()]);
         }
         if !has_ssh_config_option(&arguments, "ServerAliveInterval") {
@@ -263,7 +263,8 @@ impl SshCommand {
         if !has_ssh_config_option(&arguments, "ServerAliveCountMax") {
             arguments.extend(["-o".into(), "ServerAliveCountMax=3".into()]);
         }
-        if !has_ssh_config_option(&arguments, "ControlPath")
+        if !cfg!(windows)
+            && !has_ssh_config_option(&arguments, "ControlPath")
             && !arguments
                 .iter()
                 .any(|argument| argument == "-S" || argument.starts_with("-S"))
@@ -347,10 +348,10 @@ fn ssh_option(word: &str) -> Result<SshOption<'_>, String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum HostTarget {
-    Local {
-        tmux: PathBuf,
-        runtime: PathBuf,
-    },
+    #[cfg(not(windows))]
+    Local { tmux: PathBuf, runtime: PathBuf },
+    #[cfg(any(windows, test))]
+    Wsl,
     Ssh {
         command: SshCommand,
         remote_runtime: String,
@@ -364,8 +365,21 @@ pub struct SessionHost {
 
 impl SessionHost {
     pub fn local(tmux: PathBuf, runtime: PathBuf) -> Self {
+        #[cfg(windows)]
+        {
+            let _ = (tmux, runtime);
+            Self::wsl()
+        }
+        #[cfg(not(windows))]
         Self {
             target: HostTarget::Local { tmux, runtime },
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub fn wsl() -> Self {
+        Self {
+            target: HostTarget::Wsl,
         }
     }
 
@@ -381,6 +395,7 @@ impl SessionHost {
     pub fn attach(&self, id: &str, workdir: &Path, agent: &AgentCommand) -> ProcessSpec {
         let session = session_name(id);
         match &self.target {
+            #[cfg(not(windows))]
             HostTarget::Local { tmux, runtime } => {
                 let marker = agent.resume_arguments.as_ref().map(|_| {
                     runtime
@@ -428,6 +443,18 @@ impl SessionHost {
                     ],
                 )
             }
+            #[cfg(any(windows, test))]
+            HostTarget::Wsl => {
+                let script = wsl_attach_script(&session, workdir, agent);
+                ProcessSpec::new(
+                    crate::wsl::executable(),
+                    crate::wsl::shell_arguments(
+                        &script,
+                        &[],
+                        crate::wsl::distribution().as_deref(),
+                    ),
+                )
+            }
             HostTarget::Ssh {
                 command,
                 remote_runtime,
@@ -472,6 +499,7 @@ impl SessionHost {
     pub fn kill_process(&self, id: &str) -> ProcessSpec {
         let session = session_name(id);
         match &self.target {
+            #[cfg(not(windows))]
             HostTarget::Local { tmux, runtime } => ProcessSpec::new(
                 tmux,
                 [
@@ -482,6 +510,22 @@ impl SessionHost {
                     session,
                 ],
             ),
+            #[cfg(any(windows, test))]
+            HostTarget::Wsl => {
+                let script = format!(
+                    "RUNTIME=\"$HOME/.local/share/{}/runtime/v1\"; exec tmux -S \"$RUNTIME/tmux.sock\" kill-session -t {}",
+                    crate::channel::data_name().to_string_lossy(),
+                    shell_quote(&session),
+                );
+                ProcessSpec::new(
+                    crate::wsl::executable(),
+                    crate::wsl::shell_arguments(
+                        &script,
+                        &[],
+                        crate::wsl::distribution().as_deref(),
+                    ),
+                )
+            }
             HostTarget::Ssh {
                 command,
                 remote_runtime,
@@ -497,6 +541,74 @@ impl SessionHost {
                 ProcessSpec::new(&command.program, arguments)
             }
         }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn wsl_attach_script(session: &str, workdir: &Path, agent: &AgentCommand) -> String {
+    let data_name = crate::channel::data_name();
+    let runtime = format!(
+        "$HOME/.local/share/{}/runtime/v1",
+        data_name.to_string_lossy()
+    );
+    let configuration = TMUX_CONFIGURATION
+        .lines()
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let marker = agent
+        .resume_arguments
+        .as_ref()
+        .map(|_| format!("\"{runtime}/agent-sessions/{session}.started\""));
+    format!(
+        "set -eu; umask 077; command -v tmux >/dev/null 2>&1 || {{ printf '%s\\n' 'xd: Install tmux in your WSL distribution (Ubuntu: sudo apt install git tmux).' >&2; exit 1; }}; RUNTIME=\"{runtime}\"; mkdir -p \"$RUNTIME/agent-sessions\"; CONF=\"$RUNTIME/tmux.conf\"; printf '%s\\n' {configuration} > \"$CONF\"; WORKDIR={}; if [ \"$WORKDIR\" = '~' ]; then WORKDIR=\"$HOME\"; fi; MARKER=\"$RUNTIME/agent-sessions/{session}.started\"; if tmux -S \"$RUNTIME/tmux.sock\" has-session -t {} 2>/dev/null && [ ! -e \"$MARKER\" ]; then : > \"$MARKER\"; fi; exec tmux -S \"$RUNTIME/tmux.sock\" -f \"$CONF\" start-server \\; source-file \"$CONF\" \\; new-session -A -s {} -c \"$WORKDIR\" {}",
+        shell_quote(&workdir.to_string_lossy()),
+        shell_quote(session),
+        shell_quote(session),
+        shell_quote(&agent.shell_command_with_marker(marker.as_deref())),
+    )
+}
+
+#[cfg(test)]
+mod wsl_tests {
+    use super::*;
+
+    #[test]
+    fn wsl_sessions_share_the_linux_host_runtime_and_preserve_workdirs() {
+        let host = SessionHost::wsl();
+        let spec = host.attach(
+            "terminal-one",
+            Path::new("/home/user/a project's files"),
+            &AgentCommand::new("codex", ["--no-alt-screen"])
+                .resume_with(["resume", "--last"])
+                .record_codex_session(),
+        );
+        assert_eq!(spec.program, PathBuf::from("wsl.exe"));
+        let script = spec
+            .arguments
+            .iter()
+            .position(|value| value == "-c")
+            .unwrap()
+            + 1;
+        let script = &spec.arguments[script];
+        assert!(script.contains("$HOME/.local/share/xd/runtime/v1"));
+        assert!(script.contains("WORKDIR='/home/user/a project'\"'\"'s files'"));
+        assert!(script.contains("XD_AGENT_SESSION_MARKER"));
+        assert!(script.contains("-c \"$WORKDIR\""));
+        let kill = host.kill_process("terminal-one");
+        assert!(
+            kill.arguments
+                .iter()
+                .any(|argument| argument.contains("kill-session"))
+        );
+    }
+
+    #[test]
+    fn wsl_global_shell_resolves_its_home_inside_the_distribution() {
+        let script = wsl_attach_script("test", Path::new("~"), &AgentCommand::user_shell());
+        assert!(script.contains("WORKDIR='~'"));
+        assert!(script.contains("WORKDIR=\"$HOME\""));
+        assert!(script.contains("${SHELL:-/bin/sh}"));
     }
 }
 
@@ -567,7 +679,7 @@ fn split_command_line(input: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs,

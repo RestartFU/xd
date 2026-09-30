@@ -263,6 +263,13 @@ jobs:
             dist/macos/xd-macos-${{ matrix.arch }}.zip
             dist/macos/xd-macos-${{ matrix.arch }}.zip.sha256
 
+  windows:
+    needs: prepare
+    uses: ./.github/workflows/windows.yml
+    with:
+      profile: release
+      ref: ${{ needs.prepare.outputs.tag }}
+
   android:
     needs: prepare
     runs-on: [self-hosted, linux, x64, xd]
@@ -343,7 +350,7 @@ jobs:
             xd-android.apk.sha256
 
   publish:
-    needs: [prepare, linux, macos, android]
+    needs: [prepare, linux, macos, windows, android]
     # GitHub's own runner: this job moves every artifact through itself, and
     # that gigabyte should not cross a home connection twice. See nightly.yml.
     runs-on: ubuntu-latest
@@ -374,6 +381,8 @@ jobs:
             xd-linux-x86_64.tar.gz.sha256
             xd-macos-*.zip
             xd-macos-*.zip.sha256
+            xd-windows-x86_64.zip
+            xd-windows-x86_64.zip.sha256
             scripts/install.sh
             scripts/install-macos.sh
           )
@@ -408,6 +417,12 @@ jobs:
           \`\`\`
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
           \`\`\`
+
+          Windows x86_64:
+
+          Extract \`xd-windows-x86_64.zip\` and run \`xd.exe\`.
+          Local sessions require WSL with git and tmux installed. The included
+          README covers setup; the browser uses Microsoft's WebView2 Runtime.
 
           $android_notes
 

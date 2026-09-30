@@ -48,6 +48,12 @@ jobs:
       - name: Build the bundle
         run: ./scripts/build.sh --build-arg PROFILE=nightly
 
+  windows:
+    uses: ./.github/workflows/windows.yml
+    with:
+      profile: nightly
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
   macos:
     # Apple desktop code must be compiled on Apple hardware because GPUI links
     # native frameworks. This gate covers the Rust app, local helpers, and the

@@ -36,8 +36,16 @@ macOS:
 curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
 ```
 
-Nightly builds and the Android APK are available from the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly).
-The desktop installer needs no root access. Install the assistants you use separately and keep their commands on `PATH`.
+Windows x86_64: download `xd-windows-x86_64.zip` from the
+[latest release](https://github.com/RestartFU/xd/releases/latest), extract the
+whole archive, and run `xd.exe`. The desktop and browser run natively;
+local projects and persistent sessions run in your default WSL distribution.
+Install git, tmux, OpenSSH client, CA certificates, and your assistant CLIs
+inside WSL first. The included README has setup instructions and a WebView2
+Runtime installer helper. Set `XD_WSL_DISTRIBUTION` to select another distro.
+
+Nightly desktop builds and the Android APK are available from the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly).
+The Linux and macOS installers need no root access. Install the assistants you use separately and keep their commands on `PATH`.
 
 ## Build
 
@@ -47,3 +55,7 @@ The desktop installer needs no root access. Install the assistants you use separ
 ```
 
 See [mobile development](docs/mobile.md) and [remote usage](docs/remote.md) for details.
+
+Windows builds use `scripts/build-windows.ps1` with a matching static Linux host
+from `scripts/build-windows-host.sh`. The `windows` GitHub Actions workflow
+builds and checks both parts, including a real Windows-to-WSL connection.

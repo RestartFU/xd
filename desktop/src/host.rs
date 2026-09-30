@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use thiserror::Error;
 
 use crate::channel;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use crate::local_socket::UnixStream;
 use crate::model::Attachment;
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
@@ -280,7 +280,7 @@ pub enum HostUpdate {
 
 #[derive(Debug, Error)]
 pub enum ConnectError {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     #[error("could not connect to legacy xd socket at {path}: {source}")]
     Connect {
         path: PathBuf,
@@ -312,6 +312,39 @@ impl Drop for StartedHost {
 }
 
 impl HostHandle {
+    #[cfg(windows)]
+    pub fn start_local() -> Result<(Self, Receiver<HostUpdate>, StartedHost), ConnectError> {
+        let payload = crate::wsl::payload().map_err(ConnectError::Start)?;
+        let data_name = channel::data_name().to_string_lossy().into_owned();
+        let update_channel = if env::var("XD_UPDATE_CHANNEL").as_deref() == Ok("dev") {
+            "dev"
+        } else if channel::nightly() {
+            "nightly"
+        } else {
+            "release"
+        };
+        let mut command = crate::wsl::command(
+            crate::wsl::HOST_SCRIPT,
+            &[
+                crate::wsl::payload_argument(&payload),
+                data_name.clone(),
+                update_channel.into(),
+            ],
+        );
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        Self::connect_command(command, PathBuf::from(format!("wsl:{data_name}"))).map_err(
+            |error| {
+                ConnectError::Start(format!(
+                    "Cannot start WSL. Install a Linux distribution with wsl --install, finish its first-time setup, and install git and tmux inside it. {error}"
+                ))
+            },
+        )
+    }
+
+    #[cfg(not(windows))]
     pub fn start_local() -> Result<(Self, Receiver<HostUpdate>, StartedHost), ConnectError> {
         let mut failures = Vec::new();
         let data = data_root();
@@ -339,6 +372,11 @@ impl HostHandle {
         identity: PathBuf,
     ) -> Result<(Self, Receiver<HostUpdate>, StartedHost), ConnectError> {
         crate::session_runtime::restore_browser_environment(&mut command);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| ConnectError::Start(error.to_string()))?;
@@ -387,7 +425,7 @@ impl HostHandle {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn connect(path: PathBuf) -> Result<(Self, Receiver<HostUpdate>), ConnectError> {
         let stream = UnixStream::connect(&path).map_err(|source| ConnectError::Connect {
             path: path.clone(),
@@ -1678,6 +1716,7 @@ fn disconnect(updates: &Sender<HostUpdate>, message: String) {
     let _ = updates.send_blocking(HostUpdate::Disconnected { message });
 }
 
+#[cfg(not(windows))]
 fn data_root() -> PathBuf {
     let data_home = env::var_os("XDG_DATA_HOME")
         .filter(|path| !path.is_empty())
@@ -1692,6 +1731,7 @@ fn data_root() -> PathBuf {
     data_home.join(channel::data_name())
 }
 
+#[cfg(not(windows))]
 fn launcher_candidates() -> Vec<PathBuf> {
     if let Some(path) = env::var_os("XD_HOST_EXECUTABLE").filter(|path| !path.is_empty()) {
         return vec![PathBuf::from(path)];
@@ -1709,7 +1749,7 @@ fn launcher_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::local_socket::UnixListener;

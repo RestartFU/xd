@@ -1,5 +1,5 @@
 # A runnable Rust/GPUI xd for every commit on master, published for Linux and
-# both Mac architectures with the independent Android client under one rolling
+# both Mac architectures and Windows, with the Android client under one rolling
 # nightly tag.
 #
 # Built as the nightly profile, which gives it its own application id, settings,
@@ -129,6 +129,11 @@ jobs:
             dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip
             dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip.sha256
 
+  windows:
+    uses: ./.github/workflows/windows.yml
+    with:
+      profile: nightly
+
   android:
     runs-on: [self-hosted, linux, x64, xd]
 
@@ -173,7 +178,7 @@ jobs:
             xd-nightly-android.apk.sha256
 
   publish:
-    needs: [linux, macos, android]
+    needs: [linux, macos, windows, android]
     # GitHub's own runner, deliberately: this job downloads every artifact and
     # uploads it again as a release asset -- about a gigabyte each way. On a
     # self-hosted runner that gigabyte crosses a home connection twice; here it
@@ -214,6 +219,12 @@ jobs:
           curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install-macos.sh | sh
           \`\`\`
 
+          Windows x86_64:
+
+          Extract \`xd-nightly-windows-x86_64.zip\` and run \`xd.exe\`.
+          Local sessions require WSL with git and tmux installed. The included
+          README covers setup; the browser uses Microsoft's WebView2 Runtime.
+
           Or unpack it yourself:
 
           \`\`\`
@@ -234,6 +245,8 @@ jobs:
             xd-nightly-linux-x86_64.tar.gz.sha256
             xd-nightly-macos-*.zip
             xd-nightly-macos-*.zip.sha256
+            xd-nightly-windows-x86_64.zip
+            xd-nightly-windows-x86_64.zip.sha256
             xd-nightly-android.apk
             xd-nightly-android.apk.sha256
             scripts/install.sh

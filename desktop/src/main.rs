@@ -1,4 +1,8 @@
 #![deny(dead_code, unused_imports)]
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 
 use std::{
     borrow::Cow,
@@ -52,6 +56,8 @@ mod settings;
 mod source_build;
 mod speech;
 mod terminal;
+#[cfg(any(target_os = "windows", test))]
+mod windows;
 
 use browser::{BrowserEvent, BrowserPane};
 use editor::{
@@ -1296,8 +1302,16 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let workspace_repo_input =
-            cx.new(|cx| ComposerInput::new(cx, "Existing repository path (optional)…"));
+        let workspace_repo_input = cx.new(|cx| {
+            ComposerInput::new(
+                cx,
+                if cfg!(target_os = "windows") {
+                    "Linux repository path, e.g. /home/you/project…"
+                } else {
+                    "Existing repository path (optional)…"
+                },
+            )
+        });
         cx.subscribe(&workspace_repo_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_repo_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
@@ -1327,16 +1341,32 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let workspace_workdir_input =
-            cx.new(|cx| ComposerInput::new(cx, "Working directory (inherit when empty)…"));
+        let workspace_workdir_input = cx.new(|cx| {
+            ComposerInput::new(
+                cx,
+                if cfg!(target_os = "windows") {
+                    "Linux working directory (inherit when empty)…"
+                } else {
+                    "Working directory (inherit when empty)…"
+                },
+            )
+        });
         cx.subscribe(&workspace_workdir_input, |this, _, event, cx| {
             if let ComposerEvent::Changed(text) = event {
                 this.workspace_workdir_changed(text.clone(), cx);
             }
         })
         .detach();
-        let workspace_repo_default_input =
-            cx.new(|cx| ComposerInput::new(cx, "Repository path (inherit when empty)…"));
+        let workspace_repo_default_input = cx.new(|cx| {
+            ComposerInput::new(
+                cx,
+                if cfg!(target_os = "windows") {
+                    "Linux repository path (inherit when empty)…"
+                } else {
+                    "Repository path (inherit when empty)…"
+                },
+            )
+        });
         cx.subscribe(&workspace_repo_default_input, |this, _, event, cx| {
             if let ComposerEvent::Changed(text) = event {
                 this.workspace_repo_default_changed(text.clone(), cx);
@@ -5780,11 +5810,13 @@ impl XdDesktop {
                             .join(xd_desktop::channel::data_name())
                             .join("sessions")
                     });
-                std::fs::create_dir_all(&runtime)
-                    .map_err(|error| format!("Cannot prepare terminal sessions: {error}."))?;
-                let configuration = runtime.join("tmux.conf");
-                std::fs::write(&configuration, TMUX_CONFIGURATION)
-                    .map_err(|error| format!("Cannot configure terminal sessions: {error}."))?;
+                if !cfg!(target_os = "windows") {
+                    std::fs::create_dir_all(&runtime)
+                        .map_err(|error| format!("Cannot prepare terminal sessions: {error}."))?;
+                    let configuration = runtime.join("tmux.conf");
+                    std::fs::write(&configuration, TMUX_CONFIGURATION)
+                        .map_err(|error| format!("Cannot configure terminal sessions: {error}."))?;
+                }
                 Ok(SessionHost::local(tmux, runtime))
             }
             ChatEndpoint::Remote => {
@@ -7950,6 +7982,7 @@ impl XdDesktop {
                 .unwrap_or_else(|| Self::new_terminal_panel(panel_id));
             panel.workdir = Some(match self.active_endpoint {
                 ChatEndpoint::Remote => ".".into(),
+                ChatEndpoint::Local if cfg!(target_os = "windows") => "~".into(),
                 ChatEndpoint::Local => env::var("HOME")
                     .or_else(|_| env::var("USERPROFILE"))
                     .unwrap_or_else(|_| ".".into()),
@@ -11281,12 +11314,15 @@ impl XdDesktop {
                                 .bg(rgb(colors.background))
                                 .child(self.workspace_clone_input.clone()),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(colors.muted))
-                                .child("Use either an existing repository path or a clone URL."),
-                        )
+                        .child(div().text_xs().text_color(rgb(colors.muted)).child(
+                            if cfg!(target_os = "windows")
+                                && self.active_endpoint == ChatEndpoint::Local
+                            {
+                                "Use a WSL path (/home/… or /mnt/c/…) or a clone URL."
+                            } else {
+                                "Use either an existing repository path or a clone URL."
+                            },
+                        ))
                         .child(
                             div()
                                 .mt_2()
@@ -13791,6 +13827,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[cfg(unix)]
     fn authoritative_tree_reconciliation_stops_removed_chat_processes(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -13886,6 +13923,7 @@ mod tests {
     }
 
     #[gpui::test]
+    #[cfg(unix)]
     fn deleting_a_chat_stops_only_that_endpoints_terminal_processes(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, _| {
@@ -15945,6 +15983,8 @@ fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> 
 }
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    windows::configure_environment();
     browser::configure_platform();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if arguments

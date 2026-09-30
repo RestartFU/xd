@@ -1,0 +1,171 @@
+# Native Windows desktop with the matching Linux host used inside WSL.
+# Callable by release, nightly, and PR gates; dispatch verifies this platform
+# independently of the other release builds.
+name: windows
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: nightly
+      ref:
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Application channel to build
+        type: choice
+        default: nightly
+        options: [nightly, release]
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install the pinned Rust toolchain and musl compiler
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal \
+            --target x86_64-unknown-linux-musl --no-self-update
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y musl-tools
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            host/target
+          key: >-
+            cargo-wsl-musl-1.95.0-${{ hashFiles('host/Cargo.lock', 'terminal-core/Cargo.lock') }}
+          restore-keys: cargo-wsl-musl-1.95.0-
+
+      - name: Build and verify the static WSL host
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+          CARGO_BUILD_JOBS: 3
+        run: ./scripts/build-windows-host.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-host
+          path: dist/windows-host/xd-host-linux*
+          if-no-files-found: error
+
+  windows:
+    needs: host
+    runs-on: windows-2025
+    env:
+      RUSTUP_TOOLCHAIN: 1.95.0
+      RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_BUILD_JOBS: 3
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          --target x86_64-pc-windows-msvc --no-self-update
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            terminal-core/target
+          key: >-
+            cargo-Windows-x86_64-msvc-static-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'terminal-core/Cargo.lock') }}
+          restore-keys: cargo-Windows-x86_64-msvc-static-1.95.0-
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: windows-host
+          path: .build-cache/windows-host
+
+      - name: Verify the host payload checksum
+        run: |
+          $expected = (Get-Content .build-cache/windows-host/xd-host-linux.sha256 -Raw).Split(' ')[0]
+          $actual = (Get-FileHash .build-cache/windows-host/xd-host-linux -Algorithm SHA256).Hash
+          if ($actual.ToLowerInvariant() -ne $expected) { throw 'WSL host checksum mismatch.' }
+
+      - name: Prepare an isolated WSL distribution for integration tests
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP 'xd-wsl-smoke'
+          New-Item -ItemType Directory -Path $work | Out-Null
+          $compressed = Join-Path $work 'rootfs.tar.gz'
+          Invoke-WebRequest -Uri 'https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.6-x86_64.tar.gz' -OutFile $compressed
+          $expected = '27694aaa55fd7a9e3ef596e0ad4eb66802308bb20172b17030cd5f4d8ae9bac2'
+          if ((Get-FileHash $compressed -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'WSL smoke root filesystem checksum mismatch.'
+          }
+          $source = [IO.File]::OpenRead($compressed)
+          $gzip = [IO.Compression.GZipStream]::new($source, [IO.Compression.CompressionMode]::Decompress)
+          $tar = Join-Path $work 'rootfs.tar'
+          $destination = [IO.File]::Create($tar)
+          try { $gzip.CopyTo($destination) } finally {
+            $destination.Dispose()
+            $gzip.Dispose()
+            $source.Dispose()
+          }
+          wsl.exe --import xd-ci-smoke (Join-Path $work 'distribution') $tar --version 1
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot import the isolated WSL smoke distribution.' }
+          wsl.exe --distribution xd-ci-smoke --exec sh -lc 'apk add --no-cache git tmux openssh-client ca-certificates'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare WSL session prerequisites.' }
+          "XD_WSL_DISTRIBUTION=xd-ci-smoke" >> $env:GITHUB_ENV
+          "XD_WSL_HOST_EXECUTABLE=$((Resolve-Path .build-cache/windows-host/xd-host-linux).Path)" >> $env:GITHUB_ENV
+
+      - name: Check formatting and terminal behavior
+        run: |
+          cargo fmt --check --manifest-path desktop/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Desktop formatting failed.' }
+          cargo fmt --check --manifest-path terminal-core/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Terminal formatting failed.' }
+          cargo test --locked --release --target x86_64-pc-windows-msvc --manifest-path terminal-core/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'Windows terminal tests failed.' }
+
+      - name: Build and smoke-test the native Windows package
+        run: |
+          ./scripts/build-windows.ps1 -Profile '${{ inputs.profile }}' -HostPayload .build-cache/windows-host/xd-host-linux
+          "GPUI_FXC_PATH=$env:GPUI_FXC_PATH" >> $env:GITHUB_ENV
+          $name = if ('${{ inputs.profile }}' -eq 'nightly') { 'xd-nightly' } else { 'xd' }
+          ./scripts/smoke-windows.ps1 -Archive "dist/windows/$name-windows-x86_64.zip"
+          ./installer/windows/install-webview2.ps1
+
+      - name: Test the native desktop and WSL stdio connection
+        env:
+          XD_BUILD_PROFILE: ${{ inputs.profile }}
+        run: |
+          $env:XD_COMMIT = (git rev-parse HEAD).Trim()
+          cargo test --locked --release --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --lib --bin xd-desktop
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows desktop tests failed.' }
+          cargo test --locked --release --target x86_64-pc-windows-msvc --manifest-path desktop/Cargo.toml --test windows_wsl -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows to WSL host integration failed.' }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            dist/windows/*-windows-x86_64.zip
+            dist/windows/*-windows-x86_64.zip.sha256
+          if-no-files-found: error
+
+      - name: Remove the isolated WSL test distribution
+        if: always()
+        run: wsl.exe --unregister xd-ci-smoke

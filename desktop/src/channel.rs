@@ -48,10 +48,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_builds_default_to_the_stable_channel() {
-        assert!(!nightly());
-        assert_eq!(data_name(), OsString::from("xd"));
-        assert_eq!(app_id(), "com.restartfu.Xd");
+    fn build_profile_selects_the_default_channel_identity() {
+        let nightly_build = option_env!("XD_BUILD_PROFILE") == Some("nightly");
+        assert_eq!(nightly(), nightly_build);
+        assert_eq!(
+            data_name(),
+            OsString::from(if nightly_build { "xd-nightly" } else { "xd" })
+        );
+        assert_eq!(
+            app_id(),
+            if nightly_build {
+                "com.restartfu.Xd.Nightly"
+            } else {
+                "com.restartfu.Xd"
+            }
+        );
     }
 
     #[test]

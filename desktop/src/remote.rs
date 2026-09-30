@@ -91,7 +91,7 @@ fn probe_arguments(command: &SshCommand) -> Vec<String> {
     let relative_host = remote_host_relative_path();
     let script = format!(
         "printf 'XD_HOME=%s\\n' \"$HOME\"; printf 'XD_SYSTEM='; uname -s; printf 'XD_ARCH='; uname -m; host=\"$HOME\"/{}; if [ -x \"$host\" ]; then printf 'XD_HOST_VERSION='; \"$host\" --version 2>/dev/null || true; fi",
-        shell_quote(&relative_host.to_string_lossy()),
+        shell_quote(&relative_host),
     );
     arguments.extend(["--".into(), command.destination().into(), script]);
     arguments
@@ -99,12 +99,15 @@ fn probe_arguments(command: &SshCommand) -> Vec<String> {
 
 fn host_arguments(command: &SshCommand, home: &Path) -> Vec<String> {
     let mut arguments = ssh_base_arguments(command);
-    let host = home.join(remote_host_relative_path());
-    let data = home.join(".local/share").join(channel::data_name());
+    let host = posix_join(home, &remote_host_relative_path());
+    let data = posix_join(
+        home,
+        &format!(".local/share/{}", channel::data_name().to_string_lossy()),
+    );
     let script = format!(
         "exec {} stdio --data {}",
-        shell_quote(&host.to_string_lossy()),
-        shell_quote(&data.to_string_lossy()),
+        shell_quote(&host),
+        shell_quote(&data),
     );
     arguments.extend(["--".into(), command.destination().into(), script]);
     arguments
@@ -159,6 +162,12 @@ fn probe_remote(command: &SshCommand) -> Result<RemoteInfo, RemoteError> {
     })
 }
 
+#[cfg(windows)]
+fn local_host_executable() -> Result<PathBuf, RemoteError> {
+    crate::wsl::payload().map_err(RemoteError::Bridge)
+}
+
+#[cfg(not(windows))]
 fn local_host_executable() -> Result<PathBuf, RemoteError> {
     let path = env::var_os("XD_HOST_EXECUTABLE")
         .filter(|path| !path.is_empty())
@@ -179,8 +188,13 @@ fn local_host_executable() -> Result<PathBuf, RemoteError> {
 }
 
 fn host_version(host: &Path) -> Result<String, RemoteError> {
+    #[cfg(windows)]
+    let mut command = crate::wsl::version_command(host);
+    #[cfg(not(windows))]
     let mut command = Command::new(host);
-    command.arg("--version").stdin(Stdio::null());
+    #[cfg(not(windows))]
+    command.arg("--version");
+    command.stdin(Stdio::null());
     let output = bounded_output(&mut command, VERSION_TIMEOUT, COMMAND_OUTPUT_LIMIT)
         .map_err(|error| RemoteError::Bridge(format!("cannot inspect xd host: {error}")))?;
     if !output.status.success() {
@@ -211,12 +225,12 @@ fn deploy_remote_host(
             env::consts::ARCH,
         )));
     }
-    let directory = remote.home.join(remote_host_relative_directory());
-    let destination = directory.join("xd-host");
+    let directory = posix_join(&remote.home, &remote_host_relative_directory());
+    let destination = format!("{directory}/xd-host");
     let script = format!(
         "set -eu; umask 077; directory={}; destination={}; mkdir -p \"$directory\"; temporary=\"$directory/.xd-host.$$\"; trap 'rm -f \"$temporary\"' EXIT HUP INT TERM; cat > \"$temporary\"; chmod 700 \"$temporary\"; \"$temporary\" --version; mv -f \"$temporary\" \"$destination\"; trap - EXIT HUP INT TERM",
-        shell_quote(&directory.to_string_lossy()),
-        shell_quote(&destination.to_string_lossy()),
+        shell_quote(&directory),
+        shell_quote(&destination),
     );
     let mut arguments = ssh_base_arguments(command);
     arguments.extend(["--".into(), command.destination().into(), script]);
@@ -257,6 +271,11 @@ fn bounded_output(
     timeout: Duration,
     output_limit: usize,
 ) -> Result<Output, String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command
@@ -356,18 +375,28 @@ fn read_bounded(mut input: impl Read, limit: usize) -> (Vec<u8>, bool) {
     (kept, truncated)
 }
 
-fn remote_host_relative_directory() -> PathBuf {
-    PathBuf::from(".local/share")
-        .join(channel::data_name())
-        .join("runtime/v1")
+fn posix_join(home: &Path, relative: &str) -> String {
+    format!(
+        "{}/{relative}",
+        home.to_string_lossy().trim_end_matches('/')
+    )
 }
 
-fn remote_host_relative_path() -> PathBuf {
-    remote_host_relative_directory().join("xd-host")
+fn remote_host_relative_directory() -> String {
+    format!(
+        ".local/share/{}/runtime/v1",
+        channel::data_name().to_string_lossy()
+    )
+}
+
+fn remote_host_relative_path() -> String {
+    format!("{}/xd-host", remote_host_relative_directory())
 }
 
 fn same_platform(system: &str, architecture: &str) -> bool {
     let system_matches = match env::consts::OS {
+        // Windows carries the static Linux host used by its WSL backend.
+        "windows" => system.eq_ignore_ascii_case("linux"),
         "linux" => system.eq_ignore_ascii_case("linux"),
         "macos" => system.eq_ignore_ascii_case("darwin"),
         other => system.eq_ignore_ascii_case(other),
@@ -388,6 +417,7 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn ssh_transport_runs_the_host_over_stdio_without_a_socket_forward() {
         let command = SshCommand::parse(
@@ -455,6 +485,7 @@ mod tests {
             ("linux", "aarch64") => ("Linux", "aarch64"),
             ("macos", "x86_64") => ("Darwin", "x86_64"),
             ("macos", "aarch64") => ("Darwin", "arm64"),
+            ("windows", "x86_64") => ("Linux", "x86_64"),
             pair => pair,
         };
         assert!(same_platform(system, architecture));
@@ -474,6 +505,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_commands_have_a_wall_clock_timeout() {
         let mut command = Command::new("sleep");
@@ -536,6 +568,7 @@ mod tests {
         assert!(error.contains("timed out"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn remote_command_output_is_bounded() {
         let mut command = Command::new("sh");
@@ -543,5 +576,15 @@ mod tests {
         let error =
             bounded_output(&mut command, std::time::Duration::from_secs(2), 1024).unwrap_err();
         assert!(error.contains("too much output"), "{error}");
+    }
+
+    #[test]
+    fn remote_paths_use_posix_separators_on_every_desktop_platform() {
+        let command = SshCommand::parse("ssh user@example.com").unwrap();
+        let arguments = host_arguments(&command, Path::new("/home/a person"));
+        assert_eq!(
+            arguments.last().unwrap(),
+            "exec '/home/a person/.local/share/xd/runtime/v1/xd-host' stdio --data '/home/a person/.local/share/xd'",
+        );
     }
 }

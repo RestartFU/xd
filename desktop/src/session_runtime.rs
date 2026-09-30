@@ -551,7 +551,7 @@ impl SessionRuntime {
             .ok_or_else(|| "No such terminal.".to_owned())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn wait_until_empty(&self, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         while std::time::Instant::now() < deadline {
@@ -571,6 +571,11 @@ impl SessionRuntime {
 fn run_cleanup(spec: ProcessSpec) {
     let mut command = Command::new(spec.program);
     restore_browser_environment(&mut command);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
     let mut child = match command
         .args(spec.arguments)
         .stdin(Stdio::null())
@@ -805,12 +810,17 @@ pub(crate) fn restore_browser_environment(command: &mut Command) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::{path::PathBuf, time::Duration};
 
+    #[cfg(unix)]
     use crate::session_host::ProcessSpec;
 
-    use super::{ActivityParser, SessionEndpoint, SessionEvent, SessionEventKind, SessionRuntime};
+    use super::{ActivityParser, SessionEvent, SessionEventKind};
+    #[cfg(unix)]
+    use super::{SessionEndpoint, SessionRuntime};
 
+    #[cfg(unix)]
     #[test]
     fn chat_reconciliation_is_scoped_to_the_sessions_origin_endpoint() {
         let (runtime, events) = SessionRuntime::new();
@@ -1071,6 +1081,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_pty_session_streams_output_accepts_input_and_closes() {
         let (runtime, events) = SessionRuntime::new();
@@ -1102,6 +1113,7 @@ mod tests {
         assert!(runtime.wait_until_empty(Duration::from_secs(1)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn explicit_close_runs_persistent_cleanup_without_blocking_the_caller() {
         let directory =
@@ -1143,6 +1155,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn explicit_close_allows_immediate_reopen_with_the_same_terminal_id() {
         let (runtime, events) = SessionRuntime::new();
@@ -1188,6 +1201,7 @@ mod tests {
         runtime.kill("stable-agent").unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn opening_an_existing_session_replays_its_opened_event() {
         let (runtime, events) = SessionRuntime::new();
@@ -1232,6 +1246,7 @@ mod tests {
         runtime.kill("stable-agent").unwrap();
     }
 
+    #[cfg(unix)]
     fn recv_output_containing(events: &super::SessionEventReceiver, expected: &str) -> bool {
         for _ in 0..8 {
             match events.recv_blocking().unwrap().kind {

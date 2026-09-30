@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
 const REPOSITORY: &str = "RestartFU/xd";
@@ -420,6 +421,7 @@ fn run(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
     command.process_group(0);
     let mut child = command
         .spawn()
@@ -515,8 +517,16 @@ fn wait_for_child(control: &Arc<RunControl>) -> Result<ExitStatus, String> {
 }
 
 fn terminate_process_group(pid: u32) {
+    #[cfg(unix)]
     let _ = Command::new("kill")
         .args(["-KILL", &format!("-{pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    #[cfg(windows)]
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -641,6 +651,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn output_reader_chunks_are_bounded_and_active_processes_cancel() {
         assert_eq!(READ_CHUNK_BYTES, 1_024);
         let (sender, receiver) = async_channel::bounded(64);
