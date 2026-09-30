@@ -628,11 +628,30 @@ fn start_reader(
         .spawn(move || {
             let mut buffer = [0_u8; 8_192];
             let mut activity = ActivityParser::default();
+            #[cfg(windows)]
+            let mut startup_cursor = ConPtyStartupCursor::default();
             loop {
                 let count = match reader.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
+                #[cfg(windows)]
+                if startup_cursor.feed(&buffer[..count]) {
+                    // portable-pty enables PSEUDOCONSOLE_INHERIT_CURSOR.
+                    // ConPTY waits for this reply before starting the child;
+                    // each new xd terminal starts at the screen origin.
+                    let replied = session.writer.lock().is_ok_and(|mut writer| {
+                        writer.as_mut().is_some_and(|writer| {
+                            writer
+                                .write_all(b"\x1b[1;1R")
+                                .and_then(|_| writer.flush())
+                                .is_ok()
+                        })
+                    });
+                    if !replied {
+                        break;
+                    }
+                }
                 if events
                     .send(SessionEvent::new(
                         session.endpoint,
@@ -678,6 +697,37 @@ fn start_reader(
             }
         })
         .expect("terminal reader thread should start");
+}
+
+/// Acknowledge only ConPTY's initial cursor handshake. The reader continues
+/// forwarding the original bytes, and later application queries are untouched.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct ConPtyStartupCursor {
+    matched: usize,
+    answered: bool,
+}
+
+#[cfg(any(windows, test))]
+impl ConPtyStartupCursor {
+    fn feed(&mut self, bytes: &[u8]) -> bool {
+        const REQUEST: &[u8] = b"\x1b[6n";
+        if self.answered {
+            return false;
+        }
+        for &byte in bytes {
+            if byte == REQUEST[self.matched] {
+                self.matched += 1;
+                if self.matched == REQUEST.len() {
+                    self.answered = true;
+                    return true;
+                }
+            } else {
+                self.matched = usize::from(byte == REQUEST[0]);
+            }
+        }
+        false
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -819,6 +869,24 @@ mod tests {
     use super::{ActivityParser, SessionEvent, SessionEventKind};
     #[cfg(unix)]
     use super::{SessionEndpoint, SessionRuntime};
+
+    #[test]
+    fn conpty_startup_cursor_acknowledges_a_fragmented_request_once() {
+        let mut cursor = super::ConPtyStartupCursor::default();
+        assert!(!cursor.feed(b"\x1b"));
+        assert!(!cursor.feed(b"[6"));
+        assert!(cursor.feed(b"n"));
+        assert!(!cursor.feed(b"\x1b[6n"));
+    }
+
+    #[test]
+    fn conpty_startup_cursor_ignores_other_queries_and_restarts_after_noise() {
+        let mut cursor = super::ConPtyStartupCursor::default();
+        assert!(!cursor.feed(b"\x1b[0n\x1b[?6n\x1b[6x"));
+        assert!(!cursor.feed(b"\x1b[6"));
+        assert!(!cursor.feed(b"ordinary text"));
+        assert!(cursor.feed(b"\x1b\x1b[6n"));
+    }
 
     #[cfg(unix)]
     #[test]

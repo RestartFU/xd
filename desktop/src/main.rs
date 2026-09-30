@@ -1717,9 +1717,13 @@ impl XdDesktop {
             this.window_bounds_changed(window, cx);
         })
         .detach();
-        match desktop.active_endpoint {
-            ChatEndpoint::Local => desktop.schedule_connect(Duration::ZERO, cx),
-            ChatEndpoint::Remote => desktop.schedule_remote_connect(Duration::ZERO, cx),
+        // View fixtures supply their own host state. Real connections belong
+        // in integration tests and must not depend on installed user tools.
+        if !cfg!(test) {
+            match desktop.active_endpoint {
+                ChatEndpoint::Local => desktop.schedule_connect(Duration::ZERO, cx),
+                ChatEndpoint::Remote => desktop.schedule_remote_connect(Duration::ZERO, cx),
+            }
         }
         desktop.listen_for_terminal_runtime(terminal_updates, cx);
         cx.spawn(async move |this, cx| {
