@@ -44,7 +44,7 @@ Install git, tmux, OpenSSH client, CA certificates, and your assistant CLIs
 inside WSL first. The included README has setup instructions and a WebView2
 Runtime installer helper. Set `XD_WSL_DISTRIBUTION` to select another distro.
 
-Nightly desktop builds and the Android APK are available from the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly).
+Nightly desktop builds are available from the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly). The Android APK is included when signing credentials are configured.
 The Linux and macOS installers need no root access. Install the assistants you use separately and keep their commands on `PATH`.
 
 ## Build

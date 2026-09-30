@@ -142,7 +142,39 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check protected Android signing
+        id: android_signing
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          credentials=(
+            "$ANDROID_RELEASE_KEYSTORE_BASE64"
+            "$XD_ANDROID_STORE_PASSWORD"
+            "$XD_ANDROID_KEY_ALIAS"
+            "$XD_ANDROID_KEY_PASSWORD"
+          )
+          present=0
+          for credential in "${credentials[@]}"; do
+            if [[ -n "$credential" ]]; then
+              ((present += 1))
+            fi
+          done
+          if (( present == 0 )); then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Android signing secrets are absent; omitting the Android artifact."
+          elif (( present != ${#credentials[@]} )); then
+            echo "::error::Android signing secrets are only partially configured."
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build the Android APK
+        if: steps.android_signing.outputs.available == 'true'
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           XD_MOBILE_RELEASE: 1
@@ -165,12 +197,14 @@ jobs:
             --secret id=android_key_password,env=XD_ANDROID_KEY_PASSWORD
 
       - name: Name it for the release
+        if: steps.android_signing.outputs.available == 'true'
         run: |
           set -euo pipefail
           mv dist/mobile/xd-mobile-release.apk xd-nightly-android.apk
           sha256sum xd-nightly-android.apk > xd-nightly-android.apk.sha256
 
       - uses: actions/upload-artifact@v4
+        if: steps.android_signing.outputs.available == 'true'
         with:
           name: android
           path: |
@@ -204,6 +238,31 @@ jobs:
           set -euo pipefail
 
           subject=$(git log -1 --format=%s)
+          assets=(
+            xd-nightly-linux-x86_64.tar.gz
+            xd-nightly-linux-x86_64.tar.gz.sha256
+            xd-nightly-macos-*.zip
+            xd-nightly-macos-*.zip.sha256
+            xd-nightly-windows-x86_64.zip
+            xd-nightly-windows-x86_64.zip.sha256
+            scripts/install.sh
+            scripts/install-macos.sh
+          )
+          if [[ -f xd-nightly-android.apk ]]; then
+            assets+=(xd-nightly-android.apk xd-nightly-android.apk.sha256)
+            android_notes=$(cat <<'EOF'
+          Android connects directly over SSH with password or imported-key
+          authentication and explicit SSH host-key fingerprint verification.
+          The remote machine must already have the xd nightly host installed.
+          EOF
+            )
+          else
+            android_notes=$(cat <<'EOF'
+          No Android APK is published because protected signing credentials are
+          not configured for this repository.
+          EOF
+            )
+          fi
           notes=$(cat <<EOF
           Built from \`${GITHUB_SHA:0:7}\` — $subject
 
@@ -232,25 +291,10 @@ jobs:
           ./xd-nightly/xd.sh
           \`\`\`
 
-          Android connects directly over SSH with password or imported-key
-          authentication and explicit SSH host-key fingerprint verification.
-          The remote machine must already have the xd nightly host installed.
+          $android_notes
 
           Linux and macOS are self-contained.
           EOF
-          )
-
-          assets=(
-            xd-nightly-linux-x86_64.tar.gz
-            xd-nightly-linux-x86_64.tar.gz.sha256
-            xd-nightly-macos-*.zip
-            xd-nightly-macos-*.zip.sha256
-            xd-nightly-windows-x86_64.zip
-            xd-nightly-windows-x86_64.zip.sha256
-            xd-nightly-android.apk
-            xd-nightly-android.apk.sha256
-            scripts/install.sh
-            scripts/install-macos.sh
           )
 
           # Stage every asset on a private draft first. `release upload
