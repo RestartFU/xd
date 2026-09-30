@@ -21,10 +21,12 @@ RUN rustup component add rustfmt \
       git \
       libfontconfig-dev \
       libglib2.0-dev \
+      libgtk-3-dev \
       libssl-dev \
       libva-dev \
       libvulkan1 \
       libwayland-dev \
+      libwebkit2gtk-4.1-dev \
       libx11-xcb-dev \
       libxkbcommon-x11-dev \
       libzstd-dev \
@@ -82,6 +84,16 @@ ENV XD_COMMIT=$XD_COMMIT
 RUN cargo build --locked --release \
  && test -x target/release/xd-desktop
 
+# Production WebKitGTK disables WEBKIT_EXEC_PATH. Use its public GLib launch
+# API to relocate only WebKit's three auxiliary executables, retaining the
+# engine's own bubblewrap sandbox policy.
+FROM gpui-toolchain AS browser-runtime-paths
+
+COPY scripts/webkit-paths.c /src/webkit-paths.c
+RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
+      $(pkg-config --cflags gio-2.0) /src/webkit-paths.c \
+      -o /xd-webkit-paths.so -ldl $(pkg-config --libs gio-2.0)
+
 FROM gpui-toolchain AS rust-host-source
 
 WORKDIR /src/host
@@ -136,11 +148,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-jetbrains-mono \
       fonts-noto-color-emoji \
       git \
+      glib-networking \
       libfontconfig1 \
       libsqlite3-dev \
       libssl-dev \
       libvulkan1 \
       libwayland-client0 \
+      libwebkit2gtk-4.1-0 \
       libx11-data \
       libx11-xcb1 \
       libxkbcommon-x11-0 \
@@ -172,6 +186,7 @@ RUN install -m0755 /usr/bin/tmux /stage/usr/libexec/tmux \
  && install -Dm0644 /usr/share/doc/tmux/copyright /stage/usr/share/licenses/tmux-LICENSE
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
 COPY --from=rust-host-release /src/host/target/release/xd-host /stage/usr/libexec/xd-host
+COPY --from=browser-runtime-paths /xd-webkit-paths.so /stage/usr/lib/xd-webkit-paths.so
 
 RUN set -eux; \
     test "$PROFILE" = default || test "$PROFILE" = nightly; \

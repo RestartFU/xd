@@ -61,6 +61,21 @@ while IFS= read -r template_line || [ -n "$template_line" ]; do
   printf '%s\n' "$template_rest"
 done < "$HERE/etc/fonts.conf.in" > "$RUNTIME/fonts.conf"
 
+# GTK caches quote module paths. Escape those quotes, then replace the marker
+# literally so ampersands in an installation path keep their original value.
+BROWSER_HERE=$(printf '%s' "$HERE" | sed 's/[\\"]/\\&/g')
+for browser_cache in pixbuf-loaders gtk-immodules; do
+  while IFS= read -r template_line || [ -n "$template_line" ]; do
+    template_rest=$template_line
+    while [ "${template_rest#*@BUNDLE@}" != "$template_rest" ]; do
+      template_prefix=${template_rest%%@BUNDLE@*}
+      printf '%s%s' "$template_prefix" "$BROWSER_HERE"
+      template_rest=${template_rest#*@BUNDLE@}
+    done
+    printf '%s\n' "$template_rest"
+  done < "$HERE/etc/$browser_cache.cache.in" > "$RUNTIME/$browser_cache.cache"
+done
+
 # Anything xd launches for the user -- a terminal, an editor -- must run in the
 # host's environment, not the bundle's. Remember the values before they are
 # overridden so they can be handed back to terminals, agents, and host tools.
@@ -69,6 +84,30 @@ export XD_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS-}"
 export XD_HOST_LANG="${LANG-}"
 export XD_HOST_LC_ALL="${LC_ALL-}"
 export XD_HOST_LOCPATH="${LOCPATH-}"
+export XD_HOST_XD_BROWSER_BUNDLE_ROOT="${XD_BROWSER_BUNDLE_ROOT-}"
+export XD_HOST_XD_BROWSER_RUNTIME_ROOT="${XD_BROWSER_RUNTIME_ROOT-}"
+export XD_HOST_WEBKIT_INJECTED_BUNDLE_PATH="${WEBKIT_INJECTED_BUNDLE_PATH-}"
+export XD_HOST_GIO_MODULE_DIR="${GIO_MODULE_DIR-}"
+export XD_HOST_GSETTINGS_SCHEMA_DIR="${GSETTINGS_SCHEMA_DIR-}"
+export XD_HOST_GDK_PIXBUF_MODULE_FILE="${GDK_PIXBUF_MODULE_FILE-}"
+export XD_HOST_GTK_IM_MODULE_FILE="${GTK_IM_MODULE_FILE-}"
+export XD_HOST_GST_PLUGIN_SYSTEM_PATH_1_0="${GST_PLUGIN_SYSTEM_PATH_1_0-}"
+export XD_HOST_GST_PLUGIN_SCANNER_1_0="${GST_PLUGIN_SCANNER_1_0-}"
+export XD_HOST_GST_REGISTRY_1_0="${GST_REGISTRY_1_0-}"
+
+# WebKit's helper launcher is relocated by the linked xd-webkit-paths shim.
+# Keep the browser sandbox enabled; bubblewrap, its D-Bus proxy, GBM, DRM, and
+# Wayland remain host components along with the graphics driver.
+export XD_BROWSER_BUNDLE_ROOT="$HERE"
+export XD_BROWSER_RUNTIME_ROOT="$RUNTIME"
+export WEBKIT_INJECTED_BUNDLE_PATH="$HERE/libexec/webkit2gtk-4.1/injected-bundle"
+export GIO_MODULE_DIR="$HERE/lib/gio/modules"
+export GSETTINGS_SCHEMA_DIR="$HERE/share/glib-2.0/schemas"
+export GDK_PIXBUF_MODULE_FILE="$RUNTIME/pixbuf-loaders.cache"
+export GTK_IM_MODULE_FILE="$RUNTIME/gtk-immodules.cache"
+export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/lib/gstreamer-1.0"
+export GST_PLUGIN_SCANNER_1_0="$HERE/libexec/gst-plugin-scanner"
+export GST_REGISTRY_1_0="$RUNTIME/gstreamer-registry.bin"
 
 # Both matter: without FONTCONFIG_PATH, fontconfig also reads the host's
 # /etc/fonts. It still scans the conf.avail template dir compiled into the

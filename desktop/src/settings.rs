@@ -74,6 +74,10 @@ pub struct AppSettings {
     pub sidebar_files_height: u16,
     pub diff_width: u16,
     pub terminal_height: u16,
+    pub browser_open: bool,
+    pub browser_width: u16,
+    /// Last browser address per connection and project.
+    pub browser_urls: HashMap<String, String>,
     pub window_width: u16,
     pub window_height: u16,
     pub window_maximized: bool,
@@ -107,6 +111,9 @@ impl Default for AppSettings {
             sidebar_files_height: 280,
             diff_width: 460,
             terminal_height: 320,
+            browser_open: false,
+            browser_width: 460,
+            browser_urls: HashMap::new(),
             window_width: 1180,
             window_height: 780,
             window_maximized: false,
@@ -134,6 +141,11 @@ impl AppSettings {
     }
 
     pub fn save(&self) -> Result<(), String> {
+        // Persistence is tested through save_preserving with explicit paths.
+        // GPUI fixtures must not write to the user's settings or each other.
+        if cfg!(test) {
+            return Ok(());
+        }
         self.save_preserving(&settings_path())
     }
 
@@ -293,6 +305,12 @@ mod tests {
             sidebar_files_height: 336,
             diff_width: 512,
             terminal_height: 280,
+            browser_open: true,
+            browser_width: 540,
+            browser_urls: HashMap::from([(
+                "local/project/folder-a".into(),
+                "http://localhost:3000/".into(),
+            )]),
             window_width: 1440,
             window_height: 900,
             window_maximized: true,

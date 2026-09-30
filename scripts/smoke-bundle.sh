@@ -6,7 +6,7 @@
 set -eu
 
 BUNDLE=${1:?bundle directory}
-BUNDLE=$(CDPATH='' cd -- "$BUNDLE" && pwd)
+BUNDLE=$(CDPATH='' cd -- "$BUNDLE" && pwd -P)
 GIT="$BUNDLE/bin/git"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -36,6 +36,33 @@ require_file libexec/tmux
 require_file libexec/install.sh
 require_file libexec/curl
 require_file libexec/openssl
+require_file lib/xd-webkit-paths.so
+require_file libexec/webkit2gtk-4.1/WebKitWebProcess
+require_file libexec/webkit2gtk-4.1/WebKitNetworkProcess
+require_file libexec/webkit2gtk-4.1/WebKitGPUProcess
+require_file libexec/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so
+require_file lib/gio/modules/libgiognutls.so
+require_file lib/gio/modules/giomodule.cache
+require_file libexec/gst-plugin-scanner
+require_file share/glib-2.0/schemas/gschemas.compiled
+require_file etc/pixbuf-loaders.cache.in
+require_file etc/gtk-immodules.cache.in
+
+# These helpers link against the private engine. Check the relocated library
+# closure without a display, rather than trusting the builder's /usr/lib copy.
+for process in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
+  dependencies=$(ldd "$BUNDLE/libexec/webkit2gtk-4.1/$process")
+  if printf '%s\n' "$dependencies" | grep -F 'not found' >/dev/null; then
+    echo "bundle smoke: unresolved browser dependencies in $process" >&2
+    exit 1
+  fi
+  engine=$(printf '%s\n' "$dependencies" |
+    awk '$1 == "libwebkit2gtk-4.1.so.0" { print $3 }')
+  test "$(readlink -f "$engine")" = "$BUNDLE/lib/libwebkit2gtk-4.1.so.0" || {
+    echo "bundle smoke: $process selected a host browser engine" >&2
+    exit 1
+  }
+done
 
 # glibc and the compiler runtimes belong to the host. Shipping either can make
 # distro GPU drivers fail before GPUI creates its Vulkan context.
@@ -44,7 +71,13 @@ for host_runtime in \
   lib/libc.so.6 \
   lib/libm.so.6 \
   lib/libgcc_s.so.1 \
-  lib/libstdc++.so.6; do
+  lib/libstdc++.so.6 \
+  lib/libgbm.so.1 \
+  lib/libdrm.so.2 \
+  lib/libwayland-client.so.0 \
+  lib/libwayland-cursor.so.0 \
+  lib/libwayland-egl.so.1 \
+  lib/libwayland-server.so.0; do
   test ! -e "$BUNDLE/$host_runtime" || {
     echo "bundle smoke: must not ship $host_runtime" >&2
     exit 1

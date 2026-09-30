@@ -60,6 +60,9 @@ chmod +x "$fixture/bin/xd"
 cat > "$fixture/etc/fonts.conf.in" <<'EOF'
 <fontconfig><dir>@BUNDLE@/share/fonts</dir></fontconfig>
 EOF
+for cache in pixbuf-loaders gtk-immodules; do
+  printf '"@BUNDLE@/lib/module.so"\n' > "$fixture/etc/$cache.cache.in"
+done
 cat > "$fixture/share/applications/com.restartfu.Xd.Nightly.desktop" <<'EOF'
 [Desktop Entry]
 Name=xd
@@ -84,6 +87,11 @@ fonts="$runtime/xd-$(id -u)/xd-nightly/fonts.conf"
 escaped_home=${home//&/&amp;}
 grep -Fq -- "<dir>$escaped_home/.local/opt/xd-nightly/share/fonts</dir>" "$fonts" \
   || fail "fontconfig bundle path was corrupted"
+for cache in pixbuf-loaders gtk-immodules; do
+  grep -Fqx -- "\"$home/.local/opt/xd-nightly/lib/module.so\"" \
+    "$runtime/xd-$(id -u)/xd-nightly/$cache.cache" \
+    || fail "GTK module cache bundle path was corrupted"
+done
 
 cat > "$work/bin/apksigner" <<'EOF'
 #!/bin/sh

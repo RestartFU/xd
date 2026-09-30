@@ -22,6 +22,28 @@ There is no background xd daemon or listening socket.
 
 See [remote desktop over SSH](../docs/remote.md) for the remote process shape.
 
+## Integrated browser
+
+Click **Browser** in the workspace header to open a pane beside the active
+session. Enter a URL or `localhost:3000`, use Back, Forward, and Reload to
+navigate, and drag the divider to resize the pane. Clicking a chat or terminal
+link opens it in the Browser pane automatically. The last address is saved
+per workspace; closing the pane hides its page and preserves navigation history
+when reopened during the same desktop session.
+
+The browser runs on the desktop machine in both local and SSH modes. A remote
+development server needs an SSH port forward or a reachable URL; `localhost`
+always means the machine displaying xd. For example, forward port 3000 with
+`ssh -L 3000:localhost:3000 user@server` before opening `localhost:3000`.
+
+macOS uses the system WKWebView. Linux uses GTK3/WebKitGTK 4.1 through X11, so
+Wayland desktops need XWayland and a working `DISPLAY`. The Linux bundle ships
+the browser engine, auxiliary processes, TLS backend, and GTK/media resources.
+The host supplies `bubblewrap` (`bwrap`), `xdg-dbus-proxy`, and its GBM/DRM and
+Wayland graphics libraries. WebKit's process sandbox stays enabled. Browser
+toolkit settings are restored before xd starts terminals, agents, or its host
+service.
+
 ## Build and test
 
 Build and test this crate through the repository Dockerfile:
@@ -29,6 +51,10 @@ Build and test this crate through the repository Dockerfile:
 ```sh
 docker build --target gpui-desktop-check .
 ```
+
+Linux source builds additionally need GTK3 and WebKitGTK 4.1 development
+packages (`libgtk-3-dev` and `libwebkit2gtk-4.1-dev` on Debian). Docker installs
+these dependencies automatically.
 
 Every push to `master` replaces the rolling Linux and macOS nightly. Tagged
 releases use the stable application id and install beside the nightly.

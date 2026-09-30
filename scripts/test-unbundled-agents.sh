@@ -39,15 +39,10 @@ for pattern in \
   voice-build \
   libasound \
   pipewire \
-  libgtk \
   libadwaita \
   libvte \
-  gdk-pixbuf \
-  glib-networking \
   libegl \
   libgl1 \
-  GSETTINGS_SCHEMA_DIR \
-  GDK_PIXBUF_MODULE_FILE \
   GSK_RENDERER
 do
   fail_if_present "$pattern" "${packaging[@]}"

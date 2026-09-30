@@ -42,6 +42,7 @@ use xd_desktop::{
     theme::ThemeColors,
 };
 
+mod browser;
 mod editor;
 mod files;
 mod input;
@@ -52,6 +53,7 @@ mod source_build;
 mod speech;
 mod terminal;
 
+use browser::{BrowserEvent, BrowserPane};
 use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
     DeleteWord as EditorDeleteWord, DeleteWordForward as EditorDeleteWordForward,
@@ -113,6 +115,11 @@ const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
+
+fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
+    // Keep the session usable even at the window's minimum size.
+    f32::from(requested).clamp(280.0, (window_width - 426.0).clamp(280.0, 1000.0))
+}
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
     let lit = frame % 4;
@@ -231,6 +238,13 @@ fn session_status_icon(color: u32) -> gpui::AnyElement {
 }
 
 gpui::actions!(xd, [CloseSearch, CopyRenderedSelection]);
+
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct OpenBrowserUrl {
+    url: String,
+    window: gpui::AnyWindowHandle,
+}
 
 #[derive(Clone, Debug, Deserialize)]
 struct AuthProvider {
@@ -1176,6 +1190,9 @@ struct XdDesktop {
     workspace_defaults: Option<WorkspaceDefaults>,
     diff_panel: Option<DiffPanel>,
     terminal_panel: Option<TerminalPanel>,
+    browser_panes: HashMap<String, Entity<BrowserPane>>,
+    browser_drag: Option<(f32, u16)>,
+    browser_restore_focus: bool,
     terminal_runtime: SessionRuntime,
     terminal_panel_cache: HashMap<(ChatEndpoint, String), TerminalPanel>,
     terminal_activity_by_tab: HashMap<(ChatEndpoint, String, String), bool>,
@@ -1215,6 +1232,38 @@ struct XdDesktop {
 
 impl XdDesktop {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let browser_window = window.window_handle();
+        let desktop = cx.weak_entity();
+        let app: &mut App = cx;
+        // Link clicks can arrive without a focused GPUI element, including
+        // while the native browser owns focus. Route them by their window.
+        app.on_action(move |action: &OpenBrowserUrl, cx| {
+            if action.window != browser_window || desktop.upgrade().is_none() {
+                cx.propagate();
+                return;
+            }
+            let desktop = desktop.clone();
+            let url = action.url.clone();
+            // Action dispatch already borrows the window; update after it ends.
+            cx.defer(move |cx| {
+                let _ = browser_window.update(cx, |_, window, cx| {
+                    let _ = desktop.update(cx, |desktop, cx| {
+                        desktop.open_browser_url(&url, window, cx);
+                    });
+                });
+            });
+        });
+        let desktop = cx.weak_entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = desktop.update(cx, |desktop, cx| {
+                // Rendered frames can retain the native child after the view
+                // entity is released. Dispose it while its parent still exists.
+                for pane in desktop.browser_panes.values() {
+                    pane.update(cx, |pane, _| pane.shutdown());
+                }
+            });
+            true
+        });
         let composer_input = cx.new(FileEditor::composer);
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.composer_changed(text.clone(), cx),
@@ -1413,7 +1462,12 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let mut settings = AppSettings::load();
+        // Window tests must not inherit settings written by another fixture.
+        let mut settings = if cfg!(test) {
+            AppSettings::default()
+        } else {
+            AppSettings::load()
+        };
         let source_build_input =
             cx.new(|cx| ComposerInput::new(cx, "main, #128, GitHub URL, or commit SHA…"));
         cx.subscribe(&source_build_input, |this, _, event, cx| match event {
@@ -1592,6 +1646,9 @@ impl XdDesktop {
             workspace_defaults: None,
             diff_panel: None,
             terminal_panel: None,
+            browser_panes: HashMap::new(),
+            browser_drag: None,
+            browser_restore_focus: false,
             terminal_runtime,
             terminal_panel_cache: HashMap::new(),
             terminal_activity_by_tab: HashMap::new(),
@@ -5506,6 +5563,120 @@ impl XdDesktop {
         connection_state_key(self.active_endpoint, remote.as_deref())
     }
 
+    fn selected_minimal_project_id(&self) -> Option<String> {
+        let requested = match &self.minimal_route {
+            MinimalRoute::Projects { project_id } | MinimalRoute::Sessions { project_id } => {
+                project_id.as_deref()
+            }
+            MinimalRoute::Cli { project_id, .. } => Some(project_id.as_str()),
+            MinimalRoute::Terminal => return None,
+        };
+        requested
+            .filter(|id| self.model.folders.iter().any(|folder| folder.id == *id))
+            .map(str::to_owned)
+            .or_else(|| self.model.folders.first().map(|folder| folder.id.clone()))
+    }
+
+    fn browser_scope_key(&self) -> String {
+        let connection = self.current_connection_key();
+        match self.selected_minimal_project_id() {
+            Some(project) => format!("{connection}/project/{project}"),
+            None => format!("{connection}/browser"),
+        }
+    }
+
+    fn close_browser(&mut self, cx: &mut Context<Self>) {
+        self.settings.browser_open = false;
+        self.browser_drag = None;
+        self.browser_restore_focus = true;
+        for pane in self.browser_panes.values() {
+            pane.update(cx, |pane, _| pane.set_visible(false));
+        }
+        let _ = self.settings.save();
+        cx.notify();
+    }
+
+    fn toggle_browser(&mut self, cx: &mut Context<Self>) {
+        if self.settings.browser_open {
+            self.close_browser(cx);
+        } else {
+            self.settings.browser_open = true;
+            let _ = self.settings.save();
+            cx.notify();
+        }
+    }
+
+    fn open_browser_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.browser_open = true;
+        self.browser_restore_focus = false;
+        if let Some(pane) = self.sync_browser_pane(window, cx) {
+            pane.update(cx, |pane, cx| pane.navigate(url, cx));
+        }
+        let _ = self.settings.save();
+        cx.notify();
+    }
+
+    fn sync_browser_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Entity<BrowserPane>> {
+        let key = self.browser_scope_key();
+        let visible = self.settings.browser_open
+            && !self.minimal_popup_is_open()
+            && self.browser_drag.is_none();
+        for (scope, pane) in &self.browser_panes {
+            pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
+        }
+        if !self.settings.browser_open {
+            return None;
+        }
+        let colors = self.settings.theme.colors();
+        let pane = if let Some(pane) = self.browser_panes.get(&key) {
+            pane.clone()
+        } else {
+            let initial_url = self.settings.browser_urls.get(&key).cloned();
+            let pane = cx.new(|cx| BrowserPane::new(initial_url, colors, window, cx));
+            let scope = key.clone();
+            cx.subscribe(&pane, move |this, _, event, cx| match event {
+                BrowserEvent::Navigated(url) => {
+                    if this.settings.browser_urls.get(&scope) != Some(url) {
+                        this.settings
+                            .browser_urls
+                            .insert(scope.clone(), url.clone());
+                        let _ = this.settings.save();
+                    }
+                }
+                BrowserEvent::Close => this.close_browser(cx),
+            })
+            .detach();
+            self.browser_panes.insert(key, pane.clone());
+            pane
+        };
+        pane.update(cx, |pane, cx| {
+            pane.set_colors(colors, cx);
+            pane.set_visible(visible);
+        });
+        Some(pane)
+    }
+
+    fn browser_compacts_sidebar(&self, window: &Window) -> bool {
+        self.settings.browser_open
+            && f32::from(window.viewport_size().width)
+                - browser_pane_width(
+                    self.settings.browser_width,
+                    f32::from(window.viewport_size().width),
+                )
+                < 640.0
+    }
+
+    fn finish_browser_resize(&mut self, cx: &mut Context<Self>) {
+        if self.browser_drag.take().is_some() {
+            let _ = self.settings.save();
+            cx.notify();
+        }
+    }
+
     fn cached_last_chat(&self) -> Option<String> {
         let key = self.current_connection_key();
         self.settings.last_chats.get(&key).cloned().or_else(|| {
@@ -8158,9 +8329,15 @@ impl XdDesktop {
                     output_layout,
                     output,
                     ranges,
-                    move |index, _, cx| {
+                    move |index, window, cx| {
                         if let Some(url) = urls.get(index) {
-                            cx.open_url(url);
+                            window.dispatch_action(
+                                Box::new(OpenBrowserUrl {
+                                    url: url.clone(),
+                                    window: window.window_handle(),
+                                }),
+                                cx,
+                            );
                         }
                     },
                 )
@@ -8823,6 +9000,32 @@ impl XdDesktop {
                     )
                     .child(
                         div()
+                            .id("minimal-browser-toggle")
+                            .h(px(34.0))
+                            .px_3()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .bg(rgb(if self.settings.browser_open {
+                                colors.selected_surface
+                            } else {
+                                colors.surface
+                            }))
+                            .text_sm()
+                            .text_color(rgb(if self.settings.browser_open {
+                                colors.accent
+                            } else {
+                                colors.muted
+                            }))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx)))
+                            .child("Browser"),
+                    )
+                    .child(
+                        div()
                             .id("minimal-runtime")
                             .h(px(34.0))
                             .px_3()
@@ -9387,19 +9590,11 @@ impl XdDesktop {
     fn render_minimal_home(
         &mut self,
         colors: ThemeColors,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let projects = project_cards(&self.model.folders, &self.model.chats);
-        let requested_project_id = match &self.minimal_route {
-            MinimalRoute::Projects { project_id } => project_id.as_ref(),
-            MinimalRoute::Sessions { project_id } => project_id.as_ref(),
-            MinimalRoute::Terminal => None,
-            MinimalRoute::Cli { project_id, .. } => Some(project_id),
-        };
-        let selected_project_id = requested_project_id
-            .filter(|selected| projects.iter().any(|project| &project.id == *selected))
-            .cloned()
-            .or_else(|| projects.first().map(|project| project.id.clone()));
+        let selected_project_id = self.selected_minimal_project_id();
         let selected_project = selected_project_id
             .as_deref()
             .and_then(|selected| projects.iter().find(|project| project.id == selected));
@@ -9857,10 +10052,85 @@ impl XdDesktop {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(project_sidebar)
+                    .when(!self.browser_compacts_sidebar(window), |row| {
+                        row.child(project_sidebar)
+                    })
                     .child(project_content),
             )
             .into_any_element()
+    }
+
+    fn render_native_inline(
+        content: &markdown::InlineText,
+        colors: ThemeColors,
+        index: usize,
+    ) -> gpui::AnyElement {
+        let highlights = content.spans.iter().map(|span| {
+            let style = match span.kind {
+                markdown::InlineKind::Strong => HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    ..Default::default()
+                },
+                markdown::InlineKind::Emphasis => HighlightStyle {
+                    font_style: Some(gpui::FontStyle::Italic),
+                    ..Default::default()
+                },
+                markdown::InlineKind::StrongEmphasis => HighlightStyle {
+                    font_weight: Some(FontWeight::BOLD),
+                    font_style: Some(gpui::FontStyle::Italic),
+                    ..Default::default()
+                },
+                markdown::InlineKind::Code => HighlightStyle {
+                    background_color: Some(rgb(colors.surface_high).into()),
+                    ..Default::default()
+                },
+                markdown::InlineKind::Link => HighlightStyle {
+                    color: Some(rgb(colors.accent).into()),
+                    underline: Some(gpui::UnderlineStyle {
+                        thickness: px(1.0),
+                        color: None,
+                        wavy: false,
+                    }),
+                    ..Default::default()
+                },
+            };
+            (span.range.clone(), style)
+        });
+        let value: SharedString = content.text.clone().into();
+        let text = StyledText::new(value.clone()).with_highlights(highlights);
+        let layout = text.layout().clone();
+        let document = scoped_element_id(&format!("native-inline:{}", content.text), index);
+        let (ranges, urls) = content
+            .spans
+            .iter()
+            .filter(|span| span.kind == markdown::InlineKind::Link)
+            .filter_map(|span| {
+                span.url
+                    .as_ref()
+                    .map(|url| (span.range.clone(), url.clone()))
+            })
+            .unzip::<_, _, Vec<_>, Vec<_>>();
+        selectable_links_in_document(
+            document,
+            document,
+            value,
+            0..content.text.len(),
+            layout,
+            text,
+            ranges,
+            move |link, window, cx| {
+                if let Some(url) = urls.get(link) {
+                    window.dispatch_action(
+                        Box::new(OpenBrowserUrl {
+                            url: url.clone(),
+                            window: window.window_handle(),
+                        }),
+                        cx,
+                    );
+                }
+            },
+        )
+        .into_any_element()
     }
 
     fn render_native_markdown_block(
@@ -9878,14 +10148,14 @@ impl XdDesktop {
                 }))
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(colors.text))
-                .child(content.text.clone())
+                .child(Self::render_native_inline(content, colors, index))
                 .into_any_element(),
             markdown::Block::Paragraph(content) => div()
                 .id(("native-paragraph", index))
                 .text_sm()
                 .line_height(px(22.0))
                 .text_color(rgb(colors.text))
-                .child(content.text.clone())
+                .child(Self::render_native_inline(content, colors, index))
                 .into_any_element(),
             markdown::Block::Quote(content) => div()
                 .id(("native-quote", index))
@@ -9895,7 +10165,7 @@ impl XdDesktop {
                 .text_sm()
                 .line_height(px(22.0))
                 .text_color(rgb(colors.muted))
-                .child(content.text.clone())
+                .child(Self::render_native_inline(content, colors, index))
                 .into_any_element(),
             markdown::Block::ListItem {
                 number,
@@ -9911,7 +10181,12 @@ impl XdDesktop {
                 .line_height(px(22.0))
                 .text_color(rgb(colors.text))
                 .child(number.map_or_else(|| "•".into(), |number| format!("{number}.")))
-                .child(content.text.clone())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(Self::render_native_inline(content, colors, index)),
+                )
                 .into_any_element(),
             markdown::Block::Rule => div()
                 .id(("native-rule", index))
@@ -9964,8 +10239,11 @@ impl XdDesktop {
                     blocks
                         .iter()
                         .enumerate()
-                        .map(|(index, block)| {
-                            Self::render_native_markdown_block(colors, block, index)
+                        .map(|(child_index, block)| {
+                            let child_index =
+                                scoped_element_id(&format!("native-analysis:{index}"), child_index)
+                                    as usize;
+                            Self::render_native_markdown_block(colors, block, child_index)
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -10103,6 +10381,7 @@ impl XdDesktop {
             message.label.clone().unwrap_or_else(|| "Assistant".into())
         };
         let markdown = message.markdown();
+        let block_scope = format!("native-message:{}", message.id.unwrap_or(index as i64));
         let card = div()
             .min_w_0()
             .max_w(px(if user { 720.0 } else { 860.0 }))
@@ -10132,8 +10411,12 @@ impl XdDesktop {
                         .blocks
                         .iter()
                         .enumerate()
-                        .map(|(index, block)| {
-                            Self::render_native_markdown_block(colors, block, index)
+                        .map(|(block_index, block)| {
+                            Self::render_native_markdown_block(
+                                colors,
+                                block,
+                                scoped_element_id(&block_scope, block_index) as usize,
+                            )
                         })
                         .collect::<Vec<_>>(),
                 ),
@@ -10466,16 +10749,23 @@ impl XdDesktop {
             .bg(rgb(colors.background))
             .child(toolbar)
             .child(
-                div().flex_1().min_h_0().flex().child(board).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .min_h_0()
-                        .p_4()
-                        .bg(rgb(colors.background))
-                        .child(content),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .when(!self.browser_compacts_sidebar(window), |row| {
+                        row.child(board)
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .min_h_0()
+                            .p_4()
+                            .bg(rgb(colors.background))
+                            .child(content),
+                    ),
             )
             .into_any_element()
     }
@@ -10499,6 +10789,7 @@ impl XdDesktop {
     fn render_minimal_empty_sessions(
         &mut self,
         colors: ThemeColors,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let toolbar = self.render_minimal_context_toolbar(colors, cx);
@@ -10512,18 +10803,25 @@ impl XdDesktop {
             .bg(rgb(colors.background))
             .child(toolbar)
             .child(
-                div().flex_1().min_h_0().flex().child(board).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child("No session selected."),
-                ),
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .when(!self.browser_compacts_sidebar(window), |row| {
+                        row.child(board)
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(rgb(colors.muted))
+                            .child("No session selected."),
+                    ),
             )
             .into_any_element()
     }
@@ -10538,10 +10836,33 @@ impl XdDesktop {
         let minimal_popup_open = self.minimal_popup_is_open();
         let minimal_popup_focus = self.minimal_popup_focus.clone();
         let colors = self.settings.theme.colors();
+        if self.browser_restore_focus {
+            self.browser_restore_focus = false;
+            if self.terminal_panel.is_some() {
+                let native_chat = self
+                    .terminal_panel
+                    .as_ref()
+                    .and_then(TerminalPanel::selected)
+                    .is_some_and(|tab| tab.native_chat_id.is_some());
+                let focus = if native_chat {
+                    self.composer_input.read(cx).focus_handle(cx)
+                } else {
+                    self.terminal_input.read(cx).focus_handle(cx)
+                };
+                window.focus(&focus);
+            } else {
+                window.blur();
+            }
+        }
+        let browser_pane = self.sync_browser_pane(window, cx);
+        let browser_width = browser_pane_width(
+            self.settings.browser_width,
+            f32::from(window.viewport_size().width),
+        );
         let route = self.minimal_route.clone();
         let content = match route {
-            MinimalRoute::Projects { .. } => self.render_minimal_home(colors, cx),
-            MinimalRoute::Sessions { .. } => self.render_minimal_empty_sessions(colors, cx),
+            MinimalRoute::Projects { .. } => self.render_minimal_home(colors, window, cx),
+            MinimalRoute::Sessions { .. } => self.render_minimal_empty_sessions(colors, window, cx),
             MinimalRoute::Terminal => self.render_minimal_standalone_terminal(colors, window, cx),
             MinimalRoute::Cli {
                 project_id,
@@ -11783,6 +12104,7 @@ impl XdDesktop {
         });
 
         div()
+            .id("desktop-root")
             .size_full()
             .relative()
             .flex()
@@ -11790,6 +12112,37 @@ impl XdDesktop {
             .key_context("XdDesktop")
             .bg(rgb(colors.background))
             .font_family(UI_FONT)
+            .on_mouse_move(
+                cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if let Some((start_x, start_width)) = this.browser_drag {
+                        if event.dragging() {
+                            let requested =
+                                (f32::from(start_width) + start_x - f32::from(event.position.x))
+                                    .round()
+                                    .clamp(280.0, 1000.0) as u16;
+                            this.settings.browser_width = browser_pane_width(
+                                requested,
+                                f32::from(window.viewport_size().width),
+                            ) as u16;
+                            cx.notify();
+                        } else {
+                            this.finish_browser_resize(cx);
+                        }
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.finish_browser_resize(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.finish_browser_resize(cx);
+                }),
+            )
             .on_action(cx.listener(|_, _: &CopyRenderedSelection, _, cx| {
                 if let Some(text) = TextSelection::selected(cx) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -11822,7 +12175,50 @@ impl XdDesktop {
                 }
             }))
             .child(product_nav)
-            .child(content)
+            .child(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(div().flex_1().min_w_0().min_h_0().h_full().child(content))
+                    .when_some(browser_pane, |row, pane| {
+                        row.child(
+                            div()
+                                .id("browser-resize")
+                                .w(px(6.0))
+                                .h_full()
+                                .flex_none()
+                                .bg(rgb(colors.border))
+                                .cursor(CursorStyle::ResizeLeftRight)
+                                .hover(|style| style.bg(rgb(colors.accent)))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        this.browser_drag = Some((
+                                            f32::from(event.position.x),
+                                            browser_width as u16,
+                                        ));
+                                        for pane in this.browser_panes.values() {
+                                            pane.update(cx, |pane, _| pane.set_visible(false));
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("integrated-browser")
+                                .w(px(browser_width))
+                                .h_full()
+                                .min_h_0()
+                                .flex_none()
+                                .overflow_hidden()
+                                .child(pane),
+                        )
+                    }),
+            )
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
@@ -12449,6 +12845,61 @@ mod tests {
         install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
     }
 
+    #[gpui::test]
+    fn clicking_a_native_markdown_link_dispatches_the_integrated_browser_action(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        struct MarkdownLink {
+            content: markdown::InlineText,
+            opened_url: Option<String>,
+        }
+
+        impl Render for MarkdownLink {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .text_size(px(14.0))
+                    .line_height(px(22.0))
+                    .child(XdDesktop::render_native_inline(
+                        &self.content,
+                        ThemePreset::default().colors(),
+                        0,
+                    ))
+            }
+        }
+
+        let document = markdown::parse("[Preview](http://localhost:3000)");
+        let markdown::Block::Paragraph(content) = document.blocks.into_iter().next().unwrap()
+        else {
+            panic!("the preview link must parse as a paragraph");
+        };
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.weak_entity();
+            let target = window.window_handle();
+            let app: &mut App = cx;
+            app.on_action(move |action: &OpenBrowserUrl, cx| {
+                if action.window != target {
+                    cx.propagate();
+                    return;
+                }
+                let _ = view.update(cx, |view: &mut MarkdownLink, cx| {
+                    view.opened_url = Some(action.url.clone());
+                    cx.notify();
+                });
+            });
+            MarkdownLink {
+                content,
+                opened_url: None,
+            }
+        });
+        cx.run_until_parked();
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+
+        let opened_url = cx.update(|_, cx| view.read(cx).opened_url.clone());
+        assert_eq!(opened_url.as_deref(), Some("http://localhost:3000"));
+        assert!(cx.opened_url().is_none());
+    }
+
     #[test]
     fn working_dots_cycle_from_dim_to_three_lit() {
         assert_eq!(working_dot_alphas(0), [0x4d, 0x4d, 0x4d]);
@@ -12956,6 +13407,128 @@ mod tests {
         assert!(!overlay.contains("Pairing code"));
         assert!(!overlay.contains("remote_port_input"));
         assert!(production.contains("settings.remote_ssh_command = Some"));
+    }
+
+    #[gpui::test]
+    fn opening_a_link_opens_the_project_browser_and_reuses_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.settings.browser_open = false;
+            desktop.model.folders = vec![Folder {
+                id: "link-project".into(),
+                name: "Links".into(),
+                parent: None,
+            }];
+            desktop.minimal_route = MinimalRoute::Projects {
+                project_id: Some("link-project".into()),
+            };
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let target = cx.update(|window, _| window.window_handle());
+        cx.dispatch_action(OpenBrowserUrl {
+            url: "http://localhost:3000/first".into(),
+            window: target,
+        });
+        let first = desktop.update(cx, |desktop, cx| {
+            assert!(desktop.settings.browser_open);
+            let pane = desktop.browser_panes["local/project/link-project"].clone();
+            assert_eq!(
+                pane.read(cx).current_url().as_deref(),
+                Some("http://localhost:3000/first")
+            );
+            pane
+        });
+        assert!(cx.opened_url().is_none());
+
+        cx.dispatch_action(OpenBrowserUrl {
+            url: "http://localhost:3000/second".into(),
+            window: target,
+        });
+        desktop.update(cx, |desktop, cx| {
+            let second = &desktop.browser_panes["local/project/link-project"];
+            assert_eq!(first.entity_id(), second.entity_id());
+            assert_eq!(
+                second.read(cx).current_url().as_deref(),
+                Some("http://localhost:3000/second")
+            );
+        });
+        assert!(cx.opened_url().is_none());
+    }
+
+    #[test]
+    fn browser_width_keeps_room_for_the_session_at_minimum_window_size() {
+        for requested in [0, 280, 460, u16::MAX] {
+            let width = browser_pane_width(requested, 760.0);
+            assert!(width >= 280.0);
+            assert!(760.0 - width - 6.0 >= 420.0);
+        }
+        assert_eq!(browser_pane_width(460, 1180.0), 460.0);
+        assert_eq!(browser_pane_width(u16::MAX, 3000.0), 1000.0);
+    }
+
+    #[gpui::test]
+    fn browser_panes_preserve_projects_and_hide_for_popups(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.model.folders = vec![
+                Folder {
+                    id: "a".into(),
+                    name: "A".into(),
+                    parent: None,
+                },
+                Folder {
+                    id: "b".into(),
+                    name: "B".into(),
+                    parent: None,
+                },
+            ];
+            desktop.minimal_route = MinimalRoute::Projects { project_id: None };
+            desktop.settings.browser_open = true;
+            let a_key = desktop.browser_scope_key();
+            assert_eq!(a_key, "local/project/a");
+            let a = desktop.sync_browser_pane(window, cx).unwrap();
+            assert!(a.read(cx).is_visible());
+
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "b".into(),
+                chat_id: "chat-b".into(),
+                agent: AgentCli::Codex,
+            };
+            let b = desktop.sync_browser_pane(window, cx).unwrap();
+            assert_ne!(a.entity_id(), b.entity_id());
+            assert!(!a.read(cx).is_visible());
+            assert!(b.read(cx).is_visible());
+
+            desktop.minimal_route = MinimalRoute::Sessions {
+                project_id: Some("a".into()),
+            };
+            let restored = desktop.sync_browser_pane(window, cx).unwrap();
+            assert_eq!(a.entity_id(), restored.entity_id());
+            assert!(!b.read(cx).is_visible());
+
+            desktop.minimal_theme_open = true;
+            desktop.sync_browser_pane(window, cx);
+            assert!(!a.read(cx).is_visible());
+            desktop.minimal_theme_open = false;
+            desktop.browser_drag = Some((100.0, 460));
+            desktop.sync_browser_pane(window, cx);
+            assert!(!a.read(cx).is_visible());
+            desktop.browser_drag = None;
+
+            desktop.settings.remote_ssh_command = Some("ssh remote.example".into());
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            let remote = desktop.sync_browser_pane(window, cx).unwrap();
+            assert_ne!(a.entity_id(), remote.entity_id());
+            assert!(!a.read(cx).is_visible());
+            assert!(remote.read(cx).is_visible());
+
+            desktop.close_browser(cx);
+            assert!(desktop.sync_browser_pane(window, cx).is_none());
+            assert!(!remote.read(cx).is_visible());
+        });
     }
 
     #[gpui::test]
@@ -14723,7 +15296,7 @@ mod tests {
 
         assert!(terminal.contains("markdown::web_links("));
         assert!(terminal.contains("selectable_links_in_document("));
-        assert!(terminal.contains("cx.open_url(url)"));
+        assert!(terminal.contains("Box::new(OpenBrowserUrl"));
     }
 
     #[test]
@@ -15372,6 +15945,7 @@ fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> 
 }
 
 fn main() {
+    browser::configure_platform();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if arguments
         .iter()

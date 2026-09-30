@@ -338,6 +338,7 @@ impl HostHandle {
         mut command: ProcessCommand,
         identity: PathBuf,
     ) -> Result<(Self, Receiver<HostUpdate>, StartedHost), ConnectError> {
+        crate::session_runtime::restore_browser_environment(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| ConnectError::Start(error.to_string()))?;

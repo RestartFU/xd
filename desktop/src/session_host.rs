@@ -387,8 +387,10 @@ impl SessionHost {
                         .join("agent-sessions")
                         .join(format!("{session}.started"))
                 });
+                let mut status_command = Command::new(tmux);
+                crate::session_runtime::restore_browser_environment(&mut status_command);
                 if let Some(marker) = marker.as_ref()
-                    && Command::new(tmux)
+                    && status_command
                         .args(["-S"])
                         .arg(runtime.join("tmux.sock"))
                         .args(["has-session", "-t", &session])

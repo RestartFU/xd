@@ -569,7 +569,9 @@ impl SessionRuntime {
 }
 
 fn run_cleanup(spec: ProcessSpec) {
-    let mut child = match Command::new(spec.program)
+    let mut command = Command::new(spec.program);
+    restore_browser_environment(&mut command);
+    let mut child = match command
         .args(spec.arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -757,9 +759,41 @@ impl ActivityParser {
 }
 
 fn restore_host_environment(command: &mut CommandBuilder) {
-    for name in ["PATH", "LANG", "LC_ALL", "LOCPATH"] {
+    for name in ["PATH", "LANG", "LC_ALL", "LOCPATH"]
+        .into_iter()
+        .chain(BROWSER_ENVIRONMENT.iter().copied())
+    {
         let saved = format!("XD_HOST_{name}");
         if let Some(value) = std::env::var_os(&saved) {
+            if value.is_empty() {
+                command.env_remove(name);
+            } else {
+                command.env(name, value);
+            }
+        }
+    }
+}
+
+const BROWSER_ENVIRONMENT: &[&str] = &[
+    "WAYLAND_DISPLAY",
+    "GDK_BACKEND",
+    "XD_BROWSER_BUNDLE_ROOT",
+    "XD_BROWSER_RUNTIME_ROOT",
+    "WEBKIT_INJECTED_BUNDLE_PATH",
+    "GIO_MODULE_DIR",
+    "GSETTINGS_SCHEMA_DIR",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GTK_IM_MODULE_FILE",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "GST_PLUGIN_SCANNER_1_0",
+    "GST_REGISTRY_1_0",
+];
+
+/// Browser dependencies belong to the desktop and its WebKit children. Host
+/// services, SSH, terminals, and agent CLIs retain the user's toolkit settings.
+pub(crate) fn restore_browser_environment(command: &mut Command) {
+    for name in BROWSER_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(format!("XD_HOST_{name}")) {
             if value.is_empty() {
                 command.env_remove(name);
             } else {
