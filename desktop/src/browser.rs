@@ -21,6 +21,8 @@ use gpui::{
 use raw_window_handle::XlibWindowHandle;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle, WindowHandle};
 use url::Url;
+#[cfg(target_os = "linux")]
+use wry::WebViewExtUnix;
 use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 use xd_desktop::theme::ThemeColors;
 
@@ -386,8 +388,14 @@ impl BrowserPane {
         let tab = self.tabs[self.session.active_tab].entity.read(cx);
         if tab.url.is_none() {
             tab.address.read(cx).focus_handle(cx).focus(window);
-        } else if let Some(native) = &tab.display.native {
-            let _ = native.with_view(WebView::focus);
+        } else if tab.display.native_visible.get()
+            && let Some(native) = &tab.display.native
+        {
+            let _ = native.with_view(|view| {
+                #[cfg(target_os = "linux")]
+                focus_gtk_webview(&view.webview());
+                view.focus()
+            });
         }
     }
 }
@@ -605,6 +613,25 @@ impl BrowserTab {
                 pane.navigate(&url, cx);
             }
             _ => {}
+        })
+        .detach();
+        #[cfg(target_os = "linux")]
+        cx.observe_window_activation(window, |tab, window, _| {
+            if !window.is_window_active()
+                && tab.display.native_visible.get()
+                && let Some(native) = &tab.display.native
+            {
+                let _ = native.with_view(|view| {
+                    // GPUI treats FocusOut(Inferior) as deactivation too.
+                    // Keep page focus when X moved into this native child.
+                    let webview = view.webview();
+                    if !gtk_browser_has_keyboard_focus(&webview)
+                        && let Some(window) = gtk_browser_toplevel(&webview)
+                    {
+                        set_gtk_window_focus(&window, false);
+                    }
+                });
+            }
         })
         .detach();
         cx.spawn(async move |this, cx| {
@@ -1060,6 +1087,10 @@ impl TabDisplay {
         if self.native_visible.replace(shown) == shown {
             return;
         }
+        #[cfg(target_os = "linux")]
+        if !shown {
+            let _ = native.with_view(|view| blur_gtk_webview(&view.webview()));
+        }
         self.bounds.set(None);
         #[cfg(target_os = "linux")]
         VISIBLE_GTK_BROWSERS.with(|count| {
@@ -1209,12 +1240,14 @@ impl gpui::Element for NativeSurface {
         window: &mut Window,
         _: &mut App,
     ) {
-        #[cfg(not(target_os = "linux"))]
         let native = self.native.clone();
         window.on_mouse_event(move |event: &MouseDownEvent, phase, _window, _| {
             if phase == DispatchPhase::Capture && !bounds.contains(&event.position) {
                 #[cfg(target_os = "linux")]
-                _window.activate_window();
+                {
+                    let _ = native.with_view(|view| blur_gtk_webview(&view.webview()));
+                    _window.activate_window();
+                }
                 #[cfg(not(target_os = "linux"))]
                 let _ = native.with_view(WebView::focus_parent);
             }
@@ -1326,9 +1359,14 @@ fn create_native(
     #[cfg(target_os = "linux")]
     {
         register_gtk_browser_window(&native);
+        use gtk::prelude::WidgetExt;
         use webkit2gtk::WebViewExt;
         use wry::WebViewExtUnix;
         let webview = native.webview();
+        webview.connect_button_press_event(|webview, _| {
+            focus_gtk_webview(webview);
+            gtk::glib::Propagation::Proceed
+        });
         webview.connect_load_failed(move |_, _, url, error| {
             if !error.matches(webkit2gtk::NetworkError::Cancelled) {
                 events.send(NativeEvent::Error(format!("Could not load {url}: {error}")));
@@ -1359,9 +1397,123 @@ fn register_gtk_browser_window(view: &WebView) -> Option<gtk::Window> {
             // which lets WebKit display the caret in a focused page input.
             window.register_window(&gdk_window);
         }
-        gdk_window.set_events(gdk_window.events() | gtk::gdk::EventMask::FOCUS_CHANGE_MASK);
+        gdk_window.set_events(
+            gdk_window.events()
+                | gtk::gdk::EventMask::FOCUS_CHANGE_MASK
+                | gtk::gdk::EventMask::KEY_PRESS_MASK
+                | gtk::gdk::EventMask::KEY_RELEASE_MASK,
+        );
     }
     Some(window)
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn gdk_x11_window_get_xid(window: *mut gtk::gdk::ffi::GdkWindow) -> std::ffi::c_ulong;
+}
+
+#[cfg(target_os = "linux")]
+fn gtk_browser_toplevel(webview: &webkit2gtk::WebView) -> Option<gtk::Window> {
+    use gtk::prelude::*;
+    webview.toplevel()?.downcast::<gtk::Window>().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn set_gtk_window_focus(window: &gtk::Window, focused: bool) {
+    use gtk::prelude::*;
+    if window.has_toplevel_focus() == focused && window.is_active() == focused {
+        return;
+    }
+    let Some(gdk_window) = window.window() else {
+        return;
+    };
+    // GDK does not translate foreign-window focus into GtkWindow state.
+    // Deliver the standard GTK focus event on interaction, rather than
+    // leaving WebKit's document/caret unfocused while keyboard input works.
+    // SAFETY: this event is allocated and freed here on GTK's main thread.
+    // It owns one reference to the live GDK window; GTK handles it synchronously.
+    unsafe {
+        let event = gtk::gdk::ffi::gdk_event_new(gtk::gdk::ffi::GDK_FOCUS_CHANGE);
+        let focus = event.cast::<gtk::gdk::ffi::GdkEventFocus>();
+        (*focus).window = gtk::glib::gobject_ffi::g_object_ref(gdk_window.as_ptr().cast()).cast();
+        (*focus).send_event = 1;
+        (*focus).in_ = i16::from(focused);
+        gtk::ffi::gtk_widget_event(window.as_ptr().cast(), event);
+        gtk::gdk::ffi::gdk_event_free(event);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn focus_gtk_webview(webview: &webkit2gtk::WebView) {
+    use gtk::prelude::*;
+    use x11rb::protocol::xproto::{ConnectionExt, InputFocus};
+    if let Some(window) = gtk_browser_toplevel(webview) {
+        // Complete GTK's pending map before focusing its foreign X11 child.
+        // GdkWindow::focus routes through the WM on EWMH desktops, where an
+        // unmanaged child may be ignored. Set the keyboard target directly.
+        window.display().sync();
+        let Some((connection, child, focused)) = gtk_browser_keyboard_focus(webview) else {
+            return;
+        };
+        if !focused {
+            let Ok(request) = connection.set_input_focus(InputFocus::PARENT, child, 0u32) else {
+                return;
+            };
+            if request.check().is_err() {
+                return;
+            }
+        }
+        set_gtk_window_focus(&window, true);
+        webview.grab_focus();
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn gtk_browser_keyboard_focus(
+    webview: &webkit2gtk::WebView,
+) -> Option<(x11rb::rust_connection::RustConnection, u32, bool)> {
+    use gtk::prelude::*;
+    use x11rb::protocol::xproto::ConnectionExt;
+    let window = gtk_browser_toplevel(webview)?.window()?;
+    // SAFETY: borrow the live X11 GDK window on its owning main thread.
+    let child = u32::try_from(unsafe { gdk_x11_window_get_xid(window.as_ptr()) }).ok()?;
+    let (connection, _) = x11rb::connect(None).ok()?;
+    let mut focus = connection.get_input_focus().ok()?.reply().ok()?.focus;
+    for _ in 0..8 {
+        if focus == child {
+            return Some((connection, child, true));
+        }
+        if focus <= 1 {
+            break;
+        }
+        focus = connection.query_tree(focus).ok()?.reply().ok()?.parent;
+    }
+    Some((connection, child, false))
+}
+
+#[cfg(target_os = "linux")]
+fn gtk_browser_has_keyboard_focus(webview: &webkit2gtk::WebView) -> bool {
+    gtk_browser_keyboard_focus(webview).is_some_and(|(_, _, focused)| focused)
+}
+
+#[cfg(target_os = "linux")]
+fn blur_gtk_webview(webview: &webkit2gtk::WebView) {
+    use x11rb::{
+        connection::Connection,
+        protocol::xproto::{ConnectionExt, InputFocus},
+    };
+    if let Some(window) = gtk_browser_toplevel(webview) {
+        set_gtk_window_focus(&window, false);
+    }
+    // Restore GPUI's keyboard target only while this page owns it. Hiding an
+    // inactive page must not take focus from another application.
+    if let Some((connection, child, true)) = gtk_browser_keyboard_focus(webview)
+        && let Ok(reply) = connection.query_tree(child)
+        && let Ok(tree) = reply.reply()
+    {
+        let _ = connection.set_input_focus(InputFocus::PARENT, tree.parent, 0u32);
+        let _ = connection.flush();
+    }
 }
 
 #[cfg(target_os = "linux")]
