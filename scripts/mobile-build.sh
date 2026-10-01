@@ -7,7 +7,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-./scripts/test-mobile-native-chat.sh
+./scripts/test-mobile-session-routing.sh
 target=apk
 artifact=xd-mobile-debug.apk
 cache_options=()

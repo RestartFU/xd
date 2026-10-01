@@ -37,7 +37,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,9 +59,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
-import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
@@ -117,7 +114,6 @@ internal fun MinimalMobileApp(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
-    val experimentMode by settings.experimentMode.collectAsStateWithLifecycle()
     var tabs by rememberSaveable(stateSaver = SessionTabsSaver) {
         mutableStateOf(emptyList())
     }
@@ -195,38 +191,21 @@ internal fun MinimalMobileApp(
         )
 
         mobileDestination == MobileDestination.SESSIONS && active != null -> {
-            key(experimentMode, active.chatId) {
-                if (experimentMode) {
-                    MinimalNativeSession(
-                        model = model,
-                        settings = settings,
-                        link = link,
-                        destination = active,
-                        tabs = tabs,
-                        selectTab = { activeChatId = it },
-                        closeTab = closeTab,
-                        addTab = {
-                            createTabFor = active.projectId to active.projectName
-                        },
-                        onProjects = showProjects,
-                        onTerminal = showTerminal,
-                    )
-                } else {
-                    MinimalDirectSession(
-                        model = model,
-                        settings = settings,
-                        link = link,
-                        destination = active,
-                        tabs = tabs,
-                        selectTab = { activeChatId = it },
-                        closeTab = closeTab,
-                        addTab = {
-                            createTabFor = active.projectId to active.projectName
-                        },
-                        onProjects = showProjects,
-                        onTerminal = showTerminal,
-                    )
-                }
+            key(active.chatId) {
+                MinimalDirectSession(
+                    model = model,
+                    settings = settings,
+                    link = link,
+                    destination = active,
+                    tabs = tabs,
+                    selectTab = { activeChatId = it },
+                    closeTab = closeTab,
+                    addTab = {
+                        createTabFor = active.projectId to active.projectName
+                    },
+                    onProjects = showProjects,
+                    onTerminal = showTerminal,
+                )
             }
         }
 
@@ -405,71 +384,6 @@ private fun MinimalProjectsHome(
             },
         )
     }
-    if (settingsOpen) {
-        MinimalSettingsDialog(
-            settings = settings,
-            onDismiss = { settingsOpen = false },
-            onDisconnect = {
-                settingsOpen = false
-                model.forget()
-            },
-        )
-    }
-}
-
-@Composable
-private fun MinimalNativeSession(
-    model: MainViewModel,
-    settings: MobileSettings,
-    link: Link,
-    destination: SessionDestination,
-    tabs: List<SessionDestination>,
-    selectTab: (String) -> Unit,
-    closeTab: (String) -> Unit,
-    addTab: () -> Unit,
-    onProjects: () -> Unit,
-    onTerminal: () -> Unit,
-) {
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
-    val chatOwner = remember(destination.chatId) { NativeChatOwner() }
-    DisposableEffect(chatOwner) {
-        onDispose { chatOwner.viewModelStore.clear() }
-    }
-    CompositionLocalProvider(LocalViewModelStoreOwner provides chatOwner) {
-        val chat: ChatViewModel = viewModel(
-            key = "chat-${destination.chatId}",
-            factory = ChatViewModel.Factory(
-                client = model.client,
-                chatId = destination.chatId,
-            ),
-        )
-        ChatScreen(
-            model = chat,
-            settings = settings,
-            goBack = onProjects,
-            productHeader = {
-                ProductHeader(
-                    link = link,
-                    active = MobileDestination.SESSIONS,
-                    onProjects = onProjects,
-                    onSessions = {},
-                    onTerminal = onTerminal,
-                    onAdd = addTab,
-                    onSettings = { settingsOpen = true },
-                )
-            },
-            sessionTabs = {
-                SessionTabStrip(
-                    tabs = tabs,
-                    selectedChatId = destination.chatId,
-                    selectTab = selectTab,
-                    closeTab = closeTab,
-                    addTab = addTab,
-                )
-            },
-        )
-    }
-
     if (settingsOpen) {
         MinimalSettingsDialog(
             settings = settings,
@@ -1076,7 +990,6 @@ private fun MinimalSettingsDialog(
 ) {
     val theme by settings.theme.collectAsStateWithLifecycle()
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
-    val experimentMode by settings.experimentMode.collectAsStateWithLifecycle()
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },
@@ -1107,21 +1020,6 @@ private fun MinimalSettingsDialog(
                         Text(preset.label, modifier = Modifier.weight(1f))
                         if (theme == preset) Text("✓", color = MaterialTheme.colorScheme.primary)
                     }
-                }
-                HorizontalDivider()
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Experiment mode", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "Use synchronized native chat instead of the direct agent terminal.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    Switch(
-                        checked = experimentMode,
-                        onCheckedChange = settings::setExperimentMode,
-                    )
                 }
                 HorizontalDivider()
                 Row(verticalAlignment = Alignment.CenterVertically) {

@@ -20,7 +20,11 @@ A local-first desktop workspace for user-installed Codex, Claude Code, JCode, an
 - Persistent agent and shell sessions backed by tmux.
 - Local or remote over your existing SSH command, with no listening daemon.
 - Projects, Git worktrees, branches, and pull requests in one workspace.
+- An integrated browser with separate tabs for each chat and shared site data.
 - Uses your installed CLI tools, authentication, and configuration.
+
+Each chat remembers its browser tabs and whether the pane is open. Use the
+Browser button to show it, then `+` in its tab bar to open another tab.
 
 ## Install
 

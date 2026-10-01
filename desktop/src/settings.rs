@@ -9,6 +9,15 @@ use std::{
 use serde::{Deserialize, Serialize};
 pub use xd_desktop::theme::ThemePreset;
 
+use crate::browser::BrowserSession;
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(default)]
+pub struct BrowserState {
+    pub open: bool,
+    pub session: BrowserSession,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccentPreset {
@@ -49,7 +58,6 @@ pub struct AppSettings {
     pub accent: AccentPreset,
     pub notifications: bool,
     pub speech: bool,
-    pub experiment_mode: bool,
     pub allow_all_permissions: bool,
     pub git_writer: GitWriter,
     pub git_writer_model: Option<String>,
@@ -74,10 +82,11 @@ pub struct AppSettings {
     pub sidebar_files_height: u16,
     pub diff_width: u16,
     pub terminal_height: u16,
-    pub browser_open: bool,
     pub browser_width: u16,
     /// Last browser address per connection and project.
     pub browser_urls: HashMap<String, String>,
+    /// Open browser tabs and their selection per connection and chat.
+    pub browser_sessions: HashMap<String, BrowserState>,
     pub window_width: u16,
     pub window_height: u16,
     pub window_maximized: bool,
@@ -93,7 +102,6 @@ impl Default for AppSettings {
             accent: AccentPreset::Blue,
             notifications: true,
             speech: false,
-            experiment_mode: false,
             allow_all_permissions: false,
             git_writer: GitWriter::Chat,
             git_writer_model: None,
@@ -111,9 +119,9 @@ impl Default for AppSettings {
             sidebar_files_height: 280,
             diff_width: 460,
             terminal_height: 320,
-            browser_open: false,
             browser_width: 460,
             browser_urls: HashMap::new(),
+            browser_sessions: HashMap::new(),
             window_width: 1180,
             window_height: 780,
             window_maximized: false,
@@ -272,7 +280,6 @@ mod tests {
             accent: AccentPreset::Purple,
             notifications: false,
             speech: true,
-            experiment_mode: true,
             allow_all_permissions: true,
             git_writer: GitWriter::Claude,
             git_writer_model: Some("claude-opus-5".into()),
@@ -305,12 +312,37 @@ mod tests {
             sidebar_files_height: 336,
             diff_width: 512,
             terminal_height: 280,
-            browser_open: true,
             browser_width: 540,
             browser_urls: HashMap::from([(
                 "local/project/folder-a".into(),
                 "http://localhost:3000/".into(),
             )]),
+            browser_sessions: HashMap::from([
+                (
+                    "local/chat/chat-restore".into(),
+                    BrowserState {
+                        open: true,
+                        session: BrowserSession {
+                            tabs: vec![
+                                Some("http://localhost:3000/".into()),
+                                Some("https://example.com/".into()),
+                                None,
+                            ],
+                            active_tab: 1,
+                        },
+                    },
+                ),
+                (
+                    "local/chat/chat-closed".into(),
+                    BrowserState {
+                        open: false,
+                        session: BrowserSession {
+                            tabs: vec![Some("https://example.com/closed".into())],
+                            active_tab: 0,
+                        },
+                    },
+                ),
+            ]),
             window_width: 1440,
             window_height: 900,
             window_maximized: true,
@@ -351,13 +383,17 @@ mod tests {
     }
 
     #[test]
-    fn experiment_mode_is_off_by_default_and_survives_serialization() {
-        let defaults = serde_json::to_value(AppSettings::default()).unwrap();
-        assert_eq!(defaults["experiment_mode"], false);
-
-        let enabled: AppSettings = serde_json::from_str(r#"{"experiment_mode":true}"#).unwrap();
-        let enabled = serde_json::to_value(enabled).unwrap();
-        assert_eq!(enabled["experiment_mode"], true);
+    fn removed_experiment_mode_is_ignored_in_existing_settings() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"experiment_mode":true,"allow_all_permissions":true}"#)
+                .unwrap();
+        assert!(settings.allow_all_permissions);
+        assert!(
+            serde_json::to_value(settings)
+                .unwrap()
+                .get("experiment_mode")
+                .is_none()
+        );
     }
 
     #[test]

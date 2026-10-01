@@ -15,7 +15,7 @@ use async_channel::Sender;
 use gpui::{
     App, Bounds, Context, DispatchPhase, ElementId, Entity, EventEmitter, Focusable,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, Pixels, Render,
-    Style, Timer, Window, div, prelude::*, px, relative, rgb,
+    ScrollHandle, Style, Timer, Window, div, prelude::*, px, relative, rgb,
 };
 #[cfg(target_os = "linux")]
 use raw_window_handle::XlibWindowHandle;
@@ -28,20 +28,101 @@ use crate::input::{ComposerEvent, ComposerInput};
 
 #[derive(Clone, Debug)]
 pub enum BrowserEvent {
-    Navigated(String),
     Close,
+    SessionChanged(BrowserSession),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BrowserSession {
+    pub tabs: Vec<Option<String>>,
+    pub active_tab: usize,
+}
+
+impl Default for BrowserSession {
+    fn default() -> Self {
+        Self {
+            tabs: vec![None],
+            active_tab: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum TabEvent {
+    Navigated(String),
+    Updated,
+    Open(String),
+    ClosePane,
 }
 
 enum NativeEvent {
     Started(String),
     Finished(String),
-    Title(String),
+    TitleReady,
     Open(String),
     Error(String),
 }
 
+#[derive(Default)]
+struct PendingTitle {
+    latest: Option<String>,
+    queued: bool,
+}
+
+/// Load/error/popup messages retain their order. High-frequency page titles
+/// share one pending value so a page cannot build an ever-growing UI backlog.
+#[derive(Clone)]
+struct NativeEvents {
+    sender: Sender<NativeEvent>,
+    title: Rc<RefCell<PendingTitle>>,
+}
+
+impl NativeEvents {
+    fn channel() -> (Self, async_channel::Receiver<NativeEvent>) {
+        let (sender, receiver) = async_channel::unbounded();
+        (
+            Self {
+                sender,
+                title: Rc::default(),
+            },
+            receiver,
+        )
+    }
+
+    fn send(&self, event: NativeEvent) {
+        let _ = self.sender.try_send(event);
+    }
+
+    fn title_changed(&self, title: String) {
+        let mut pending = self.title.borrow_mut();
+        if pending.latest.as_ref() == Some(&title) {
+            return;
+        }
+        pending.latest = Some(title);
+        if pending.queued {
+            return;
+        }
+        pending.queued = true;
+        drop(pending);
+        if self.sender.try_send(NativeEvent::TitleReady).is_err() {
+            self.title.borrow_mut().queued = false;
+        }
+    }
+
+    fn take_title(&self) -> Option<String> {
+        let mut pending = self.title.borrow_mut();
+        pending.queued = false;
+        pending.latest.take()
+    }
+}
+
+thread_local! {
+    static SHARED_BROWSER_CONTEXT: RefCell<Option<Rc<RefCell<WebContext>>>> = const { RefCell::new(None) };
+}
+
 #[cfg(target_os = "linux")]
 thread_local! {
+    static SHARED_GTK_CONTEXT: RefCell<Option<webkit2gtk::WebContext>> = const { RefCell::new(None) };
     static VISIBLE_GTK_BROWSERS: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -67,8 +148,387 @@ pub fn configure_platform() {
     }
 }
 
+struct TabSlot {
+    id: usize,
+    entity: Entity<BrowserTab>,
+    display: Rc<TabDisplay>,
+}
+
+/// A chat's open tabs. Every native tab shares the application's website data.
 pub struct BrowserPane {
-    native: Option<Rc<NativeBrowser>>,
+    tabs: Vec<TabSlot>,
+    session: BrowserSession,
+    next_tab_id: usize,
+    tab_scroll: ScrollHandle,
+    reveal_after_layout: bool,
+    visible: bool,
+    colors: ThemeColors,
+}
+
+impl EventEmitter<BrowserEvent> for BrowserPane {}
+
+impl BrowserPane {
+    #[cfg(test)]
+    pub fn new(
+        initial_url: Option<String>,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_session(
+            BrowserSession {
+                tabs: vec![initial_url],
+                active_tab: 0,
+            },
+            colors,
+            window,
+            cx,
+        )
+    }
+
+    pub fn with_session(
+        session: BrowserSession,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut pane = Self {
+            tabs: Vec::new(),
+            session: BrowserSession {
+                tabs: Vec::new(),
+                active_tab: session.active_tab,
+            },
+            next_tab_id: 0,
+            tab_scroll: ScrollHandle::new(),
+            reveal_after_layout: true,
+            visible: true,
+            colors,
+        };
+        for url in session.tabs {
+            pane.insert_tab(url, window, cx);
+        }
+        if pane.tabs.is_empty() {
+            pane.insert_tab(None, window, cx);
+        }
+        pane.session.active_tab = pane.session.active_tab.min(pane.tabs.len() - 1);
+        pane.update_visibility();
+        pane
+    }
+
+    pub fn session(&self) -> BrowserSession {
+        self.session.clone()
+    }
+
+    pub fn current_url(&self) -> Option<String> {
+        self.session.tabs[self.session.active_tab].clone()
+    }
+
+    #[cfg(test)]
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    pub fn set_visible(&mut self, visible: bool) {
+        if visible && !self.visible {
+            self.tab_scroll.scroll_to_item(self.session.active_tab);
+        }
+        self.visible = visible;
+        self.update_visibility();
+    }
+
+    pub fn set_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
+        if self.colors == colors {
+            return;
+        }
+        self.colors = colors;
+        for tab in &self.tabs {
+            tab.entity.update(cx, |tab, cx| tab.set_colors(colors, cx));
+        }
+        cx.notify();
+    }
+
+    pub fn shutdown(&mut self) {
+        self.visible = false;
+        for tab in &self.tabs {
+            tab.display.shutdown();
+        }
+    }
+
+    /// Links from a chat reuse an existing matching tab or the current blank tab.
+    pub fn open_url(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let url = match normalize_url(address) {
+            Ok(url) => url,
+            Err(_) => {
+                self.navigate(address, cx);
+                return;
+            }
+        };
+        if let Some(index) = self
+            .session
+            .tabs
+            .iter()
+            .position(|tab| tab.as_ref() == Some(&url))
+        {
+            self.select_tab(index, window, cx);
+        } else if self.current_url().is_none() {
+            self.navigate(&url, cx);
+        } else {
+            self.add_tab(Some(url), window, cx);
+        }
+    }
+
+    pub fn navigate(&mut self, address: &str, cx: &mut Context<Self>) {
+        let index = self.session.active_tab;
+        self.tabs[index]
+            .entity
+            .update(cx, |tab, cx| tab.navigate(address, cx));
+        let url = self.tabs[index].entity.read(cx).current_url();
+        if self.session.tabs[index] != url {
+            self.session.tabs[index] = url;
+            cx.emit(BrowserEvent::SessionChanged(self.session()));
+        }
+        cx.notify();
+    }
+
+    fn insert_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let entity = cx.new(|cx| BrowserTab::new(url, self.colors, window, cx));
+        let display = entity.read(cx).display.clone();
+        self.session.tabs.push(entity.read(cx).current_url());
+        cx.subscribe_in(&entity, window, move |pane, _, event, window, cx| {
+            let Some(index) = pane.tabs.iter().position(|tab| tab.id == id) else {
+                return;
+            };
+            match event {
+                TabEvent::Navigated(url) => {
+                    if pane.session.tabs[index].as_ref() != Some(url) {
+                        pane.session.tabs[index] = Some(url.clone());
+                        cx.emit(BrowserEvent::SessionChanged(pane.session()));
+                    }
+                }
+                TabEvent::Updated => {}
+                TabEvent::Open(url) => pane.add_tab(Some(url.clone()), window, cx),
+                TabEvent::ClosePane => {
+                    pane.set_visible(false);
+                    cx.emit(BrowserEvent::Close);
+                }
+            }
+            cx.notify();
+        })
+        .detach();
+        self.tabs.push(TabSlot {
+            id,
+            entity,
+            display,
+        });
+    }
+
+    fn add_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.insert_tab(url, window, cx);
+        self.session.active_tab = self.tabs.len() - 1;
+        self.tab_scroll.scroll_to_item(self.session.active_tab);
+        self.update_visibility();
+        self.focus_active_tab(window, cx);
+        cx.emit(BrowserEvent::SessionChanged(self.session()));
+        cx.notify();
+    }
+
+    fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() || index == self.session.active_tab {
+            return;
+        }
+        self.session.active_tab = index;
+        self.tab_scroll.scroll_to_item(index);
+        self.update_visibility();
+        self.focus_active_tab(window, cx);
+        cx.emit(BrowserEvent::SessionChanged(self.session()));
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let was_active = index == self.session.active_tab;
+        self.tabs[index].display.shutdown();
+        self.tabs.remove(index);
+        self.session.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.insert_tab(None, window, cx);
+            self.session.active_tab = 0;
+        } else if index < self.session.active_tab {
+            self.session.active_tab -= 1;
+        } else {
+            self.session.active_tab = self.session.active_tab.min(self.tabs.len() - 1);
+        }
+        self.tab_scroll.scroll_to_item(self.session.active_tab);
+        self.update_visibility();
+        if was_active {
+            self.focus_active_tab(window, cx);
+        }
+        cx.emit(BrowserEvent::SessionChanged(self.session()));
+        cx.notify();
+    }
+
+    fn update_visibility(&self) {
+        for (index, tab) in self.tabs.iter().enumerate() {
+            tab.display
+                .set_visible(self.visible && index == self.session.active_tab);
+        }
+    }
+
+    fn focus_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.visible {
+            return;
+        }
+        window.blur();
+        let tab = self.tabs[self.session.active_tab].entity.read(cx);
+        if tab.url.is_none() {
+            tab.address.read(cx).focus_handle(cx).focus(window);
+        } else if let Some(native) = &tab.display.native {
+            let _ = native.with_view(WebView::focus);
+        }
+    }
+}
+
+impl Drop for BrowserPane {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl Render for BrowserPane {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The scroll viewport is initialized by the first prepaint. Retain
+        // restored selection until its bounds exist, then reveal it once.
+        if self.reveal_after_layout {
+            if self.tab_scroll.bounds().size.width > px(0.) {
+                self.tab_scroll.scroll_to_item(self.session.active_tab);
+                self.reveal_after_layout = false;
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        let colors = self.colors;
+        div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(colors.background))
+            .child(
+                div()
+                    .id("browser-tabs")
+                    .h(px(32.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .bg(rgb(colors.sidebar))
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .child(
+                        div()
+                            .id("browser-tab-list")
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.tab_scroll)
+                            .children(self.tabs.iter().enumerate().map(|(index, slot)| {
+                                let tab = slot.entity.read(cx);
+                                let label = if !tab.title.is_empty() {
+                                    tab.title.clone()
+                                } else if let Some(url) = &tab.url {
+                                    Url::parse(url)
+                                        .ok()
+                                        .and_then(|url| url.host_str().map(str::to_owned))
+                                        .unwrap_or_else(|| url.clone())
+                                } else {
+                                    "New tab".to_owned()
+                                };
+                                let active = index == self.session.active_tab;
+                                div()
+                                    .id(("browser-tab", slot.id))
+                                    .h_full()
+                                    .w(px(148.))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .pl(px(10.))
+                                    .pr(px(3.))
+                                    .border_r_1()
+                                    .border_color(rgb(colors.border))
+                                    .text_size(px(11.))
+                                    .text_color(rgb(if active {
+                                        colors.text
+                                    } else {
+                                        colors.muted
+                                    }))
+                                    .when(active, |tab| {
+                                        tab.bg(rgb(colors.background))
+                                            .border_b_1()
+                                            .border_color(rgb(colors.accent))
+                                    })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |pane, _, window, cx| {
+                                        pane.select_tab(index, window, cx)
+                                    }))
+                                    .child(div().flex_1().min_w_0().text_ellipsis().child(label))
+                                    .child(
+                                        div()
+                                            .id(("browser-close-tab", slot.id))
+                                            .w(px(22.))
+                                            .h(px(22.))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(3.))
+                                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                                            .child("×")
+                                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                                cx.stop_propagation();
+                                                pane.close_tab(index, window, cx);
+                                            })),
+                                    )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("browser-new-tab")
+                            .w(px(32.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(rgb(colors.muted))
+                            .cursor_pointer()
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(colors.surface_high))
+                                    .text_color(rgb(colors.text))
+                            })
+                            .child("+")
+                            .on_click(
+                                cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .child(self.tabs[self.session.active_tab].entity.clone()),
+            )
+    }
+}
+
+struct BrowserTab {
+    display: Rc<TabDisplay>,
     address: Entity<ComposerInput>,
     draft: String,
     address_dirty: bool,
@@ -80,16 +540,12 @@ pub struct BrowserPane {
     can_back: bool,
     can_forward: bool,
     error: Option<String>,
-    visible: bool,
-    native_visible: bool,
     colors: ThemeColors,
-    events: Sender<NativeEvent>,
-    bounds: Rc<Cell<Option<NativeAllocation>>>,
 }
 
-impl EventEmitter<BrowserEvent> for BrowserPane {}
+impl EventEmitter<TabEvent> for BrowserTab {}
 
-impl BrowserPane {
+impl BrowserTab {
     pub fn new(
         initial_url: Option<String>,
         colors: ThemeColors,
@@ -101,9 +557,31 @@ impl BrowserPane {
             input.set_colors(colors, cx);
             input
         });
-        let (events, receiver) = async_channel::unbounded();
+        let (events, receiver) = NativeEvents::channel();
+        let (native, error) = if cfg!(test) {
+            (None, None)
+        } else {
+            match create_native(window, events.clone(), cx) {
+                Ok((native, context)) => (
+                    Some(Rc::new(NativeBrowser {
+                        view: RefCell::new(Some(native)),
+                        _context: context,
+                    })),
+                    None,
+                ),
+                Err(error) => (None, Some(error)),
+            }
+        };
         let mut pane = Self {
-            native: None,
+            display: Rc::new(TabDisplay {
+                native,
+                events,
+                bounds: Rc::new(Cell::new(None)),
+                visible: Cell::new(false),
+                native_visible: Cell::new(false),
+                has_page: Cell::new(false),
+                healthy: Cell::new(error.is_none()),
+            }),
             address: address.clone(),
             draft: String::new(),
             address_dirty: false,
@@ -114,25 +592,9 @@ impl BrowserPane {
             load_timed_out: false,
             can_back: false,
             can_forward: false,
-            error: None,
-            visible: true,
-            native_visible: false,
+            error,
             colors,
-            events: events.clone(),
-            bounds: Rc::new(Cell::new(None)),
         };
-        // GPUI's test window deliberately has no native window handle.
-        if !cfg!(test) {
-            match create_native(window, events, cx) {
-                Ok((native, context)) => {
-                    pane.native = Some(Rc::new(NativeBrowser {
-                        view: RefCell::new(Some(native)),
-                        _context: context,
-                    }));
-                }
-                Err(error) => pane.error = Some(error),
-            }
-        }
         cx.subscribe_in(&address, window, |pane, _, event, _, cx| match event {
             ComposerEvent::Changed(text) => {
                 pane.draft = text.clone();
@@ -185,65 +647,18 @@ impl BrowserPane {
         }
     }
 
-    pub fn set_visible(&mut self, visible: bool) {
-        self.visible = visible;
-        if let Some(native) = &self.native {
-            let shown = visible && self.url.is_some() && self.error.is_none();
-            if self.native_visible == shown {
-                return;
-            }
-            // GTK needs a fresh allocation after remapping a foreign
-            // child window, even when GPUI's pane bounds are unchanged.
-            self.bounds.set(None);
-            self.native_visible = shown;
-            #[cfg(target_os = "linux")]
-            VISIBLE_GTK_BROWSERS.with(|count| {
-                count.set(if shown {
-                    count.get() + 1
-                } else {
-                    count.get().saturating_sub(1)
-                });
-            });
-            if let Some(Err(error)) = native.with_view(|view| view.set_visible(shown)) {
-                let _ = self.events.try_send(NativeEvent::Error(error.to_string()));
-            }
-        }
+    fn refresh_visibility(&self) {
+        self.display.has_page.set(self.url.is_some());
+        self.display.healthy.set(self.error.is_none());
+        self.display.set_visible(self.display.visible.get());
     }
 
-    /// Release the actual native child before GPUI destroys its parent window.
-    /// Render frames can retain NativeBrowser's Rc without retaining a live
-    /// foreign X11/NSView child after this call.
-    pub fn shutdown(&mut self) {
-        self.visible = false;
-        #[cfg(target_os = "linux")]
-        if self.native_visible {
-            VISIBLE_GTK_BROWSERS.with(|count| count.set(count.get().saturating_sub(1)));
-        }
-        self.native_visible = false;
-        if let Some(native) = self.native.take() {
-            let view = native.view.borrow_mut().take();
-            #[cfg(target_os = "linux")]
-            if let Some(view) = &view {
-                use gtk::prelude::*;
-
-                if let Some(window) = register_gtk_browser_window(view) {
-                    // Wry destroys the X11 child before closing its GTK
-                    // wrapper. Release GTK's native resources while that
-                    // child exists; closing an unrealized wrapper is a no-op.
-                    window.unrealize();
-                }
-            }
-            drop(view);
-        }
+    fn shutdown(&self) {
+        self.display.shutdown();
     }
 
     pub fn current_url(&self) -> Option<String> {
         self.url.clone()
-    }
-
-    #[cfg(test)]
-    pub fn is_visible(&self) -> bool {
-        self.visible
     }
 
     pub fn navigate(&mut self, address: &str, cx: &mut Context<Self>) {
@@ -251,7 +666,7 @@ impl BrowserPane {
             Ok(url) => url,
             Err(error) => {
                 self.error = Some(error);
-                self.set_visible(self.visible);
+                self.refresh_visibility();
                 cx.notify();
                 return;
             }
@@ -260,11 +675,9 @@ impl BrowserPane {
         self.address_dirty = false;
         self.address
             .update(cx, |input, cx| input.set_text(url.clone(), cx));
-        let Some(native) = self.native.as_ref() else {
-            if cfg!(test) {
-                self.url = Some(url.clone());
-                cx.emit(BrowserEvent::Navigated(url));
-            }
+        let Some(native) = self.display.native.as_ref() else {
+            self.record_url(url, cx);
+            self.refresh_visibility();
             cx.notify();
             return;
         };
@@ -275,10 +688,13 @@ impl BrowserPane {
                 self.title.clear();
                 self.record_url(url, cx);
             }
-            Some(Err(error)) => self.error = Some(format!("Could not open page: {error}")),
+            Some(Err(error)) => {
+                self.error = Some(format!("Could not open page: {error}"));
+                self.record_url(url, cx);
+            }
             None => return,
         }
-        self.set_visible(self.visible);
+        self.refresh_visibility();
         cx.notify();
     }
 
@@ -292,7 +708,7 @@ impl BrowserPane {
             self.address
                 .update(cx, |input, cx| input.set_text(url.clone(), cx));
         }
-        cx.emit(BrowserEvent::Navigated(url));
+        cx.emit(TabEvent::Navigated(url));
     }
 
     fn start_loading(&mut self, cx: &mut Context<Self>) {
@@ -309,7 +725,7 @@ impl BrowserPane {
                     pane.loading = false;
                     pane.load_timed_out = true;
                     pane.error = Some("The page is taking too long to load. Check that the server is running, then reload.".into());
-                    pane.set_visible(pane.visible);
+                    pane.refresh_visibility();
                     cx.notify();
                 }
             });
@@ -332,23 +748,32 @@ impl BrowserPane {
                 self.record_url(url, cx);
                 self.refresh_navigation(cx);
             }
-            NativeEvent::Title(title) => self.title = title,
-            NativeEvent::Open(url) => self.navigate(&url, cx),
+            NativeEvent::TitleReady => {
+                let Some(title) = self.display.events.take_title() else {
+                    return;
+                };
+                if self.title == title {
+                    return;
+                }
+                self.title = title;
+                cx.emit(TabEvent::Updated);
+            }
+            NativeEvent::Open(url) => cx.emit(TabEvent::Open(url)),
             NativeEvent::Error(error) => {
                 self.loading = false;
                 self.load_timed_out = false;
                 self.error = Some(error);
             }
         }
-        self.set_visible(self.visible);
+        self.refresh_visibility();
         cx.notify();
     }
 
     fn refresh_navigation(&mut self, cx: &mut Context<Self>) {
-        if !self.visible {
+        if !self.display.visible.get() {
             return;
         }
-        let Some(native) = self.native.as_ref() else {
+        let Some(native) = self.display.native.as_ref() else {
             return;
         };
         let Some((url, can_back, can_forward)) = native.with_view(|view| {
@@ -378,7 +803,7 @@ impl BrowserPane {
     }
 
     fn history(&mut self, back: bool, cx: &mut Context<Self>) {
-        let result = match &self.native {
+        let result = match &self.display.native {
             Some(native) if back => native.with_view(WebView::go_back).unwrap_or(Ok(())),
             Some(native) => native.with_view(WebView::go_forward).unwrap_or(Ok(())),
             None => Ok(()),
@@ -394,12 +819,12 @@ impl BrowserPane {
             // Same-document history may have no load events. Keep URL polling
             // active; a document load's Started event will arm its timeout.
         }
-        self.set_visible(self.visible);
+        self.refresh_visibility();
         cx.notify();
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        if let Some(native) = &self.native {
+        if let Some(native) = &self.display.native {
             match native.with_view(WebView::reload) {
                 Some(Ok(())) => {
                     self.start_loading(cx);
@@ -409,7 +834,7 @@ impl BrowserPane {
                 None => return,
             }
         }
-        self.set_visible(self.visible);
+        self.refresh_visibility();
         cx.notify();
     }
 
@@ -442,13 +867,13 @@ impl BrowserPane {
     }
 }
 
-impl Drop for BrowserPane {
+impl Drop for BrowserTab {
     fn drop(&mut self) {
         self.shutdown();
     }
 }
 
-impl Render for BrowserPane {
+impl Render for BrowserTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_page = self.current_url().is_some();
         let back_enabled = self.can_back;
@@ -529,8 +954,8 @@ impl Render for BrowserPane {
                         .child(
                             self.button("browser-close", "×", true)
                                 .on_click(cx.listener(|pane, _, _, cx| {
-                                    pane.set_visible(false);
-                                    cx.emit(BrowserEvent::Close);
+                                    pane.display.set_visible(false);
+                                    cx.emit(TabEvent::ClosePane);
                                 })),
                         ),
                 );
@@ -544,12 +969,12 @@ impl Render for BrowserPane {
                     .child(error.clone()),
             );
         } else if has_page {
-            if let Some(native) = &self.native {
+            if let Some(native) = &self.display.native {
                 pane = pane.child(NativeSurface {
                     native: native.clone(),
-                    bounds: self.bounds.clone(),
-                    events: self.events.clone(),
-                    visible: self.visible,
+                    bounds: self.display.bounds.clone(),
+                    events: self.display.events.clone(),
+                    visible: self.display.visible.get(),
                 });
             } else {
                 pane = pane.child(div().flex_1());
@@ -614,11 +1039,63 @@ impl Render for BrowserPane {
     }
 }
 
+/// Shared native visibility permits pane changes without mutating child entities.
+struct TabDisplay {
+    native: Option<Rc<NativeBrowser>>,
+    events: NativeEvents,
+    bounds: Rc<Cell<Option<NativeAllocation>>>,
+    visible: Cell<bool>,
+    native_visible: Cell<bool>,
+    has_page: Cell<bool>,
+    healthy: Cell<bool>,
+}
+
+impl TabDisplay {
+    fn set_visible(&self, visible: bool) {
+        self.visible.set(visible);
+        let Some(native) = &self.native else {
+            return;
+        };
+        let shown = visible && self.has_page.get() && self.healthy.get();
+        if self.native_visible.replace(shown) == shown {
+            return;
+        }
+        self.bounds.set(None);
+        #[cfg(target_os = "linux")]
+        VISIBLE_GTK_BROWSERS.with(|count| {
+            count.set(if shown {
+                count.get() + 1
+            } else {
+                count.get().saturating_sub(1)
+            });
+        });
+        if let Some(Err(error)) = native.with_view(|view| view.set_visible(shown)) {
+            self.events.send(NativeEvent::Error(error.to_string()));
+        }
+    }
+
+    fn shutdown(&self) {
+        self.set_visible(false);
+        if let Some(native) = &self.native {
+            let view = native.view.borrow_mut().take();
+            #[cfg(target_os = "linux")]
+            if let Some(view) = &view {
+                use gtk::prelude::*;
+                if let Some(window) = register_gtk_browser_window(view) {
+                    // Release GTK's resources before Wry destroys its X11 child.
+                    window.unrealize();
+                }
+            }
+            drop(view);
+        }
+    }
+}
+
 struct NativeBrowser {
     view: RefCell<Option<WebView>>,
     // Keep the context alive even if a previously painted layout element is
     // still holding the native view after the owning entity is released.
-    _context: WebContext,
+    _context: Rc<RefCell<WebContext>>,
 }
 
 impl NativeBrowser {
@@ -632,7 +1109,7 @@ type NativeAllocation = (Bounds<Pixels>, f32, gpui::Point<Pixels>);
 struct NativeSurface {
     native: Rc<NativeBrowser>,
     bounds: Rc<Cell<Option<NativeAllocation>>>,
-    events: Sender<NativeEvent>,
+    events: NativeEvents,
     visible: bool,
 }
 
@@ -714,7 +1191,7 @@ impl gpui::Element for NativeSurface {
             }) {
                 Some(Ok(())) => self.bounds.set(Some(allocation)),
                 Some(Err(error)) => {
-                    let _ = self.events.try_send(NativeEvent::Error(error.to_string()));
+                    self.events.send(NativeEvent::Error(error.to_string()));
                 }
                 None => {}
             }
@@ -757,9 +1234,9 @@ impl HasWindowHandle for NativeParent {
 
 fn create_native(
     window: &Window,
-    events: Sender<NativeEvent>,
+    events: NativeEvents,
     cx: &mut App,
-) -> Result<(WebView, WebContext), String> {
+) -> Result<(WebView, Rc<RefCell<WebContext>>), String> {
     #[cfg(target_os = "linux")]
     {
         if env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
@@ -786,14 +1263,23 @@ fn create_native(
             .map_err(|error| error.to_string())?
             .as_raw(),
     );
-    #[cfg(target_os = "linux")]
-    let mut context = WebContext::new(None);
-    #[cfg(not(target_os = "linux"))]
-    let mut context = WebContext::new(Some(browser_data_directory()));
+    let context = SHARED_BROWSER_CONTEXT.with(|shared| {
+        shared
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                #[cfg(target_os = "linux")]
+                let context = WebContext::new(None);
+                #[cfg(not(target_os = "linux"))]
+                let context = WebContext::new(Some(browser_data_directory()));
+                Rc::new(RefCell::new(context))
+            })
+            .clone()
+    });
+    let mut context_ref = context.borrow_mut();
     let load_events = events.clone();
     let title_events = events.clone();
     let popup_events = events.clone();
-    let builder = WebViewBuilder::new_with_web_context(&mut context);
+    let builder = WebViewBuilder::new_with_web_context(&mut context_ref);
     #[cfg(target_os = "linux")]
     let builder = {
         use wry::WebViewBuilderExtUnix;
@@ -816,20 +1302,27 @@ fn create_native(
                     PageLoadEvent::Started => NativeEvent::Started(url),
                     PageLoadEvent::Finished => NativeEvent::Finished(url),
                 };
-                let _ = load_events.try_send(event);
+                load_events.send(event);
             }
         })
         .with_document_title_changed_handler(move |title| {
-            let _ = title_events.try_send(NativeEvent::Title(title));
+            title_events.title_changed(title);
         })
         .with_new_window_req_handler(move |url, _| {
             if is_browser_url(&url) {
-                let _ = popup_events.try_send(NativeEvent::Open(url));
+                popup_events.send(NativeEvent::Open(url));
             }
             NewWindowResponse::Deny
         })
         .build_as_child(&parent)
         .map_err(|error| format!("Could not create the browser: {error}"))?;
+    // Wry's X11 builder shows the GTK wrapper before attaching its X11 data,
+    // so its initial with_visible(false) only hides the inner WebKit widget.
+    // Hide the fully constructed child before trusting our visibility cache;
+    // otherwise a blank/background tab leaves a mapped 200px surface at (0, 0).
+    native
+        .set_visible(false)
+        .map_err(|error| format!("Could not hide the browser: {error}"))?;
     #[cfg(target_os = "linux")]
     {
         register_gtk_browser_window(&native);
@@ -838,12 +1331,12 @@ fn create_native(
         let webview = native.webview();
         webview.connect_load_failed(move |_, _, url, error| {
             if !error.matches(webkit2gtk::NetworkError::Cancelled) {
-                let _ =
-                    events.try_send(NativeEvent::Error(format!("Could not load {url}: {error}")));
+                events.send(NativeEvent::Error(format!("Could not load {url}: {error}")));
             }
             false
         });
     }
+    drop(context_ref);
     Ok((native, context))
 }
 
@@ -873,6 +1366,22 @@ fn register_gtk_browser_window(view: &WebView) -> Option<gtk::Window> {
 
 #[cfg(target_os = "linux")]
 fn linux_related_view() -> Result<webkit2gtk::WebView, String> {
+    let context = SHARED_GTK_CONTEXT.with(|shared| {
+        if let Some(context) = shared.borrow().as_ref() {
+            return Ok(context.clone());
+        }
+        let context = create_linux_browser_context()?;
+        *shared.borrow_mut() = Some(context.clone());
+        Ok::<_, String>(context)
+    })?;
+    // A related view inherits its seed's web process. Use a fresh seed per tab
+    // while sharing the context/data manager, so a busy page cannot stall
+    // every chat's browser through one common renderer.
+    Ok(webkit2gtk::WebView::with_context(&context))
+}
+
+#[cfg(target_os = "linux")]
+fn create_linux_browser_context() -> Result<webkit2gtk::WebContext, String> {
     use webkit2gtk::{CookieManagerExt, WebContextExt, WebsiteDataManagerExt};
 
     let directory = browser_data_directory();
@@ -898,7 +1407,7 @@ fn linux_related_view() -> Result<webkit2gtk::WebView, String> {
             webkit2gtk::CookiePersistentStorage::Text,
         );
     }
-    Ok(webkit2gtk::WebView::with_context(&context))
+    Ok(context)
 }
 
 fn browser_data_directory() -> PathBuf {
@@ -984,30 +1493,37 @@ fn ensure_gtk_pump(cx: &mut App) {
         return;
     }
     cx.spawn(async move |cx| {
+        let mut pending_work = false;
         loop {
-            // A 16ms polling interval can deliver GTK's next frame-clock
-            // deadline a full frame late. Keep latency below a quarter frame.
-            let delay = VISIBLE_GTK_BROWSERS
-                .with(|count| Duration::from_millis(if count.get() > 0 { 4 } else { 16 }));
-            Timer::after(delay).await;
-            if cx
-                .update(|_| {
-                    // Bound elapsed time as well as iterations so page work
-                    // yields promptly to GPUI input and terminal rendering.
-                    let started = Instant::now();
-                    for _ in 0..64 {
-                        if !gtk::events_pending() {
-                            break;
-                        }
-                        gtk::main_iteration_do(false);
-                        if started.elapsed() >= Duration::from_millis(2) {
-                            break;
-                        }
-                    }
+            // Use a short catch-up interval after a busy dispatch budget,
+            // then return to normal visible/hidden cadence once GTK is idle.
+            let delay = VISIBLE_GTK_BROWSERS.with(|count| {
+                Duration::from_millis(if count.get() == 0 {
+                    16
+                } else if pending_work {
+                    1
+                } else {
+                    4
                 })
-                .is_err()
-            {
-                break;
+            });
+            Timer::after(delay).await;
+            match cx.update(|_| {
+                // Bound elapsed time as well as iterations so page work
+                // yields promptly to GPUI input and terminal rendering.
+                let started = Instant::now();
+                for _ in 0..64 {
+                    if !gtk::events_pending() {
+                        break;
+                    }
+                    gtk::main_iteration_do(false);
+                    if started.elapsed() >= Duration::from_millis(2) {
+                        break;
+                    }
+                }
+                gtk::events_pending()
+            }) {
+                Ok(pending) => pending_work = pending,
+                Err(_) => break,
             }
         }
     })
@@ -1069,7 +1585,7 @@ mod tests {
     #[gpui::test]
     fn clicking_the_address_field_focuses_it_and_accepts_text(cx: &mut gpui::TestAppContext) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
-            BrowserPane::new(
+            BrowserTab::new(
                 None,
                 xd_desktop::theme::ThemePreset::Dark.colors(),
                 window,
@@ -1086,6 +1602,284 @@ mod tests {
             assert!(pane.address.read(cx).focus_handle(cx).is_focused(window));
             assert_eq!(pane.draft, "localhost:3000");
         });
+    }
+
+    #[gpui::test]
+    fn tabs_preserve_address_drafts_and_close_independently(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                None,
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.simulate_click(gpui::point(px(150.), px(53.)), gpui::Modifiers::default());
+        cx.simulate_input("first.localhost:3000");
+        let plus_x = cx.update(|window, _| window.viewport_size().width - px(16.));
+        cx.simulate_click(gpui::point(plus_x, px(16.)), gpui::Modifiers::default());
+        cx.simulate_input("second.localhost:5173");
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.session().active_tab, 1);
+            assert_eq!(pane.tabs[0].entity.read(cx).draft, "first.localhost:3000");
+            assert_eq!(pane.tabs[1].entity.read(cx).draft, "second.localhost:5173");
+            assert!(!pane.tabs[0].display.visible.get());
+            assert!(pane.tabs[1].display.visible.get());
+        });
+
+        cx.simulate_click(gpui::point(px(50.), px(16.)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.session().active_tab, 0);
+            let tab = pane.tabs[0].entity.read(cx);
+            assert_eq!(tab.draft, "first.localhost:3000");
+            assert!(tab.address.read(cx).focus_handle(cx).is_focused(window));
+            assert!(pane.tabs[0].display.visible.get());
+            assert!(!pane.tabs[1].display.visible.get());
+        });
+
+        // Close the first tab using its button; the second tab remains intact.
+        cx.simulate_click(gpui::point(px(134.), px(16.)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.tabs.len(), 1);
+            assert_eq!(pane.tabs[0].entity.read(cx).draft, "second.localhost:5173");
+        });
+        cx.simulate_click(gpui::point(px(134.), px(16.)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.session(), BrowserSession::default());
+            let tab = pane.tabs[0].entity.read(cx);
+            assert!(tab.draft.is_empty());
+            assert!(tab.address.read(cx).focus_handle(cx).is_focused(window));
+        });
+    }
+
+    #[gpui::test]
+    fn chat_links_reuse_matching_tabs_and_popups_open_new_tabs(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                None,
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.open_url("localhost:3000", window, cx);
+                pane.open_url("example.com/docs", window, cx);
+                pane.open_url("localhost:3000", window, cx);
+                assert_eq!(
+                    pane.session(),
+                    BrowserSession {
+                        tabs: vec![
+                            Some("http://localhost:3000/".into()),
+                            Some("https://example.com/docs".into())
+                        ],
+                        active_tab: 0,
+                    }
+                );
+                pane.tabs[0].entity.update(cx, |tab, cx| {
+                    tab.native_event(NativeEvent::Open("https://example.com/popup".into()), cx);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.session().active_tab, 2);
+            assert_eq!(
+                pane.current_url().as_deref(),
+                Some("https://example.com/popup")
+            );
+            assert_eq!(
+                pane.session().tabs[0].as_deref(),
+                Some("http://localhost:3000/")
+            );
+            assert_eq!(pane.tabs.len(), 3);
+        });
+    }
+
+    #[gpui::test]
+    fn restored_tab_sets_are_valid_and_keep_the_selected_page(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::with_session(
+                BrowserSession {
+                    tabs: vec![
+                        Some("localhost:3000".into()),
+                        None,
+                        Some("example.com".into()),
+                    ],
+                    active_tab: usize::MAX,
+                },
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.session().active_tab, 2);
+            assert_eq!(pane.current_url().as_deref(), Some("https://example.com/"));
+            assert_eq!(pane.session().tabs[1], None);
+            assert!(!pane.tabs[0].display.visible.get());
+            assert!(pane.tabs[2].display.visible.get());
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.close_tab(0, window, cx);
+                assert_eq!(pane.session().active_tab, 1);
+                assert_eq!(pane.current_url().as_deref(), Some("https://example.com/"));
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn selected_overflow_tabs_scroll_into_view(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::with_session(
+                BrowserSession {
+                    tabs: vec![None; 32],
+                    active_tab: 31,
+                },
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        fn draw_frames(cx: &mut gpui::VisualTestContext) {
+            // The test platform supplies no animation-frame callbacks.
+            for _ in 0..2 {
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear();
+                });
+            }
+        }
+        fn assert_selected_visible(pane: &BrowserPane) {
+            let tab = pane
+                .tab_scroll
+                .bounds_for_item(pane.session.active_tab)
+                .unwrap();
+            let viewport = pane.tab_scroll.bounds();
+            let offset = pane.tab_scroll.offset().x;
+            assert!(tab.left() + offset >= viewport.left());
+            assert!(tab.right() + offset <= viewport.right());
+        }
+        cx.run_until_parked();
+        draw_frames(cx);
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert!(pane.tab_scroll.offset().x < px(0.));
+            assert_selected_visible(pane);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.select_tab(0, window, cx));
+        });
+        cx.run_until_parked();
+        draw_frames(cx);
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert_eq!(pane.tab_scroll.offset().x, px(0.));
+            assert_selected_visible(pane);
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.add_tab(None, window, cx));
+        });
+        cx.run_until_parked();
+        draw_frames(cx);
+        cx.update(|_, cx| assert_selected_visible(pane.read(cx)));
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| pane.close_tab(32, window, cx));
+        });
+        cx.run_until_parked();
+        draw_frames(cx);
+        cx.update(|_, cx| assert_selected_visible(pane.read(cx)));
+    }
+
+    #[test]
+    fn page_title_flood_has_bounded_work_and_preserves_navigation_order() {
+        let (events, receiver) = NativeEvents::channel();
+        events.send(NativeEvent::Started("https://example.com/".into()));
+        for index in 0..10_000 {
+            events.title_changed(format!("Page update {index}"));
+        }
+        events.send(NativeEvent::Finished("https://example.com/".into()));
+        events.send(NativeEvent::Open("https://example.com/popup".into()));
+        events.send(NativeEvent::Error("Connection closed".into()));
+        assert_eq!(receiver.len(), 5);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::Started(_)
+        ));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::TitleReady
+        ));
+        assert_eq!(events.take_title().as_deref(), Some("Page update 9999"));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::Finished(_)
+        ));
+        assert!(matches!(receiver.try_recv().unwrap(), NativeEvent::Open(_)));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::Error(_)
+        ));
+        assert!(receiver.is_empty());
+
+        // A second burst still produces only one wake. The tab suppresses
+        // an unchanged display title after consuming that pending value.
+        for _ in 0..10_000 {
+            events.title_changed("Page update 9999".into());
+        }
+        assert_eq!(receiver.len(), 1);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::TitleReady
+        ));
+        assert_eq!(events.take_title().as_deref(), Some("Page update 9999"));
+        events.title_changed("Final title".into());
+        assert_eq!(receiver.len(), 1);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::TitleReady
+        ));
+        assert_eq!(events.take_title().as_deref(), Some("Final title"));
+    }
+
+    #[test]
+    fn a_new_document_can_deliver_the_same_title_again() {
+        let (events, receiver) = NativeEvents::channel();
+        events.title_changed("Local app".into());
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::TitleReady
+        ));
+        assert_eq!(events.take_title().as_deref(), Some("Local app"));
+
+        // Loading another document clears the displayed title. Its matching
+        // title must still reach the tab, even after the previous wake drained.
+        events.send(NativeEvent::Started("http://localhost:3000/another".into()));
+        events.title_changed("Local app".into());
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::Started(_)
+        ));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NativeEvent::TitleReady
+        ));
+        assert_eq!(events.take_title().as_deref(), Some("Local app"));
+        assert!(receiver.is_empty());
     }
 
     #[test]
@@ -1121,7 +1915,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
-            BrowserPane::new(
+            BrowserTab::new(
                 None,
                 xd_desktop::theme::ThemePreset::Dark.colors(),
                 window,
@@ -1148,7 +1942,7 @@ mod tests {
     #[gpui::test]
     fn same_document_history_does_not_arm_a_load_timeout(cx: &mut gpui::TestAppContext) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
-            BrowserPane::new(
+            BrowserTab::new(
                 None,
                 xd_desktop::theme::ThemePreset::Dark.colors(),
                 window,
