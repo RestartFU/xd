@@ -120,11 +120,16 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
+const NAV_RAIL_WIDTH: f32 = 60.0;
+const BROWSER_DIVIDER_WIDTH: f32 = 1.0;
 const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
 
 fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
     // Keep the session usable even at the window's minimum size.
-    f32::from(requested).clamp(280.0, (window_width - 426.0).clamp(280.0, 1000.0))
+    f32::from(requested).clamp(
+        280.0,
+        (window_width - NAV_RAIL_WIDTH - BROWSER_DIVIDER_WIDTH - 400.0).clamp(280.0, 1000.0),
+    )
 }
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
@@ -195,6 +200,52 @@ fn xd_mark(color: u32) -> gpui::AnyElement {
         .flex_none()
         .text_color(rgb(color))
         .into_any_element()
+}
+
+fn workbench_nav_button(
+    id: &'static str,
+    label: &'static str,
+    icon: gpui::AnyElement,
+    active: bool,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .w_full()
+        .h(px(54.0))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .rounded(px(4.0))
+        .border_l_2()
+        .border_color(if active {
+            rgb(colors.accent_ink)
+        } else {
+            rgba(0x00000000)
+        })
+        .bg(rgb(if active {
+            colors.selected_surface
+        } else {
+            colors.sidebar
+        }))
+        .text_size(px(9.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(if active {
+            colors.accent_ink
+        } else {
+            colors.muted
+        }))
+        .cursor_pointer()
+        .hover(|style| {
+            style
+                .bg(rgb(colors.surface_high))
+                .text_color(rgb(colors.text))
+        })
+        .child(icon)
+        .child(label)
 }
 
 fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
@@ -8521,7 +8572,7 @@ impl XdDesktop {
             .relative()
             .flex()
             .flex_col()
-            .rounded_xl()
+            .rounded(px(5.0))
             .border_1()
             .border_color(rgb(colors.border))
             .bg(rgb(colors.surface))
@@ -8826,7 +8877,6 @@ impl XdDesktop {
     fn render_minimal_product_nav(
         &mut self,
         colors: ThemeColors,
-        titlebar: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let projects_active = matches!(self.minimal_route, MinimalRoute::Projects { .. });
@@ -8840,22 +8890,133 @@ impl XdDesktop {
             MinimalRoute::Sessions { project_id } => project_id.clone(),
             MinimalRoute::Projects { .. } | MinimalRoute::Terminal => None,
         };
-        let connected = self.model.connected;
-        let remote_active = self.active_endpoint == ChatEndpoint::Remote;
-        let runtime_label = if remote_active { "Remote" } else { "Local" };
+        let projects_icon = svg().path(FOLDER_ICON).size(px(19.0)).into_any_element();
+        let sessions_icon = div().text_size(px(23.0)).child("≡").into_any_element();
+        let terminal_icon = div()
+            .font_family(MONO)
+            .text_size(px(17.0))
+            .child(">_")
+            .into_any_element();
 
         div()
             .id("minimal-product-nav")
-            .h(px(62.0))
+            .w(px(NAV_RAIL_WIDTH))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px_1()
+            .py_2()
+            .gap_1()
+            .border_r_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.sidebar))
+            .child(
+                workbench_nav_button(
+                    "minimal-projects-tab",
+                    "Projects",
+                    projects_icon,
+                    projects_active,
+                    colors,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.show_minimal_projects(cx))),
+            )
+            .child(
+                workbench_nav_button(
+                    "minimal-sessions-tab",
+                    "Sessions",
+                    sessions_icon,
+                    sessions_active,
+                    colors,
+                )
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.show_minimal_sessions(window, cx)),
+                ),
+            )
+            .child(
+                workbench_nav_button(
+                    "minimal-terminal-tab",
+                    "Terminal",
+                    terminal_icon,
+                    terminal_active,
+                    colors,
+                )
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.show_minimal_terminal(window, cx)),
+                ),
+            )
+            .child(div().flex_1())
+            .child(
+                workbench_nav_button(
+                    "minimal-global-create",
+                    "New",
+                    plus_icon(colors.accent_ink),
+                    false,
+                    colors,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(project_id) = create_session_for.clone() {
+                        this.begin_chat_create(project_id, window, cx);
+                    } else {
+                        this.begin_workspace_create(window, cx);
+                    }
+                })),
+            )
+            .child(
+                workbench_nav_button(
+                    "minimal-theme",
+                    "Settings",
+                    div().text_size(px(20.0)).child("⚙").into_any_element(),
+                    self.minimal_theme_open,
+                    colors,
+                )
+                .on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_minimal_theme_popup(window, cx)),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn render_minimal_titlebar(
+        &mut self,
+        colors: ThemeColors,
+        titlebar: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let connected = self.model.connected;
+        let remote_active = self.active_endpoint == ChatEndpoint::Remote;
+        let context = match &self.minimal_route {
+            MinimalRoute::Projects { .. } => "Workspace".to_string(),
+            MinimalRoute::Sessions { .. } => "Sessions".to_string(),
+            MinimalRoute::Terminal => "Terminal".to_string(),
+            MinimalRoute::Cli { project_id, .. } => self
+                .model
+                .folders
+                .iter()
+                .find(|folder| &folder.id == project_id)
+                .map(|folder| folder.name.clone())
+                .unwrap_or_else(|| "Session".to_string()),
+        };
+
+        div()
+            .id("workbench-titlebar")
+            .h(px(42.0))
             .w_full()
             .flex_none()
             .flex()
             .items_center()
+            .gap_3()
+            .pl(px(if titlebar && cfg!(target_os = "macos") {
+                86.0
+            } else {
+                16.0
+            }))
             .border_b_1()
             .border_color(rgb(colors.border))
-            .bg(rgb(colors.surface))
-            .when(titlebar, |nav| {
-                nav.on_mouse_down(MouseButton::Left, |event, window, _| {
+            .bg(rgb(colors.sidebar))
+            .when(titlebar, |bar| {
+                bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
                         if cfg!(target_os = "macos") {
                             window.titlebar_double_click();
@@ -8870,264 +9031,95 @@ impl XdDesktop {
             .child(
                 div()
                     .h_full()
-                    .min_w_0()
-                    .flex_1()
-                    .pl(px(if titlebar && cfg!(target_os = "macos") {
-                        86.0
-                    } else {
-                        22.0
-                    }))
-                    .pr_2()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .pr_4()
-                            .font_weight(FontWeight::BOLD)
-                            .text_size(px(19.0))
-                            .text_color(rgb(colors.text))
-                            .when(titlebar, |brand| {
-                                brand.window_control_area(WindowControlArea::Drag)
-                            })
-                            .child(xd_mark(colors.accent))
-                            .child("xd"),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-projects-tab")
-                            .h(px(38.0))
-                            .px_4()
-                            .flex()
-                            .items_center()
-                            .rounded_full()
-                            .bg(rgb(if projects_active {
-                                colors.surface_high
-                            } else {
-                                colors.surface
-                            }))
-                            .text_base()
-                            .font_weight(if projects_active {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .text_color(rgb(if projects_active {
-                                colors.text
-                            } else {
-                                colors.muted
-                            }))
-                            .cursor_pointer()
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(colors.surface_high))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, _, cx| this.show_minimal_projects(cx)))
-                            .child("Projects"),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-sessions-tab")
-                            .h(px(38.0))
-                            .px_4()
-                            .flex()
-                            .items_center()
-                            .rounded_full()
-                            .bg(rgb(if sessions_active {
-                                colors.surface_high
-                            } else {
-                                colors.surface
-                            }))
-                            .text_base()
-                            .font_weight(if sessions_active {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .text_color(rgb(if sessions_active {
-                                colors.text
-                            } else {
-                                colors.muted
-                            }))
-                            .cursor_pointer()
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(colors.surface_high))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_minimal_sessions(window, cx)
-                            }))
-                            .child("Sessions"),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-terminal-tab")
-                            .h(px(38.0))
-                            .px_4()
-                            .flex()
-                            .items_center()
-                            .rounded_full()
-                            .bg(rgb(if terminal_active {
-                                colors.surface_high
-                            } else {
-                                colors.surface
-                            }))
-                            .text_base()
-                            .font_weight(if terminal_active {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .text_color(rgb(if terminal_active {
-                                colors.text
-                            } else {
-                                colors.muted
-                            }))
-                            .cursor_pointer()
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(colors.surface_high))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_minimal_terminal(window, cx)
-                            }))
-                            .child("Terminal"),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-global-create")
-                            .ml_1()
-                            .size(px(38.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(rgb(colors.accent))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.accent_hover)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if let Some(project_id) = create_session_for.clone() {
-                                    this.begin_chat_create(project_id, window, cx);
-                                } else {
-                                    this.begin_workspace_create(window, cx);
-                                }
-                            }))
-                            .child(plus_icon(colors.accent_text)),
-                    )
-                    .child(
-                        div()
-                            .h_full()
-                            .min_w(px(20.0))
-                            .flex_1()
-                            .when(titlebar, |spacer| {
-                                spacer.window_control_area(WindowControlArea::Drag)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-browser-toggle")
-                            .h(px(34.0))
-                            .px_3()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .rounded_md()
-                            .bg(rgb(if self.settings.browser_open {
-                                colors.selected_surface
-                            } else {
-                                colors.surface
-                            }))
-                            .text_sm()
-                            .text_color(rgb(if self.settings.browser_open {
-                                colors.accent
-                            } else {
-                                colors.muted
-                            }))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx)))
-                            .child("Browser"),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-runtime")
-                            .h(px(34.0))
-                            .px_3()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .rounded_full()
-                            .bg(rgb(colors.background))
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(colors.text))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if remote_active {
-                                    this.disconnect_remote_runtime(cx);
-                                } else {
-                                    this.open_remote(window, cx);
-                                }
-                            }))
-                            .child(div().size(px(8.0)).rounded_full().bg(rgb(if connected {
-                                0x36c75c
-                            } else {
-                                0xb74c58
-                            })))
-                            .child(runtime_label),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-theme")
-                            .size(px(34.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .text_lg()
-                            .text_color(rgb(colors.muted))
-                            .cursor_pointer()
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(colors.surface_high))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_minimal_theme_popup(window, cx)
-                            }))
-                            .child("⚙"),
-                    ),
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_sm()
+                    .text_color(rgb(colors.text))
+                    .when(titlebar, |brand| {
+                        brand.window_control_area(WindowControlArea::Drag)
+                    })
+                    .child(xd_mark(colors.accent_ink))
+                    .child("xd"),
             )
-            .when(titlebar && !cfg!(target_os = "macos"), |nav| {
-                nav.child(self.render_minimal_window_controls(colors))
+            .child(div().text_sm().text_color(rgb(colors.muted)).child("/"))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_xs()
+                    .text_color(rgb(colors.muted))
+                    .when(titlebar, |context| {
+                        context.window_control_area(WindowControlArea::Drag)
+                    })
+                    .child(context),
+            )
+            .child(
+                div()
+                    .id("minimal-browser-toggle")
+                    .h(px(28.0))
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.0))
+                    .bg(rgb(if self.settings.browser_open {
+                        colors.selected_surface
+                    } else {
+                        colors.sidebar
+                    }))
+                    .text_xs()
+                    .text_color(rgb(if self.settings.browser_open {
+                        colors.accent_ink
+                    } else {
+                        colors.muted
+                    }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx)))
+                    .child("Browser"),
+            )
+            .child(
+                div()
+                    .id("minimal-runtime")
+                    .h(px(28.0))
+                    .px_2()
+                    .mr_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(4.0))
+                    .text_xs()
+                    .text_color(rgb(colors.muted))
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .bg(rgb(colors.surface_high))
+                            .text_color(rgb(colors.text))
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if remote_active {
+                            this.disconnect_remote_runtime(cx);
+                        } else {
+                            this.open_remote(window, cx);
+                        }
+                    }))
+                    .child(div().size(px(6.0)).rounded_full().bg(rgb(if connected {
+                        0x36c75c
+                    } else {
+                        0xb74c58
+                    })))
+                    .child(if remote_active { "Remote" } else { "Local" }),
+            )
+            .when(titlebar && !cfg!(target_os = "macos"), |bar| {
+                bar.child(self.render_minimal_window_controls(colors))
             })
             .into_any_element()
-    }
-
-    fn render_minimal_titlebar(
-        &mut self,
-        colors: ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        self.render_minimal_product_nav(colors, true, cx)
     }
 
     fn render_minimal_context_toolbar(
@@ -9172,7 +9164,7 @@ impl XdDesktop {
 
         div()
             .id("minimal-context-toolbar")
-            .h(px(54.0))
+            .h(px(40.0))
             .w_full()
             .flex_none()
             .px_4()
@@ -9393,11 +9385,11 @@ impl XdDesktop {
                     div()
                         .id(("minimal-session-card", instance))
                         .w_full()
-                        .min_h(px(104.0))
+                        .min_h(px(76.0))
                         .px_3()
-                        .py_3()
-                        .rounded_md()
-                        .border_1()
+                        .py_2()
+                        .rounded(px(4.0))
+                        .border_l_2()
                         .border_color(rgb(if emphasized {
                             colors.selected_border
                         } else {
@@ -9596,7 +9588,7 @@ impl XdDesktop {
 
         div()
             .id("minimal-session-board")
-            .w(px(268.0))
+            .w(px(236.0))
             .h_full()
             .min_h_0()
             .flex_none()
@@ -9661,8 +9653,8 @@ impl XdDesktop {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .rounded_lg()
-                        .border_1()
+                        .rounded(px(4.0))
+                        .border_l_2()
                         .border_color(rgb(if selected {
                             colors.selected_border
                         } else {
@@ -9749,13 +9741,13 @@ impl XdDesktop {
                     .id(("minimal-session", index))
                     .w_full()
                     .max_w(px(760.0))
-                    .px_4()
-                    .py_4()
+                    .px_3()
+                    .py_3()
                     .flex()
                     .items_center()
-                    .gap_4()
-                    .rounded_xl()
-                    .border_1()
+                    .gap_3()
+                    .rounded(px(4.0))
+                    .border_b_1()
                     .border_color(rgb(colors.border))
                     .bg(rgb(colors.surface))
                     .cursor_pointer()
@@ -9831,7 +9823,7 @@ impl XdDesktop {
 
         let project_sidebar = div()
             .id("minimal-project-list")
-            .w(px(268.0))
+            .w(px(236.0))
             .h_full()
             .min_h_0()
             .flex_none()
@@ -9897,8 +9889,8 @@ impl XdDesktop {
             .h_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px_8()
-            .py_7()
+            .px_6()
+            .py_5()
             .bg(rgb(colors.background))
             .child(
                 div()
@@ -10041,7 +10033,7 @@ impl XdDesktop {
                             .w_full()
                             .flex()
                             .flex_col()
-                            .gap_3()
+                            .gap_0()
                             .children(session_rows)
                             .when(
                                 selected_project_id.is_some() && sessions.is_empty(),
@@ -10051,7 +10043,7 @@ impl XdDesktop {
                                             .w_full()
                                             .max_w(px(760.0))
                                             .p_6()
-                                            .rounded_xl()
+                                            .rounded(px(5.0))
                                             .border_1()
                                             .border_color(rgb(colors.border))
                                             .text_sm()
@@ -10075,7 +10067,6 @@ impl XdDesktop {
                             }),
                     ),
             );
-        let toolbar = self.render_minimal_context_toolbar(colors, cx);
 
         div()
             .size_full()
@@ -10083,7 +10074,6 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
-            .child(toolbar)
             .child(
                 div()
                     .flex_1()
@@ -10829,7 +10819,6 @@ impl XdDesktop {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let toolbar = self.render_minimal_context_toolbar(colors, cx);
         let board = self.render_minimal_session_board(colors, None, cx);
 
         div()
@@ -10838,7 +10827,6 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
-            .child(toolbar)
             .child(
                 div()
                     .flex_1()
@@ -10907,11 +10895,8 @@ impl XdDesktop {
                 agent,
             } => self.render_minimal_cli(colors, project_id, chat_id, agent, window, cx),
         };
-        let product_nav = if custom_titlebar {
-            self.render_minimal_titlebar(colors, cx)
-        } else {
-            self.render_minimal_product_nav(colors, false, cx)
-        };
+        let titlebar = self.render_minimal_titlebar(colors, custom_titlebar, cx);
+        let product_nav = self.render_minimal_product_nav(colors, cx);
         let session_context_overlay = self.session_context_menu.clone().map(|menu| {
             let rename_chat_id = menu.chat_id.clone();
             let rename_title = menu.title.clone();
@@ -11042,11 +11027,14 @@ impl XdDesktop {
                     div()
                         .occlude()
                         .absolute()
-                        .top(px(68.0))
-                        .right(px(22.0))
+                        .id("workbench-settings")
+                        .bottom(px(12.0))
+                        .left(px(NAV_RAIL_WIDTH + 8.0))
                         .w(px(300.0))
+                        .max_h(px(f32::from(window.viewport_size().height) - 24.0))
+                        .overflow_y_scroll()
                         .p_2()
-                        .rounded_xl()
+                        .rounded(px(6.0))
                         .border_1()
                         .border_color(rgb(colors.border))
                         .bg(rgb(colors.surface))
@@ -12214,37 +12202,54 @@ impl XdDesktop {
                     this.show_minimal_projects(cx);
                 }
             }))
-            .child(product_nav)
+            .child(titlebar)
             .child(
                 div()
                     .w_full()
                     .flex_1()
                     .min_h_0()
                     .flex()
+                    .child(product_nav)
                     .child(div().flex_1().min_w_0().min_h_0().h_full().child(content))
                     .when_some(browser_pane, |row, pane| {
                         row.child(
                             div()
-                                .id("browser-resize")
-                                .w(px(6.0))
+                                .id("browser-divider")
+                                .relative()
+                                .w(px(BROWSER_DIVIDER_WIDTH))
                                 .h_full()
                                 .flex_none()
-                                .bg(rgb(colors.border))
-                                .cursor(CursorStyle::ResizeLeftRight)
-                                .hover(|style| style.bg(rgb(colors.accent)))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        this.browser_drag = Some((
-                                            f32::from(event.position.x),
-                                            browser_width as u16,
-                                        ));
-                                        for pane in this.browser_panes.values() {
-                                            pane.update(cx, |pane, _| pane.set_visible(false));
-                                        }
-                                        cx.notify();
-                                    }),
+                                .bg(rgb(if self.browser_drag.is_some() {
+                                    colors.accent
+                                } else {
+                                    colors.border
+                                }))
+                                .child(
+                                    div()
+                                        .id("browser-resize")
+                                        .absolute()
+                                        .left(px(-4.0))
+                                        .w(px(9.0))
+                                        .h_full()
+                                        .cursor(CursorStyle::ResizeLeftRight)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                move |this, event: &MouseDownEvent, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.browser_drag = Some((
+                                                        f32::from(event.position.x),
+                                                        browser_width as u16,
+                                                    ));
+                                                    for pane in this.browser_panes.values() {
+                                                        pane.update(cx, |pane, _| {
+                                                            pane.set_visible(false)
+                                                        });
+                                                    }
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        ),
                                 ),
                         )
                         .child(
@@ -12886,6 +12891,36 @@ mod tests {
     }
 
     #[gpui::test]
+    fn workbench_navigation_and_settings_respond_to_clicks(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.run_until_parked();
+
+        cx.simulate_click(point(px(30.0), px(131.0)), gpui::Modifiers::default());
+        cx.update(|_, cx| {
+            assert!(matches!(
+                desktop.read(cx).minimal_route,
+                MinimalRoute::Sessions { .. }
+            ));
+        });
+
+        cx.simulate_click(point(px(30.0), px(77.0)), gpui::Modifiers::default());
+        cx.update(|_, cx| {
+            assert!(matches!(
+                desktop.read(cx).minimal_route,
+                MinimalRoute::Projects { .. }
+            ));
+        });
+
+        let settings_y = cx.update(|window, _| window.viewport_size().height - px(35.0));
+        cx.simulate_click(point(px(30.0), settings_y), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
+
+        cx.simulate_click(point(px(500.0), px(90.0)), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
+    }
+
+    #[gpui::test]
     fn clicking_a_native_markdown_link_dispatches_the_integrated_browser_action(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -13065,64 +13100,6 @@ mod tests {
             .1;
         assert!(startup.contains("appears_transparent: true"));
         assert!(startup.contains("traffic_light_position: cfg!(target_os = \"macos\")"));
-    }
-
-    #[test]
-    fn minimal_chrome_uses_the_xirp_two_level_header() {
-        let source = include_str!("main.rs");
-        let production = source
-            .split_once("#[cfg(test)]")
-            .expect("desktop production source")
-            .0;
-        let product_nav = production
-            .split_once("fn render_minimal_product_nav(")
-            .expect("product navigation renderer")
-            .1
-            .split_once("fn render_minimal_titlebar(")
-            .expect("end of product navigation renderer")
-            .0;
-        for behavior in [
-            "minimal-product-nav",
-            ".child(\"Projects\")",
-            ".child(\"Sessions\")",
-            ".child(\"Terminal\")",
-            "this.show_minimal_projects(cx)",
-            "this.show_minimal_sessions(window, cx)",
-            "this.show_minimal_terminal(window, cx)",
-            "this.begin_workspace_create(window, cx)",
-            "minimal-runtime",
-            "minimal-theme",
-        ] {
-            assert!(product_nav.contains(behavior), "missing {behavior}");
-        }
-
-        let context_toolbar = production
-            .split_once("fn render_minimal_context_toolbar(")
-            .expect("session context toolbar")
-            .1
-            .split_once("fn render_minimal_session_board(")
-            .expect("end of session context toolbar")
-            .0;
-        for behavior in [
-            "minimal-context-toolbar",
-            "minimal-session-agent",
-            "minimal-context-terminal",
-            "this.open_minimal_terminal_tab(None, window, cx)",
-            "this.send_terminal_input(&[3], cx)",
-            ".child(\"Stop\")",
-        ] {
-            assert!(context_toolbar.contains(behavior), "missing {behavior}");
-        }
-
-        let render = production
-            .split_once("fn render_minimal(")
-            .expect("minimal root renderer")
-            .1;
-        assert!(render.contains("self.render_minimal_titlebar(colors, cx)"));
-        assert!(render.contains("self.render_minimal_product_nav(colors, false, cx)"));
-        assert!(render.contains(
-            "MinimalRoute::Terminal => self.render_minimal_standalone_terminal(colors, window, cx)"
-        ));
     }
 
     #[test]
@@ -13502,7 +13479,7 @@ mod tests {
         for requested in [0, 280, 460, u16::MAX] {
             let width = browser_pane_width(requested, 760.0);
             assert!(width >= 280.0);
-            assert!(760.0 - width - 6.0 >= 420.0);
+            assert!(760.0 - width - NAV_RAIL_WIDTH - BROWSER_DIVIDER_WIDTH >= 400.0);
         }
         assert_eq!(browser_pane_width(460, 1180.0), 460.0);
         assert_eq!(browser_pane_width(u16::MAX, 3000.0), 1000.0);

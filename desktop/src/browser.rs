@@ -40,6 +40,11 @@ enum NativeEvent {
     Error(String),
 }
 
+#[cfg(target_os = "linux")]
+thread_local! {
+    static VISIBLE_GTK_BROWSERS: Cell<usize> = const { Cell::new(0) };
+}
+
 /// Configure both native toolkits before any threads or windows are created.
 /// Wry's child-webview embedding uses X11 on Linux; XWayland supplies it on a
 /// Wayland desktop. Saved values are restored in host/terminal subprocesses.
@@ -91,7 +96,11 @@ impl BrowserPane {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let address = cx.new(|cx| ComposerInput::new(cx, "URL or localhost:3000"));
+        let address = cx.new(|cx| {
+            let mut input = ComposerInput::new(cx, "URL or localhost:3000");
+            input.set_colors(colors, cx);
+            input
+        });
         let (events, receiver) = async_channel::unbounded();
         let mut pane = Self {
             native: None,
@@ -170,6 +179,8 @@ impl BrowserPane {
     pub fn set_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
         if self.colors != colors {
             self.colors = colors;
+            self.address
+                .update(cx, |input, cx| input.set_colors(colors, cx));
             cx.notify();
         }
     }
@@ -178,12 +189,21 @@ impl BrowserPane {
         self.visible = visible;
         if let Some(native) = &self.native {
             let shown = visible && self.url.is_some() && self.error.is_none();
-            if self.native_visible != shown {
-                // GTK needs a fresh allocation after remapping a foreign
-                // child window, even when GPUI's pane bounds are unchanged.
-                self.bounds.set(None);
-                self.native_visible = shown;
+            if self.native_visible == shown {
+                return;
             }
+            // GTK needs a fresh allocation after remapping a foreign
+            // child window, even when GPUI's pane bounds are unchanged.
+            self.bounds.set(None);
+            self.native_visible = shown;
+            #[cfg(target_os = "linux")]
+            VISIBLE_GTK_BROWSERS.with(|count| {
+                count.set(if shown {
+                    count.get() + 1
+                } else {
+                    count.get().saturating_sub(1)
+                });
+            });
             if let Some(Err(error)) = native.with_view(|view| view.set_visible(shown)) {
                 let _ = self.events.try_send(NativeEvent::Error(error.to_string()));
             }
@@ -195,36 +215,18 @@ impl BrowserPane {
     /// foreign X11/NSView child after this call.
     pub fn shutdown(&mut self) {
         self.visible = false;
+        #[cfg(target_os = "linux")]
+        if self.native_visible {
+            VISIBLE_GTK_BROWSERS.with(|count| count.set(count.get().saturating_sub(1)));
+        }
         self.native_visible = false;
         if let Some(native) = self.native.take() {
             let view = native.view.borrow_mut().take();
             #[cfg(target_os = "linux")]
             if let Some(view) = &view {
                 use gtk::prelude::*;
-                use wry::WebViewExtUnix;
 
-                if let Some(window) = view
-                    .webview()
-                    .toplevel()
-                    .and_then(|widget| widget.downcast::<gtk::Window>().ok())
-                {
-                    if let Some(gdk_window) = window.window() {
-                        let mut owner = std::ptr::null_mut();
-                        // SAFETY: read the opaque user-data pointer from a live
-                        // GDK window on GTK's main thread without dereferencing it.
-                        unsafe {
-                            gtk::gdk::ffi::gdk_window_get_user_data(
-                                gdk_window.as_ptr(),
-                                &mut owner,
-                            );
-                        }
-                        if owner.is_null() {
-                            // Wry replaces GtkWindow's own GDK window with a
-                            // foreign one without registering it. GTK requires
-                            // this owner when unrealize unregisters the window.
-                            window.register_window(&gdk_window);
-                        }
-                    }
+                if let Some(window) = register_gtk_browser_window(view) {
                     // Wry destroys the X11 child before closing its GTK
                     // wrapper. Release GTK's native resources while that
                     // child exists; closing an unrealized wrapper is a no-op.
@@ -343,6 +345,9 @@ impl BrowserPane {
     }
 
     fn refresh_navigation(&mut self, cx: &mut Context<Self>) {
+        if !self.visible {
+            return;
+        }
         let Some(native) = self.native.as_ref() else {
             return;
         };
@@ -418,20 +423,20 @@ impl BrowserPane {
             .id(id)
             .w(px(28.))
             .h(px(28.))
+            .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(4.))
+            .rounded(px(5.))
             .text_size(px(15.))
-            .text_color(rgb(if enabled {
-                self.colors.text
-            } else {
-                self.colors.muted
-            }))
+            .text_color(rgb(self.colors.muted))
+            .opacity(if enabled { 1. } else { 0.4 })
             .when(enabled, |button| {
-                button
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(self.colors.surface_high)))
+                button.cursor_pointer().hover(|style| {
+                    style
+                        .bg(rgb(self.colors.surface_high))
+                        .text_color(rgb(self.colors.text))
+                })
             })
             .child(label)
     }
@@ -458,31 +463,14 @@ impl Render for BrowserPane {
                 .text_color(rgb(self.colors.text))
                 .child(
                     div()
-                        .h(px(38.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px(px(10.))
-                        .border_b_1()
-                        .border_color(rgb(self.colors.border))
-                        .child(div().text_size(px(12.)).child("Browser"))
-                        .child(
-                            self.button("browser-close", "×", true)
-                                .on_click(cx.listener(|pane, _, _, cx| {
-                                    pane.set_visible(false);
-                                    cx.emit(BrowserEvent::Close);
-                                })),
-                        ),
-                )
-                .child(
-                    div()
+                        .id("browser-toolbar")
                         .h(px(42.))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
                         .gap(px(3.))
                         .px(px(6.))
+                        .bg(rgb(self.colors.sidebar))
                         .border_b_1()
                         .border_color(rgb(self.colors.border))
                         .child(self.button("browser-back", "←", back_enabled).on_click(
@@ -513,14 +501,14 @@ impl Render for BrowserPane {
                                 .id("browser-address")
                                 .flex_1()
                                 .min_w_0()
-                                .h(px(28.))
+                                .h(px(30.))
                                 .flex()
                                 .items_center()
                                 .px(px(8.))
-                                .bg(rgb(self.colors.surface))
+                                .bg(rgb(self.colors.background))
                                 .border_1()
                                 .border_color(rgb(self.colors.border))
-                                .rounded(px(4.))
+                                .rounded(px(5.))
                                 .text_size(px(12.))
                                 .cursor_text()
                                 .on_mouse_down(
@@ -537,7 +525,14 @@ impl Render for BrowserPane {
                                     cx.open_url(url);
                                 }
                             }),
-                        )),
+                        ))
+                        .child(
+                            self.button("browser-close", "×", true)
+                                .on_click(cx.listener(|pane, _, _, cx| {
+                                    pane.set_visible(false);
+                                    cx.emit(BrowserEvent::Close);
+                                })),
+                        ),
                 );
         if let Some(error) = &self.error {
             pane = pane.child(
@@ -600,6 +595,7 @@ impl Render for BrowserPane {
         pane.child(
             div()
                 .h(px(24.))
+                .bg(rgb(self.colors.sidebar))
                 .flex_shrink_0()
                 .px(px(10.))
                 .flex()
@@ -684,6 +680,10 @@ impl gpui::Element for NativeSurface {
     ) -> Hitbox {
         let allocation = (bounds, window.scale_factor(), window.bounds().origin);
         if self.visible && self.bounds.get() != Some(allocation) {
+            let geometry_changed = self
+                .bounds
+                .get()
+                .is_none_or(|previous| previous.0 != bounds || previous.1 != allocation.1);
             let rect = Rect {
                 position: wry::dpi::LogicalPosition::new(
                     f64::from(bounds.origin.x),
@@ -697,7 +697,11 @@ impl gpui::Element for NativeSurface {
                 .into(),
             };
             match self.native.with_view(|view| {
-                let result = view.set_bounds(rect);
+                let result = if geometry_changed {
+                    view.set_bounds(rect)
+                } else {
+                    Ok(())
+                };
                 #[cfg(target_os = "windows")]
                 {
                     use wry::WebViewExtWindows;
@@ -828,6 +832,7 @@ fn create_native(
         .map_err(|error| format!("Could not create the browser: {error}"))?;
     #[cfg(target_os = "linux")]
     {
+        register_gtk_browser_window(&native);
         use webkit2gtk::WebViewExt;
         use wry::WebViewExtUnix;
         let webview = native.webview();
@@ -840,6 +845,30 @@ fn create_native(
         });
     }
     Ok((native, context))
+}
+
+#[cfg(target_os = "linux")]
+fn register_gtk_browser_window(view: &WebView) -> Option<gtk::Window> {
+    use gtk::prelude::*;
+    use wry::WebViewExtUnix;
+
+    let window = view.webview().toplevel()?.downcast::<gtk::Window>().ok()?;
+    if let Some(gdk_window) = window.window() {
+        let mut owner = std::ptr::null_mut();
+        // SAFETY: inspect the live GDK window's opaque owner on GTK's main
+        // thread; the pointer is never dereferenced.
+        unsafe {
+            gtk::gdk::ffi::gdk_window_get_user_data(gdk_window.as_ptr(), &mut owner);
+        }
+        if owner.is_null() {
+            // Wry replaces GtkWindow's registered GDK window with a foreign
+            // child. GTK needs its owner to route focus events to the toplevel,
+            // which lets WebKit display the caret in a focused page input.
+            window.register_window(&gdk_window);
+        }
+        gdk_window.set_events(gdk_window.events() | gtk::gdk::EventMask::FOCUS_CHANGE_MASK);
+    }
+    Some(window)
 }
 
 #[cfg(target_os = "linux")]
@@ -948,21 +977,32 @@ fn find_x11_parent() -> Result<u32, String> {
 
 #[cfg(target_os = "linux")]
 fn ensure_gtk_pump(cx: &mut App) {
+    use std::time::Instant;
+
     thread_local! { static RUNNING: Cell<bool> = const { Cell::new(false) }; }
     if RUNNING.replace(true) {
         return;
     }
     cx.spawn(async move |cx| {
         loop {
-            Timer::after(Duration::from_millis(16)).await;
+            // A 16ms polling interval can deliver GTK's next frame-clock
+            // deadline a full frame late. Keep latency below a quarter frame.
+            let delay = VISIBLE_GTK_BROWSERS
+                .with(|count| Duration::from_millis(if count.get() > 0 { 4 } else { 16 }));
+            Timer::after(delay).await;
             if cx
                 .update(|_| {
-                    // Bound work per tick so a busy page cannot starve GPUI input.
+                    // Bound elapsed time as well as iterations so page work
+                    // yields promptly to GPUI input and terminal rendering.
+                    let started = Instant::now();
                     for _ in 0..64 {
                         if !gtk::events_pending() {
                             break;
                         }
                         gtk::main_iteration_do(false);
+                        if started.elapsed() >= Duration::from_millis(2) {
+                            break;
+                        }
                     }
                 })
                 .is_err()
@@ -1025,6 +1065,28 @@ fn normalize_url(address: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn clicking_the_address_field_focuses_it_and_accepts_text(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                None,
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.simulate_click(gpui::point(px(150.), px(21.)), gpui::Modifiers::default());
+        cx.simulate_input("localhost:3000");
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            let pane = pane.read(cx);
+            assert!(pane.address.read(cx).focus_handle(cx).is_focused(window));
+            assert_eq!(pane.draft, "localhost:3000");
+        });
+    }
 
     #[test]
     fn addresses_select_http_for_loopback_and_https_for_websites() {

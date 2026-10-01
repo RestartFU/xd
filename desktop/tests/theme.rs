@@ -87,6 +87,32 @@ fn every_preset_exposes_a_complete_readable_semantic_palette() {
 }
 
 #[test]
+fn default_theme_controls_remain_readable_on_every_surface() {
+    for preset in [ThemePreset::Dark, ThemePreset::Light] {
+        let colors = preset.colors();
+
+        for (role, background) in [
+            ("sidebar", colors.sidebar),
+            ("surface", colors.surface),
+            ("surface_high", colors.surface_high),
+        ] {
+            assert!(
+                contrast(colors.text, background) >= 7.0,
+                "{preset:?} text on {role}"
+            );
+            assert!(
+                contrast(colors.muted, background) >= 4.5,
+                "{preset:?} muted text on {role}"
+            );
+            assert!(
+                contrast(colors.accent_ink, background) >= 4.5,
+                "{preset:?} accent ink on {role}"
+            );
+        }
+    }
+}
+
+#[test]
 fn selectable_themes_produce_distinct_palettes() {
     let palettes = ThemePreset::ALL.map(ThemePreset::colors);
 

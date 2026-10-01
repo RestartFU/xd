@@ -8,6 +8,7 @@ use gpui::{
     fill, hsla, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
+use xd_desktop::theme::ThemeColors;
 
 use crate::{
     editor::{
@@ -141,6 +142,7 @@ pub struct ComposerInput {
     terminal: bool,
     terminal_bracketed_paste: bool,
     concealed: bool,
+    colors: Option<ThemeColors>,
 }
 
 impl EventEmitter<ComposerEvent> for ComposerInput {}
@@ -161,6 +163,7 @@ impl ComposerInput {
             terminal: false,
             terminal_bracketed_paste: false,
             concealed: false,
+            colors: None,
         }
     }
 
@@ -172,6 +175,13 @@ impl ComposerInput {
 
     pub fn set_terminal_bracketed_paste(&mut self, enabled: bool) {
         self.terminal_bracketed_paste = enabled;
+    }
+
+    pub fn set_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
+        if self.colors != Some(colors) {
+            self.colors = Some(colors);
+            cx.notify();
+        }
     }
 
     pub fn password(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
@@ -825,10 +835,17 @@ impl Element for TextElement {
         let cursor_offset = input.cursor_offset();
         let style = window.text_style();
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0.65, 1.))
+            (
+                input.placeholder.clone(),
+                input
+                    .colors
+                    .map(|colors| rgb(colors.muted).into())
+                    .unwrap_or_else(|| hsla(0., 0., 0.65, 1.)),
+            )
         } else {
             (content, style.color)
         };
+        let caret_color = input.colors.map_or(0x6b8cff, |colors| colors.accent_ink);
         let run = TextRun {
             len: display_text.len(),
             font: style.font(),
@@ -880,7 +897,7 @@ impl Element for TextElement {
                         point(left + cursor_x, bounds.top()),
                         size(CARET_WIDTH, bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0x6b8cff),
+                    rgb(caret_color),
                 )),
             )
         } else {
@@ -890,7 +907,7 @@ impl Element for TextElement {
                         point(left + line.x_for_index(selected_range.start), bounds.top()),
                         point(left + line.x_for_index(selected_range.end), bounds.bottom()),
                     ),
-                    rgba(0x6b8cff55),
+                    rgba((caret_color << 8) | 0x55),
                 )),
                 None,
             )
@@ -1021,7 +1038,7 @@ impl Render for ComposerInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .line_height(px(22.))
             .text_size(px(14.))
-            .text_color(rgb(0xe8eaf0))
+            .text_color(rgb(self.colors.map_or(0xe8eaf0, |colors| colors.text)))
             .child(
                 div()
                     .h(px(30.))

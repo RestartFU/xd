@@ -54,34 +54,34 @@ impl ThemePreset {
     pub const fn colors(self) -> ThemeColors {
         match self {
             Self::Dark => ThemeColors {
-                background: 0x11110f,
-                sidebar: 0x181818,
-                surface: 0x202020,
-                surface_high: 0x282826,
-                border: 0x303030,
-                selected_surface: 0x2b201c,
-                selected_border: 0x704333,
-                text: 0xf1f1f1,
-                muted: 0xa0a0a0,
-                accent: 0xf07a55,
-                accent_ink: 0xf07a55,
-                accent_hover: 0xf58966,
-                accent_text: 0x1b0e09,
+                background: 0x101722,
+                sidebar: 0x131d2b,
+                surface: 0x1b293a,
+                surface_high: 0x25354b,
+                border: 0x31455e,
+                selected_surface: 0x213b5b,
+                selected_border: 0x5682bc,
+                text: 0xe6edf6,
+                muted: 0xaebdd0,
+                accent: 0x77aaff,
+                accent_ink: 0x8fbaff,
+                accent_hover: 0x91bbff,
+                accent_text: 0x101722,
             },
             Self::Light => ThemeColors {
-                background: 0xf7f7f5,
-                sidebar: 0xffffff,
-                surface: 0xfafafa,
-                surface_high: 0xf3f3f1,
-                border: 0xebebeb,
-                selected_surface: 0xfdf0eb,
-                selected_border: 0xf1d2cb,
-                text: 0x202020,
-                muted: 0x6f6f6f,
-                accent: 0xe96a43,
-                accent_ink: 0xa34226,
-                accent_hover: 0xda5d37,
-                accent_text: 0x2a1008,
+                background: 0xf3f6fb,
+                sidebar: 0xe9eef6,
+                surface: 0xffffff,
+                surface_high: 0xe2eaf4,
+                border: 0xc5d1e1,
+                selected_surface: 0xdae7f8,
+                selected_border: 0x5986c1,
+                text: 0x19283d,
+                muted: 0x50617a,
+                accent: 0x245caf,
+                accent_ink: 0x2357a4,
+                accent_hover: 0x1d4d95,
+                accent_text: 0xffffff,
             },
             Self::Warm => ThemeColors {
                 background: 0x17110d,
@@ -135,17 +135,6 @@ impl ThemePreset {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn light_theme_matches_the_flat_coral_session_board() {
-        let colors = ThemePreset::Light.colors();
-
-        assert_eq!(colors.background, 0xf7f7f5);
-        assert_eq!(colors.sidebar, 0xffffff);
-        assert_eq!(colors.surface, 0xfafafa);
-        assert_eq!(colors.border, 0xebebeb);
-        assert_eq!(colors.accent, 0xe96a43);
-    }
 
     #[test]
     fn known_theme_presets_include_nord_and_dracula() {
