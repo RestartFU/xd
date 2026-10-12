@@ -38,8 +38,7 @@ for line in sys.stdin:
             print(json.dumps({'method':'item/agentMessage/delta','params':{'threadId':'thread-test','itemId':'msg-before','delta':'before tool'}}), flush=True)
             print(json.dumps({'method':'item/completed','params':{'threadId':'thread-test','item':{'type':'commandExecution','id':'cmd','command':'echo done','aggregatedOutput':'done'}}}), flush=True)
             print(json.dumps({'method':'item/agentMessage/delta','params':{'threadId':'thread-test','itemId':'msg-after','delta':'after tool'}}), flush=True)
-            time.sleep(0.3)
-            print(json.dumps({'method':'turn/completed','params':{'threadId':'thread-test','turn':{'status':'completed'}}}), flush=True)
+            print(json.dumps({'id':42,'method':'item/commandExecution/requestApproval','params':{'threadId':'thread-test','turnId':'turn-test','itemId':'finish','command':'finish mixed turn'}}), flush=True)
         elif prompt == 'forever':
             time.sleep(30)
         elif prompt == 'wait':
@@ -49,6 +48,8 @@ for line in sys.stdin:
         else:
             print(json.dumps({'method':'item/agentMessage/delta','params':{'threadId':'thread-test','itemId':'msg','delta':'hello'}}), flush=True)
             print(json.dumps({'method':'turn/completed','params':{'threadId':'thread-test','turn':{'status':'completed'}}}), flush=True)
+    elif frame.get('id') == 42 and 'result' in frame:
+        print(json.dumps({'method':'turn/completed','params':{'threadId':'thread-test','turn':{'status':'completed'}}}), flush=True)
     elif frame.get('id') == 41 and 'result' in frame:
         print(json.dumps({'method':'item/agentMessage/delta','params':{'threadId':'thread-test','itemId':'msg','delta':'approved'}}), flush=True)
         print(json.dumps({'method':'turn/completed','params':{'threadId':'thread-test','turn':{'status':'completed'}}}), flush=True)
@@ -161,6 +162,21 @@ impl<R: Read, W: Write> Client<R, W> {
             }
         }
     }
+    /// Wait for observable host state instead of assuming a process scheduling delay.
+    fn wait_for(&mut self, request: Value, ready: impl Fn(&Value) -> bool) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let reply = self.call(request.clone());
+            if ready(&reply) {
+                return reply;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "state did not become ready: {reply}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     fn frame(&mut self) -> Value {
         let mut line = String::new();
         assert!(
@@ -240,9 +256,14 @@ fn agent_turn_and_pending_approval_survive_client_disconnects() {
     );
     client.writer.shutdown(Shutdown::Both).unwrap();
     drop(client);
-    thread::sleep(Duration::from_millis(800));
     let mut client = daemon.client();
-    let history = client.call(json!({"op":"messages", "chat":chat}));
+    let history = client.wait_for(json!({"op":"messages", "chat":chat}), |reply| {
+        reply["messages"].as_array().is_some_and(|messages| {
+            messages
+                .iter()
+                .any(|message| message["content"] == "survived disconnect")
+        })
+    });
     assert!(
         history["messages"]
             .as_array()
@@ -266,8 +287,13 @@ fn agent_turn_and_pending_approval_survive_client_disconnects() {
     );
     assert_eq!(client.call(json!({"op":"respond", "chat":chat,"request_id":interaction["request_id"], "response":{"decision":"accept"}}))["ok"], true);
     assert_eq!(client.call(json!({"op":"respond", "chat":chat,"request_id":interaction["request_id"], "response":{"decision":"accept"}}))["ok"], false);
-    thread::sleep(Duration::from_millis(100));
-    let history = client.call(json!({"op":"messages", "chat":chat}));
+    let history = client.wait_for(json!({"op":"messages", "chat":chat}), |reply| {
+        reply["messages"].as_array().is_some_and(|messages| {
+            messages
+                .iter()
+                .any(|message| message["content"] == "approved")
+        })
+    });
     assert!(
         history["messages"]
             .as_array()
@@ -302,18 +328,20 @@ fn bridges_autostart_one_daemon_and_preserve_pairing_after_restart() {
                     .args(["stdio", "--data"])
                     .arg(&root)
                     .env("XD_CODEX_EXECUTABLE", root.join("codex"))
+                    .env("HOME", &root)
+                    .env("SHELL", "/bin/sh")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
                     .spawn()
                     .unwrap();
-                let mut input = child.stdin.take().unwrap();
-                writeln!(input, "{}", json!({"op":"daemon-info","_xd_request":1})).unwrap();
-                input.flush().unwrap();
-                let mut reader = BufReader::new(child.stdout.take().unwrap());
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let reply: Value = serde_json::from_str(&line).unwrap();
+                let mut client = Client {
+                    reader: BufReader::new(child.stdout.take().unwrap()),
+                    writer: child.stdin.take().unwrap(),
+                    next: 1,
+                };
+                let reply = client.call(json!({"op":"daemon-info"}));
+                assert_eq!(reply["ok"], true, "{reply}");
                 child.kill().unwrap();
                 child.wait().unwrap();
                 reply["pid"].as_u64().unwrap()
@@ -350,8 +378,12 @@ fn snapshots_preserve_text_tool_order_without_replaying_a_committed_segment() {
         client.call(json!({"op":"send","chat":chat,"text":"mixed"}))["ok"],
         true
     );
-    thread::sleep(Duration::from_millis(100));
-    let snapshot = client.call(json!({"op":"chat","chat":chat}));
+    let snapshot = client.wait_for(json!({"op":"chat","chat":chat}), |reply| {
+        reply["segment"] == "after tool"
+            && reply["interactions"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+    });
     assert_eq!(snapshot["segment"], "after tool");
     let active_history = client.call(json!({"op":"messages","chat":chat}));
     assert_eq!(
@@ -366,8 +398,19 @@ fn snapshots_preserve_text_tool_order_without_replaying_a_committed_segment() {
             .iter()
             .any(|item| item["tool"] == false && item["text"] == "before tool")
     );
-    thread::sleep(Duration::from_millis(300));
-    let history = client.call(json!({"op":"messages","chat":chat}));
+    assert_eq!(
+        client.call(json!({"op":"respond", "chat":chat,
+            "request_id":snapshot["interactions"][0]["request_id"],
+            "response":{"decision":"accept"}}))["ok"],
+        true
+    );
+    let history = client.wait_for(json!({"op":"messages","chat":chat}), |reply| {
+        reply["messages"].as_array().is_some_and(|messages| {
+            messages
+                .iter()
+                .any(|message| message["content"] == "after tool")
+        })
+    });
     let messages = history["messages"].as_array().unwrap();
     let before = messages
         .iter()
