@@ -42,6 +42,22 @@ struct RuntimeInner {
     /// Agent processes kept between a chat's turns, by chat.
     sessions: Mutex<HashMap<String, AgentSession>>,
     todos: Mutex<HashMap<String, Vec<TodoItem>>>,
+    interactions: Mutex<HashMap<String, PendingInteractions>>,
+    next_interaction: AtomicU64,
+    interaction_epoch: String,
+}
+
+#[derive(Default)]
+struct PendingInteractions {
+    revision: u64,
+    requests: HashMap<String, PendingInteraction>,
+}
+
+struct PendingInteraction {
+    id: Value,
+    method: String,
+    params: Value,
+    turn_id: u64,
 }
 
 /// An agent process that outlives the turn it was started for.
@@ -56,7 +72,7 @@ struct AgentSession {
     stdin: ChildStdin,
     /// Lent to the turn being answered, and handed back when it ends. Absent
     /// while a turn holds it.
-    stdout: Option<ChildStdout>,
+    stdout: Option<BufReader<ChildStdout>>,
     /// What this process was started with. A turn that wants anything else --
     /// another model, another directory -- needs its own process, because all
     /// of it was fixed in argv when this one started.
@@ -90,6 +106,7 @@ impl Drop for RuntimeInner {
 }
 
 struct ActiveProcess {
+    message_boundary: i64,
     turn_id: u64,
     child: Arc<Mutex<Child>>,
     cancelled: Arc<AtomicBool>,
@@ -104,30 +121,27 @@ struct ActiveProcess {
 /// is, or it shows a turn that started an unknown time ago with none of the
 /// text it has produced.
 #[derive(Default)]
-struct TurnProgress {
-    sequence: AtomicU64,
-    segment: Mutex<String>,
+struct ProgressState {
+    sequence: u64,
+    segment: String,
+    items: Vec<Value>,
 }
-
+#[derive(Default)]
+struct TurnProgress {
+    state: Mutex<ProgressState>,
+    ready: AtomicBool,
+}
 impl TurnProgress {
-    fn next_sequence(&self) -> u64 {
-        self.sequence.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
     fn sequence(&self) -> u64 {
-        self.sequence.load(Ordering::Relaxed)
-    }
-
-    fn set_segment(&self, text: &str) {
-        if let Ok(mut segment) = self.segment.lock() {
-            segment.clear();
-            segment.push_str(text);
-        }
+        self.state.lock().map(|state| state.sequence).unwrap_or(0)
     }
 }
 
 /// Where a live turn has got to, for a client that just loaded the chat.
 pub struct LiveTurn {
+    pub epoch: String,
+    pub message_boundary: i64,
+    pub items: Vec<Value>,
     pub turn_id: u64,
     pub sequence: u64,
     pub label: String,
@@ -154,8 +168,134 @@ impl TurnRuntime {
                 commands: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 todos: Mutex::new(HashMap::new()),
+                interactions: Mutex::new(HashMap::new()),
+                next_interaction: AtomicU64::new(1),
+                interaction_epoch: uuid::Uuid::new_v4().to_string(),
             }),
         }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        if let Ok(active) = self.inner.active.lock() {
+            for process in active.values() {
+                process.cancelled.store(true, Ordering::Release);
+                if let Ok(mut child) = process.child.lock() {
+                    let _ = terminate_agent(&mut child);
+                }
+            }
+        }
+        if let Ok(mut sessions) = self.inner.sessions.lock() {
+            for session in sessions.values_mut() {
+                if let Ok(mut child) = session.child.lock() {
+                    let _ = terminate_agent(&mut child);
+                }
+            }
+            sessions.clear();
+        }
+    }
+
+    fn write_rpc(&self, chat_id: &str, frame: &Value) -> Result<(), String> {
+        let mut sessions = self
+            .inner
+            .sessions
+            .lock()
+            .map_err(|_| "Agent sessions unavailable".to_owned())?;
+        let session = sessions
+            .get_mut(chat_id)
+            .ok_or("The agent session has ended")?;
+        writeln!(session.stdin, "{frame}")
+            .and_then(|()| session.stdin.flush())
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn interactions(&self, chat_id: &str) -> Value {
+        self.inner.interactions.lock().ok().and_then(|all| all.get(chat_id).map(|pending| json!({"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision,"interactions":pending.requests.iter().map(|(id, request)| json!({"request_id":id,"method":request.method,"params":request.params})).collect::<Vec<_>>()}))).unwrap_or_else(|| json!({"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":0,"interactions":[]}))
+    }
+
+    pub(crate) fn respond(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        response: &Value,
+    ) -> Result<(), String> {
+        let mut all = self
+            .inner
+            .interactions
+            .lock()
+            .map_err(|_| "Pending requests unavailable".to_owned())?;
+        let pending = all
+            .get_mut(chat_id)
+            .ok_or("This request is no longer pending")?;
+        let request = pending
+            .requests
+            .get(request_id)
+            .ok_or("This request was already answered or expired")?;
+        if !self.inner.active.lock().is_ok_and(|active| {
+            active
+                .get(chat_id)
+                .is_some_and(|turn| turn.turn_id == request.turn_id)
+        }) {
+            return Err("This turn has ended".into());
+        }
+        let result = match request.method.as_str() {
+            "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
+                let decision = response
+                    .get("decision")
+                    .and_then(Value::as_str)
+                    .ok_or("Approval needs a decision")?;
+                if !matches!(
+                    decision,
+                    "accept" | "acceptForSession" | "decline" | "cancel"
+                ) {
+                    return Err("Invalid approval decision".into());
+                }
+                json!({"decision":decision})
+            }
+            "item/permissions/requestApproval" => {
+                let granted = match response.get("decision").and_then(Value::as_str) {
+                    Some("accept" | "acceptForSession") => request
+                        .params
+                        .get("permissions")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                    Some("decline" | "cancel") => json!({}),
+                    _ => return Err("Permission request needs an approval decision".into()),
+                };
+                json!({"permissions":granted,"scope":if response["decision"] == "acceptForSession" {"session"} else {"turn"}})
+            }
+            "item/tool/requestUserInput" => {
+                let answers = response
+                    .get("answers")
+                    .and_then(Value::as_object)
+                    .ok_or("Question needs answers")?;
+                let questions = request
+                    .params
+                    .get("questions")
+                    .and_then(Value::as_array)
+                    .ok_or("Invalid question request")?;
+                if questions
+                    .iter()
+                    .any(|q| q["id"].as_str().is_none_or(|id| !answers.contains_key(id)))
+                    || answers.len() != questions.len()
+                {
+                    return Err("Answer each requested question".into());
+                }
+                if answers.values().any(|a| {
+                    a.get("answers")
+                        .and_then(Value::as_array)
+                        .is_none_or(|a| a.is_empty() || a.iter().any(|s| s.as_str().is_none()))
+                }) {
+                    return Err("Invalid question answers".into());
+                }
+                json!({"answers":answers})
+            }
+            _ => return Err("Unsupported interaction".into()),
+        };
+        self.write_rpc(chat_id, &json!({"id":request.id,"result":result}))?;
+        pending.requests.remove(request_id);
+        pending.revision = self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
+        self.inner.events.publish(json!({"event":"interaction-resolved","chat":chat_id,"request_id":request_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
+        Ok(())
     }
 
     pub fn start(&self, mut turn: TurnSpec) -> Result<(), String> {
@@ -187,7 +327,8 @@ impl TurnRuntime {
             session_id: turn.session_id.as_deref(),
             environment: &turn.environment,
         };
-        let keeps_process = AgentCommand::keeps_its_process(&command_backend);
+        let app_server = command_backend == "codex";
+        let keeps_process = app_server || AgentCommand::keeps_its_process(&command_backend);
         // Everything baked into argv when a process starts. A turn that wants
         // any of it different cannot be answered by the process already up.
         let fingerprint = format!(
@@ -197,12 +338,16 @@ impl TurnRuntime {
             turn.system_prompt.as_deref().unwrap_or_default(),
             turn.environment,
         );
-        let mut command = specification.build();
+        let mut command = if app_server {
+            specification.build_app_server()
+        } else {
+            specification.build()
+        };
         let (child, stdout, complaint) = if keeps_process {
             self.session_for(
                 &turn.chat_id,
                 &fingerprint,
-                &turn.prompt,
+                &turn,
                 &mut command,
                 &command_backend,
             )?
@@ -223,8 +368,17 @@ impl TurnRuntime {
                 .ok_or_else(|| format!("Cannot read {command_backend} errors."))?;
             let complaint = Arc::new(Mutex::new(String::new()));
             drain_stderr(stderr, complaint.clone());
-            (Arc::new(Mutex::new(child)), stdout, complaint)
+            (
+                Arc::new(Mutex::new(child)),
+                BufReader::new(stdout),
+                complaint,
+            )
         };
+        let message_boundary = self
+            .inner
+            .store
+            .latest_message_id(&turn.chat_id)
+            .map_err(|e| e.to_string())?;
         let turn_id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed) + 1;
         let cancelled = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(TurnProgress::default());
@@ -243,6 +397,7 @@ impl TurnRuntime {
             active.insert(
                 turn.chat_id.clone(),
                 ActiveProcess {
+                    message_boundary,
                     turn_id,
                     child: child.clone(),
                     cancelled: cancelled.clone(),
@@ -255,6 +410,33 @@ impl TurnRuntime {
         let chat_id = turn.chat_id.clone();
         let label = turn.label.clone();
         let backend = turn.backend.clone();
+        self.inner.events.publish(json!({
+            "event": "turn-started",
+            "turn_epoch": self.inner.interaction_epoch,
+            "chat": chat_id,
+            "label": label,
+            "turn_id": turn_id,
+            "turn_sequence": 0,
+        }));
+        if app_server {
+            let child = child.clone();
+            let active = self.inner.clone();
+            let chat = chat_id.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_secs(30));
+                let starting = active.active.lock().is_ok_and(|running| {
+                    running.get(&chat).is_some_and(|process| {
+                        process.turn_id == turn_id
+                            && !process.progress.ready.load(Ordering::Acquire)
+                    })
+                });
+                if starting {
+                    if let Ok(mut child) = child.lock() {
+                        let _ = terminate_agent(&mut child);
+                    }
+                }
+            });
+        }
         let runtime = self.clone();
         if let Err(error) = thread::Builder::new()
             .name(format!("xd-agent-turn-{turn_id}"))
@@ -285,13 +467,6 @@ impl TurnRuntime {
             }
             return Err(format!("Cannot supervise {backend}: {error}"));
         }
-        self.inner.events.publish(json!({
-            "event": "turn-started",
-            "chat": chat_id,
-            "label": label,
-            "turn_id": turn_id,
-            "turn_sequence": 0,
-        }));
         Ok(())
     }
 
@@ -324,17 +499,16 @@ impl TurnRuntime {
     pub fn live_turn(&self, chat_id: &str) -> Option<LiveTurn> {
         let active = self.inner.active.lock().ok()?;
         let process = active.get(chat_id)?;
+        let state = process.progress.state.lock().ok()?;
         Some(LiveTurn {
+            epoch: self.inner.interaction_epoch.clone(),
+            message_boundary: process.message_boundary,
+            items: state.items.clone(),
             turn_id: process.turn_id,
-            sequence: process.progress.sequence(),
+            sequence: state.sequence,
             label: process.label.clone(),
             working_for: process.started.elapsed().as_secs(),
-            segment: process
-                .progress
-                .segment
-                .lock()
-                .map(|segment| segment.clone())
-                .unwrap_or_default(),
+            segment: state.segment.clone(),
         })
     }
 
@@ -358,10 +532,17 @@ impl TurnRuntime {
         &self,
         chat_id: &str,
         fingerprint: &str,
-        prompt: &str,
+        turn: &TurnSpec,
         command: &mut std::process::Command,
         backend: &str,
-    ) -> Result<(Arc<Mutex<Child>>, ChildStdout, Arc<Mutex<String>>), String> {
+    ) -> Result<
+        (
+            Arc<Mutex<Child>>,
+            BufReader<ChildStdout>,
+            Arc<Mutex<String>>,
+        ),
+        String,
+    > {
         let mut sessions = self
             .inner
             .sessions
@@ -379,7 +560,14 @@ impl TurnRuntime {
             if usable {
                 // Writing the turn is also the test of whether the pipe is
                 // still there; a broken one falls through to a fresh process.
-                let written = writeln!(session.stdin, "{}", AgentCommand::encode_turn(prompt))
+                let frame = if backend == "codex" {
+                    crate::codex_app::CodexAppParser::new(turn)
+                        .turn_request()
+                        .to_string()
+                } else {
+                    AgentCommand::encode_turn(&turn.prompt)
+                };
+                let written = writeln!(session.stdin, "{}", frame)
                     .and_then(|()| session.stdin.flush())
                     .is_ok();
                 if written {
@@ -413,7 +601,12 @@ impl TurnRuntime {
             .stderr
             .take()
             .ok_or_else(|| format!("Cannot read {backend} errors."))?;
-        writeln!(stdin, "{}", AgentCommand::encode_turn(prompt))
+        let frame = if backend == "codex" {
+            crate::codex_app::CodexAppParser::initialize().to_string()
+        } else {
+            AgentCommand::encode_turn(&turn.prompt)
+        };
+        writeln!(stdin, "{}", frame)
             .and_then(|()| stdin.flush())
             .map_err(|error| format!("Cannot send the turn to {backend}: {error}"))?;
         let complaint = Arc::new(Mutex::new(String::new()));
@@ -429,11 +622,11 @@ impl TurnRuntime {
                 complaint: complaint.clone(),
             },
         );
-        Ok((child, stdout, complaint))
+        Ok((child, BufReader::new(stdout), complaint))
     }
 
     /// Hands a kept process's output back, so the next turn can have it.
-    fn return_stdout(&self, chat_id: &str, stdout: ChildStdout) {
+    fn return_stdout(&self, chat_id: &str, stdout: BufReader<ChildStdout>) {
         if let Ok(mut sessions) = self.inner.sessions.lock()
             && let Some(session) = sessions.get_mut(chat_id)
         {
@@ -459,12 +652,18 @@ impl TurnRuntime {
         child: Arc<Mutex<Child>>,
         cancelled: Arc<AtomicBool>,
         progress: Arc<TurnProgress>,
-        stdout: ChildStdout,
+        stdout: BufReader<ChildStdout>,
         complaint: Arc<Mutex<String>>,
         keeps_process: bool,
     ) {
         let started = Instant::now();
-        let mut parser = match AgentParser::new(&turn.backend) {
+        let mut parser = match if turn.backend == "codex" {
+            Ok(AgentParser::AppServer(
+                crate::codex_app::CodexAppParser::new(&turn),
+            ))
+        } else {
+            AgentParser::new(&turn.backend)
+        } {
             Ok(parser) => parser,
             Err(error) => {
                 self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
@@ -482,7 +681,7 @@ impl TurnRuntime {
         let mut parked = Instant::now();
 
         // Owned back after the loop so a kept process can be lent out again.
-        let mut reader = BufReader::new(stdout);
+        let mut reader = stdout;
         let mut line = String::new();
         loop {
             line.clear();
@@ -499,6 +698,55 @@ impl TurnRuntime {
             let line = line.trim_end_matches(['\r', '\n']).to_owned();
             for event in parser.feed(&line) {
                 match event {
+                    AgentEvent::Ready => {
+                        progress.ready.store(true, Ordering::Release);
+                    }
+                    AgentEvent::Rpc(frame) => {
+                        if let Err(error) = self.write_rpc(&turn.chat_id, &frame) {
+                            latest_error = Some(error);
+                        }
+                    }
+                    AgentEvent::Interaction { id, method, params } => {
+                        let request_id =
+                            format!("{}:{turn_id}:{}", self.inner.interaction_epoch, id);
+                        if matches!(
+                            method.as_str(),
+                            "item/commandExecution/requestApproval"
+                                | "item/fileChange/requestApproval"
+                                | "item/tool/requestUserInput"
+                                | "item/permissions/requestApproval"
+                        ) {
+                            if let Ok(mut interactions) = self.inner.interactions.lock() {
+                                let pending = interactions.entry(turn.chat_id.clone()).or_default();
+                                pending.requests.insert(
+                                    request_id.clone(),
+                                    PendingInteraction {
+                                        id,
+                                        method: method.clone(),
+                                        params: params.clone(),
+                                        turn_id,
+                                    },
+                                );
+                                pending.revision =
+                                    self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
+                                self.inner.events.publish(json!({"event":"interaction", "chat":turn.chat_id, "request_id":request_id, "method":method, "params":params,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
+                            }
+                        } else {
+                            let _ = self.write_rpc(&turn.chat_id, &json!({"id":id, "error":{"code":-32601,"message":"Unsupported client request"}}));
+                        }
+                    }
+                    AgentEvent::InteractionResolved(id) => {
+                        let request_id =
+                            format!("{}:{turn_id}:{}", self.inner.interaction_epoch, id);
+                        if let Ok(mut interactions) = self.inner.interactions.lock() {
+                            if let Some(pending) = interactions.get_mut(&turn.chat_id) {
+                                pending.requests.remove(&request_id);
+                                pending.revision =
+                                    self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
+                                self.inner.events.publish(json!({"event":"interaction-resolved", "chat":turn.chat_id, "request_id":request_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
+                            }
+                        }
+                    }
                     AgentEvent::Session(session) => {
                         if let Err(error) = self.inner.store.set_session(
                             &turn.chat_id,
@@ -566,7 +814,6 @@ impl TurnRuntime {
                             published_text = true;
                             // A client that loads the chat now has to be handed
                             // the same text the live events already carried.
-                            progress.set_segment(&streamed_text[..visible_streamed_bytes]);
                         }
                         // Park the reply so far, throttled so a token stream is
                         // not a write storm. Only an interrupted turn ever
@@ -583,6 +830,22 @@ impl TurnRuntime {
                         }
                     }
                     AgentEvent::Tool(text) => {
+                        if !streamed_text.is_empty() {
+                            let segment = std::mem::take(&mut streamed_text);
+                            if let Err(error) = self.inner.store.append_turn_message(
+                                &turn.chat_id,
+                                "assistant",
+                                &segment,
+                                Some(&turn.label),
+                            ) {
+                                latest_error = Some(error.to_string());
+                            } else {
+                                had_activity = true;
+                            }
+                            visible_streamed_bytes = 0;
+
+                            let _ = self.inner.store.set_partial_reply(&turn.chat_id, "", None);
+                        }
                         match self.inner.store.append_turn_message(
                             &turn.chat_id,
                             "tool",
@@ -681,7 +944,7 @@ impl TurnRuntime {
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_none();
             if alive && completed && !was_cancelled {
-                self.return_stdout(&turn.chat_id, reader.into_inner());
+                self.return_stdout(&turn.chat_id, reader);
             } else {
                 self.drop_session(&turn.chat_id);
             }
@@ -712,6 +975,12 @@ impl TurnRuntime {
                 .is_some_and(|active| active.turn_id == turn_id)
         {
             active.remove(&turn.chat_id);
+        }
+        if let Ok(mut interactions) = self.inner.interactions.lock() {
+            let pending = interactions.entry(turn.chat_id.clone()).or_default();
+            pending.requests.clear();
+            pending.revision = self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
+            self.inner.events.publish(json!({"event":"interactions-cleared", "chat":turn.chat_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
         }
         let asked = ask::parse(&assistant_text);
         self.finish(
@@ -808,6 +1077,7 @@ impl TurnRuntime {
         };
         let mut event = json!({
             "event": "turn-finished",
+            "turn_epoch": self.inner.interaction_epoch,
             "chat": turn.chat_id,
             "turn_id": turn_id,
             "turn_sequence": sequence,
@@ -847,11 +1117,41 @@ impl TurnRuntime {
         progress: &TurnProgress,
         fields: Value,
     ) {
-        let sequence = progress.next_sequence();
+        let sequence = {
+            let mut state = progress.state.lock().expect("turn progress lock");
+            state.sequence += 1;
+            if name == "text" {
+                if let Some(text) = fields["text"].as_str() {
+                    state.segment.push_str(text);
+                }
+            } else if name == "tool"
+                && fields["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("todo_list\n"))
+            {
+                state.items.retain(|item| {
+                    !item["text"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("todo_list\n"))
+                });
+                state.items.push(json!({"tool":true,"text":fields["text"]}));
+            } else if name == "tool" {
+                if !state.segment.is_empty() {
+                    let text = std::mem::take(&mut state.segment);
+                    state.items.push(json!({"tool":false,"text":text}));
+                }
+                state.items.push(json!({"tool":true,"text":fields["text"]}));
+            }
+            state.sequence
+        };
         let mut event = fields.as_object().cloned().unwrap_or_default();
         event.insert("event".into(), name.into());
         event.insert("chat".into(), turn.chat_id.clone().into());
         event.insert("turn_id".into(), turn_id.into());
+        event.insert(
+            "turn_epoch".into(),
+            self.inner.interaction_epoch.clone().into(),
+        );
         event.insert("turn_sequence".into(), sequence.into());
         self.inner.events.publish(Value::Object(event));
     }
@@ -996,6 +1296,7 @@ mod tests {
         runtime.inner.active.lock().unwrap().insert(
             "chat".to_owned(),
             ActiveProcess {
+                message_boundary: 0,
                 turn_id: 1,
                 child: Arc::new(Mutex::new(child)),
                 cancelled: Arc::new(AtomicBool::new(false)),
@@ -1027,15 +1328,29 @@ mod tests {
     fn turn_progress_numbers_every_published_event_and_holds_the_latest_segment() {
         let progress = TurnProgress::default();
         assert_eq!(progress.sequence(), 0);
-        assert_eq!(progress.next_sequence(), 1);
-        assert_eq!(progress.next_sequence(), 2);
+        assert_eq!(
+            {
+                let mut state = progress.state.lock().unwrap();
+                state.sequence += 1;
+                state.sequence
+            },
+            1
+        );
+        assert_eq!(
+            {
+                let mut state = progress.state.lock().unwrap();
+                state.sequence += 1;
+                state.sequence
+            },
+            2
+        );
         assert_eq!(progress.sequence(), 2);
 
         // The segment is the whole reply so far, not the last delta: a client
         // that loads mid-turn gets one snapshot and no chance to accumulate.
-        progress.set_segment("Half");
-        progress.set_segment("Half an ans");
-        assert_eq!(*progress.segment.lock().unwrap(), "Half an ans");
+        progress.state.lock().unwrap().segment = "Half".into();
+        progress.state.lock().unwrap().segment = "Half an ans".into();
+        assert_eq!(progress.state.lock().unwrap().segment, "Half an ans");
     }
 
     #[test]

@@ -50,13 +50,19 @@ with tempfile.TemporaryDirectory(prefix='xd-windows-host-smoke-') as directory:
     environment = dict(os.environ, HOME=directory)
     requests = ''.join(json.dumps({'op': operation, '_xd_request': index}) + '\n'
                        for index, operation in enumerate(['ping', 'tree'], 1))
-    result = subprocess.run([str(binary), 'stdio', '--data', directory],
-                            input=requests, capture_output=True, text=True,
-                            env=environment, check=True, timeout=30)
-    replies = {frame['_xd_request']: frame for frame in
-               map(json.loads, result.stdout.splitlines()) if '_xd_request' in frame}
-    assert replies[1]['ok'] is True, replies
-    assert replies[2]['ok'] is True and 'folders' in replies[2], replies
+    try:
+        result = subprocess.run([str(binary), 'stdio', '--data', directory],
+                                input=requests, capture_output=True, text=True,
+                                env=environment, check=True, timeout=30)
+        replies = {frame['_xd_request']: frame for frame in
+                   map(json.loads, result.stdout.splitlines()) if '_xd_request' in frame}
+        assert replies[1]['ok'] is True, replies
+        assert replies[2]['ok'] is True and 'folders' in replies[2], replies
+    finally:
+        # The stdio client now starts a persistent daemon. Stop only this test's
+        # isolated instance before its temporary data directory is removed.
+        subprocess.run([str(binary), 'daemon-stop', '--data', directory],
+                       capture_output=True, text=True, env=environment, timeout=30)
 print('Static Windows WSL host: stdio ping and tree passed')
 PY
 

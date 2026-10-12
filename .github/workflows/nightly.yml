@@ -251,9 +251,9 @@ jobs:
           if [[ -f xd-nightly-android.apk ]]; then
             assets+=(xd-nightly-android.apk xd-nightly-android.apk.sha256)
             android_notes=$(cat <<'EOF'
-          Android connects directly over SSH with password or imported-key
-          authentication and explicit SSH host-key fingerprint verification.
-          The remote machine must already have the xd nightly host installed.
+          Android connects directly to the xd daemon using a pairing invite
+          and pinned TLS. The host must be reachable over LAN, Tailscale,
+          or a server address and have the xd nightly host installed.
           EOF
             )
           else

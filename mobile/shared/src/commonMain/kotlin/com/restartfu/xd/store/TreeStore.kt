@@ -102,6 +102,7 @@ internal class TreeStore(
                                 folderId = it.folder,
                                 title = it.title,
                                 backend = it.backend,
+                                sessionMode = it.sessionMode,
                                 branch = it.branch,
                                 working = workingEvents[it.id]
                                     ?.takeIf { event ->

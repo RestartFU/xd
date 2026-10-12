@@ -56,7 +56,7 @@ minor="${BASH_REMATCH[2]}"
 patch="${BASH_REMATCH[3]}"
 current_code=$((major * 1000000 + minor * 1000 + patch))
 
-for manifest in host/Cargo.toml; do
+for manifest in host/Cargo.toml transport-core/Cargo.toml; do
   grep -m1 -qx "version = \"$current\"" "$manifest" \
     || { printf '%s version mismatch\n' "$manifest" >&2; exit 1; }
 done
@@ -74,6 +74,12 @@ grep -A1 -m1 '^name = "xd-desktop"$' desktop/Cargo.lock \
 grep -A1 -m1 '^name = "xd-host"$' host/Cargo.lock \
   | grep -qx "version = \"$current\"" \
   || { printf 'host/Cargo.lock version mismatch\n' >&2; exit 1; }
+
+for lockfile in desktop/Cargo.lock host/Cargo.lock transport-core/Cargo.lock; do
+  grep -A1 -m1 '^name = "xd-transport"$' "$lockfile" \
+    | grep -qx "version = \"$current\"" \
+    || { printf '%s transport version mismatch\n' "$lockfile" >&2; exit 1; }
+done
 
 if [[ "$bump" == --current ]]; then
   printf '%s\n' "$current"
@@ -108,7 +114,8 @@ rewrite () {
 # dependencies and are not ours to move.
 for manifest in \
   desktop/Cargo.toml \
-  host/Cargo.toml
+  host/Cargo.toml \
+  transport-core/Cargo.toml
 do
   rewrite "$manifest" -v current="$current" -v to="$to" '
     !moved && $0 == "version = \"" current "\"" {
@@ -134,7 +141,12 @@ rewrite mobile/androidApp/build.gradle.kts \
 
 # A lockfile states the same version again under the package that has it,
 # inside the block that names it.
-for package in xd-desktop:desktop/Cargo.lock xd-host:host/Cargo.lock; do
+for package in \
+  xd-desktop:desktop/Cargo.lock \
+  xd-host:host/Cargo.lock \
+  xd-transport:desktop/Cargo.lock \
+  xd-transport:host/Cargo.lock \
+  xd-transport:transport-core/Cargo.lock; do
   rewrite "${package#*:}" \
     -v package="${package%%:*}" -v current="$current" -v to="$to" '
     $0 == "name = \"" package "\"" { inside = 1 }

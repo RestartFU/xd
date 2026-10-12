@@ -356,7 +356,7 @@ impl HostHandle {
                 .arg(&data)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                .stderr(Stdio::piped());
             channel::configure_host(&mut command, &launcher);
             match Self::connect_command(command, data.clone()) {
                 Ok(connection) => return Ok(connection),
@@ -394,8 +394,7 @@ impl HostHandle {
         Ok((handle, updates, StartedHost { child }))
     }
 
-    #[cfg(all(test, unix))]
-    fn connect_io(
+    pub fn connect_io(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         identity: PathBuf,
@@ -1423,6 +1422,15 @@ impl HostHandle {
                 "option": "new-worktree",
                 "value": if enabled { "true" } else { "false" },
             }),
+        )
+    }
+
+    pub fn respond(&self, chat_id: &str, request_id: &str, response: Value) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op":"respond", "chat":chat_id,"request_id":request_id,"response":response}),
         )
     }
 

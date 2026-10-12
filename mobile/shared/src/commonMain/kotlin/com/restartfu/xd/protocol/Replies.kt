@@ -21,6 +21,8 @@ public data class ChatSummaryReply(
     val branch: String? = null,
     @SerialName("terminal_working")
     val terminalWorking: Boolean = false,
+    @SerialName("session_mode")
+    val sessionMode: String = "terminal",
 )
 
 @Serializable
@@ -62,7 +64,9 @@ public data class DraftAttachmentReply(
 
 @Serializable
 public data class ChatReply(
-    val ok: Boolean,
+    val interactions: List<InteractionReply> = emptyList(),
+    @SerialName("interaction_revision") val interactionRevision: Long = 0,
+    @SerialName("interaction_epoch") val interactionEpoch: String = "",    val ok: Boolean,
     val title: String,
     val backend: String,
     val commands: List<String> = emptyList(),
@@ -83,6 +87,7 @@ public data class ChatReply(
     // `tool` events can be dropped instead of applied twice.
     @SerialName("turn_id")
     val turnId: Long? = null,
+    @SerialName("turn_epoch") val turnEpoch: String = "",
     @SerialName("turn_sequence")
     val turnSequence: Long? = null,
     @SerialName("working_for")
@@ -259,3 +264,27 @@ public data class TerminalOpenReply(
     val ok: Boolean,
     val id: String,
 )
+
+@Serializable
+public data class InteractionReply(
+    @SerialName("request_id") val requestId: String,
+    val method: String,
+    val params: kotlinx.serialization.json.JsonObject,
+)
+
+public fun InteractionReply.toModel(): com.restartfu.xd.model.PendingInteraction {
+    fun text(value: kotlinx.serialization.json.JsonElement?): String? = (value as? kotlinx.serialization.json.JsonPrimitive)?.content
+    val questions = (params["questions"] as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { element ->
+        val q = element as? kotlinx.serialization.json.JsonObject ?: return@mapNotNull null
+        com.restartfu.xd.model.PendingQuestion(
+            id = text(q["id"]) ?: return@mapNotNull null,
+            text = text(q["question"]) ?: "Your input is needed",
+            options = (q["options"] as? kotlinx.serialization.json.JsonArray).orEmpty().mapNotNull { option -> text((option as? kotlinx.serialization.json.JsonObject)?.get("label")) },
+            secret = text(q["isSecret"]) == "true",
+        )
+    }
+    return com.restartfu.xd.model.PendingInteraction(
+        requestId = requestId, method = method, questions = questions,
+        detail = text(params["command"]) ?: text(params["reason"]) ?: params["permissions"]?.toString() ?: "The agent requests permission to continue",
+    )
+}

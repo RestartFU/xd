@@ -238,6 +238,8 @@ internal fun ChatScreen(
         },
         bottomBar = {
             if (pane == Pane.CHAT) {
+                Column {
+                    state.interactions.firstOrNull()?.let { request -> InteractionCard(request, model) }
                 Composer(
                     state = state,
                     composer = composer,
@@ -246,6 +248,7 @@ internal fun ChatScreen(
                     steering = steering,
                     model = model,
                 )
+                }
             }
         },
     ) { padding ->
@@ -936,6 +939,34 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
                     Text(it, style = MaterialTheme.typography.labelSmall)
                 }
                 SelectableMessageBody(item, model)
+            }
+        }
+    }
+}
+
+@Composable
+private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, model: ChatViewModel) {
+    var answers by remember(request.requestId) { mutableStateOf(emptyMap<String, String>()) }
+    Card(Modifier.fillMaxWidth().padding(8.dp)) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (request.questions.isEmpty()) {
+                Text("Approval needed", style = MaterialTheme.typography.titleSmall)
+                Text(request.detail)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { model.approve(request.requestId, "accept") }) { Text("Allow once") }
+                    TextButton(onClick = { model.approve(request.requestId, "acceptForSession") }) { Text("This session") }
+                    TextButton(onClick = { model.approve(request.requestId, "decline") }) { Text("Deny") }
+                }
+            } else {
+                request.questions.forEach { question ->
+                    Text(question.text)
+                    question.options.forEach { option ->
+                        TextButton(onClick = { answers = answers + (question.id to option) }) { Text(option) }
+                    }
+                    OutlinedTextField(value = answers[question.id].orEmpty(), onValueChange = { answers = answers + (question.id to it) }, label = { Text("Answer") },
+                        visualTransformation = if (question.secret) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None)
+                }
+                TextButton(onClick = { model.answer(request.requestId, answers) }, enabled = request.questions.all { !answers[it.id].isNullOrBlank() }) { Text("Submit answers") }
             }
         }
     }

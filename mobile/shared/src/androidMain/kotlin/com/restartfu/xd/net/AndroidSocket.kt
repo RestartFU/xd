@@ -107,7 +107,8 @@ internal class AndroidSshSocket(
             activeSession.setConfig(
                 "PreferredAuthentications",
                 when (connection.authentication) {
-                    is SshAuthentication.Password -> "password"
+                    is SshAuthentication.Paired -> error("Use the daemon TLS transport for paired devices")
+                is SshAuthentication.Password -> "password"
                     is SshAuthentication.PrivateKey -> "publickey"
                 },
             )

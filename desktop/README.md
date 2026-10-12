@@ -11,23 +11,28 @@ state and agent orchestration are provided by the bundled `xd-host` process.
 
 ## Process model
 
-There is no background xd daemon or listening socket.
+One `xd-host daemon` owns workspace state, agent processes, and shell panes for
+all clients using a data directory. Closing a window disconnects that client
+and leaves work running.
 
-- Local mode starts `xd-host stdio` as a child of the desktop and stops it when
-  the window closes.
-- Remote mode runs `xd-host stdio` through the user's persisted SSH command.
-- Codex, Claude Code, JCode, GitHub Copilot, and terminal tabs run in bundled tmux sessions on the
-  selected local or remote machine so they can be reattached after reconnects.
-- Local and remote modes never coexist in one window.
+- Local mode starts a small `xd-host stdio` bridge. It connects to a private
+  Unix socket and automatically starts the daemon if needed.
+- Remote desktop and Android connect directly to the daemon's TLS listener.
+  Settings → **Pair a device** starts the listener, creates a one-use code,
+  and copies an invitation containing the endpoint and certificate fingerprint.
+- New Codex, Claude Code, and JCode sessions open in native chat. Existing
+  terminal sessions and GitHub Copilot retain their CLI interface.
+- Codex chat uses app-server for streaming, conversation resume, approvals,
+  and questions. Optional shells are owned by the daemon too.
 
 On Windows, the desktop is native and local `xd-host` and tmux sessions run in
 WSL. The archive includes a matching static Linux host, deployed into the
-selected distribution on startup. Install git, tmux, OpenSSH client, CA
+selected distribution on startup. Install git, tmux, CA
 certificates, and assistant CLIs in WSL. `XD_WSL_DISTRIBUTION` selects a distro;
 the default is the user's default WSL distribution. Project paths are Linux
 paths. Settings remain on Windows, while chats and workspaces live in WSL.
 
-See [remote desktop over SSH](../docs/remote.md) for the remote process shape.
+See [paired remote connections](../docs/remote.md) for the remote process shape.
 
 ## Integrated browser
 
@@ -38,8 +43,8 @@ link opens it in the Browser pane automatically. The last address is saved
 per workspace; closing the pane hides its page and preserves navigation history
 when reopened during the same desktop session.
 
-The browser runs on the desktop machine in both local and SSH modes. A remote
-development server needs an SSH port forward or a reachable URL; `localhost`
+The browser runs on the desktop machine in both local and paired modes. A remote
+development server needs a reachable LAN/Tailscale URL or a port forward; `localhost`
 always means the machine displaying xd. For example, forward port 3000 with
 `ssh -L 3000:localhost:3000 user@server` before opening `localhost:3000`.
 

@@ -1,6 +1,9 @@
 package com.restartfu.xd.credentials
 
 public sealed interface SshAuthentication {
+    /** A paired daemon; SSH records remain readable only to support migration. */
+    public data class Paired(val fingerprint: String, val code: String? = null, val token: String? = null) : SshAuthentication
+
     public data class Password(val value: String) : SshAuthentication
 
     public data class PrivateKey(
@@ -59,6 +62,7 @@ internal fun StoredCredentials.copyStored(): StoredCredentials = copy(
 
 internal fun SshConnection.copyConnection(): SshConnection = copy(
     authentication = when (val authentication = authentication) {
+        is SshAuthentication.Paired -> authentication.copy()
         is SshAuthentication.Password -> authentication.copy()
         is SshAuthentication.PrivateKey -> authentication.copy(bytes = authentication.bytes.copyOf())
     },

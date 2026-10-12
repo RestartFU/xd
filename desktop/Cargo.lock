@@ -8343,6 +8343,7 @@ dependencies = [
  "wry",
  "x11rb",
  "xd-terminal",
+ "xd-transport",
 ]
 
 [[package]]
@@ -8350,6 +8351,17 @@ name = "xd-terminal"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+]
+
+[[package]]
+name = "xd-transport"
+version = "0.1.19"
+dependencies = [
+ "base64",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]

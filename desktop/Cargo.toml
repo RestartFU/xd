@@ -21,6 +21,7 @@ unicode-segmentation = "1.12"
 url = "2.5"
 wry = "0.57.0"
 xd-terminal = { path = "../terminal-core" }
+xd-transport = { path = "../transport-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

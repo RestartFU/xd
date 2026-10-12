@@ -33,6 +33,7 @@ RUN rustup component add rustfmt \
       lld \
       make \
       pkg-config \
+      python3 \
       tmux \
  && rm -rf /var/lib/apt/lists/*
 
@@ -60,13 +61,15 @@ FROM gpui-toolchain AS gpui-desktop-source
 WORKDIR /src/desktop
 COPY desktop/Cargo.toml desktop/Cargo.lock ./
 COPY terminal-core/Cargo.toml /src/terminal-core/Cargo.toml
-RUN mkdir -p src /src/terminal-core/src \
- && touch src/lib.rs /src/terminal-core/src/lib.rs \
+COPY transport-core/Cargo.toml /src/transport-core/Cargo.toml
+RUN mkdir -p src /src/terminal-core/src /src/transport-core/src \
+ && touch src/lib.rs /src/terminal-core/src/lib.rs /src/transport-core/src/lib.rs \
  && cargo fetch --locked \
- && rm -rf src /src/terminal-core/src
+ && rm -rf src /src/terminal-core/src /src/transport-core/src
 COPY desktop/assets ./assets
 COPY data/fonts /src/data/fonts
 COPY terminal-core/src /src/terminal-core/src
+COPY transport-core/src /src/transport-core/src
 COPY desktop/src ./src
 
 FROM gpui-desktop-source AS gpui-desktop-tests
@@ -99,15 +102,19 @@ FROM gpui-toolchain AS rust-host-source
 WORKDIR /src/host
 COPY host/Cargo.toml host/Cargo.lock ./
 COPY terminal-core/Cargo.toml /src/terminal-core/Cargo.toml
-RUN mkdir -p src /src/terminal-core/src \
- && touch src/lib.rs /src/terminal-core/src/lib.rs \
+COPY transport-core/Cargo.toml /src/transport-core/Cargo.toml
+RUN mkdir -p src /src/terminal-core/src /src/transport-core/src \
+ && touch src/lib.rs /src/terminal-core/src/lib.rs /src/transport-core/src/lib.rs \
  && cargo fetch --locked \
- && rm -rf src /src/terminal-core/src
+ && rm -rf src /src/terminal-core/src /src/transport-core/src
 COPY terminal-core/src /src/terminal-core/src
+COPY transport-core/src /src/transport-core/src
 COPY host/src ./src
 COPY tests/fixtures/codex-exec.jsonl tests/fixtures/codex-recoverable-error.jsonl tests/fixtures/claude-stream.jsonl /src/tests/fixtures/
 
 FROM rust-host-source AS rust-host-tests
+
+COPY host/tests ./tests
 
 RUN cargo fmt --check \
  && cargo test --locked \

@@ -129,6 +129,8 @@ jobs:
                 desktop/Cargo.lock \
                 host/Cargo.toml \
                 host/Cargo.lock \
+                transport-core/Cargo.toml \
+                transport-core/Cargo.lock \
                 mobile/androidApp/build.gradle.kts
               git commit -m "chore: release $tag" \
                 -m "Co-authored-by: Codex <codex@openai.com>"
@@ -392,7 +394,8 @@ jobs:
           Android:
 
           Download `xd-android.apk` from this release. Android connects
-          directly over SSH and requires the stable xd host on the remote machine.
+          directly to the xd daemon using a pairing invite and pinned TLS.
+          The host must be reachable over LAN, Tailscale, or a server address.
           EOF
             )
           else
@@ -406,6 +409,10 @@ jobs:
           fi
 
           notes=$(cat <<EOF
+          Native chat UI with streaming responses, approvals, assistant settings,
+          files, changes, and shell tools. One xd daemon owns local and remote
+          sessions; desktop and Android connect using pairing invites and pinned TLS.
+
           Linux:
 
           \`\`\`

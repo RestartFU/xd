@@ -60,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
@@ -192,6 +193,15 @@ internal fun MinimalMobileApp(
 
         mobileDestination == MobileDestination.SESSIONS && active != null -> {
             key(active.chatId) {
+                if (tree.chats.firstOrNull { it.id == active.chatId }?.sessionMode == "chat") {
+                    val owner = remember(active.chatId) { DirectTerminalOwner() }
+                    DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
+                    val chat: ChatViewModel = viewModel(key = "chat-${active.chatId}", viewModelStoreOwner = owner, factory = ChatViewModel.Factory(model.client, active.chatId))
+                    ChatScreen(model = chat, settings = settings, goBack = showProjects,
+                        productHeader = { ProductHeader(link = link, active = MobileDestination.SESSIONS, onProjects = showProjects, onSessions = {}, onTerminal = showTerminal, onAdd = {}, onSettings = {}, showAdd = false) },
+                        sessionTabs = { SessionTabStrip(tabs = tabs, selectedChatId = active.chatId, selectTab = { activeChatId = it }, closeTab = closeTab, addTab = { createTabFor = active.projectId to active.projectName }) },
+                    )
+                } else {
                 MinimalDirectSession(
                     model = model,
                     settings = settings,
@@ -206,6 +216,7 @@ internal fun MinimalMobileApp(
                     onProjects = showProjects,
                     onTerminal = showTerminal,
                 )
+                }
             }
         }
 

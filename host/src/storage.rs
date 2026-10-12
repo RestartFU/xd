@@ -201,6 +201,10 @@ struct WorkspaceRow {
 }
 
 impl StateStore {
+    pub(crate) fn workspace_path(&self) -> &Path {
+        &self.workspace_root
+    }
+
     pub fn open(
         database_path: impl AsRef<Path>,
         workspace_root: impl Into<PathBuf>,
@@ -520,7 +524,7 @@ impl StateStore {
             .collect::<Vec<_>>();
 
         let mut statement = database.prepare(
-            "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir FROM chats \
+            "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -533,6 +537,7 @@ impl StateStore {
                     row.get::<_, bool>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -540,7 +545,9 @@ impl StateStore {
 
         let mut branches = HashMap::<String, Option<String>>::new();
         let mut chats = Vec::new();
-        for (id, folder, title, backend, working, workdir, original_workdir) in stored_chats {
+        for (id, folder, title, backend, working, workdir, original_workdir, session_mode) in
+            stored_chats
+        {
             if !visible_ids.contains(folder.as_str()) {
                 continue;
             }
@@ -580,6 +587,7 @@ impl StateStore {
                 "title": title,
                 "backend": backend,
                 "working": working,
+                "session_mode": session_mode,
             });
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
@@ -658,6 +666,11 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.to_owned()))?;
+        let session_mode: String = database.query_row(
+            "SELECT session_mode FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get(0),
+        )?;
         let queue = queue_from_column(row.9.as_deref());
         let attachments = serde_json::from_str::<Value>(&row.13).unwrap_or_else(|_| json!([]));
         let has_messages: bool = database.query_row(
@@ -694,6 +707,7 @@ impl StateStore {
             "title": row.1,
             "backend": row.2,
             "auth_state": "unknown",
+            "session_mode": session_mode,
             "commands": [],
             "plan": row.7,
             "fast": row.2 == "codex" && row.8,
@@ -1869,6 +1883,15 @@ impl StateStore {
         Ok((reply, event))
     }
 
+    pub(crate) fn latest_message_id(&self, chat_id: &str) -> Result<i64, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.query_row(
+            "SELECT COALESCE(MAX(id),0) FROM messages WHERE chat_id = ?",
+            [chat_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn messages(&self, request: &Value) -> Result<Value, StorageError> {
         let chat_id = required_string(request, "chat", "messages needs a chat id")?;
         let requested_limit = optional_integer(request, "limit")?.unwrap_or(0);
@@ -1911,6 +1934,10 @@ impl StateStore {
             ));
         }
 
+        let through = request
+            .get("_through_id")
+            .and_then(Value::as_i64)
+            .unwrap_or(i64::MAX);
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let exists: bool = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?)",
@@ -1921,13 +1948,13 @@ impl StateStore {
             return Err(StorageError::NoChat(chat_id.into()));
         }
         let total: i64 = database.query_row(
-            "SELECT COUNT(*) FROM messages WHERE chat_id = ?",
-            [chat_id],
+            "SELECT COUNT(*) FROM messages WHERE chat_id = ? AND id <= ?",
+            params![chat_id, through],
             |row| row.get(0),
         )?;
         let last_message_id: i64 = database.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?",
-            [chat_id],
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND id <= ?",
+            params![chat_id, through],
             |row| row.get(0),
         )?;
         let limit = if requested_limit > 0 {
@@ -1938,20 +1965,26 @@ impl StateStore {
         let (offset, messages) = if let Some(before) = before {
             let mut statement = database.prepare(
                 "SELECT id, role, content, created_at, label FROM messages \
-                 WHERE chat_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+                 WHERE chat_id = ? AND id < ? AND id <= ? ORDER BY id DESC LIMIT ?",
             )?;
             let mut messages = statement
-                .query_map(params![chat_id, before, limit], message_from_page_row)?
+                .query_map(
+                    params![chat_id, before, through, limit],
+                    message_from_page_row,
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             messages.reverse();
             (0, messages)
         } else if let Some(after) = after {
             let mut statement = database.prepare(
                 "SELECT id, role, content, created_at, label FROM messages \
-                 WHERE chat_id = ? AND id > ? ORDER BY id LIMIT ?",
+                 WHERE chat_id = ? AND id > ? AND id <= ? ORDER BY id LIMIT ?",
             )?;
             let messages = statement
-                .query_map(params![chat_id, after, limit], message_from_page_row)?
+                .query_map(
+                    params![chat_id, after, through, limit],
+                    message_from_page_row,
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             (0, messages)
         } else {
@@ -1962,10 +1995,13 @@ impl StateStore {
             };
             let mut statement = database.prepare(
                 "SELECT id, role, content, created_at, label FROM messages \
-                 WHERE chat_id = ? ORDER BY id LIMIT ? OFFSET ?",
+                 WHERE chat_id = ? AND id <= ? ORDER BY id LIMIT ? OFFSET ?",
             )?;
             let messages = statement
-                .query_map(params![chat_id, limit, offset], message_from_page_row)?
+                .query_map(
+                    params![chat_id, through, limit, offset],
+                    message_from_page_row,
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             (offset, messages)
         };
@@ -3010,8 +3046,8 @@ impl StateStore {
         transaction.execute(
             "INSERT INTO chats \
              (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
-              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 folder_id,
@@ -3029,6 +3065,7 @@ impl StateStore {
                 now,
                 now,
                 now * 1_000_000,
+                if backend == "copilot" { "terminal" } else { "chat" },
             ],
         )?;
         transaction.commit()?;
@@ -3415,6 +3452,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             )));
         }
         if version > 0 {
+            ensure_session_mode(database)?;
             ensure_chat_host_working_column(database)?;
             ensure_chat_session_context_columns(database)?;
             ensure_chat_partial_reply_columns(database)?;
@@ -3441,6 +3479,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            claude_mode INTEGER NOT NULL DEFAULT 0, queued TEXT, new_worktree INTEGER NOT NULL DEFAULT 0, \
            terminal_open INTEGER NOT NULL DEFAULT 0, diff_open INTEGER NOT NULL DEFAULT 0, \
            resume_after_restart INTEGER NOT NULL DEFAULT 0, original_workdir TEXT, \
+           session_mode TEXT NOT NULL DEFAULT 'terminal', \
            host_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
            partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, \
@@ -3503,6 +3542,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
         [],
     )?;
     transaction.commit()?;
+    ensure_session_mode(database)?;
     ensure_chat_host_working_column(database)?;
     ensure_chat_session_context_columns(database)?;
     ensure_chat_partial_reply_columns(database)?;
@@ -3510,6 +3550,20 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_chat_sort_order(database)?;
     ensure_shared_events_table(database)?;
     disable_claude_mode(database)?;
+    Ok(())
+}
+
+fn ensure_session_mode(database: &Connection) -> Result<(), StorageError> {
+    let columns = database
+        .prepare("PRAGMA table_info(chats)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    if !columns.contains("session_mode") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN session_mode TEXT NOT NULL DEFAULT 'terminal'",
+            [],
+        )?;
+    }
     Ok(())
 }
 

@@ -8,6 +8,12 @@ import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.BrowseListReply
 import com.restartfu.xd.protocol.BrowseReadReply
 import com.restartfu.xd.protocol.ChatOption
+import com.restartfu.xd.protocol.toModel
+import com.restartfu.xd.protocol.InteractionReply
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.decodeFromJsonElement
+import com.restartfu.xd.protocol.WireJson
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.DiffReply
 import com.restartfu.xd.protocol.FileEntryReply
@@ -62,6 +68,18 @@ public class ChatSession internal constructor(
         text: String,
         images: List<PngAttachment> = emptyList(),
     ): Unit = core.send(text, images)
+
+    public suspend fun approve(requestId: String, decision: String): Unit = core.call(buildJsonObject {
+        put("op", "respond"); put("chat", core.chatId); put("request_id", requestId)
+        put("response", buildJsonObject { put("decision", decision) })
+    })
+
+    public suspend fun answer(requestId: String, answers: Map<String, String>): Unit = core.call(buildJsonObject {
+        put("op", "respond"); put("chat", core.chatId); put("request_id", requestId)
+        put("response", buildJsonObject { put("answers", buildJsonObject {
+            answers.forEach { (id, answer) -> put(id, buildJsonObject { put("answers", JsonArray(listOf(JsonPrimitive(answer)))) }) }
+        }) })
+    })
 
     public suspend fun cancel(): Unit = core.call(Ops.cancel(core.chatId))
 
@@ -245,11 +263,14 @@ internal class ChatSessionCore(
                     )
                     val effects = mutableListOf<TranscriptEffect>()
                     for (buffered in inputsDuringReload) {
-                        if (buffered.sequence != null &&
-                            buffered.sequence <= chatReply.sequence
-                        ) {
-                            continue
+                        val tagged = when (val input = buffered.input) {
+                            is TranscriptInput.Text -> input.turnId != null
+                            is TranscriptInput.Tool -> input.turnId != null
+                            is TranscriptInput.TurnStarted -> input.turnId != null
+                            is TranscriptInput.TurnFinished -> input.turnId != null
+                            else -> false
                         }
+                        if (!tagged && buffered.sequence != null && buffered.sequence <= chatReply.sequence) continue
                         transition = TranscriptMachine.reduce(transition.state, buffered.input)
                         effects += transition.effects
                     }
@@ -421,6 +442,12 @@ internal class ChatSessionCore(
         if (eventName in CHAT_SCOPED_EVENTS && eventChat == null) return
         if (eventChat != null && eventChat != chatId) return
 
+        (value["turn_epoch"] as? JsonPrimitive)?.contentOrNull?.let { epoch ->
+            stateMutex.withLock {
+                val current = _state.value
+                if (epoch != current.turnEpoch) _state.value = current.copy(turnEpoch = epoch, turnId = null, turnSequence = 0, liveItems = emptyList(), liveSegment = "")
+            }
+        }
         val turnId = value.longOrNull("turn_id")
         val turnSequence = value.longOrNull("turn_sequence")
 
@@ -430,6 +457,24 @@ internal class ChatSessionCore(
         // written before its reply" -- gating on it would drop live deltas.
         // Untagged events keep the arrival gate as a compatibility path.
         val arrivalGate = if (turnId == null) event.sequence else null
+
+        if (eventName in setOf("interaction", "interaction-resolved", "interactions-cleared")) {
+            val revision = value.longOrNull("interaction_revision") ?: return
+            stateMutex.withLock {
+                val epoch = (value["interaction_epoch"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                val before = _state.value
+                val current = if (epoch != before.interactionEpoch) before.copy(interactions = emptyList(), interactionRevision = 0, interactionEpoch = epoch) else before
+                if (revision <= current.interactionRevision) return@withLock
+                val id = (value["request_id"] as? JsonPrimitive)?.contentOrNull
+                val pending = when (eventName) {
+                    "interactions-cleared" -> emptyList()
+                    "interaction-resolved" -> current.interactions.filterNot { it.requestId == id }
+                    else -> current.interactions.filterNot { it.requestId == id } + WireJson.decodeFromJsonElement<InteractionReply>(value).toModel()
+                }
+                _state.value = current.copy(interactions = pending, interactionRevision = revision)
+            }
+            return
+        }
 
         when (eventName) {
             "turn-started" -> {
@@ -629,6 +674,7 @@ internal class ChatSessionCore(
         const val PENDING_TIMEOUT_MILLIS = 10_000L
         const val SPEECH_BUFFER_CAPACITY = 32
         val CHAT_SCOPED_EVENTS = setOf(
+            "interaction", "interaction-resolved", "interactions-cleared",
             "commands",
             "turn-started",
             "text",

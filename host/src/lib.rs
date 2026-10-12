@@ -19,6 +19,7 @@ mod ask;
 mod auth;
 mod background_process;
 mod cli_versions;
+mod codex_app;
 mod git_draft;
 mod local_socket;
 mod pairing;
@@ -58,6 +59,7 @@ pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 const REQUEST_ID: &str = "_xd_request";
 
 pub struct Engine {
+    shutdown: AtomicBool,
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
@@ -80,6 +82,7 @@ pub struct Engine {
 pub struct PeerEndpoint {
     pub host: String,
     pub port: u16,
+    pub fingerprint: String,
 }
 
 type PeerListener = Arc<dyn Fn(&str, u16) -> Result<PeerEndpoint, String> + Send + Sync>;
@@ -106,6 +109,7 @@ struct Subscriber {
     sender: SyncSender<Value>,
     connection: Option<UnixStream>,
     authenticated: Arc<AtomicBool>,
+    events_ready: Option<Arc<AtomicBool>>,
 }
 
 impl Engine {
@@ -115,6 +119,7 @@ impl Engine {
         let secrets = Arc::new(SecretsStore::new(None));
         let self_update = SelfUpdate::new(events.clone());
         Self {
+            shutdown: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
@@ -150,6 +155,7 @@ impl Engine {
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
         let engine = Self {
+            shutdown: AtomicBool::new(false),
             runtime: Some(TurnRuntime::new(
                 store.clone(),
                 events.clone(),
@@ -195,6 +201,13 @@ impl Engine {
         }
         let mut reply = match operation {
             Some("ping") => json!({"ok": true}),
+            Some("daemon-info") => {
+                json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok())})
+            }
+            Some("daemon-stop") if self.pairing.is_local(owner) => {
+                self.shutdown.store(true, Ordering::Release);
+                json!({"ok": true})
+            }
             Some("pair") => self.pair(owner, &request),
             Some("hello") => self.hello(owner, &request),
             Some("peer-pairing") => self.peer_pairing(owner, &request),
@@ -206,7 +219,7 @@ impl Engine {
                 Ok(chat_id) => self.chat(chat_id),
                 Err(error) => error_reply(error),
             },
-            Some("messages") => self.read(|store| store.messages(&request)),
+            Some("messages") => self.messages(&request),
             Some("list-dir") => self.read(|store| store.list_directory(&request)),
             Some("file-browse") => self.read(|store| store.file_browse(&request)),
             Some("search") => self.read(|store| store.search(&request)),
@@ -252,10 +265,16 @@ impl Engine {
             }
             Some("agent-auth") => self.auth.snapshots(),
             Some("agent-clis") => self.cli_versions.snapshots(),
-            Some("host-update") => self
-                .self_update
-                .perform(request.get("action").and_then(Value::as_str))
-                .unwrap_or_else(error_reply),
+            Some("host-update") => {
+                let action = request.get("action").and_then(Value::as_str);
+                let reply = self.self_update.perform(action).unwrap_or_else(error_reply);
+                if action == Some("restart") && reply["ok"] == true {
+                    if let Some(runtime) = &self.runtime {
+                        runtime.shutdown();
+                    }
+                }
+                reply
+            }
             Some("agent-auth-start") => {
                 self.auth_mutation(&request, |auth, provider, _| auth.login(provider))
             }
@@ -277,6 +296,20 @@ impl Engine {
             Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
             Some("set-option") => self.event_mutation(|store| store.set_option(&request)),
             Some("send") => self.send_message(&request),
+            Some("respond") => {
+                match (
+                    request.get("chat").and_then(Value::as_str),
+                    request.get("request_id").and_then(Value::as_str),
+                    request.get("response"),
+                    &self.runtime,
+                ) {
+                    (Some(chat), Some(id), Some(response), Some(runtime)) => runtime
+                        .respond(chat, id, response)
+                        .map(|()| json!({"ok":true}))
+                        .unwrap_or_else(error_reply),
+                    _ => error_reply("respond needs chat, request_id, and response"),
+                }
+            }
             Some("cancel") => self.cancel(&request),
             Some("new-folder") => self.new_folder(&request),
             Some("set-folder-context") => {
@@ -319,6 +352,28 @@ impl Engine {
         reply
     }
 
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+
+    pub fn shutdown(&self) {
+        if let Some(runtime) = &self.runtime {
+            runtime.shutdown();
+        }
+        if let Ok(mut subscribers) = self.events.subscribers.lock() {
+            for subscriber in subscribers.values() {
+                if let Some(connection) = &subscriber.connection {
+                    let _ = connection.shutdown(std::net::Shutdown::Both);
+                }
+            }
+            subscribers.clear();
+        }
+    }
+
+    pub fn remote_listener(&self) -> Option<(String, u16)> {
+        self.store.as_ref()?.remote_listener().ok().flatten()
+    }
+
     pub fn arm_pairing(&self, ttl: std::time::Duration) -> String {
         self.pairing.arm(ttl)
     }
@@ -339,7 +394,10 @@ impl Engine {
         if !self.pairing.is_local(owner) {
             return error_reply("Pairing codes can only be created on the host machine.");
         }
-        let bind = request.get("bind").and_then(Value::as_str).unwrap_or("::");
+        let bind = request
+            .get("bind")
+            .and_then(Value::as_str)
+            .unwrap_or("0.0.0.0");
         if bind.is_empty() {
             return error_reply("Pairing bind address cannot be empty.");
         }
@@ -376,6 +434,7 @@ impl Engine {
             "host": endpoint.host,
             "port": endpoint.port,
             "expires_in": 300,
+            "fingerprint": endpoint.fingerprint,
         })
     }
 
@@ -395,7 +454,9 @@ impl Engine {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if !self.pairing.consume(code) {
-            return error_reply("No such pairing code. Run the server with --pair.");
+            return error_reply(
+                "Pairing code expired or was already used. Create a new code on the host.",
+            );
         }
         let token = generate_token();
         let hash = token_hash(&token);
@@ -406,6 +467,7 @@ impl Engine {
         if let Err(error) = self.pairing.authenticate(owner, hash) {
             return error_reply(error);
         }
+        self.clear_authentication_deadline(owner);
         json!({"ok": true, "token": token, "device": name})
     }
 
@@ -426,7 +488,19 @@ impl Engine {
         if let Err(error) = self.pairing.authenticate(owner, hash) {
             return error_reply(error);
         }
+        self.clear_authentication_deadline(owner);
         json!({"ok": true, "device": name, "version": 1})
+    }
+
+    fn clear_authentication_deadline(&self, owner: u64) {
+        if let Ok(subscribers) = self.events.subscribers.lock() {
+            if let Some(connection) = subscribers
+                .get(&owner)
+                .and_then(|subscriber| subscriber.connection.as_ref())
+            {
+                let _ = connection.set_read_timeout(None);
+            }
+        }
     }
 
     fn devices(&self) -> Value {
@@ -488,6 +562,21 @@ impl Engine {
         response
     }
 
+    fn messages(&self, request: &Value) -> Value {
+        let mut request = request.clone();
+        request
+            .as_object_mut()
+            .map(|request| request.remove("_through_id"));
+        if let (Some(runtime), Some(chat)) =
+            (&self.runtime, request.get("chat").and_then(Value::as_str))
+        {
+            if let Some(live) = runtime.live_turn(chat) {
+                request["_through_id"] = json!(live.message_boundary);
+            }
+        }
+        self.read(|store| store.messages(&request))
+    }
+
     fn chat(&self, chat_id: &str) -> Value {
         let mut response = self.read(|store| store.chat(chat_id));
         if response.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -500,6 +589,10 @@ impl Engine {
             .to_owned();
         response["auth_state"] = Value::String(self.auth.state(&provider));
         if let Some(runtime) = &self.runtime {
+            let interactions = runtime.interactions(chat_id);
+            response["interactions"] = interactions["interactions"].clone();
+            response["interaction_revision"] = interactions["interaction_revision"].clone();
+            response["interaction_epoch"] = interactions["interaction_epoch"].clone();
             response["commands"] = Value::Array(
                 runtime
                     .commands(chat_id, &provider)
@@ -1108,7 +1201,6 @@ impl Engine {
         }
     }
 
-    #[cfg(test)]
     fn subscribe_transport(
         &self,
         sender: SyncSender<Value>,
@@ -1180,6 +1272,7 @@ impl EventBus {
                     sender,
                     connection,
                     authenticated,
+                    events_ready: None,
                 },
             );
         Ok(id)
@@ -1210,7 +1303,12 @@ impl EventBus {
             return;
         };
         subscribers.retain(|_, subscriber| {
-            if !subscriber.authenticated.load(Ordering::Acquire) {
+            if !subscriber.authenticated.load(Ordering::Acquire)
+                || subscriber
+                    .events_ready
+                    .as_ref()
+                    .is_some_and(|ready| !ready.load(Ordering::Acquire))
+            {
                 true
             } else {
                 match subscriber.sender.try_send(event.clone()) {
@@ -1357,15 +1455,129 @@ fn serve_connection_with_engine(
         .spawn(move || write_frames(writer_stream, frames))?;
     let result = read_requests(&mut reader, &engine, subscriber, &outbound);
     engine.unsubscribe(subscriber);
+    if result.is_err() {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
     drop(outbound);
     let writer_result = writer
         .join()
         .map_err(|_| std::io::Error::other("host writer panicked"))?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     result.and(writer_result)
 }
 
-/// Serve one local desktop connection over stdin/stdout. The process owns no
-/// socket and exits when its controlling desktop closes.
+/// Serve an authenticated connection to the shared daemon.
+pub fn serve_daemon_connection(
+    stream: UnixStream,
+    engine: Arc<Engine>,
+    remote: bool,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let (outbound, frames) = sync_channel(256);
+    let subscriber = engine
+        .subscribe_transport(
+            outbound.clone(),
+            stream.try_clone()?,
+            if remote {
+                Transport::Remote
+            } else {
+                Transport::Local
+            },
+        )
+        .map_err(std::io::Error::other)?;
+    let events_ready = Arc::new(AtomicBool::new(!remote));
+    if let Ok(mut subscribers) = engine.events.subscribers.lock() {
+        if let Some(client) = subscribers.get_mut(&subscriber) {
+            client.events_ready = Some(events_ready.clone());
+        }
+    }
+    let writer_stream = stream.try_clone()?;
+    let writer = thread::spawn(move || write_frames(writer_stream, frames));
+    let (commands, queued) = sync_channel::<Value>(128);
+    let worker_engine = engine.clone();
+    let replies = outbound.clone();
+    let worker_stream = stream.try_clone()?;
+    let worker = thread::spawn(move || {
+        while let Ok(request) = queued.recv() {
+            if !worker_engine.events.subscribed(subscriber) {
+                break;
+            }
+            let reply = worker_engine.dispatch_for(subscriber, request);
+            if replies.try_send(reply).is_err() {
+                let _ = worker_stream.shutdown(std::net::Shutdown::Both);
+                break;
+            }
+        }
+    });
+    let result = (|| -> std::io::Result<()> {
+        loop {
+            let authenticated = engine.pairing.authenticated(subscriber);
+            let limit = if authenticated {
+                FRAME_LIMIT
+            } else {
+                AUTH_FRAME_LIMIT
+            };
+            let mut line = Vec::new();
+            if reader
+                .by_ref()
+                .take((limit + 1) as u64)
+                .read_until(b'\n', &mut line)?
+                == 0
+            {
+                return Ok(());
+            }
+            if line.len() > limit {
+                return Err(std::io::Error::other("Frame exceeds protocol limit"));
+            }
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let request = match serde_json::from_slice::<Value>(&line) {
+                Ok(request) => request,
+                Err(_) => {
+                    outbound
+                        .try_send(error_reply("Invalid JSON request"))
+                        .map_err(std::io::Error::other)?;
+                    continue;
+                }
+            };
+            let control = !authenticated
+                || matches!(
+                    request["op"].as_str(),
+                    Some("ping" | "cancel" | "respond" | "agent-auth-cancel" | "daemon-stop")
+                );
+            if control {
+                let authenticating = matches!(request["op"].as_str(), Some("pair" | "hello"));
+                let reply = engine.dispatch_for(subscriber, request);
+                let authenticated = authenticating && reply["ok"] == true;
+                outbound.try_send(reply).map_err(std::io::Error::other)?;
+                if authenticated {
+                    events_ready.store(true, Ordering::Release);
+                }
+            } else {
+                commands
+                    .try_send(request)
+                    .map_err(|_| std::io::Error::other("Client command queue overflowed"))?;
+            }
+        }
+    })();
+    drop(commands);
+    if result.is_err() {
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    }
+    // A half-close requests a final drain; a disconnected client cannot block
+    // this forever because daemon sockets have bounded write deadlines.
+    let _ = worker.join();
+    engine.unsubscribe(subscriber);
+    drop(outbound);
+    let writer_result = writer
+        .join()
+        .map_err(|_| std::io::Error::other("Daemon writer panicked"))?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    result.and(writer_result)
+}
+
+/// Serve an isolated stdio host (used by transport tests).
 pub fn serve_stdio(
     engine: Engine,
     reader: impl Read,
@@ -1496,6 +1708,8 @@ fn overlay_terminal_working(tree: &mut Value, working_chats: &HashSet<String>) {
 /// blocks and tool calls are stored as they arrive and come back in `messages`.
 fn merge_live_turn(response: &mut Value, live: LiveTurn) {
     response["turn_id"] = live.turn_id.into();
+    response["turn_epoch"] = live.epoch.into();
+    response["items"] = Value::Array(live.items);
     response["turn_sequence"] = live.sequence.into();
     response["working_for"] = live.working_for.into();
     response["label"] = Value::String(live.label);
@@ -1533,6 +1747,9 @@ mod tests {
         merge_live_turn(
             &mut response,
             LiveTurn {
+                epoch: "epoch-1".into(),
+                message_boundary: 42,
+                items: Vec::new(),
                 turn_id: 7,
                 sequence: 12,
                 label: "Codex".into(),
@@ -2269,6 +2486,7 @@ mod tests {
                 assert_eq!(bind, "127.0.0.1");
                 assert_eq!(port, 0);
                 Ok(PeerEndpoint {
+                    fingerprint: "ab".repeat(32),
                     host: "192.168.1.10".into(),
                     port: 43125,
                 })

@@ -27,6 +27,37 @@ import kotlinx.serialization.json.jsonPrimitive
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionActorTest {
     @Test
+    fun pairingSavesOnlyTheDeviceTokenAndReconnectsWithHello() = runTest {
+        val factory = FakeSocketFactory()
+        val store = MemoryCredentialStore()
+        val actor = ConnectionActor(factory, store, backgroundScope)
+        val connection = SshConnection("host", 4001, "Phone", SshAuthentication.Paired("ab".repeat(32), code = "ABCD-EFGH"), SshHostKey("TLS-SHA256", byteArrayOf(1), "ab".repeat(32)))
+        val connecting = async { actor.connect(connection) }
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        assertTrue(factory.latest.writeText().contains("\"op\":\"pair\""))
+        assertNull(store.load())
+        factory.latest.receive("""{"ok":true,"token":"device-token","device":"Phone","_xd_request":1}""")
+        runCurrent()
+        assertEquals(ConnectResult.Success("host:4001"), connecting.await())
+        val saved = assertIs<SshAuthentication.Paired>(store.load()?.connection?.authentication)
+        assertNull(saved.code)
+        assertEquals("device-token", saved.token)
+        actor.goBackground()
+        runCurrent()
+        actor.poke()
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        assertTrue(factory.latest.writeText().contains("\"op\":\"hello\""))
+        assertFalse(factory.latest.writeText().contains("ABCD-EFGH"))
+        factory.latest.receive("""{"ok":true,"device":"Phone","_xd_request":2}""")
+        runCurrent()
+        assertEquals(Link.Up("host:4001"), actor.link.value)
+    }
+
+    @Test
     fun credentialLoadFailureStillMakesTheActorReadyForANewConnection() = runTest {
         var saved: StoredCredentials? = null
         val store = object : CredentialStore {

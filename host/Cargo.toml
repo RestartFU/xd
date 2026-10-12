@@ -25,6 +25,8 @@ thiserror = "2.0"
 ureq = "3.3"
 uuid = { version = "1.18", features = ["v4"] }
 xd-terminal = { path = "../terminal-core" }
+xd-transport = { path = "../transport-core" }
+rcgen = "0.14"
 
 [profile.release]
 lto = "thin"

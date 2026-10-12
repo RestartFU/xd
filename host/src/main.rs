@@ -1,10 +1,7 @@
-use std::{
-    env, io,
-    path::{Path, PathBuf},
-    process::ExitCode,
-};
+use std::{env, path::PathBuf, process::ExitCode};
 
-use xd_host::{Engine, StateStore, serve_stdio};
+use xd_host::StateStore;
+mod daemon;
 
 #[derive(Clone)]
 struct HostOptions {
@@ -14,6 +11,9 @@ struct HostOptions {
 
 enum CliCommand {
     Stdio(HostOptions),
+    Daemon(HostOptions),
+    DaemonStatus(HostOptions),
+    DaemonStop(HostOptions),
     RecordAgentSession {
         database: PathBuf,
         chat: String,
@@ -34,7 +34,10 @@ fn main() -> ExitCode {
             println!("{}", usage());
             ExitCode::SUCCESS
         }
-        Ok(CliCommand::Stdio(options)) => finish(host_stdio(options)),
+        Ok(CliCommand::Stdio(options)) => finish(daemon::bridge(options)),
+        Ok(CliCommand::Daemon(options)) => finish(daemon::run(options)),
+        Ok(CliCommand::DaemonStatus(options)) => finish(daemon::control(options, "daemon-info")),
+        Ok(CliCommand::DaemonStop(options)) => finish(daemon::control(options, "daemon-stop")),
         Ok(CliCommand::RecordAgentSession {
             database,
             chat,
@@ -62,22 +65,13 @@ fn finish(result: Result<(), String>) -> ExitCode {
     }
 }
 
-fn host_stdio(options: HostOptions) -> Result<(), String> {
-    let store = StateStore::open(&options.database, &options.workspaces)
-        .map_err(|error| error.to_string())?;
-    let data_directory = options
-        .database
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| "--database must have a parent directory".to_owned())?;
-    let engine = Engine::with_store_and_data(store, Some(data_directory));
-    serve_stdio(engine, io::stdin(), io::stdout()).map_err(|error| error.to_string())
-}
-
 fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, String> {
     let mut arguments = arguments.into_iter();
     match arguments.next().as_deref() {
         Some("stdio") => host_arguments(arguments).map(CliCommand::Stdio),
+        Some("daemon") => host_arguments(arguments).map(CliCommand::Daemon),
+        Some("daemon-status") => host_arguments(arguments).map(CliCommand::DaemonStatus),
+        Some("daemon-stop") => host_arguments(arguments).map(CliCommand::DaemonStop),
         Some("record-agent-session") => record_agent_session_arguments(arguments),
         Some("--version" | "-v") if arguments.next().is_none() => Ok(CliCommand::Version),
         Some("--help" | "-h") if arguments.next().is_none() => Ok(CliCommand::Help),
@@ -131,9 +125,17 @@ fn host_arguments(mut arguments: impl Iterator<Item = String>) -> Result<HostOpt
         database = Some(data.join("chats.db"));
         workspaces = Some(data.join("Workspaces"));
     }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let absolute = |path: PathBuf| {
+        if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        }
+    };
     Ok(HostOptions {
-        database: database.ok_or("stdio needs --data or --database")?,
-        workspaces: workspaces.ok_or("stdio needs --data or --workspaces")?,
+        database: absolute(database.ok_or("host needs --data or --database")?),
+        workspaces: absolute(workspaces.ok_or("host needs --data or --workspaces")?),
     })
 }
 
@@ -192,9 +194,7 @@ fn version_string() -> String {
 }
 
 fn usage() -> &'static str {
-    "usage: xd-host stdio --data DIR\n\
-     \n\
-     The host reads JSON frames from stdin and writes replies/events to stdout."
+    "usage: xd-host <stdio|daemon|daemon-status|daemon-stop> --data DIR\n\nstdio connects to the persistent daemon, starting it if needed.\ndaemon runs it in the foreground. Remote clients use TLS pairing on port 4001."
 }
 
 #[cfg(test)]

@@ -11,14 +11,12 @@ A local-first desktop workspace for user-installed Codex, Claude Code, JCode, an
   </tr>
 </table>
 
-<p align="center">
-  <img src="docs/assets/xd-ssh.png" alt="Connect over SSH" width="520">
-</p>
 
 ## Highlights
 
-- Persistent agent and shell sessions backed by tmux.
-- Local or remote over your existing SSH command, with no listening daemon.
+- Native chat for Codex, Claude Code, and JCode, with streamed replies, activity cards, queues, and optional shell panes.
+- One persistent daemon owns local and remote sessions; work continues when clients disconnect.
+- Direct remote connections over pinned TLS, with expiring pairing codes and revocable devices.
 - Projects, Git worktrees, branches, and pull requests in one workspace.
 - An integrated browser with separate tabs for each chat and shared site data.
 - Uses your installed CLI tools, authentication, and configuration.
@@ -44,7 +42,7 @@ Windows x86_64: download `xd-windows-x86_64.zip` from the
 [latest release](https://github.com/RestartFU/xd/releases/latest), extract the
 whole archive, and run `xd.exe`. The desktop and browser run natively;
 local projects and persistent sessions run in your default WSL distribution.
-Install git, tmux, OpenSSH client, CA certificates, and your assistant CLIs
+Install git, tmux, CA certificates, and your assistant CLIs
 inside WSL first. The included README has setup instructions and a WebView2
 Runtime installer helper. Set `XD_WSL_DISTRIBUTION` to select another distro.
 

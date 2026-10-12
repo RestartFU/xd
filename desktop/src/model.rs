@@ -226,6 +226,7 @@ pub struct AgentBackend {
 pub struct AppModel {
     pub folders: Vec<Folder>,
     pub chats: Vec<ChatSummary>,
+    pub session_modes: HashMap<String, String>,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -260,6 +261,12 @@ pub struct AppModel {
     pub live_text: String,
     pub live_items: Vec<Message>,
     pub todos: Vec<TodoItem>,
+    pub interactions: Vec<Value>,
+    pub interaction_revision: u64,
+    pub interaction_epoch: String,
+    pub turn_epoch: String,
+    pub turn_watermark_id: u64,
+    pub turn_watermark_sequence: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +326,21 @@ impl AppModel {
 
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
         let mut snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
+        self.session_modes = body
+            .get("chats")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|chat| {
+                Some((
+                    chat.get("id")?.as_str()?.to_owned(),
+                    chat.get("session_mode")
+                        .and_then(Value::as_str)
+                        .unwrap_or("terminal")
+                        .to_owned(),
+                ))
+            })
+            .collect();
         let terminal_activity_revision = self.prepare_terminal_activity_version(
             snapshot.terminal_activity_epoch.as_deref(),
             snapshot.terminal_activity_revision,
@@ -394,6 +416,12 @@ impl AppModel {
     }
 
     pub fn select_chat(&mut self, chat_id: impl Into<String>) {
+        self.interactions.clear();
+        self.interaction_revision = 0;
+        self.interaction_epoch.clear();
+        self.turn_epoch.clear();
+        self.turn_watermark_id = 0;
+        self.turn_watermark_sequence = 0;
         let chat_id = chat_id.into();
         self.unread_chats.remove(&chat_id);
         self.selected_chat = Some(chat_id);
@@ -427,6 +455,27 @@ impl AppModel {
     }
 
     pub fn apply_chat(&mut self, body: &Value) {
+        let epoch = body
+            .get("interaction_epoch")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if epoch != self.interaction_epoch {
+            self.interaction_epoch = epoch.to_owned();
+            self.interaction_revision = 0;
+            self.interactions.clear();
+        }
+        let revision = body
+            .get("interaction_revision")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if revision >= self.interaction_revision {
+            self.interaction_revision = revision;
+            self.interactions = body
+                .get("interactions")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+        }
         if let Some(backend) = body.get("backend").and_then(Value::as_str) {
             self.backend = backend.to_owned();
             if let Some(selected) = self.selected_chat.as_deref()
@@ -490,21 +539,66 @@ impl AppModel {
             .filter_map(Value::as_str)
             .map(ToOwned::to_owned)
             .collect();
-        self.working = body
+        let snapshot_working = body
             .get("working")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        // A chat opened while its turn is already running receives the text
-        // streamed before this client selected it as a snapshot. Keep text
-        // delivered by newer live events, but hydrate an otherwise empty live
-        // transcript so switching away and back cannot make Claude's reply
-        // disappear until the turn finishes.
-        if self.working
-            && self.live_text.is_empty()
-            && self.live_items.is_empty()
-            && let Some(segment) = body.get("segment").and_then(Value::as_str)
-        {
-            self.live_text = segment.to_owned();
+        if let (Some(id), Some(sequence)) = (
+            body.get("turn_id").and_then(Value::as_u64),
+            body.get("turn_sequence").and_then(Value::as_u64),
+        ) {
+            let epoch = body
+                .get("turn_epoch")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let fresh = epoch != self.turn_epoch
+                || id > self.turn_watermark_id
+                || (id == self.turn_watermark_id && sequence >= self.turn_watermark_sequence);
+            if fresh {
+                self.turn_epoch = epoch.to_owned();
+                self.turn_watermark_id = id;
+                self.turn_watermark_sequence = sequence;
+                self.working = snapshot_working;
+                self.live_text = body
+                    .get("segment")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                self.live_items = body
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        let text = item.get("text")?.as_str()?;
+                        if let Some(todos) = todo_snapshot(text) {
+                            self.todos = todos;
+                            return None;
+                        }
+                        Some(Message::new(
+                            None,
+                            if item.get("tool").and_then(Value::as_bool) == Some(true) {
+                                "tool"
+                            } else {
+                                "assistant"
+                            },
+                            text,
+                            Some(self.backend.clone()),
+                        ))
+                    })
+                    .collect();
+            }
+        } else {
+            self.working = snapshot_working;
+            if self.working && self.live_text.is_empty() && self.live_items.is_empty() {
+                if let Some(segment) = body.get("segment").and_then(Value::as_str) {
+                    self.live_text = segment.to_owned();
+                }
+            }
+            if !self.working {
+                self.live_text.clear();
+                self.live_items.clear();
+            }
         }
         if let Some(selected_chat) = self.selected_chat.as_deref()
             && let Some(summary) = self
@@ -654,6 +748,67 @@ impl AppModel {
     }
 
     pub fn apply_event(&mut self, name: &str, body: &Value) {
+        if matches!(name, "turn-started" | "text" | "tool" | "turn-finished")
+            && self.event_is_active(body)
+        {
+            if let (Some(id), Some(sequence)) = (
+                body.get("turn_id").and_then(Value::as_u64),
+                body.get("turn_sequence").and_then(Value::as_u64),
+            ) {
+                let epoch = body
+                    .get("turn_epoch")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if epoch != self.turn_epoch {
+                    self.turn_epoch = epoch.to_owned();
+                    self.turn_watermark_id = 0;
+                    self.turn_watermark_sequence = 0;
+                    self.live_items.clear();
+                    self.live_text.clear();
+                }
+                if id < self.turn_watermark_id
+                    || (id == self.turn_watermark_id && sequence <= self.turn_watermark_sequence)
+                {
+                    return;
+                }
+                self.turn_watermark_id = id;
+                self.turn_watermark_sequence = sequence;
+            }
+        }
+
+        if matches!(
+            name,
+            "interaction" | "interaction-resolved" | "interactions-cleared"
+        ) && body.get("chat").and_then(Value::as_str) == self.selected_chat.as_deref()
+        {
+            let epoch = body
+                .get("interaction_epoch")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if epoch != self.interaction_epoch {
+                self.interaction_epoch = epoch.to_owned();
+                self.interaction_revision = 0;
+                self.interactions.clear();
+            }
+            let revision = body
+                .get("interaction_revision")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if revision > self.interaction_revision {
+                self.interaction_revision = revision;
+                if name == "interactions-cleared" {
+                    self.interactions.clear();
+                } else if let Some(id) = body.get("request_id").and_then(Value::as_str) {
+                    self.interactions.retain(|pending| {
+                        pending.get("request_id").and_then(Value::as_str) != Some(id)
+                    });
+                    if name == "interaction" {
+                        self.interactions.push(body.clone());
+                    }
+                }
+            }
+            return;
+        }
         if name == "terminal-activity"
             && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
             && let Some(working) = body.get("terminal_working").and_then(Value::as_bool)
@@ -884,6 +1039,7 @@ impl AppModel {
                     terminal_working: false,
                 },
             ],
+            session_modes: HashMap::new(),
             terminal_activity_epoch: None,
             terminal_activity_by_chat: HashMap::new(),
             selected_chat: Some("chat-gpui".into()),
@@ -932,6 +1088,12 @@ impl AppModel {
             live_text: String::new(),
             live_items: Vec::new(),
             todos: Vec::new(),
+            interactions: Vec::new(),
+            interaction_revision: 0,
+            interaction_epoch: String::new(),
+            turn_epoch: String::new(),
+            turn_watermark_id: 0,
+            turn_watermark_sequence: 0,
         }
     }
 }
@@ -963,6 +1125,38 @@ mod tests {
         model.selected_chat = Some("chat-1".into());
         model.apply_event("turn-finished", &json!({"chat":"chat-1"}));
         assert_eq!(model.working_for(), None);
+    }
+
+    #[test]
+    fn live_snapshots_deduplicate_events_and_restart_the_watermark_with_the_daemon() {
+        let mut model = AppModel::default();
+        model.select_chat("chat");
+        model.apply_chat(&json!({"working":true,"turn_epoch":"daemon-a","turn_id":4,"turn_sequence":2,"segment":"after","items":[{"tool":false,"text":"before"},{"tool":true,"text":"command"}]}));
+        model.apply_event("text",&json!({"chat":"chat","turn_epoch":"daemon-a","turn_id":4,"turn_sequence":2,"text":"duplicate"}));
+        assert_eq!(model.live_text, "after");
+        assert_eq!(model.live_items.len(), 2);
+        model.apply_event("text",&json!({"chat":"chat","turn_epoch":"daemon-a","turn_id":4,"turn_sequence":3,"text":" newer"}));
+        model.apply_chat(&json!({"working":true,"turn_epoch":"daemon-a","turn_id":4,"turn_sequence":2,"segment":"stale","items":[]}));
+        assert_eq!(model.live_text, "after newer");
+        model.apply_event(
+            "turn-started",
+            &json!({"chat":"chat","turn_epoch":"daemon-b","turn_id":1,"turn_sequence":0}),
+        );
+        assert!(model.live_items.is_empty());
+        assert!(model.live_text.is_empty());
+        assert_eq!(model.turn_watermark_id, 1);
+    }
+
+    #[test]
+    fn resolved_interactions_are_not_resurrected_by_an_older_snapshot() {
+        let mut model = AppModel::default();
+        model.select_chat("chat");
+        model.apply_event("interaction",&json!({"chat":"chat","interaction_epoch":"daemon-a","interaction_revision":2,"request_id":"request","method":"approval","params":{}}));
+        model.apply_event("interaction-resolved",&json!({"chat":"chat","interaction_epoch":"daemon-a","interaction_revision":3,"request_id":"request"}));
+        model.apply_chat(&json!({"working":false,"interaction_epoch":"daemon-a","interaction_revision":2,"interactions":[{"request_id":"request"}]}));
+        assert!(model.interactions.is_empty());
+        model.apply_chat(&json!({"working":false,"interaction_epoch":"daemon-b","interaction_revision":0,"interactions":[]}));
+        assert_eq!(model.interaction_revision, 0);
     }
 
     #[test]

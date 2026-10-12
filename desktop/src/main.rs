@@ -38,7 +38,7 @@ use xd_desktop::{
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
     model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, Worktree},
-    remote::{self, RemoteError, SshRemoteBridge, SshRemoteSession},
+    paired::{self, RemoteBridge, RemoteError, RemoteSession},
     session_host::{AgentCommand, SessionHost, SshCommand, TMUX_CONFIGURATION},
     session_runtime::{
         SessionEndpoint, SessionEvent, SessionEventKind, SessionEventReceiver, SessionRuntime,
@@ -303,12 +303,24 @@ struct OpenBrowserUrl {
     window: gpui::AnyWindowHandle,
 }
 
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct ToggleActivity {
+    id: i64,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct AuthProvider {
     provider: String,
     state: String,
     #[serde(default)]
     needs_input: bool,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    login_url: Option<String>,
+    #[serde(default)]
+    device_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -399,6 +411,7 @@ struct BrowseEntry {
 
 #[derive(Clone, Default)]
 struct DiffPanel {
+    patch: String,
     branch: bool,
     base: Option<String>,
     files_mode: bool,
@@ -418,6 +431,15 @@ struct DiffPanel {
     pr_loading: bool,
     pr_title: Option<String>,
     pr_body: String,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum NativePane {
+    #[default]
+    Chat,
+    Files,
+    Diff,
+    Terminal,
 }
 
 struct TerminalTab {
@@ -532,6 +554,7 @@ impl TerminalPanel {
     }
 }
 
+#[allow(dead_code)]
 fn terminal_tab_title(agent: Option<AgentCli>) -> String {
     agent.map(AgentCli::label).unwrap_or("Terminal").to_owned()
 }
@@ -569,6 +592,7 @@ fn stable_agent_session_id(terminal_id: &str) -> String {
     )
 }
 
+#[allow(dead_code)]
 fn terminal_session_id(
     chat_id: &str,
     agent: Option<AgentCli>,
@@ -1059,6 +1083,7 @@ struct SharePanel {
     host: String,
     port: Option<u16>,
     code: String,
+    fingerprint: String,
     error: Option<String>,
 }
 
@@ -1137,6 +1162,9 @@ struct XdDesktop {
     minimal_popup_previous_focus: Option<WeakFocusHandle>,
     minimal_popup_focus_captured: bool,
     minimal_new_session_agent: AgentCli,
+    native_pane: NativePane,
+    native_option_open: Option<&'static str>,
+    expanded_activities: HashSet<i64>,
     pending_minimal_session: Option<(String, String)>,
     settings: AppSettings,
     settings_open: bool,
@@ -1161,7 +1189,7 @@ struct XdDesktop {
     connecting: bool,
     connection_in_flight: bool,
     remote_host: Option<HostHandle>,
-    remote_bridge: Option<SshRemoteBridge>,
+    remote_bridge: Option<RemoteBridge>,
     remote_state: RemoteState,
     remote_error: Option<String>,
     remote_generation: u64,
@@ -1199,8 +1227,10 @@ struct XdDesktop {
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
     device_name_input: Entity<ComposerInput>,
-    remote_ssh_input: Entity<ComposerInput>,
+    remote_pairing_input: Entity<ComposerInput>,
+    share_host_input: Entity<ComposerInput>,
     question_input: Entity<ComposerInput>,
+    secret_question_input: Entity<ComposerInput>,
     source_build_input: Entity<ComposerInput>,
     composer: String,
     queue_edit: Option<QueueEdit>,
@@ -1263,6 +1293,7 @@ struct XdDesktop {
     pending_send: Option<PendingSend>,
     open_question: Option<OpenQuestion>,
     question_answer: String,
+    interaction_answers: HashMap<String, String>,
     source_build_panel: SourceBuildPanel,
     source_build_run: Option<SourceBuildRun>,
     source_build_generation: u64,
@@ -1511,8 +1542,20 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let remote_ssh_input = cx.new(|cx| ComposerInput::new(cx, "ssh user@host -p 22"));
-        cx.subscribe(&remote_ssh_input, |this, _, event, cx| match event {
+        let share_host_input =
+            cx.new(|cx| ComposerInput::new(cx, "Host address (LAN or Tailscale)…"));
+        cx.subscribe(&share_host_input, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                if let Some(panel) = &mut this.share_panel {
+                    panel.host = text.clone();
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        let remote_pairing_input =
+            cx.new(|cx| ComposerInput::new(cx, "Paste pairing code from host…"));
+        cx.subscribe(&remote_pairing_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => {
                 if let Some(panel) = &mut this.remote_panel {
                     panel.command = text.clone();
@@ -1522,6 +1565,16 @@ impl XdDesktop {
             }
             ComposerEvent::Submit => this.connect_remote_machine(cx),
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
+        })
+        .detach();
+        let secret_question_input = cx.new(|cx| ComposerInput::password(cx, "Type your answer…"));
+        cx.subscribe(&secret_question_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                this.question_answer = text.clone();
+                cx.notify();
+            }
+            ComposerEvent::Submit => this.send_question_input(cx),
+            _ => {}
         })
         .detach();
         let question_input = cx.new(|cx| ComposerInput::new(cx, "Type your answer…"));
@@ -1565,17 +1618,13 @@ impl XdDesktop {
             target: source_build::parse_target(&settings.build_source),
             ..Default::default()
         };
-        let parsed_remote = settings
-            .remote_ssh_command
-            .as_deref()
-            .map(SshCommand::parse)
-            .transpose();
-        let remote_error = parsed_remote.as_ref().err().cloned();
-        let remote_key = parsed_remote
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .map(|command| connection_state_key(ChatEndpoint::Remote, Some(command.destination())));
+        let remote_error = None;
+        let remote_key = settings.remote_credentials.as_ref().map(|credentials| {
+            connection_state_key(
+                ChatEndpoint::Remote,
+                Some(&format!("{}:{}", credentials.host, credentials.port)),
+            )
+        });
         let active_endpoint =
             persisted_runtime(settings.active_connection.as_deref(), remote_key.as_deref());
         let active_connection = match active_endpoint {
@@ -1617,6 +1666,9 @@ impl XdDesktop {
             minimal_popup_previous_focus: None,
             minimal_popup_focus_captured: false,
             minimal_new_session_agent: AgentCli::Codex,
+            native_pane: NativePane::Chat,
+            native_option_open: None,
+            expanded_activities: HashSet::new(),
             pending_minimal_session: None,
             settings,
             settings_open: false,
@@ -1678,8 +1730,10 @@ impl XdDesktop {
             secret_name_input,
             secret_value_input,
             device_name_input,
-            remote_ssh_input,
+            remote_pairing_input,
+            share_host_input,
             question_input,
+            secret_question_input,
             source_build_input,
             composer: String::new(),
             queue_edit: None,
@@ -1739,6 +1793,7 @@ impl XdDesktop {
             pending_send: None,
             open_question: None,
             question_answer: String::new(),
+            interaction_answers: HashMap::new(),
             source_build_panel,
             source_build_run: None,
             source_build_generation: 0,
@@ -1985,6 +2040,9 @@ impl XdDesktop {
                 | "terminal-resized"
                 | "terminal-closed"
                 | "git-draft-finished"
+                | "interaction"
+                | "interaction-resolved"
+                | "interactions-cleared"
                 | "folder-clone"
         )
     }
@@ -2145,7 +2203,7 @@ impl XdDesktop {
 
     fn schedule_remote_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
         if self.active_endpoint != ChatEndpoint::Remote
-            || self.settings.remote_ssh_command.is_none()
+            || self.settings.remote_credentials.is_none()
             || matches!(
                 self.remote_state,
                 RemoteState::Connecting | RemoteState::Connected
@@ -2171,21 +2229,13 @@ impl XdDesktop {
         if self.remote_generation != generation || self.remote_state != RemoteState::Connecting {
             return;
         }
-        let Some(command) = self.settings.remote_ssh_command.clone() else {
+        let Some(credentials) = self.settings.remote_credentials.clone() else {
             self.remote_state = RemoteState::Unconfigured;
             return;
         };
-        let command = match SshCommand::parse(&command) {
-            Ok(command) => command,
-            Err(error) => {
-                self.remote_state = RemoteState::Unconfigured;
-                self.remote_error = Some(error);
-                return;
-            }
-        };
         let connection = cx
             .background_executor()
-            .spawn(async move { remote::connect_ssh(&command) });
+            .spawn(async move { paired::resume(credentials) });
         cx.spawn(async move |this, cx| {
             let result = connection.await;
             let _ = this.update(cx, |this, cx| {
@@ -2204,10 +2254,15 @@ impl XdDesktop {
 
     fn install_remote_session(
         &mut self,
-        session: SshRemoteSession,
+        session: RemoteSession,
         generation: u64,
         cx: &mut Context<Self>,
     ) {
+        self.settings.remote_credentials = Some(session.credentials.clone());
+        if let Err(error) = self.settings.save() {
+            self.remote_connection_failed(RemoteError::Authentication(error), cx);
+            return;
+        }
         let (host, updates, bridge) = session.into_parts();
         self.remote_host = Some(host);
         self.remote_bridge = Some(bridge);
@@ -2383,9 +2438,14 @@ impl XdDesktop {
         self.remote_bridge = None;
         self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
         self.remote_state = RemoteState::Offline;
-        self.remote_error = Some(format!("{message} Retrying automatically…"));
-        self.remote_reconnect_attempt = self.remote_reconnect_attempt.saturating_add(1);
-        self.schedule_remote_connect(reconnect_delay(self.remote_reconnect_attempt), cx);
+        if error.fatal() {
+            self.remote_state = RemoteState::Unconfigured;
+            self.remote_error = Some(message);
+        } else {
+            self.remote_error = Some(format!("{message} Retrying automatically…"));
+            self.remote_reconnect_attempt = self.remote_reconnect_attempt.saturating_add(1);
+            self.schedule_remote_connect(reconnect_delay(self.remote_reconnect_attempt), cx);
+        }
         if let Some(panel) = &mut self.remote_panel {
             panel.submitting = false;
             panel.error = self.remote_error.clone();
@@ -2396,8 +2456,8 @@ impl XdDesktop {
     }
 
     fn activate_remote_runtime(&mut self, cx: &mut Context<Self>) {
-        if self.settings.remote_ssh_command.is_none() {
-            self.remote_error = Some("Enter an SSH command first.".into());
+        if self.settings.remote_credentials.is_none() {
+            self.remote_error = Some("Pair with a host first.".into());
             cx.notify();
             return;
         }
@@ -2429,7 +2489,7 @@ impl XdDesktop {
         self.remote_generation = self.remote_generation.saturating_add(1);
         self.remote_host = None;
         self.remote_bridge = None;
-        self.remote_state = if self.settings.remote_ssh_command.is_some() {
+        self.remote_state = if self.settings.remote_credentials.is_some() {
             RemoteState::Offline
         } else {
             RemoteState::Unconfigured
@@ -3319,7 +3379,14 @@ impl XdDesktop {
                     panel.loading = false;
                     match pairing_details(&value) {
                         Ok((host, port, code)) => {
+                            self.share_host_input
+                                .update(cx, |input, cx| input.set_text(host.clone(), cx));
                             panel.host = host;
+                            panel.fingerprint = value
+                                .get("fingerprint")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_owned();
                             panel.port = Some(port);
                             panel.code = code;
                             panel.error = None;
@@ -3409,6 +3476,9 @@ impl XdDesktop {
                         self.prepare_diff_file(path, output, generation, cx);
                     }
                 } else {
+                    if let Some(diff) = &mut self.diff_panel {
+                        diff.patch = output.clone();
+                    }
                     self.prepare_diff(output, generation, cx);
                 }
             }
@@ -4430,6 +4500,22 @@ impl XdDesktop {
         attachments: Option<Vec<Attachment>>,
         cx: &mut Context<Self>,
     ) {
+        if self.event_is_active(&body)
+            && matches!(name, "interaction-resolved" | "interactions-cleared")
+        {
+            if let Some(id) = body.get("request_id").and_then(Value::as_str) {
+                self.interaction_answers
+                    .retain(|key, _| !key.starts_with(&format!("{id}/")));
+            } else {
+                self.interaction_answers.clear();
+            }
+            self.question_answer.clear();
+            self.question_input
+                .update(cx, |input, cx| input.set_text("", cx));
+            self.secret_question_input
+                .update(cx, |input, cx| input.set_text("", cx));
+        }
+
         if Self::is_terminal_screen_event(name) {
             self.handle_terminal_screen_event(self.active_endpoint, name, &body, cx);
         }
@@ -4843,6 +4929,10 @@ impl XdDesktop {
 
     fn browser_occluded_by_popup(&self) -> bool {
         self.minimal_new_tab_open
+            || self.auth_open
+            || self.native_option_open.is_some()
+            || self.share_panel.is_some()
+            || self.devices_panel.is_some()
             || self.remote_panel.is_some()
             || self.creating_workspace
             || self.sidebar_edit.is_some()
@@ -5167,15 +5257,15 @@ impl XdDesktop {
 
     fn open_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
-        let command = self.settings.remote_ssh_command.clone().unwrap_or_default();
+        let command = String::new();
         self.remote_panel = Some(RemotePanel {
             command: command.clone(),
             submitting: false,
             error: self.remote_error.clone(),
         });
-        self.remote_ssh_input
+        self.remote_pairing_input
             .update(cx, |input, cx| input.set_text(command, cx));
-        let focus = self.remote_ssh_input.read(cx).focus_handle(cx);
+        let focus = self.remote_pairing_input.read(cx).focus_handle(cx);
         self.focus_minimal_popup(focus, window, cx);
         cx.notify();
     }
@@ -5187,14 +5277,14 @@ impl XdDesktop {
             .is_some_and(|panel| panel.submitting);
         if canceled_connection {
             self.remote_generation = self.remote_generation.saturating_add(1);
-            self.remote_state = if self.settings.remote_ssh_command.is_some() {
+            self.remote_state = if self.settings.remote_credentials.is_some() {
                 RemoteState::Offline
             } else {
                 RemoteState::Unconfigured
             };
         }
         self.remote_panel = None;
-        if canceled_connection && self.settings.remote_ssh_command.is_some() {
+        if canceled_connection && self.settings.remote_credentials.is_some() {
             self.schedule_remote_connect(Duration::ZERO, cx);
         }
         cx.notify();
@@ -5207,8 +5297,8 @@ impl XdDesktop {
         if panel.submitting {
             return;
         }
-        let command = match SshCommand::parse(&panel.command) {
-            Ok(command) => command,
+        let invite = match xd_transport::PairingInvite::parse(&panel.command) {
+            Ok(invite) => invite,
             Err(error) => {
                 if let Some(panel) = &mut self.remote_panel {
                     panel.error = Some(error);
@@ -5217,13 +5307,6 @@ impl XdDesktop {
                 return;
             }
         };
-        if panel.command.trim().is_empty() {
-            if let Some(panel) = &mut self.remote_panel {
-                panel.error = Some("Enter an SSH command.".into());
-            }
-            cx.notify();
-            return;
-        }
         self.remote_generation = self.remote_generation.saturating_add(1);
         let generation = self.remote_generation;
         self.remote_host = None;
@@ -5234,19 +5317,9 @@ impl XdDesktop {
             panel.submitting = true;
             panel.error = None;
         }
-        self.settings.remote_ssh_command = Some(panel.command.trim().to_owned());
-        if let Err(error) = self.settings.save() {
-            self.remote_state = RemoteState::Unconfigured;
-            if let Some(panel) = &mut self.remote_panel {
-                panel.submitting = false;
-                panel.error = Some(error);
-            }
-            cx.notify();
-            return;
-        }
         let connection = cx
             .background_executor()
-            .spawn(async move { remote::connect_ssh(&command) });
+            .spawn(async move { paired::pair(invite) });
         cx.spawn(async move |this, cx| {
             let result = connection.await;
             let _ = this.update(cx, |this, cx| {
@@ -5528,10 +5601,16 @@ impl XdDesktop {
     fn connection_key(&self, endpoint: ChatEndpoint) -> String {
         let remote = self
             .settings
-            .remote_ssh_command
-            .as_deref()
-            .and_then(|command| SshCommand::parse(command).ok())
-            .map(|command| command.destination().to_owned());
+            .remote_credentials
+            .as_ref()
+            .map(|credentials| format!("{}:{}", credentials.host, credentials.port))
+            .or_else(|| {
+                self.settings
+                    .remote_ssh_command
+                    .as_deref()
+                    .and_then(|command| SshCommand::parse(command).ok())
+                    .map(|command| command.destination().to_owned())
+            });
         connection_state_key(endpoint, remote.as_deref())
     }
 
@@ -5806,6 +5885,7 @@ impl XdDesktop {
         .detach();
     }
 
+    #[allow(dead_code)]
     fn active_session_host(&self) -> Result<SessionHost, String> {
         match self.active_endpoint {
             ChatEndpoint::Local => {
@@ -5842,6 +5922,7 @@ impl XdDesktop {
         }
     }
 
+    #[allow(dead_code)]
     fn terminal_agent_command(&self, agent: Option<AgentCli>, terminal_id: &str) -> AgentCommand {
         let remote = self.active_endpoint == ChatEndpoint::Remote;
         match agent {
@@ -5940,7 +6021,10 @@ impl XdDesktop {
         let terminal_id = panel.selected.clone();
         let should_auto_open = panel.should_auto_open();
         if geometry_changed && let Some(terminal_id) = terminal_id {
-            let result = self.terminal_runtime.resize(&terminal_id, columns, rows);
+            let result = self
+                .active_host()
+                .ok_or_else(|| "Host disconnected.".to_owned())
+                .and_then(|host| host.terminal_resize(&terminal_id, columns, rows));
             if let Err(error) = result
                 && let Some(panel) = &mut self.terminal_panel
             {
@@ -5963,7 +6047,10 @@ impl XdDesktop {
         else {
             return;
         };
-        if let Err(error) = self.terminal_runtime.input(&terminal_id, bytes)
+        if let Err(error) = self
+            .active_host()
+            .ok_or_else(|| "Host disconnected.".to_owned())
+            .and_then(|host| host.terminal_input(&terminal_id, bytes))
             && let Some(panel) = &mut self.terminal_panel
         {
             panel.error = Some(error);
@@ -6036,7 +6123,10 @@ impl XdDesktop {
     }
 
     fn kill_terminal_id(&mut self, terminal_id: String, cx: &mut Context<Self>) {
-        if let Err(error) = self.terminal_runtime.kill(&terminal_id)
+        if let Err(error) = self
+            .active_host()
+            .ok_or_else(|| "Host disconnected.".to_owned())
+            .and_then(|host| host.terminal_kill(&terminal_id))
             && let Some(panel) = &mut self.terminal_panel
         {
             panel.error = Some(error);
@@ -6095,35 +6185,29 @@ impl XdDesktop {
         panel.auto_open = false;
         let opening_generation = panel.begin_opening(agent);
         panel.error = None;
-        let terminal_id = terminal_session_id(
-            &chat_id,
-            agent,
-            reuse,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
-        );
-        let title = terminal_tab_title(agent);
-        let workdir = panel.workdir.clone().or_else(|| self.model.workdir.clone());
-        let result = workdir
-            .ok_or_else(|| "The session working directory is still loading.".to_owned())
-            .and_then(|workdir| {
-                let host = self.active_session_host()?;
-                let command = self.terminal_agent_command(agent, &terminal_id);
-                let process = host.attach(&terminal_id, Path::new(&workdir), &command);
-                let cleanup = host.kill_process(&terminal_id);
-                self.terminal_runtime.open_for(
-                    endpoint.into(),
+        let colors = self.settings.theme.colors();
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| match agent {
+                Some(agent) => host.terminal_open_agent(
                     &chat_id,
-                    &terminal_id,
-                    &title,
-                    agent.map(AgentCli::protocol_name),
-                    process,
-                    Some(cleanup),
                     columns,
                     rows,
-                )
+                    reuse,
+                    agent.protocol_name(),
+                    self.settings.allow_all_permissions,
+                    colors.text,
+                    colors.background,
+                ),
+                None => host.terminal_open(
+                    &chat_id,
+                    columns,
+                    rows,
+                    reuse,
+                    colors.text,
+                    colors.background,
+                ),
             });
         match result {
             Err(error) => {
@@ -6168,32 +6252,24 @@ impl XdDesktop {
         let Some(chat_id) = self
             .terminal_panel
             .as_ref()
-            .filter(|panel| self.model.selected_chat.as_deref() == Some(panel.chat_id.as_str()))
+            .filter(|panel| {
+                panel.chat_id.starts_with("global:")
+                    || self.model.selected_chat.as_deref() == Some(panel.chat_id.as_str())
+            })
             .map(|panel| panel.chat_id.clone())
         else {
             return;
         };
-        if self.model.workdir.is_none() {
-            // The tree primes an empty panel for every session before its full
-            // chat snapshot (including workdir) has been fetched. Restoring
-            // one of those panels must remain in the loading state so the
-            // viewport cannot turn this normal dependency into a terminal
-            // startup error while the chat request is in flight. A panel that
-            // already has a live terminal can remain usable during hydration.
-            if let Some(panel) = &mut self.terminal_panel
-                && panel.sessions.is_empty()
-            {
-                panel.loading = true;
-                panel.error = None;
-            }
-            self.request_chat(&chat_id);
-            return;
-        }
         if let Some(panel) = &mut self.terminal_panel {
-            panel.loading = false;
+            panel.loading = true;
             panel.error = None;
         }
-        self.start_terminal_session(true, cx);
+        if let Some(host) = self.active_host() {
+            if let Err(error) = host.terminal_list(&chat_id) {
+                self.model.connection_error = Some(error);
+            }
+        }
+        cx.notify();
     }
 
     fn select_terminal(&mut self, terminal_id: String, cx: &mut Context<Self>) {
@@ -6216,7 +6292,10 @@ impl XdDesktop {
             && let Some(session) = panel.selected_mut()
         {
             session.screen.resize(columns, rows);
-            if let Err(error) = self.terminal_runtime.resize(&terminal_id, columns, rows)
+            if let Err(error) = self
+                .active_host()
+                .ok_or_else(|| "Host disconnected.".to_owned())
+                .and_then(|host| host.terminal_resize(&terminal_id, columns, rows))
                 && let Some(panel) = &mut self.terminal_panel
             {
                 panel.error = Some(error);
@@ -7506,6 +7585,38 @@ impl XdDesktop {
     }
 
     fn send_question_input(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self
+            .model
+            .interactions
+            .iter()
+            .find(|p| p["method"] == "item/tool/requestUserInput")
+            .cloned()
+        {
+            if let Some(id) = pending["request_id"].as_str() {
+                if let Some(question) =
+                    pending["params"]["questions"]
+                        .as_array()
+                        .and_then(|questions| {
+                            questions.iter().find(|q| {
+                                !self.interaction_answers.contains_key(&format!(
+                                    "{id}/{}",
+                                    q["id"].as_str().unwrap_or_default()
+                                ))
+                            })
+                        })
+                {
+                    if let Some(qid) = question["id"].as_str() {
+                        self.answer_interaction(
+                            id.to_owned(),
+                            qid.to_owned(),
+                            self.question_answer.clone(),
+                            cx,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
         self.answer_question(self.question_answer.trim().to_owned(), cx);
     }
 
@@ -7897,6 +8008,14 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn native_session(&self) -> bool {
+        self.model
+            .selected_chat
+            .as_ref()
+            .and_then(|id| self.model.session_modes.get(id))
+            .is_some_and(|mode| mode == "chat")
+    }
+
     fn open_minimal_session(
         &mut self,
         project_id: String,
@@ -7906,7 +8025,11 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         self.select_minimal_session(project_id, chat_id, agent, cx);
-        let focus = self.terminal_input.read(cx).focus_handle(cx);
+        let focus = if self.native_session() {
+            self.composer_input.read(cx).focus_handle(cx)
+        } else {
+            self.terminal_input.read(cx).focus_handle(cx)
+        };
         window.focus(&focus);
         cx.notify();
     }
@@ -7924,6 +8047,10 @@ impl XdDesktop {
             .as_ref()
             .is_some_and(|panel| panel.chat_id == chat_id && panel.agent == Some(agent));
         if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
+            self.native_pane = NativePane::Chat;
+            self.diff_generation = self.diff_generation.saturating_add(1);
+            self.diff_panel = None;
+            self.interaction_answers.clear();
             self.model.select_chat(chat_id.clone());
             self.remember_last_chat(&chat_id);
             self.invalidate_live_render();
@@ -7938,6 +8065,19 @@ impl XdDesktop {
             chat_id: chat_id.clone(),
             agent,
         };
+        if self.native_session() {
+            self.stash_terminal_panel();
+            self.sync_terminal_input_mode(cx);
+            self.transcript_loading = true;
+            self.request_chat(&chat_id);
+            self.request_messages(&chat_id);
+            self.list_tree_directory(String::new(), cx);
+            if let Some(host) = self.active_host() {
+                let _ = host.git_state(&chat_id);
+            }
+            cx.notify();
+            return;
+        }
         if !same_panel {
             self.stash_terminal_panel();
             let restored = self.restore_terminal_panel(&chat_id, agent);
@@ -10022,6 +10162,8 @@ impl XdDesktop {
         colors: ThemeColors,
         card: ActivityCard,
         index: usize,
+        activity_id: i64,
+        expanded: bool,
     ) -> gpui::AnyElement {
         let status_color = match card.kind {
             ActivityKind::Running => colors.accent,
@@ -10070,6 +10212,12 @@ impl XdDesktop {
             .bg(rgb(colors.surface_high))
             .child(
                 div()
+                    .id(("native-activity-toggle", index))
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| {
+                        window.dispatch_action(Box::new(ToggleActivity { id: activity_id }), cx);
+                    })
+                    .child(if expanded { "▾" } else { "▸" })
                     .flex()
                     .items_center()
                     .gap_2()
@@ -10089,7 +10237,7 @@ impl XdDesktop {
                             .child(card.status),
                     ),
             )
-            .when_some(detail, |activity, detail| {
+            .when_some(detail.filter(|_| expanded), |activity, detail| {
                 activity.child(
                     div()
                         .id(("native-activity-detail", index))
@@ -10106,7 +10254,7 @@ impl XdDesktop {
                         .child(detail),
                 )
             })
-            .children(item_rows)
+            .children(if expanded { item_rows } else { Vec::new() })
             .into_any_element()
     }
 
@@ -10115,6 +10263,7 @@ impl XdDesktop {
         message: &Message,
         activity: Option<ActivityCard>,
         index: usize,
+        expanded: bool,
     ) -> gpui::AnyElement {
         let role = message.role.as_str();
         if role == "duration" {
@@ -10135,7 +10284,13 @@ impl XdDesktop {
         }
 
         if let Some(activity) = activity {
-            return Self::render_native_activity(colors, activity, index);
+            return Self::render_native_activity(
+                colors,
+                activity,
+                index,
+                message.id.unwrap_or(-(index as i64) - 1),
+                expanded,
+            );
         }
 
         let user = role == "user";
@@ -10197,7 +10352,198 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    #[allow(dead_code)]
+    fn respond_interaction(&mut self, request_id: String, response: Value, cx: &mut Context<Self>) {
+        if let (Some(chat), Some(host)) = (self.model.selected_chat.as_deref(), self.active_host())
+        {
+            if let Err(error) = host.respond(chat, &request_id, response) {
+                self.model.connection_error = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    fn answer_interaction(
+        &mut self,
+        request_id: String,
+        question_id: String,
+        answer: String,
+        cx: &mut Context<Self>,
+    ) {
+        if answer.trim().is_empty() {
+            return;
+        }
+        self.interaction_answers
+            .insert(format!("{request_id}/{question_id}"), answer);
+        let Some(pending) = self
+            .model
+            .interactions
+            .iter()
+            .find(|pending| pending["request_id"].as_str() == Some(&request_id))
+        else {
+            return;
+        };
+        let mut answers = serde_json::Map::new();
+        let questions = pending["params"]["questions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for question in questions {
+            let Some(id) = question["id"].as_str() else {
+                return;
+            };
+            let Some(answer) = self.interaction_answers.get(&format!("{request_id}/{id}")) else {
+                self.question_answer.clear();
+                self.question_input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                cx.notify();
+                return;
+            };
+            answers.insert(id.to_owned(), serde_json::json!({"answers":[answer]}));
+        }
+        self.respond_interaction(request_id, serde_json::json!({"answers":answers}), cx);
+    }
+
+    fn render_interaction(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let pending = self.model.interactions.first()?.clone();
+        let request_id = pending["request_id"].as_str()?.to_owned();
+        let method = pending["method"].as_str().unwrap_or_default();
+        let params = &pending["params"];
+        let mut card = div()
+            .w_full()
+            .px_4()
+            .py_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(colors.accent))
+            .bg(rgb(colors.surface))
+            .text_color(rgb(colors.text));
+        if method == "item/tool/requestUserInput" {
+            let question = params["questions"]
+                .as_array()?
+                .iter()
+                .find(|q| {
+                    !self.interaction_answers.contains_key(&format!(
+                        "{request_id}/{}",
+                        q["id"].as_str().unwrap_or_default()
+                    ))
+                })?
+                .clone();
+            let question_id = question["id"].as_str()?.to_owned();
+            card = card.child(
+                question["question"]
+                    .as_str()
+                    .unwrap_or("Your input is needed")
+                    .to_owned(),
+            );
+            let buttons = question["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+                .map(|(index, option)| {
+                    let label = option["label"].as_str().unwrap_or_default().to_owned();
+                    let answer = label.clone();
+                    let id = request_id.clone();
+                    let question = question_id.clone();
+                    div()
+                        .id(("interaction-answer", index))
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(rgb(colors.surface_high))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.answer_interaction(
+                                id.clone(),
+                                question.clone(),
+                                answer.clone(),
+                                cx,
+                            )
+                        }))
+                        .child(label)
+                })
+                .collect::<Vec<_>>();
+            card = card.children(buttons).child(div().h(px(40.0)).child(
+                if question["isSecret"] == true {
+                    self.secret_question_input.clone()
+                } else {
+                    self.question_input.clone()
+                },
+            ));
+            card = card.child(
+                div()
+                    .id("interaction-submit")
+                    .px_3()
+                    .py_2()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.answer_interaction(
+                            request_id.clone(),
+                            question_id.clone(),
+                            this.question_answer.clone(),
+                            cx,
+                        )
+                    }))
+                    .child("Submit answer"),
+            );
+        } else {
+            let detail = params
+                .get("command")
+                .and_then(Value::as_str)
+                .or_else(|| params.get("reason").and_then(Value::as_str))
+                .unwrap_or("The agent requests permission to continue");
+            card = card
+                .child("Approval needed")
+                .child(div().text_sm().font_family(MONO).child(detail.to_owned()));
+            if let Some(permissions) = params.get("permissions") {
+                card = card.child(
+                    div()
+                        .text_xs()
+                        .font_family(MONO)
+                        .child(permissions.to_string()),
+                );
+            }
+            card = card.child(
+                div().flex().gap_2().children(
+                    [
+                        ("Allow once", "accept"),
+                        ("Allow for session", "acceptForSession"),
+                        ("Deny", "decline"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, decision))| {
+                        let id = request_id.clone();
+                        div()
+                            .id(("interaction-decision", index))
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(colors.surface_high))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond_interaction(
+                                    id.clone(),
+                                    serde_json::json!({"decision":decision}),
+                                    cx,
+                                )
+                            }))
+                            .child(label)
+                    })
+                    .collect::<Vec<_>>(),
+                ),
+            );
+        }
+        Some(card.into_any_element())
+    }
+
     fn render_native_chat(
         &mut self,
         colors: ThemeColors,
@@ -10220,6 +10566,7 @@ impl XdDesktop {
                     });
                 });
         }
+        let expanded_activities = self.expanded_activities.clone();
         let messages = self.transcript_snapshot.clone();
         let transcript_empty = messages.get(0).is_none();
         let transcript_loading = self.transcript_loading;
@@ -10260,7 +10607,13 @@ impl XdDesktop {
                         workflow_pending.contains(&message.content),
                     )
                 });
-                Self::render_native_message(colors, message, activity, index)
+                Self::render_native_message(
+                    colors,
+                    message,
+                    activity,
+                    index,
+                    expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
+                )
             })
             .size_full()
             .into_any_element()
@@ -10327,6 +10680,46 @@ impl XdDesktop {
             && self.model.draft_attachments.is_empty();
         let working = self.model.working;
 
+        let attachments = self
+            .model
+            .draft_attachments
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, attachment)| {
+                let name = attachment.name.clone();
+                div()
+                    .id(("draft-image", index))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        gpui::img(attachment.preview)
+                            .w(px(96.0))
+                            .h(px(72.0))
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
+                    .child(div().text_xs().text_color(rgb(colors.muted)).child(name))
+                    .child(
+                        div()
+                            .id(("remove-draft-image", index))
+                            .text_xs()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if index < this.model.draft_attachments.len() {
+                                    this.model.draft_attachments.remove(index);
+                                    this.attachments_dirty = true;
+                                    this.attachment_generation =
+                                        this.attachment_generation.saturating_add(1);
+                                    this.schedule_draft_sync(cx);
+                                }
+                                cx.notify();
+                            }))
+                            .child("Remove"),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let interaction = self.render_interaction(colors, cx);
         div()
             .size_full()
             .flex()
@@ -10341,6 +10734,58 @@ impl XdDesktop {
                     .px_5()
                     .py_4()
                     .child(transcript),
+            )
+            .when(!attachments.is_empty(), |chat| {
+                chat.child(div().mx_5().flex().gap_3().children(attachments))
+            })
+            .when_some(interaction, |chat, card| chat.child(card))
+            .when_some(
+                self.open_question
+                    .clone()
+                    .filter(|_| self.model.interactions.is_empty()),
+                |chat, question| {
+                    let buttons = question
+                        .options
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, answer)| {
+                            let label = answer.clone();
+                            div()
+                                .id(("tagged-question", index))
+                                .px_3()
+                                .py_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.answer_question(answer.clone(), cx)
+                                }))
+                                .child(label)
+                        })
+                        .collect::<Vec<_>>();
+                    chat.child(
+                        div()
+                            .px_4()
+                            .py_3()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .text_color(rgb(colors.text))
+                            .child(question.question)
+                            .children(buttons)
+                            .when(question.accepts_input, |card| {
+                                card.child(div().h(px(40.0)).child(self.question_input.clone()))
+                                    .child(
+                                        div()
+                                            .id("tagged-question-submit")
+                                            .py_2()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.send_question_input(cx)
+                                            }))
+                                            .child("Submit answer"),
+                                    )
+                            }),
+                    )
+                },
             )
             .when(working, |chat| {
                 chat.child(
@@ -10496,6 +10941,344 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    fn show_native_pane(&mut self, pane: NativePane, cx: &mut Context<Self>) {
+        self.native_pane = pane;
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        match pane {
+            NativePane::Files | NativePane::Diff => {
+                self.diff_generation = self.diff_generation.saturating_add(1);
+                self.diff_panel = Some(DiffPanel {
+                    files_mode: pane == NativePane::Files,
+                    loading: true,
+                    ..Default::default()
+                });
+                if let Some(host) = self.active_host() {
+                    let result = if pane == NativePane::Files {
+                        host.file_browse_list(&chat_id, "", self.diff_generation)
+                    } else {
+                        host.diff_read(&chat_id, "working-all", None, None, self.diff_generation)
+                    };
+                    if let Err(error) = result {
+                        self.model.connection_error = Some(error);
+                    }
+                }
+                self.refresh_git_status();
+            }
+            NativePane::Terminal => {
+                let mut panel = Self::new_terminal_panel(chat_id.clone());
+                panel.workdir = self.model.workdir.clone();
+                self.terminal_panel = Some(panel);
+                self.refresh_terminal_sessions(cx);
+            }
+            NativePane::Chat => {
+                self.stash_terminal_panel();
+            }
+        }
+        cx.notify();
+    }
+
+    fn set_native_option(&mut self, option: &'static str, value: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(host) = self.active_host().cloned() else {
+            return;
+        };
+        let result = match option {
+            "model" => host.set_model(&chat_id, &value),
+            "effort" => host.set_effort(&chat_id, &value),
+            "access" => host.set_access(&chat_id, &value),
+            _ => host.set_plan(&chat_id, value == "true"),
+        };
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        } else {
+            self.native_option_open = None;
+        }
+        cx.notify();
+    }
+
+    fn render_native_workspace(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let tabs = [
+            ("Chat", NativePane::Chat),
+            ("Files", NativePane::Files),
+            ("Changes", NativePane::Diff),
+            ("Terminal", NativePane::Terminal),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (label, pane))| {
+            div()
+                .id(("native-pane", index))
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .text_color(rgb(if pane == self.native_pane {
+                    colors.accent
+                } else {
+                    colors.muted
+                }))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| this.show_native_pane(pane, cx)))
+                .child(label)
+        })
+        .collect::<Vec<_>>();
+        let controls = [
+            (
+                "model",
+                format!(
+                    "Model: {}",
+                    self.model.model.as_deref().unwrap_or("Default")
+                ),
+            ),
+            ("effort", format!("Effort: {}", self.model.effort)),
+            ("access", format!("Access: {}", self.model.access)),
+            (
+                "plan",
+                if self.model.plan {
+                    "Plan: on"
+                } else {
+                    "Plan: off"
+                }
+                .to_owned(),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (option, label))| {
+            div()
+                .id(("native-option", index))
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .bg(rgb(colors.surface_high))
+                .text_xs()
+                .text_color(rgb(colors.text))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.native_option_open = Some(option);
+                    this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                    cx.notify();
+                }))
+                .child(label)
+        })
+        .collect::<Vec<_>>();
+        let content = match self.native_pane {
+            NativePane::Chat => self.render_native_chat(colors, window, cx),
+            NativePane::Terminal => self.render_minimal_terminal(colors, window, cx),
+            NativePane::Files => {
+                let panel = self.diff_panel.clone().unwrap_or_default();
+                let mut rows = Vec::new();
+                if !panel.browse_path.is_empty() {
+                    rows.push(
+                        div()
+                            .id("native-files-up")
+                            .px_3()
+                            .py_2()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let (Some(chat), Some(panel)) =
+                                    (this.model.selected_chat.clone(), &mut this.diff_panel)
+                                {
+                                    panel.browse_path = Path::new(&panel.browse_path)
+                                        .parent()
+                                        .map(|p| p.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    panel.loading = true;
+                                    panel.file_preview = None;
+                                    let path = panel.browse_path.clone();
+                                    if let Some(host) = this.active_host() {
+                                        let _ = host.file_browse_list(
+                                            &chat,
+                                            &path,
+                                            this.diff_generation,
+                                        );
+                                    }
+                                }
+                                cx.notify();
+                            }))
+                            .child("← Parent directory")
+                            .into_any_element(),
+                    );
+                }
+                for (index, entry) in panel.browse_entries.iter().enumerate() {
+                    let path = if panel.browse_path.is_empty() {
+                        entry.name.clone()
+                    } else {
+                        format!("{}/{}", panel.browse_path, entry.name)
+                    };
+                    let directory = entry.directory;
+                    let label = format!("{} {}", if directory { "▸" } else { "·" }, entry.name);
+                    rows.push(
+                        div()
+                            .id(("native-file", index))
+                            .px_3()
+                            .py_2()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(chat) = this.model.selected_chat.clone() {
+                                    if let Some(panel) = &mut this.diff_panel {
+                                        panel.file_preview = None;
+                                        if directory {
+                                            panel.browse_path = path.clone();
+                                            panel.loading = true;
+                                        } else {
+                                            panel.file_loading = true;
+                                        }
+                                    }
+                                    if let Some(host) = this.active_host() {
+                                        let result = if directory {
+                                            host.file_browse_list(
+                                                &chat,
+                                                &path,
+                                                this.diff_generation,
+                                            )
+                                        } else {
+                                            host.file_browse_read(
+                                                &chat,
+                                                &path,
+                                                this.diff_generation,
+                                            )
+                                        };
+                                        if let Err(error) = result {
+                                            this.model.connection_error = Some(error);
+                                        }
+                                    }
+                                }
+                                cx.notify();
+                            }))
+                            .child(label)
+                            .into_any_element(),
+                    );
+                }
+                div()
+                    .size_full()
+                    .flex()
+                    .min_h_0()
+                    .text_color(rgb(colors.text))
+                    .child(
+                        div()
+                            .id("native-file-list")
+                            .w(px(240.0))
+                            .h_full()
+                            .overflow_y_scroll()
+                            .children(rows),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when(panel.loading || panel.file_loading, |pane| {
+                                pane.child("Loading…")
+                            })
+                            .when_some(panel.error, |pane, error| {
+                                pane.child(div().text_color(rgb(0xd86f7c)).child(error))
+                            })
+                            .when_some(panel.file_preview, |pane, preview| {
+                                pane.child(
+                                    div()
+                                        .flex()
+                                        .gap_3()
+                                        .px_3()
+                                        .py_2()
+                                        .child(div().flex_1().child(preview.path))
+                                        .child(
+                                            div()
+                                                .id("native-save-file")
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.save_browse_file(cx)
+                                                }))
+                                                .child(if preview.saving {
+                                                    "Saving…"
+                                                } else {
+                                                    "Save"
+                                                }),
+                                        ),
+                                )
+                                .child(div().flex_1().min_h_0().child(self.file_editor.clone()))
+                            }),
+                    )
+                    .into_any_element()
+            }
+            NativePane::Diff => {
+                let panel = self.diff_panel.clone().unwrap_or_default();
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .text_color(rgb(colors.text))
+                    .child(
+                        div().flex().gap_3().child(
+                            div()
+                                .id("native-refresh-diff")
+                                .px_3()
+                                .py_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show_native_pane(NativePane::Diff, cx)
+                                }))
+                                .child("Refresh changes"),
+                        ),
+                    )
+                    .when(panel.loading, |pane| pane.child("Loading…"))
+                    .when_some(panel.error, |pane, error| {
+                        pane.child(div().text_color(rgb(0xd86f7c)).child(error))
+                    })
+                    .child(
+                        div()
+                            .id("native-diff-output")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .font_family(MONO)
+                            .text_xs()
+                            .child(if panel.patch.is_empty() && !panel.loading {
+                                "No changes.".to_owned()
+                            } else {
+                                panel.patch
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .h(px(44.0))
+                            .child(div().flex_1().child(self.git_commit_input.clone()))
+                            .child(
+                                div()
+                                    .id("native-commit")
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| this.commit_changes(cx)))
+                                    .child("Commit all changes"),
+                            ),
+                    )
+                    .into_any_element()
+            }
+        };
+        div()
+            .size_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(div().flex().gap_2().children(tabs))
+            .child(div().flex().flex_wrap().gap_2().pb_2().children(controls))
+            .child(div().flex_1().min_h_0().child(content))
+            .into_any_element()
+    }
+
     fn render_minimal_cli(
         &mut self,
         colors: ThemeColors,
@@ -10507,7 +11290,11 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let toolbar = self.render_minimal_context_toolbar(colors, cx);
         let board = self.render_minimal_session_board(colors, Some(chat_id.as_str()), cx);
-        let content = self.render_minimal_terminal(colors, window, cx);
+        let content = if self.native_session() {
+            self.render_native_workspace(colors, window, cx)
+        } else {
+            self.render_minimal_terminal(colors, window, cx)
+        };
 
         div()
             .size_full()
@@ -10781,6 +11568,26 @@ impl XdDesktop {
                                 .text_color(rgb(colors.muted))
                                 .child("Appearance"),
                         )
+                        .when(self.active_endpoint == ChatEndpoint::Local, |card| {
+                            card.child(div().id("pair-device").px_3().py_2().text_sm().text_color(rgb(colors.text)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                this.minimal_theme_open = false;
+                                this.share_panel = Some(SharePanel { loading: true, ..Default::default() });
+                                if let Some(host) = &this.host { let _ = host.peer_pairing(); }
+                                cx.notify();
+                            })).child("Pair a device"))
+                            .child(div().id("paired-devices").px_3().py_2().text_sm().text_color(rgb(colors.text)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                this.minimal_theme_open = false;
+                                this.devices_panel = Some(DevicesPanel { loading: true, ..Default::default() });
+                                this.request_devices();
+                                cx.notify();
+                            })).child("Paired devices"))
+                        })
+                        .child(div().id("assistant-accounts").px_3().py_2().text_sm().text_color(rgb(colors.text)).cursor_pointer().on_click(cx.listener(|this, _, window, cx| {
+                            this.minimal_theme_open = false; this.auth_open = true;
+                            if let Some(host) = this.active_host() { let _ = host.agent_auth(); let _ = host.agent_clis(); }
+                            this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                            cx.notify();
+                        })).child("Assistant accounts"))
                         .children(rows)
                         .child(div().mx_2().my_2().h(px(1.0)).bg(rgb(colors.border)))
                         .child(
@@ -10822,9 +11629,331 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
+        let share_overlay = self.share_panel.clone().map(|panel| {
+            let invite = xd_transport::PairingInvite { host: panel.host.clone(), port: panel.port.unwrap_or(0), fingerprint: panel.fingerprint.clone(), code: panel.code.clone() };
+            let can_copy = !panel.loading && xd_transport::validate_endpoint(&invite.host, invite.port, &invite.fingerprint).is_ok();
+            div().occlude().absolute().inset_0().flex().items_center().justify_center().bg(rgba(0x00000099)).child(
+                div().w(px(480.0)).p_5().flex().flex_col().gap_3().rounded_xl().bg(rgb(colors.surface)).text_color(rgb(colors.text))
+                .child(div().text_lg().child("Pair a device"))
+                .child(div().text_sm().text_color(rgb(colors.muted)).child("Choose a reachable LAN or Tailscale address. Copy this code to the other device within five minutes. Each code can be used once."))
+                .child(div().h(px(42.0)).px_3().flex().items_center().bg(rgb(colors.background)).child(self.share_host_input.clone()))
+                .child(if panel.loading { "Starting listener…".to_owned() } else { format!("Port {} · {}", panel.port.unwrap_or(0), panel.code) })
+                .when_some(panel.error, |card, error| card.child(div().text_sm().text_color(rgb(0xd86f7c)).child(error)))
+                .child(div().flex().gap_3()
+                    .child(div().id("copy-pairing-code").px_3().py_2().rounded_md().bg(rgb(colors.accent)).cursor_pointer().on_click(cx.listener(move |_, _, _, cx| { if can_copy { cx.write_to_clipboard(ClipboardItem::new_string(invite.encode())); } })).child("Copy pairing code"))
+                    .child(div().id("refresh-pairing-code").px_3().py_2().cursor_pointer().on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; } if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
+                    .child(div().id("close-pairing").px_3().py_2().cursor_pointer().on_click(cx.listener(|this, _, _, cx| { this.share_panel = None; cx.notify(); })).child("Close")))
+            ).into_any_element()
+        });
+        let devices_overlay = self.devices_panel.clone().map(|panel| {
+            let rows = panel
+                .devices
+                .iter()
+                .enumerate()
+                .map(|(index, device)| {
+                    let id = device
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned();
+                    let name = device
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Device")
+                        .to_owned();
+                    let confirmed = panel.revoke_confirmation.as_deref() == Some(id.as_str());
+                    div()
+                        .id(("paired-device", index))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_2()
+                        .child(div().flex_1().child(name))
+                        .child(
+                            div()
+                                .id(("revoke-device", index))
+                                .px_3()
+                                .py_2()
+                                .text_color(rgb(0xd86f7c))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if confirmed {
+                                        if let Some(host) = &this.host {
+                                            let _ = host.revoke_device(&id);
+                                        }
+                                        if let Some(panel) = &mut this.devices_panel {
+                                            panel.mutating = Some(id.clone());
+                                        }
+                                    } else if let Some(panel) = &mut this.devices_panel {
+                                        panel.revoke_confirmation = Some(id.clone());
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(if confirmed {
+                                    "Confirm revoke"
+                                } else {
+                                    "Revoke"
+                                }),
+                        )
+                })
+                .collect::<Vec<_>>();
+            div()
+                .occlude()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(480.0))
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .bg(rgb(colors.surface))
+                        .text_color(rgb(colors.text))
+                        .child(div().text_lg().child("Paired devices"))
+                        .when(panel.loading, |card| card.child("Loading…"))
+                        .when(!panel.loading && rows.is_empty(), |card| {
+                            card.child("No paired devices.")
+                        })
+                        .children(rows)
+                        .when_some(panel.error, |card, error| {
+                            card.child(div().text_color(rgb(0xd86f7c)).child(error))
+                        })
+                        .child(
+                            div()
+                                .id("close-devices")
+                                .px_3()
+                                .py_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.devices_panel = None;
+                                    cx.notify();
+                                }))
+                                .child("Close"),
+                        ),
+                )
+                .into_any_element()
+        });
+        let native_option_overlay = self.native_option_open.map(|option| {
+            let catalog = self
+                .model
+                .agent_backends
+                .iter()
+                .find(|backend| backend.id == self.model.backend);
+            let choices = match option {
+                "model" => catalog
+                    .map(|backend| {
+                        backend
+                            .models
+                            .iter()
+                            .map(|model| (model.id.clone(), model.name.clone()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                "effort" => catalog
+                    .map(|backend| {
+                        backend
+                            .efforts
+                            .iter()
+                            .map(|effort| (effort.clone(), effort.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                "access" => vec![
+                    ("read-only".into(), "Read only".into()),
+                    ("edit".into(), "Edit workspace".into()),
+                    ("full".into(), "Full access".into()),
+                ],
+                _ => vec![
+                    ("false".into(), "Act".into()),
+                    ("true".into(), "Plan".into()),
+                ],
+            };
+            let rows = choices
+                .into_iter()
+                .enumerate()
+                .map(|(index, (value, label))| {
+                    div()
+                        .id(("native-setting-choice", index))
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(colors.surface_high)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_native_option(option, value.clone(), cx)
+                        }))
+                        .child(label)
+                })
+                .collect::<Vec<_>>();
+            div()
+                .occlude()
+                .absolute()
+                .inset_0()
+                .track_focus(&minimal_popup_focus)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(420.0))
+                        .max_h(px(500.0))
+                        .flex()
+                        .flex_col()
+                        .p_4()
+                        .gap_2()
+                        .rounded_xl()
+                        .bg(rgb(colors.surface))
+                        .text_color(rgb(colors.text))
+                        .child(div().text_lg().child(format!("Choose {option}")))
+                        .child(
+                            div()
+                                .id("native-setting-choices")
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
+                        .child(
+                            div()
+                                .id("close-native-setting")
+                                .py_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.native_option_open = None;
+                                    cx.notify();
+                                }))
+                                .child("Cancel"),
+                        ),
+                )
+                .into_any_element()
+        });
+        let auth_overlay = self.auth_open.then(|| {
+            let rows = self
+                .auth_providers
+                .clone()
+                .into_iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    let id = provider.provider.clone();
+                    let signing_in = provider.state == "signing-in";
+                    div()
+                        .id(("assistant-account", index))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .py_2()
+                        .child(format!("{} · {}", provider.provider, provider.state))
+                        .when_some(provider.detail, |row, detail| {
+                            row.child(div().text_xs().text_color(rgb(colors.muted)).child(detail))
+                        })
+                        .when_some(provider.device_code, |row, code| {
+                            row.child(div().font_family(MONO).child(code))
+                        })
+                        .when_some(provider.login_url, |row, url| {
+                            row.child(
+                                div()
+                                    .id(("assistant-login-url", index))
+                                    .py_2()
+                                    .text_color(rgb(colors.accent))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.auth_open = false;
+                                        this.open_browser_url(&url, window, cx);
+                                    }))
+                                    .child("Open sign-in page"),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id(("assistant-login", index))
+                                .py_2()
+                                .text_color(rgb(colors.accent))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(host) = this.active_host() {
+                                        if let Err(error) = host.agent_auth_action(
+                                            if signing_in {
+                                                "agent-auth-cancel"
+                                            } else {
+                                                "agent-auth-start"
+                                            },
+                                            &id,
+                                            None,
+                                        ) {
+                                            this.model.connection_error = Some(error);
+                                        }
+                                    }
+                                    cx.notify();
+                                }))
+                                .child(if signing_in {
+                                    "Cancel sign-in"
+                                } else {
+                                    "Sign in"
+                                }),
+                        )
+                })
+                .collect::<Vec<_>>();
+            div()
+                .occlude()
+                .absolute()
+                .inset_0()
+                .track_focus(&minimal_popup_focus)
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000099))
+                .child(
+                    div()
+                        .w(px(480.0))
+                        .p_5()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .rounded_xl()
+                        .bg(rgb(colors.surface))
+                        .text_color(rgb(colors.text))
+                        .child(div().text_lg().child("Assistant accounts"))
+                        .children(rows)
+                        .when(
+                            self.auth_providers
+                                .iter()
+                                .any(|p| p.needs_input && p.state == "signing-in"),
+                            |card| {
+                                card.child(div().h(px(42.0)).child(self.auth_input.clone()))
+                                    .child(
+                                        div()
+                                            .id("submit-assistant-auth")
+                                            .py_2()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.submit_auth_input(cx)
+                                            }))
+                                            .child("Submit sign-in code"),
+                                    )
+                            },
+                        )
+                        .child(
+                            div()
+                                .id("close-assistant-accounts")
+                                .py_2()
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.auth_open = false;
+                                    cx.notify();
+                                }))
+                                .child("Close"),
+                        ),
+                )
+                .into_any_element()
+        });
         let remote_overlay = self.remote_panel.clone().map(|panel| {
             let can_connect =
-                !panel.submitting && SshCommand::parse(panel.command.trim()).is_ok();
+                !panel.submitting && xd_transport::PairingInvite::parse(panel.command.trim()).is_ok();
             div()
                 .occlude()
                 .absolute()
@@ -10850,7 +11979,7 @@ impl XdDesktop {
                                 .text_lg()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
-                                .child("Connect over SSH"),
+                                .child("Pair with a host"),
                         )
                         .child(
                             div()
@@ -10858,7 +11987,7 @@ impl XdDesktop {
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(
-                                    "Enter the SSH command you normally use. This replaces the local runtime until you disconnect.",
+                                    "On the host, open Settings → Pair a device and copy its pairing code. Paste it here to connect directly.",
                                 ),
                         )
                         .child(
@@ -10871,7 +12000,7 @@ impl XdDesktop {
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.background))
-                                .child(self.remote_ssh_input.clone()),
+                                .child(self.remote_pairing_input.clone()),
                         )
                         .when_some(panel.error.clone(), |card, error| {
                             card.child(div().text_sm().text_color(rgb(0xd86f7c)).child(error))
@@ -11866,12 +12995,31 @@ impl XdDesktop {
                     this.finish_browser_resize(cx);
                 }),
             )
+            .on_action(cx.listener(|this, action: &ToggleActivity, _, cx| {
+                if !this.expanded_activities.insert(action.id) {
+                    this.expanded_activities.remove(&action.id);
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|_, _: &CopyRenderedSelection, _, cx| {
                 if let Some(text) = TextSelection::selected(cx) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if this.auth_open {
+                    this.auth_open = false;
+                    cx.notify();
+                    return;
+                }
+                if this.native_option_open.take().is_some() {
+                    cx.notify();
+                    return;
+                }
+                if this.share_panel.take().is_some() || this.devices_panel.take().is_some() {
+                    cx.notify();
+                    return;
+                }
                 if this.remote_panel.is_some() {
                     this.close_remote(cx);
                 } else if this.session_context_menu.is_some() {
@@ -11962,6 +13110,10 @@ impl XdDesktop {
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
+            .when_some(share_overlay, |root, overlay| root.child(overlay))
+            .when_some(devices_overlay, |root, overlay| root.child(overlay))
+            .when_some(native_option_overlay, |root, overlay| root.child(overlay))
+            .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_overlay, |root, overlay| root.child(overlay))
             .when_some(sidebar_rename_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_delete_overlay, |root, overlay| {
@@ -12692,7 +13844,7 @@ mod tests {
                 let message = self.message.clone();
                 let colors = self.colors;
                 list(self.state.clone(), move |index, _, _| {
-                    XdDesktop::render_native_message(colors, &message, None, index)
+                    XdDesktop::render_native_message(colors, &message, None, index, false)
                 })
                 .size_full()
             }
@@ -13026,7 +14178,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_setup_is_one_persisted_ssh_command_without_pairing_fields() {
+    fn remote_setup_uses_a_pinned_pairing_invitation() {
         let source = include_str!("main.rs");
         let production = source
             .split_once("#[cfg(test)]")
@@ -13040,11 +14192,11 @@ mod tests {
             .expect("end of remote overlay")
             .0;
 
-        assert!(overlay.contains("Connect over SSH"));
-        assert!(overlay.contains("self.remote_ssh_input.clone()"));
+        assert!(overlay.contains("Pair with a host"));
+        assert!(overlay.contains("self.remote_pairing_input.clone()"));
         assert!(!overlay.contains("Pairing code"));
         assert!(!overlay.contains("remote_port_input"));
-        assert!(production.contains("settings.remote_ssh_command = Some"));
+        assert!(production.contains("settings.remote_credentials = Some"));
     }
 
     #[gpui::test]
@@ -13364,7 +14516,7 @@ mod tests {
 
             let panel = desktop.terminal_panel.as_ref().expect("restored panel");
             assert_eq!(panel.chat_id, "chat-a");
-            assert!(!panel.loading);
+            assert!(panel.loading); // Cached output remains visible while the daemon refreshes it.
             assert_eq!(panel.selected.as_deref(), Some("terminal-a"));
             assert_eq!(panel.sessions[0].sequence, Some(7));
             assert_eq!(panel.sessions[0].screen.rendered().text, "cached output");
@@ -13699,6 +14851,12 @@ mod tests {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, cx| {
             desktop.settings.remote_ssh_command = Some("ssh dev.example".into());
+            desktop.settings.remote_credentials = Some(xd_transport::RemoteCredentials {
+                host: "dev.example".into(),
+                port: 4001,
+                fingerprint: "ab".repeat(32),
+                token: "test-token".into(),
+            });
             desktop.remote_state = RemoteState::Connected;
             desktop.model.connected = true;
             let connection_generation = desktop.connection_generation;

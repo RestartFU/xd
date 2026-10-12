@@ -109,6 +109,11 @@ internal fun encodeCredentialRecord(credentials: StoredCredentials): String {
         put("port", connection.port)
         put("username", connection.username)
         when (val authentication = connection.authentication) {
+            is SshAuthentication.Paired -> {
+                put("authentication", "paired")
+                put("fingerprint", authentication.fingerprint)
+                put("token", requireNotNull(authentication.token))
+            }
             is SshAuthentication.Password -> {
                 require(authentication.value.isNotEmpty())
                 put("authentication", "password")
@@ -134,6 +139,7 @@ internal fun decodeCredentialRecord(value: String): StoredCredentials {
         ?: error("Missing credential port")
     val username = objectValue.stringValue("username")
     val authentication = when (objectValue.stringValue("authentication")) {
+        "paired" -> SshAuthentication.Paired(fingerprint = objectValue.stringValue("fingerprint"), token = objectValue.stringValue("token"))
         "password" -> SshAuthentication.Password(objectValue.stringValue("password"))
         "private-key" -> SshAuthentication.PrivateKey(
             bytes = Base64.getDecoder().decode(objectValue.stringValue("privateKey")),

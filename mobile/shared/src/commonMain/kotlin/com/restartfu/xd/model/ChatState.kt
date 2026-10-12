@@ -53,6 +53,7 @@ public data class ChatState(
     val working: Boolean = false,
     val label: String? = null,
     /** Live turn this state reflects, and how far into it we have applied. */
+    val turnEpoch: String = "",
     val turnId: Long? = null,
     val turnSequence: Long = 0,
     val startedAtMillis: Long? = null,
@@ -60,6 +61,9 @@ public data class ChatState(
     val liveItems: List<TranscriptItem> = emptyList(),
     val liveSegment: String = "",
     val todos: List<TodoItem> = emptyList(),
+    val interactions: List<PendingInteraction> = emptyList(),
+    val interactionRevision: Long = 0,
+    val interactionEpoch: String = "",
     val pendingUser: TranscriptItem? = null,
     val loading: Boolean = false,
     val loadingOlder: Boolean = false,
@@ -83,3 +87,16 @@ public data class ChatState(
             }
         }
 }
+
+public data class PendingInteraction(
+    val requestId: String,
+    val method: String,
+    val detail: String,
+    val questions: List<PendingQuestion> = emptyList(),
+)
+public data class PendingQuestion(
+    val id: String,
+    val text: String,
+    val options: List<String>,
+    val secret: Boolean = false,
+)

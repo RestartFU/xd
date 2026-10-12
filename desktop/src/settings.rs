@@ -63,10 +63,10 @@ pub struct AppSettings {
     pub git_writer_model: Option<String>,
     pub build_source: String,
     pub favorite_models: Vec<String>,
-    /// The exact SSH connection command used for remote mode. XD parses this
-    /// into arguments and appends its own terminal session command; it is
-    /// never evaluated by a shell.
+    /// Legacy SSH command retained for migration of per-host UI state.
+    /// New remote connections use pinned daemon credentials.
     pub remote_ssh_command: Option<String>,
+    pub remote_credentials: Option<xd_transport::RemoteCredentials>,
     pub active_connection: Option<String>,
     /// Last selected chat per host connection. `last_chat` remains as a
     /// backwards-compatible fallback for existing local settings files.
@@ -108,6 +108,7 @@ impl Default for AppSettings {
             build_source: String::new(),
             favorite_models: Vec::new(),
             remote_ssh_command: None,
+            remote_credentials: None,
             active_connection: None,
             last_chats: HashMap::new(),
             last_chat: None,
@@ -219,9 +220,14 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(settings)
         .map_err(|error| format!("Cannot encode app settings: {error}"))?;
     let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&temporary)
             .map_err(|error| format!("Cannot prepare app settings: {error}"))?;
         file.write_all(&bytes)
@@ -286,6 +292,7 @@ mod tests {
             build_source: "#128".into(),
             favorite_models: vec!["claude/claude-opus-5".into()],
             remote_ssh_command: Some("ssh dev.example -p 22".into()),
+            remote_credentials: None,
             active_connection: Some("remote/dev.example:4001".into()),
             last_chats: HashMap::from([
                 ("local".into(), "chat-restore".into()),

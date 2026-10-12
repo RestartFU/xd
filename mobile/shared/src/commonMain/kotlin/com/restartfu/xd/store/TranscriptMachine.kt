@@ -5,6 +5,7 @@ import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.model.TodoItem
 import com.restartfu.xd.model.TodoStatus
+import com.restartfu.xd.protocol.toModel
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.MessagesReply
 import com.restartfu.xd.protocol.PngAttachment
@@ -288,6 +289,9 @@ public object TranscriptMachine {
                 effort = chat.effort,
                 access = chat.access,
                 newWorktree = chat.newWorktree,
+                interactions = if (chat.interactionEpoch != state.interactionEpoch || chat.interactionRevision >= state.interactionRevision) chat.interactions.map { it.toModel() } else state.interactions,
+                interactionRevision = if (chat.interactionEpoch != state.interactionEpoch) chat.interactionRevision else maxOf(chat.interactionRevision, state.interactionRevision),
+                interactionEpoch = chat.interactionEpoch,
                 canCreateWorktree = chat.worktrees.isNotEmpty() && !chat.hasMessages,
                 commands = chat.commands,
                 shortcuts = chat.shortcuts,
@@ -301,6 +305,7 @@ public object TranscriptMachine {
                 },
                 working = chat.working,
                 label = chat.label,
+                turnEpoch = chat.turnEpoch,
                 turnId = if (chat.working) chat.turnId else null,
                 turnSequence = if (chat.working) chat.turnSequence ?: 0 else 0,
                 startedAtMillis = chat.workingFor?.let { input.nowMillis - it * 1000 },
@@ -310,7 +315,10 @@ public object TranscriptMachine {
                 loading = false,
                 loadingOlder = false,
                 error = null,
-            ).withMessages(input.messages),
+            ).withMessages(input.messages).let { loaded ->
+                val liveTodos = chat.items.asReversed().firstNotNullOfOrNull { it.text.todoSnapshot() }
+                if (liveTodos != null) loaded.copy(todos = liveTodos) else loaded
+            },
         )
     }
 

@@ -21,6 +21,7 @@ pub(crate) enum Transport {
 struct Pairing {
     code: String,
     expires_at: Instant,
+    attempts_left: u8,
 }
 
 struct ConnectionIdentity {
@@ -178,6 +179,7 @@ impl PairingService {
             *pairing = Some(Pairing {
                 code: code.clone(),
                 expires_at: Instant::now() + ttl,
+                attempts_left: 10,
             });
         }
         code
@@ -187,9 +189,13 @@ impl PairingService {
         let Ok(mut pairing) = self.pairing.lock() else {
             return false;
         };
-        let valid = pairing
-            .as_ref()
-            .is_some_and(|pairing| Instant::now() <= pairing.expires_at && pairing.code == code);
+        let valid = pairing.as_mut().is_some_and(|pairing| {
+            if Instant::now() > pairing.expires_at || pairing.attempts_left == 0 {
+                return false;
+            }
+            pairing.attempts_left -= 1;
+            pairing.code == code.trim().to_ascii_uppercase()
+        });
         if valid {
             *pairing = None;
         }

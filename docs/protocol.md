@@ -1,8 +1,8 @@
 # xd host wire protocol
 
-This is the normative JSON Lines contract used by `xd-host stdio`. The desktop
-uses it over child-process stdin/stdout locally and over SSH remotely. Android
-runs the same stdio endpoint through an SSH exec channel.
+This is the normative JSON Lines contract served by the persistent xd daemon.
+The local desktop uses a private Unix socket through `xd-host stdio`; remote
+desktop and Android use the same frames over pinned TLS.
 
 Any wire change must update the Rust host/desktop tests and the Kotlin
 `commonTest` fixtures together. Server and clients must ignore unknown object
@@ -88,15 +88,32 @@ turn output by arrival order; use the turn watermark described under `chat`.
 
 ## Transport authentication
 
-Authentication and machine identity are established by the transport before
-`xd-host stdio` starts. A local desktop owns the child process directly. Remote
-desktop and mobile clients authenticate with SSH and verify the SSH host key.
-There is no application-level `pair` or `hello` operation and no bearer token.
-The first application frame may be any supported request.
+Local connections authenticate through the user-owned 0600 Unix socket in a
+0700 runtime directory. Remote connections use pinned TLS and must begin with
+`pair` or `hello` before any workspace request or event is allowed.
 
-The SSH account has the same authority as the host process. Clients must pin or
-otherwise strictly verify the SSH host key before sending password or private-key
-authentication material.
+A local `peer-pairing` request starts the remote listener and returns `host`,
+`port`, `code`, `fingerprint`, and `expires_in:300`. The copied invitation is
+`xd1:` followed by unpadded base64url JSON containing those first four fields.
+The code is one-use, expires in five minutes, and accepts at most ten guesses.
+
+```json
+{"op":"pair","code":"ABCD-EFGH","name":"Laptop"}
+{"ok":true,"token":"device-secret","device":"Laptop"}
+{"op":"hello","token":"device-secret"}
+{"ok":true,"device":"Laptop","version":1}
+```
+
+The client verifies the invitation's SHA-256 leaf-certificate fingerprint before
+sending either secret. Authentication replies precede event fan-out. Tokens are
+stored hashed on the host. `devices`, `rename-device`, `revoke-device`,
+`peer-pairing`, and `daemon-stop` are local-only. Revocation disconnects every
+session for that device immediately. A revoked token or changed certificate
+requires explicit re-pairing.
+
+`daemon-info` returns protocol/build identity and PID. `daemon-stop` acknowledges
+before shutting down the shared runtime. Remote listeners persist across daemon
+restarts, but unused codes and pending backend requests do not.
 
 ## State reads
 
@@ -134,7 +151,7 @@ must tolerate a child appearing before its parent and treat ids as opaque.
 {"op":"chat","chat":"chat-1"}
 ```
 
-Success always includes `ok`, `title`, `backend`, `auth_state`, `commands`,
+Success always includes `ok`, `title`, `backend`, `session_mode`, `auth_state`, `commands`,
 `plan`, `queue` (oldest first), `working`, `effort`, `new_worktree`, and
 `has_messages`.
 
@@ -158,6 +175,7 @@ may offer removal only while this member is present.
 When a turn is live the reply also carries its snapshot:
 
 - `label`: string
+- `turn_epoch`: string identifying the current daemon runtime
 - `turn_id`, `turn_sequence`: integers — the turn watermark
 - `working_for`: elapsed seconds
 - `items`: ordered array of `{"tool":bool,"text":string}`
@@ -166,12 +184,21 @@ When a turn is live the reply also carries its snapshot:
 A client renders each non-tool item as finished assistant text, each tool item
 as a tool row, then appends `segment`.
 
-**Turn watermark.** `turn_sequence` counts the `text` and `tool` events already
+**Turn watermark.** A new `turn_epoch` resets the client watermark. `turn_sequence` counts the `text` and `tool` events already
 folded into this snapshot. A later event for the same `turn_id` whose
 `turn_sequence` is less than or equal to the snapshot's is already represented
 and must be dropped; a higher one must be applied. An event carrying a lower
 `turn_id` is stale. Given the ordering caveat above, this is the only correct
 way to reconcile a snapshot against concurrent live output.
+
+`session_mode` is `chat` for new Codex/Claude/JCode sessions and `terminal` for
+legacy CLI sessions and Copilot. Tree chat summaries include the same member.
+
+Snapshots also include `interactions`, `interaction_revision`, and
+`interaction_epoch`. Each interaction is `{request_id, method, params}` from
+the backend, with an opaque host-scoped request ID. Reconcile snapshots/events
+by revision within an epoch; a different epoch starts a new revision history.
+A client must clear pending prompts when it observes a new daemon epoch.
 
 `working` may be true with no turn snapshot present, when a queued message is
 durably marked as working but its turn has not started yet.
@@ -365,6 +392,24 @@ attached device sees what is waiting and either can steer it.
 
 Stops the running turn. A control operation: answered even while a serialized
 command is slow.
+
+### `respond`
+
+```json
+{"op":"respond","chat":"chat-1","request_id":"opaque-id","response":{"decision":"accept"}}
+{"op":"respond","chat":"chat-1","request_id":"opaque-id","response":{"answers":{"question-id":{"answers":["Keep it"]}}}}
+```
+
+Responds to a pending Codex app-server approval or question. Approval decisions
+are `accept`, `acceptForSession`, `decline`, or `cancel`. Permission decisions
+grant only the permissions requested by the backend. Question responses must
+answer every question in the request. Stale, already answered, or foreign-chat
+IDs are refused. Cancellation clears pending requests.
+
+`interaction` publishes `{chat,request_id,method,params,interaction_revision,
+interaction_epoch}`. `interaction-resolved` removes one ID; `interactions-cleared`
+removes all prompts for the chat. Both carry the revision and epoch. Pending
+requests survive client disconnects and are available from `chat` snapshots.
 
 ### `set-option`
 

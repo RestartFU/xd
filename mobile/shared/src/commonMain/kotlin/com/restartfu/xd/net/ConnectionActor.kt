@@ -1,5 +1,8 @@
 package com.restartfu.xd.net
 
+import com.restartfu.xd.credentials.SshAuthentication
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import com.restartfu.xd.credentials.CredentialStore
 import com.restartfu.xd.credentials.SshConnection
 import com.restartfu.xd.credentials.SshHostKey
@@ -344,7 +347,12 @@ internal class ConnectionActor(
         }
         val response = CompletableDeferred<SequencedReply>()
         val call = try {
-            calls.enqueue(Ops.tree(), response)
+            val paired = connection.authentication as? SshAuthentication.Paired
+            val request = if (paired != null) buildJsonObject {
+                if (paired.token != null) { put("op", "hello"); put("token", paired.token) }
+                else { put("op", "pair"); put("code", paired.code); put("name", connection.username) }
+            } else Ops.tree()
+            calls.enqueue(request, response)
         } catch (error: Throwable) {
             handleClosed(
                 Message.SocketClosed(
@@ -362,8 +370,8 @@ internal class ConnectionActor(
         val probeGeneration = generation
         scope.launch {
             try {
-                response.await().value.requireSuccess()
-                mailbox.send(Message.ReadinessSucceeded(probeGeneration))
+                val reply = response.await().value.requireSuccess()
+                mailbox.send(Message.ReadinessSucceeded(probeGeneration, (reply["token"] as? JsonPrimitive)?.contentOrNull))
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 mailbox.send(Message.ReadinessFailed(probeGeneration, error))
@@ -374,8 +382,13 @@ internal class ConnectionActor(
     private suspend fun handleReadinessSucceeded(message: Message.ReadinessSucceeded) {
         if (message.generation != generation || socket == null) return
         val attempt = connectionAttempt
-        val connection = attempt?.connection ?: credentials?.connection
-            ?: return protocolFatal("Ready without SSH credentials")
+        val original = attempt?.connection ?: credentials?.connection
+            ?: return protocolFatal("Ready without host credentials")
+        val paired = original.authentication as? SshAuthentication.Paired
+        val connection = if (paired != null) {
+            val token = paired.token ?: message.token ?: return protocolFatal("Host did not return device credentials")
+            original.copy(authentication = paired.copy(code = null, token = token))
+        } else original
         if (attempt != null) {
             val saved = StoredCredentials(connection)
             try {
@@ -403,7 +416,9 @@ internal class ConnectionActor(
 
     private fun handleReadinessFailed(message: Message.ReadinessFailed) {
         if (message.generation != generation || socket == null) return
-        protocolFatal("Host did not complete xd-host protocol setup", message.error)
+        if ((connectionAttempt?.connection ?: credentials?.connection)?.authentication is SshAuthentication.Paired) {
+            handleClosed(Message.SocketClosed(generation, SocketFailure(SocketFailureKind.AUTHENTICATION, message.error.message ?: "Pairing or device authentication was refused")))
+        } else protocolFatal("Host did not complete xd-host protocol setup", message.error)
     }
 
     private suspend fun handleBytes(message: Message.SocketBytes) {
@@ -643,6 +658,7 @@ internal class ConnectionActor(
 
         data class ReadinessSucceeded(
             val generation: Long,
+            val token: String? = null,
         ) : Message
 
         data class ReadinessFailed(
@@ -678,6 +694,10 @@ private fun validateConnection(connection: SshConnection) {
     require(connection.port in 1..65535) { "Port must be between 1 and 65535" }
     require(connection.username.isNotBlank()) { "Username must not be blank" }
     when (val authentication = connection.authentication) {
+        is SshAuthentication.Paired -> {
+            require(authentication.fingerprint.length == 64 && authentication.fingerprint.all { it in "0123456789abcdefABCDEF" }) { "Invalid host certificate fingerprint" }
+            require(!authentication.code.isNullOrBlank() || !authentication.token.isNullOrBlank()) { "Pairing code or device token required" }
+        }
         is com.restartfu.xd.credentials.SshAuthentication.Password ->
             require(authentication.value.isNotEmpty()) { "Password must not be empty" }
         is com.restartfu.xd.credentials.SshAuthentication.PrivateKey ->
@@ -691,4 +711,4 @@ private fun validateConnection(connection: SshConnection) {
 }
 
 private fun remoteName(connection: SshConnection): String =
-    "${connection.username}@${connection.host}"
+    if (connection.authentication is SshAuthentication.Paired) "${connection.host}:${connection.port}" else "${connection.username}@${connection.host}"

@@ -1,61 +1,37 @@
 # Mobile development
 
-The Android client under `mobile/` is a remote view onto an xd host. It now uses
-the same architecture as remote desktop mode:
+The Android client under `mobile/` is a remote view onto an xd daemon:
 
 ```text
-Android ── SSH exec stdin/stdout ── xd-host stdio
+Android ── pinned TLS + device token ── xd daemon
 ```
 
-There is no mobile daemon, pairing code, bearer token, TLS listener, local IPC,
-on-device agent, Git process, SQLite database, or offline chat cache.
+## Connection and credentials
 
-## Connection and security
+Open **Settings → Pair a device** on the host, choose its reachable LAN or
+Tailscale address, and paste the full invitation into Android's pairing screen.
+The invitation pins the exact host certificate before authentication. A one-use,
+five-minute code exchanges for a remembered device token. Revocation or a
+certificate change stops reconnect attempts and requires fresh pairing.
 
-The setup screen accepts:
-
-- hostname or Tailscale IP;
-- SSH port, default `22`;
-- SSH username;
-- either an SSH password or an imported private key with an optional passphrase.
-
-The first connection stops before SSH authentication and displays the presented
-SSH host-key algorithm and SHA-256 fingerprint. The user must compare it with a
-trusted source and explicitly confirm it. Android then reconnects and pins the
-exact host-key bytes and algorithm. A changed host key is fatal until the saved
-connection is forgotten.
-
-Password or private-key material, connection details, and the pinned host key are
-stored as one AES-256-GCM record backed by Android Keystore. The app never offers
-a trust-anyway path after a key mismatch.
-
-The remote command is:
-
-```sh
-exec "$HOME/.local/share/xd/runtime/v1/xd-host" stdio \
-  --data "$HOME/.local/share/xd"
-```
-
-The matching stable xd host must already be installed on the remote machine.
-Connecting once with the desktop deploys the current host automatically. Mobile
-does not upload native host binaries because the phone cannot determine or ship
-every remote OS and architecture safely.
-
-JSch supplies the Android SSH client. Bouncy Castle is bundled for modern EdDSA
-and XDH algorithms on Android versions whose platform providers do not expose
-them.
+Android stores the endpoint, certificate pin, and token as one AES-256-GCM
+credential record protected by Android Keystore. Existing SSH records are not
+used by the new transport: pair again after upgrading.
 
 ## Runtime behavior
 
-The shared Kotlin Multiplatform module owns JSON Lines framing, request matching,
-reconnect policy, tree/chat stores, terminal events, and transcript state. The
-Android source set supplies SSH and encrypted credential storage.
+The shared Kotlin module owns JSON Lines framing, request matching, reconnect
+policy, tree/chat stores, terminal events, and transcript state. Android supplies
+pinned TLS transport and encrypted credential storage. New supported sessions
+open native chat with model/settings controls, activity, questions, approvals,
+and diff/files/shell tabs. Existing terminal sessions and Copilot keep their
+CLI view.
 
-The app keeps no foreground service. Leaving it closes SSH. Returning reconnects
-and takes fresh snapshots because the host has no resumable event log.
+Leaving the app closes its connection; returning reconnects and takes fresh
+snapshots. Work and pending approvals continue in the host daemon. There is no
+on-device agent, database, offline chat cache, or background mobile service.
 
-The mobile client remains remote-only by design. Do not add local transport,
-on-device agents, an offline database, or a cache without revisiting this model.
+See [paired connections](remote.md) for host setup and device management.
 
 ## Build requirements
 
@@ -95,8 +71,7 @@ IDs and matching remote data channels.
 APKs published before protected signing used the public debug certificate. They
 cannot safely update in place to a private trust root, so the protected build
 uses a new package ID and installs beside the legacy app. Remove the legacy app
-after reconnecting the protected build; Android does not migrate its saved SSH
-credentials automatically.
+after reconnecting the protected build; Android does not migrate the old app's credentials automatically.
 
 ## iOS targets
 
@@ -105,6 +80,5 @@ state code cannot drift into Android-only APIs. Linux Docker builds configure bu
 cannot compile Apple targets. The macOS job in `.github/workflows/mobile.yml` is
 the build authority for them.
 
-The current SSH transport is Android-only. An iOS application will need native
-SSH transport and Keychain-backed credentials while preserving the same strict
-host-key confirmation contract.
+The current TLS transport is Android-only. An iOS application will need native
+pinned TLS transport and Keychain-backed device credentials.

@@ -14,6 +14,14 @@ use crate::tool_diff;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
     Session(String),
+    Rpc(Value),
+    Ready,
+    Interaction {
+        id: Value,
+        method: String,
+        params: Value,
+    },
+    InteractionResolved(Value),
     Commands(Vec<String>),
     Text(String),
     TextDelta(String),
@@ -84,6 +92,7 @@ pub struct AgentCommand<'a> {
 }
 
 pub enum AgentParser {
+    AppServer(crate::codex_app::CodexAppParser),
     Codex(CodexParser),
     Claude(ClaudeParser),
     Jcode(JcodeParser),
@@ -101,6 +110,7 @@ impl AgentParser {
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match self {
+            Self::AppServer(parser) => parser.feed(line),
             Self::Codex(parser) => parser.feed(line),
             Self::Claude(parser) => parser.feed(line),
             Self::Jcode(parser) => parser.feed(line),
@@ -207,6 +217,20 @@ impl CodexParser {
 }
 
 impl AgentCommand<'_> {
+    pub(crate) fn build_app_server(&self) -> Command {
+        let mut command = Command::new(resolve_codex());
+        command.args(["app-server", "--listen", "stdio://"]);
+        if self.fast {
+            command.args(["-c", "service_tier=\"priority\""]);
+        }
+        command
+            .current_dir(self.workdir)
+            .envs(self.environment.iter().map(|(name, value)| (name, value)));
+        #[cfg(unix)]
+        command.process_group(0);
+        command
+    }
+
     pub fn build(&self) -> Command {
         let mut command = match self.backend {
             "claude" => self.build_claude(),

@@ -17,3 +17,6 @@
 
 # Syncthing conflict copies
 *.sync-conflict-*
+
+/desktop/target-docker/
+/transport-core/target/
