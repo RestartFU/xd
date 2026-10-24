@@ -1,0 +1,65 @@
+<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;500;600;700;800&family=Overpass+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{--board:#0c1a2b;--panel:#12243a;--row:#162b44;--line:#23405f;--text:#f2f4f7;--muted:#a9b8ca;--faint:#7186a0;--yel:#ffd23f;--red:#ef5a4f;--grn:#5cc38a}
+*{box-sizing:border-box;margin:0}
+body{width:1440px;height:900px;overflow:hidden;background:var(--board);color:var(--text);font:400 13px/1.45 Overpass,sans-serif}
+.mono{font-family:"Overpass Mono",monospace;font-size:12px}
+.top{height:40px;display:flex;align-items:center;gap:12px;padding:0 14px;background:#08131f;border-bottom:1px solid var(--line)}
+.mark{background:var(--text);color:var(--board);font:800 12px/20px Overpass;padding:0 6px;border-radius:3px}
+.top .r{margin-left:auto;color:var(--muted);font-size:12px;display:flex;gap:16px;align-items:center}
+.app{display:flex;height:860px}
+.side{width:248px;background:#0a1624;border-right:1px solid var(--line);padding:12px 0}
+.h{font:700 11px Overpass;letter-spacing:.12em;color:var(--faint);padding:6px 16px}
+.plat{display:flex;align-items:center;gap:10px;height:40px;padding:0 14px}
+.num{width:26px;height:26px;border-radius:4px;background:var(--panel);font:800 13px/26px Overpass;text-align:center}
+.plat.on{background:var(--row)}.plat.on .num{background:var(--text);color:var(--board)}
+.plat .c{margin-left:auto;color:var(--faint);font-size:12px}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.board{background:#08131f;border-bottom:1px solid var(--line);padding:10px 18px 12px}
+.bh{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+.bh b{font:800 18px Overpass}.bh span{color:var(--muted)}
+table{width:100%;border-collapse:collapse}
+th{font:700 10.5px Overpass;letter-spacing:.12em;color:var(--faint);text-align:left;padding:4px 8px;border-bottom:1px solid var(--line)}
+td{padding:0 8px;height:30px;border-bottom:1px solid #132a42}
+tr.on td{background:var(--row)}
+.st{font:700 12px Overpass;letter-spacing:.04em}
+.chat{flex:1;display:flex;flex-direction:column;padding:18px 24px 16px;max-width:860px}
+.you{background:var(--panel);border-radius:6px;padding:10px 14px;margin-bottom:14px}
+.p{margin-bottom:10px;max-width:66ch}
+.act div{height:22px;color:var(--muted)}.act b{color:var(--text);font-weight:600}
+.ask{border:2px solid var(--yel);border-radius:6px;padding:10px 14px;margin-top:8px}
+.btn{display:inline-flex;height:30px;align-items:center;padding:0 12px;border-radius:5px;font-weight:600;font-size:12.5px;margin-right:6px}
+.btn.p{background:var(--yel);color:#1b1500}.btn.g{border:1px solid var(--line)}
+.comp{margin-top:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:12px 14px;height:92px;color:var(--faint)}
+.pane{width:420px;border-left:1px solid var(--line);background:#0a1624}
+.pt{display:flex;gap:18px;height:40px;align-items:flex-end;padding:0 16px;border-bottom:1px solid var(--line);color:var(--muted)}
+.pt span{padding-bottom:10px}.pt .on{color:var(--text);box-shadow:inset 0 -3px 0 var(--yel)}
+.f{display:flex;height:30px;align-items:center;padding:0 16px}
+</style></head><body>
+<div class="top"><span class="mark">xd</span><span style="color:var(--muted)">xd / Fix idle status on multi-tab</span><div class="r"><span><span style="color:var(--grn)">●</span> Local</span><span>–</span><span>□</span><span>×</span></div></div>
+<div class="app">
+<aside class="side"><div class="h">PROJECTS</div>
+<div class="plat"><span class="num">1</span>Lunar<span class="c">10</span></div>
+<div class="plat on"><span class="num">2</span>xd<span class="c">4</span></div>
+<div class="plat"><span class="num">3</span>decryptmypack<span class="c">1</span></div>
+<div class="plat"><span class="num">4</span>VPS<span class="c">1</span></div>
+<div class="plat"><span class="num">5</span>PotLounge<span class="c">1</span></div></aside>
+<main class="main">
+<div class="board"><div class="bh"><b>xd</b><span>4 sessions · master</span></div>
+<table><tr><th style="width:70px">STARTED</th><th>SESSION</th><th style="width:130px">AGENT</th><th style="width:150px">BRANCH</th><th style="width:150px">STATUS</th></tr>
+<tr class="on"><td class="mono">14:02</td><td>Fix idle status on multi-tab</td><td>Claude Code</td><td class="mono">xd/fix-idle</td><td class="st" style="color:var(--grn)">RUNNING</td></tr>
+<tr><td class="mono">13:47</td><td>Pairing code expiry</td><td>Codex</td><td class="mono">xd/pairing</td><td class="st" style="color:var(--yel)">WAITING ON YOU</td></tr>
+<tr><td class="mono">13:10</td><td>Windows WSL host deploy</td><td>JCode</td><td class="mono">master</td><td class="st" style="color:var(--muted)">QUEUED 2</td></tr>
+<tr><td class="mono">11:58</td><td>Release v0.1.21</td><td>Codex</td><td class="mono">release</td><td class="st" style="color:var(--red)">FAILED</td></tr></table></div>
+<div class="chat">
+<div class="you">The session card says Idle while a Claude tab is still working. Find why and fix it.</div>
+<div class="p">The card's state comes from the first tab only, so a busy second tab never reaches it. I'll aggregate activity across every terminal tab.</div>
+<div class="act mono"><div>✓ <b>read</b> desktop/src/model.rs</div><div>✓ <b>edit</b> session_activity() aggregates all tabs</div><div>✓ <b>bash</b> cargo test session_activity · 14 passed</div></div>
+<div class="ask"><div style="font-weight:700;margin-bottom:8px">Allow Claude Code to run git push?</div><span class="btn p">Allow once</span><span class="btn g">This session</span><span class="btn g">Deny</span></div>
+<div class="comp">Message Claude Code…</div></div></main>
+<aside class="pane"><div class="pt"><span class="on">Changes 3</span><span>Files</span><span>Terminal</span><span>Browser</span></div>
+<div class="f mono">desktop/src/model.rs<span style="margin-left:auto;color:var(--grn)">+42 </span><span style="color:var(--red)">&nbsp;−9</span></div>
+<div class="f mono">desktop/src/main.rs<span style="margin-left:auto;color:var(--grn)">+6 </span><span style="color:var(--red)">&nbsp;−2</span></div>
+<div class="f mono">desktop/tests/activity.rs<span style="margin-left:auto;color:var(--grn)">+31</span></div></aside>
+</div></body></html>

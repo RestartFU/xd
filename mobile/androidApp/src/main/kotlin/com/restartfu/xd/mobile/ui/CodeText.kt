@@ -13,10 +13,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
@@ -48,7 +48,7 @@ internal fun CodeText(
     Text(
         text,
         modifier = modifier.horizontalScroll(rememberScrollState()),
-        fontFamily = FontFamily.Monospace,
+        fontFamily = XdMonoFamily,
         style = MaterialTheme.typography.bodySmall,
         softWrap = false,
     )
@@ -101,11 +101,12 @@ internal fun DiffText(
         }
     }
 
+    val signals = LocalXdSignals.current
     Column(modifier.horizontalScroll(rememberScrollState())) {
         rendered.forEach { (line, annotated) ->
             val background = when (line.kind) {
-                DiffKind.ADDED -> Color(0xFF183522)
-                DiffKind.REMOVED -> Color(0xFF3A1D1B)
+                DiffKind.ADDED -> signals.diffAdded
+                DiffKind.REMOVED -> signals.diffRemoved
                 else -> Color.Transparent
             }
             Text(
@@ -118,7 +119,7 @@ internal fun DiffText(
                     DiffKind.META, DiffKind.HUNK -> MaterialTheme.colorScheme.outline
                     else -> Color.Unspecified
                 },
-                fontFamily = FontFamily.Monospace,
+                fontFamily = XdMonoFamily,
                 style = MaterialTheme.typography.bodySmall,
                 softWrap = false,
             )
@@ -160,8 +161,16 @@ private fun AnnotatedString.Builder.appendHighlighted(
         append(line)
         return
     }
+    // The shared token palette is tuned for dark grounds. Dark ink means a
+    // light theme, where the same hues are darkened to keep their contrast.
+    val onLight = fallback.luminance() < 0.5f
     Syntax.scanLine(language, line, state).forEach { piece ->
-        val colour = tokenColour(piece.token.colour) ?: fallback
+        val token = tokenColour(piece.token.colour)
+        val colour = when {
+            token == null -> fallback
+            onLight -> Color(token.red * 0.5f, token.green * 0.5f, token.blue * 0.5f)
+            else -> token
+        }
         withStyle(SpanStyle(color = colour)) { append(piece.text) }
     }
 }

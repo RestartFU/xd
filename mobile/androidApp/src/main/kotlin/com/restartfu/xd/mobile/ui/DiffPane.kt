@@ -22,7 +22,6 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -116,13 +115,13 @@ private fun DiffFileSection(
         Text(
             file.path,
             modifier = Modifier.weight(1f),
-            color = Color(0xFFFFBE6F),
+            color = MaterialTheme.colorScheme.onSurface,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        Text("+${file.additions}", color = Color(0xFF57E389))
-        Text("−${file.deletions}", color = Color(0xFFF66151))
+        Text("+${file.additions}", color = LocalXdSignals.current.working)
+        Text("−${file.deletions}", color = MaterialTheme.colorScheme.error)
     }
     if (!collapsed) DiffText(file.lines, Modifier.fillMaxWidth())
     HorizontalDivider()

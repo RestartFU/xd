@@ -14,7 +14,7 @@ use gpui::{
     fill, point, px, rgba,
 };
 
-const SELECTION: u32 = 0x6b8cff55;
+const SELECTION: u32 = 0x6f97d64d;
 
 /// The one selection in the window, keyed by the document that owns it.
 #[derive(Clone, Default)]

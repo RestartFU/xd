@@ -199,12 +199,17 @@ internal fun ChatScreen(
                             if (state.backend.isNotEmpty()) Spacer(Modifier.width(10.dp))
                             Text(
                                 state.title.ifEmpty { "Chat" },
+                                style = MaterialTheme.typography.titleMedium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
                     },
-                    navigationIcon = { TextButton(onClick = goBack) { Text("Back") } },
+                    navigationIcon = {
+                        IconButton(onClick = goBack) {
+                            Icon(painterResource(R.drawable.ic_back), contentDescription = "Back")
+                        }
+                    },
                     actions = {
                         if (pane == Pane.CHAT) {
                             TextButton(onClick = { choosingModel = true }) {
@@ -706,7 +711,7 @@ private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
                         live = item.live,
                     )
                     TranscriptKind.SYSTEM ->
-                        Text(part.text, fontFamily = FontFamily.Monospace)
+                        Text(part.text, fontFamily = XdMonoFamily)
                     else -> Text(part.text)
                 }
             }
@@ -873,7 +878,7 @@ private fun ToolRow(item: TranscriptItem) {
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    fontFamily = if (isPatch) FontFamily.Monospace else FontFamily.Default,
+                    fontFamily = if (isPatch) XdMonoFamily else FontFamily.Default,
                 )
             }
             if (expanded && detail != null) {
@@ -884,7 +889,7 @@ private fun ToolRow(item: TranscriptItem) {
                     Text(
                         detail,
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        fontFamily = FontFamily.Monospace,
+                        fontFamily = XdMonoFamily,
                         style = MaterialTheme.typography.bodySmall,
                         softWrap = false,
                     )

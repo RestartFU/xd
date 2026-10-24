@@ -33,7 +33,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -227,7 +226,7 @@ private fun TreeEntry(row: TreeRow, onClick: () -> Unit) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodySmall,
-            fontFamily = if (row.directory) null else FontFamily.Monospace,
+            fontFamily = if (row.directory) null else XdMonoFamily,
             color = if (row.directory) {
                 MaterialTheme.colorScheme.onSurface
             } else {
@@ -300,7 +299,7 @@ private fun FileEditor(
                     .weight(1f)
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp),
-                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = XdMonoFamily),
                 // Re-transforming an 800 KiB document on every selection or
                 // keystroke defeats the explicit large-file edit escape hatch.
                 visualTransformation = if (large) VisualTransformation.None else syntaxColours,
@@ -351,7 +350,7 @@ private fun LargeFileView(
                 Text(
                     highlighted?.getOrNull(index) ?: AnnotatedString(line),
                     modifier = Modifier.padding(horizontal = 8.dp),
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = XdMonoFamily,
                     style = MaterialTheme.typography.bodySmall,
                     softWrap = false,
                 )

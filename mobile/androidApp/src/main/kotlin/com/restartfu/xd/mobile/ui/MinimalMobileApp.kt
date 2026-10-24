@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.restartfu.xd.mobile.ui
 
 import androidx.compose.foundation.background
@@ -30,6 +32,17 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.ui.unit.Dp
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -51,7 +64,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -182,6 +194,9 @@ internal fun MinimalMobileApp(
         if (remaining.isEmpty()) mobileDestination = MobileDestination.PROJECTS
     }
 
+    val imeVisible = WindowInsets.isImeVisible
+    Column(Modifier.fillMaxSize()) {
+    Box(Modifier.weight(1f)) {
     when {
         mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
             model = model,
@@ -198,7 +213,7 @@ internal fun MinimalMobileApp(
                     DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
                     val chat: ChatViewModel = viewModel(key = "chat-${active.chatId}", viewModelStoreOwner = owner, factory = ChatViewModel.Factory(model.client, active.chatId))
                     ChatScreen(model = chat, settings = settings, goBack = showProjects,
-                        productHeader = { ProductHeader(link = link, active = MobileDestination.SESSIONS, onProjects = showProjects, onSessions = {}, onTerminal = showTerminal, onAdd = {}, onSettings = {}, showAdd = false) },
+                        productHeader = {},
                         sessionTabs = { SessionTabStrip(tabs = tabs, selectedChatId = active.chatId, selectTab = { activeChatId = it }, closeTab = closeTab, addTab = { createTabFor = active.projectId to active.projectName }) },
                     )
                 } else {
@@ -240,8 +255,19 @@ internal fun MinimalMobileApp(
                 tabs = tabs.filterNot { it.chatId == destination.chatId } + destination
                 activeChatId = destination.chatId
                 mobileDestination = MobileDestination.SESSIONS
+                model.client.markSeen(session.id)
             },
         )
+    }
+    }
+    if (!imeVisible) {
+        XdNavigationBar(
+            active = mobileDestination,
+            onProjects = showProjects,
+            onSessions = showSessions,
+            onTerminal = showTerminal,
+        )
+    }
     }
 
     createTabFor?.let { (projectId, projectName) ->
@@ -277,6 +303,16 @@ private fun MinimalProjectsHome(
 
     val selected = projects.firstOrNull { it.id == selectedId } ?: projects.firstOrNull()
     val sessions = selected?.let { tree.minimalSessions(it.id) }.orEmpty()
+    val waiting by model.client.waitingChats.collectAsStateWithLifecycle()
+    val unread by model.client.unreadChats.collectAsStateWithLifecycle()
+    val signalOf = { session: MinimalSession ->
+        when {
+            session.id in waiting -> SessionSignal.WAITING
+            session.working -> SessionSignal.WORKING
+            session.id in unread -> SessionSignal.DONE
+            else -> SessionSignal.IDLE
+        }
+    }
 
     LaunchedEffect(selected?.id) {
         if (selectedId != selected?.id) selectedId = selected?.id
@@ -288,19 +324,14 @@ private fun MinimalProjectsHome(
             .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding(),
     ) {
-        ProductHeader(
-            link = link,
-            active = MobileDestination.PROJECTS,
-            onProjects = {},
-            onSessions = {
-                val session = sessions.firstOrNull()
-                if (selected != null && session != null) open(selected, session) else onSessions()
-            },
-            onTerminal = onTerminal,
-            onAdd = { createProject = true },
-            onSettings = { settingsOpen = true },
-        )
-        ContextBar(title = "Projects")
+        ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true })
+        ContextBar(title = "${projects.size} project${if (projects.size == 1) "" else "s"}") {
+            TextButton(onClick = { createProject = true }) {
+                Icon(painterResource(R.drawable.ic_add), contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("New project")
+            }
+        }
 
         when {
             loading && projects.isEmpty() -> Box(
@@ -308,70 +339,56 @@ private fun MinimalProjectsHome(
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator() }
 
-            else -> LazyColumn(
+            else -> Box(Modifier.fillMaxSize()) { LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(16.dp, 18.dp, 16.dp, 28.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(12.dp, 14.dp, 12.dp, 96.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 (treeError ?: operationError)?.let { error ->
                     item("error") {
-                        Text(error, color = MaterialTheme.colorScheme.error)
+                        Text(
+                            error,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
+                            color = MaterialTheme.colorScheme.error,
+                        )
                     }
                 }
-                item("projects-label") { SectionLabel("PROJECTS") }
                 if (projects.isEmpty()) {
                     item("empty-projects") {
                         EmptyCard("Create a workspace, then start a Codex, Claude, JCode, or Copilot session.")
                     }
                 } else {
                     items(projects, key = MinimalProject::id) { project ->
-                        ProjectRow(
-                            project = project,
-                            selected = project.id == selected?.id,
-                            onClick = { selectedId = project.id },
-                        )
-                    }
-                }
-
-                selected?.let { project ->
-                    item("project-heading") {
-                        Spacer(Modifier.height(14.dp))
-                        SectionLabel("PROJECT")
-                        Text(
-                            project.name,
-                            modifier = Modifier.padding(top = 3.dp),
-                            color = MaterialTheme.colorScheme.onBackground,
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 22.dp, bottom = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                "Sessions",
-                                modifier = Modifier.weight(1f),
-                                fontWeight = FontWeight.SemiBold,
+                        if (project.id == selected?.id) {
+                            OpenDrawer(
+                                project = project,
+                                sessions = sessions,
+                                signalOf = signalOf,
+                                open = { session -> open(project, session) },
                             )
-                            Button(onClick = { createSession = true }) {
-                                Text("＋  New session")
-                            }
-                        }
-                    }
-                    if (sessions.isEmpty()) {
-                        item("empty-sessions") {
-                            EmptyCard("No sessions yet. Start one with Codex, Claude, JCode, or Copilot.")
-                        }
-                    } else {
-                        items(sessions, key = MinimalSession::id) { session ->
-                            SessionRow(session = session, onClick = { open(project, session) })
+                        } else {
+                            DrawerRow(
+                                project = project,
+                                selected = false,
+                                signals = tree.minimalSessions(project.id).map(signalOf),
+                                onClick = { selectedId = project.id },
+                            )
                         }
                     }
                 }
+            }
+            if (selected != null) {
+                ExtendedFloatingActionButton(
+                    onClick = { createSession = true },
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(16.dp),
+                    icon = { Icon(painterResource(R.drawable.ic_add), contentDescription = null) },
+                    text = { Text("New session") },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
             }
         }
     }
@@ -450,16 +467,7 @@ private fun MinimalDirectSession(
             .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding(),
     ) {
-        ProductHeader(
-            link = link,
-            active = MobileDestination.SESSIONS,
-            onProjects = onProjects,
-            onSessions = {},
-            onTerminal = onTerminal,
-            onAdd = {},
-            onSettings = { settingsOpen = true },
-            showAdd = false,
-        )
+        ProductHeader(link = link, title = destination.projectName, onSettings = { settingsOpen = true })
         SessionTabStrip(
             tabs = tabs,
             selectedChatId = destination.chatId,
@@ -554,16 +562,7 @@ private fun MinimalGlobalTerminal(
             .background(MaterialTheme.colorScheme.background)
             .navigationBarsPadding(),
     ) {
-        ProductHeader(
-            link = link,
-            active = MobileDestination.TERMINAL,
-            onProjects = onProjects,
-            onSessions = onSessions,
-            onTerminal = {},
-            onAdd = {},
-            onSettings = { settingsOpen = true },
-            showAdd = false,
-        )
+        ProductHeader(link = link, title = "Terminal", onSettings = { settingsOpen = true })
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -640,15 +639,20 @@ private fun SessionTabStrip(
                     fontSize = 12.sp,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 )
-                Text(
-                    "×",
+                Box(
                     modifier = Modifier
+                        .size(40.dp)
                         .clip(CircleShape)
-                        .clickable { closeTab(tab.chatId) }
-                        .padding(horizontal = 7.dp, vertical = 5.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 16.sp,
-                )
+                        .clickable { closeTab(tab.chatId) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        painterResource(R.drawable.ic_close),
+                        contentDescription = "Close ${tab.title}",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
         }
         Box(
@@ -657,7 +661,11 @@ private fun SessionTabStrip(
                 .clickable(onClick = addTab),
             contentAlignment = Alignment.Center,
         ) {
-            Text("+", fontSize = 22.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(
+                painterResource(R.drawable.ic_add),
+                contentDescription = "New tab",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -666,84 +674,51 @@ private fun SessionTabStrip(
 @Composable
 private fun ProductHeader(
     link: Link,
-    active: MobileDestination,
-    onProjects: () -> Unit,
-    onSessions: () -> Unit,
-    onTerminal: () -> Unit,
-    onAdd: () -> Unit,
+    title: String,
     onSettings: () -> Unit,
-    showAdd: Boolean = true,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
             .statusBarsPadding()
-            .height(62.dp)
-            .padding(horizontal = 14.dp),
+            .height(56.dp)
+            .padding(start = 16.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Box(
             modifier = Modifier
-                .size(22.dp)
-                .clip(RoundedCornerShape(7.dp))
+                .size(24.dp)
+                .clip(RoundedCornerShape(6.dp))
                 .background(MaterialTheme.colorScheme.primary),
             contentAlignment = Alignment.Center,
         ) {
-            Text("x", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Black)
+            Text("x", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
         }
-        Text("xd", fontSize = 19.sp, fontWeight = FontWeight.Bold)
-        Row(
-            modifier = Modifier
-                .weight(1f)
-                .horizontalScroll(rememberScrollState()),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            NavPill(
-                "Projects",
-                active = active == MobileDestination.PROJECTS,
-                onClick = onProjects,
-            )
-            NavPill(
-                "Sessions",
-                active = active == MobileDestination.SESSIONS,
-                onClick = onSessions,
-            )
-            NavPill(
-                "Terminal",
-                active = active == MobileDestination.TERMINAL,
-                onClick = onTerminal,
-            )
-            if (showAdd) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary)
-                        .clickable(onClick = onAdd),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("+", color = MaterialTheme.colorScheme.onPrimary, fontSize = 22.sp)
-                }
-            }
-        }
+        Text(
+            title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        val up = link is Link.Up
         Box(
-            modifier = Modifier
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.background)
-                .padding(horizontal = 9.dp, vertical = 7.dp),
+            modifier = Modifier.size(48.dp),
             contentAlignment = Alignment.Center,
         ) {
             Box(
                 Modifier
-                    .size(8.dp)
+                    .size(9.dp)
                     .clip(CircleShape)
-                    .background(if (link is Link.Up) Color(0xFF36C75C) else Color(0xFFB74C58)),
+                    .background(
+                        if (up) LocalXdSignals.current.working
+                        else MaterialTheme.colorScheme.error,
+                    ),
             )
         }
-        IconButton(onClick = onSettings, modifier = Modifier.size(36.dp)) {
+        IconButton(onClick = onSettings, modifier = Modifier.size(48.dp)) {
             Icon(
                 painter = painterResource(R.drawable.ic_settings),
                 contentDescription = "Settings",
@@ -754,126 +729,272 @@ private fun ProductHeader(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
+/** Material navigation between the three top-level places. */
 @Composable
-private fun NavPill(label: String, active: Boolean, onClick: () -> Unit) {
-    Text(
-        label,
-        modifier = Modifier
-            .clip(CircleShape)
-            .background(
-                if (active) MaterialTheme.colorScheme.surfaceContainerHigh
-                else Color.Transparent,
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 11.dp, vertical = 9.dp),
-        color = if (active) MaterialTheme.colorScheme.onSurface
-        else MaterialTheme.colorScheme.onSurfaceVariant,
-        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Medium,
-        fontSize = 13.sp,
+private fun XdNavigationBar(
+    active: MobileDestination,
+    onProjects: () -> Unit,
+    onSessions: () -> Unit,
+    onTerminal: () -> Unit,
+) {
+    NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+        NavItem("Projects", R.drawable.ic_projects, active = active == MobileDestination.PROJECTS, onClick = onProjects)
+        NavItem("Sessions", R.drawable.ic_sessions, active = active == MobileDestination.SESSIONS, onClick = onSessions)
+        NavItem("Terminal", R.drawable.ic_terminal, active = active == MobileDestination.TERMINAL, onClick = onTerminal)
+    }
+}
+
+@Composable
+private fun RowScope.NavItem(label: String, icon: Int, active: Boolean, onClick: () -> Unit) {
+    NavigationBarItem(
+        selected = active,
+        onClick = onClick,
+        icon = { Icon(painterResource(icon), contentDescription = null) },
+        label = { Text(label) },
+        colors = NavigationBarItemDefaults.colors(
+            indicatorColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
     )
 }
 
 @Composable
-private fun ContextBar(title: String) {
+private fun ContextBar(title: String, action: (@Composable () -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(50.dp)
+            .height(52.dp)
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(horizontal = 16.dp),
+            .padding(start = 16.dp, end = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, fontWeight = FontWeight.SemiBold)
+        Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+        action?.invoke()
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
-@Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = 0.8.sp,
-    )
+/** What a session's signal tab says about its agent, as on the desktop. */
+private enum class SessionSignal(val label: String) {
+    IDLE("Idle"),
+    WORKING("Working"),
+    WAITING("Waiting on you"),
+    DONE("Done"),
 }
 
 @Composable
-private fun ProjectRow(project: MinimalProject, selected: Boolean, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(13.dp))
-            .background(
-                if (selected) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.surface,
-            )
-            .border(
-                1.dp,
-                if (selected) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.outlineVariant,
-                RoundedCornerShape(13.dp),
-            )
-            .clickable(onClick = onClick)
-            .padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("▰", color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-        Column(Modifier.weight(1f)) {
-            Text(project.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(
-                "${project.sessions} session${if (project.sessions == 1) "" else "s"}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
-        if (project.working > 0) WorkingDots()
+private fun SessionSignal.color(): Color {
+    val signals = LocalXdSignals.current
+    return when (this) {
+        SessionSignal.IDLE -> signals.faint
+        SessionSignal.WORKING -> signals.working
+        SessionSignal.WAITING -> signals.waiting
+        SessionSignal.DONE -> signals.done
     }
 }
 
+/**
+ * A tab in the state's own shape as well as colour: working is solid, waiting
+ * is a taller solid flag, done is hollow.
+ */
 @Composable
-private fun SessionRow(session: MinimalSession, onClick: () -> Unit) {
+private fun SignalTab(signal: SessionSignal, width: Dp, height: Dp, modifier: Modifier = Modifier) {
+    if (signal == SessionSignal.IDLE) return
+    val color = signal.color()
+    val shape = RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp)
+    Box(
+        modifier
+            .size(width = width, height = if (signal == SessionSignal.WAITING) height * 1.4f else height)
+            .clip(shape)
+            .then(
+                if (signal == SessionSignal.DONE) Modifier.border(1.5.dp, color, shape)
+                else Modifier.background(color),
+            ),
+    )
+}
+
+/** A closed drawer: one line, with a tab for each session that is not idle. */
+@Composable
+private fun DrawerRow(
+    project: MinimalProject,
+    selected: Boolean,
+    signals: List<SessionSignal>,
+    onClick: () -> Unit,
+) {
+    val faint = LocalXdSignals.current.faint
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(15.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(6.dp))
             .clickable(onClick = onClick)
-            .padding(15.dp),
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(13.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Box(
-            Modifier
-                .size(40.dp)
-                .clip(RoundedCornerShape(11.dp))
-                .background(MaterialTheme.colorScheme.background),
-            contentAlignment = Alignment.Center,
-        ) {
-            BackendIcon(session.agent.wire, size = 22.dp)
+        Icon(
+            painterResource(if (selected) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = faint,
+            modifier = Modifier.size(16.dp),
+        )
+        if (selected) {
+            Text(
+                project.name,
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .border(1.5.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(3.dp))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        } else {
+            Text(
+                project.name,
+                modifier = Modifier.weight(1f, fill = false),
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        Column(Modifier.weight(1f)) {
-            Text(session.title, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            project.sessions.toString(),
+            fontFamily = XdMonoFamily,
+            fontSize = 12.sp,
+            color = faint,
+        )
+        Spacer(Modifier.weight(1f))
+        if (!selected) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                signals.filter { it != SessionSignal.IDLE }.take(6).forEach { signal ->
+                    SignalTab(signal, width = 10.dp, height = 5.dp)
+                }
+            }
+        }
+    }
+}
+
+/** The current project's drawer, lifted out with its session cards. */
+@Composable
+private fun OpenDrawer(
+    project: MinimalProject,
+    sessions: List<MinimalSession>,
+    signalOf: (MinimalSession) -> SessionSignal,
+    open: (MinimalSession) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.background)
+            .padding(6.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {})
+        if (sessions.isEmpty()) {
+            Text(
+                "No sessions yet. Start one with Codex, Claude, JCode, or Copilot.",
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        sessions.forEach { session ->
+            SessionRow(session = session, signal = signalOf(session), onClick = { open(session) })
+        }
+    }
+}
+
+/**
+ * A session's index card: title over the red ruled line, then branch and
+ * state. The tab clipped to the top edge says what its agent is doing.
+ */
+@Composable
+private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: () -> Unit) {
+    val signals = LocalXdSignals.current
+    Box(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(7.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainer)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 14.dp, vertical = 11.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                BackendIcon(session.agent.wire, size = 17.dp)
                 Text(
-                    session.branch,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
+                    session.title,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 18.dp),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            Box(
+                Modifier
+                    .padding(vertical = 9.dp)
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(signals.rule),
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 Text(
-                    "  ·  ${if (session.working) "Working" else "Idle"}",
-                    color = if (session.working) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
+                    session.branch,
+                    modifier = Modifier.weight(1f, fill = false),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    // Branch names are code; the placeholder for none is prose.
+                    fontFamily = if (session.branch == "Project directory") null else XdMonoFamily,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
+                Text("·", color = signals.faint, fontSize = 12.sp)
+                if (signal == SessionSignal.WAITING) {
+                    Text(
+                        signal.label.uppercase(),
+                        modifier = Modifier
+                            .border(1.dp, signal.color(), RoundedCornerShape(2.dp))
+                            .padding(horizontal = 5.dp, vertical = 1.dp),
+                        color = signal.color(),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.6.sp,
+                    )
+                } else {
+                    Text(
+                        signal.label,
+                        color = signal.color(),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                }
+                if (signal == SessionSignal.WORKING) WorkingDots()
             }
         }
-        if (session.working) WorkingDots() else Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 22.sp)
+        SignalTab(
+            signal,
+            width = 18.dp,
+            height = 10.dp,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(end = 16.dp)
+                .offset(y = (-4).dp),
+        )
     }
 }
 
@@ -889,13 +1010,13 @@ private fun AgentPill(agent: DirectAgent) {
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         BackendIcon(agent.wire, size = 15.dp)
-        Text(agent.wire, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+        Text(agent.wire, fontFamily = XdMonoFamily, fontSize = 11.sp)
     }
 }
 
 @Composable
 private fun WorkingDots() {
-    Dots(MaterialTheme.colorScheme.primary, contentDescription = "Working")
+    Dots(LocalXdSignals.current.working, contentDescription = "Working")
 }
 
 private class NativeChatOwner : ViewModelStoreOwner {
@@ -908,8 +1029,8 @@ private fun EmptyCard(text: String) {
         text,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(15.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(15.dp))
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
             .padding(20.dp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1006,30 +1127,38 @@ private fun MinimalSettingsDialog(
         title = { Text("Settings") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                Text("Theme", fontWeight = FontWeight.SemiBold)
-                MinimalThemePreset.entries.forEach { preset ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                if (theme == preset) MaterialTheme.colorScheme.surfaceContainerHigh
-                                else Color.Transparent,
+                Text("Appearance", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MinimalThemePreset.entries.forEach { preset ->
+                        val chosen = theme == preset
+                        Row(
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .border(
+                                    if (chosen) 1.5.dp else 1.dp,
+                                    if (chosen) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.outlineVariant,
+                                    RoundedCornerShape(8.dp),
+                                )
+                                .clickable { settings.setTheme(preset) }
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(width = 22.dp, height = 16.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(preset.preview)
+                                    .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(3.dp)),
                             )
-                            .clickable { settings.setTheme(preset) }
-                            .padding(9.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Box(
-                            Modifier
-                                .size(24.dp)
-                                .clip(CircleShape)
-                                .background(preset.preview)
-                                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
-                        )
-                        Text(preset.label, modifier = Modifier.weight(1f))
-                        if (theme == preset) Text("✓", color = MaterialTheme.colorScheme.primary)
+                            Text(
+                                preset.label,
+                                fontWeight = if (chosen) FontWeight.SemiBold else FontWeight.Normal,
+                            )
+                        }
                     }
                 }
                 HorizontalDivider()

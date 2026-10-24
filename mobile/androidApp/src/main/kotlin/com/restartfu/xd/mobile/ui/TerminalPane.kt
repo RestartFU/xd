@@ -45,7 +45,6 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -167,7 +166,7 @@ internal fun TerminalPaneContent(
                             remember(row, caret, terminalForeground, terminalBackground) {
                                 row.render(caret, terminalForeground, terminalBackground)
                             },
-                            fontFamily = FontFamily.Monospace,
+                            fontFamily = XdMonoFamily,
                             style = MaterialTheme.typography.bodySmall,
                             color = terminalForeground,
                             softWrap = false,
@@ -241,7 +240,7 @@ internal fun TerminalPaneContent(
 private fun measureCell(): IntSize {
     val measurer = rememberTextMeasurer()
     val style = MaterialTheme.typography.bodySmall.copy(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = XdMonoFamily,
     )
     return remember(measurer, style, LocalDensity.current) {
         // A row of them, divided back down: one glyph on its own rounds its

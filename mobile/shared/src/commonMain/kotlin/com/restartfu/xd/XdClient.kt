@@ -25,7 +25,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.booleanOrNull
@@ -51,6 +53,48 @@ public class XdClient(
     public val hasCredentials: StateFlow<Boolean> = actor.hasCredentials
     public val credentialsReady: StateFlow<Boolean> = actor.credentialsReady
     public val tree: StateFlow<TreeSnapshot> = treeStore.state
+
+    private val pendingInteractions = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
+    private val _waitingChats = MutableStateFlow<Set<String>>(emptySet())
+    private val _unreadChats = MutableStateFlow<Set<String>>(emptySet())
+    private val terminalBusy = mutableSetOf<String>()
+
+    /** Chats with an approval or question waiting on the user, across every chat. */
+    public val waitingChats: StateFlow<Set<String>> = _waitingChats.asStateFlow()
+
+    /** Chats whose turn finished while they were not open. */
+    public val unreadChats: StateFlow<Set<String>> = _unreadChats.asStateFlow()
+
+    public fun markSeen(chatId: String) {
+        _unreadChats.update { it - chatId }
+    }
+
+    private fun trackSignals(eventName: String?, chatId: String, event: kotlinx.serialization.json.JsonObject) {
+        val requestId = (event["request_id"] as? JsonPrimitive)?.contentOrNull
+        when (eventName) {
+            "interaction" -> if (requestId != null) {
+                pendingInteractions.update { it + (chatId to (it[chatId].orEmpty() + requestId)) }
+            }
+            "interaction-resolved" -> if (requestId != null) {
+                pendingInteractions.update { it + (chatId to (it[chatId].orEmpty() - requestId)) }
+            }
+            "interactions-cleared" -> pendingInteractions.update { it - chatId }
+            "turn-started" -> _unreadChats.update { it - chatId }
+            "turn-finished" -> if (chatId !in sessions.value) _unreadChats.update { it + chatId }
+            // A terminal agent finishing is the same news as a chat turn finishing.
+            "terminal-activity" -> {
+                val working = (event["terminal_working"] as? JsonPrimitive)?.booleanOrNull ?: return
+                if (working) {
+                    terminalBusy += chatId
+                    _unreadChats.update { it - chatId }
+                } else if (terminalBusy.remove(chatId) && chatId !in sessions.value) {
+                    _unreadChats.update { it + chatId }
+                }
+            }
+            else -> return
+        }
+        _waitingChats.value = pendingInteractions.value.filterValues { it.isNotEmpty() }.keys
+    }
 
     /**
      * Terminal traffic, which the chat stores do not model: a pty's output is
@@ -84,6 +128,7 @@ public class XdClient(
                     }
                 }
                 val chatId = (event.value["chat"] as? JsonPrimitive)?.contentOrNull
+                if (chatId != null) trackSignals(eventName, chatId, event.value)
                 if (chatId != null && eventName in TURN_LIFECYCLE_EVENTS) {
                     treeStore.setChatWorking(
                         chatId = chatId,

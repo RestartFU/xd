@@ -4629,9 +4629,18 @@ fn run_gh(
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let child = command.spawn().map_err(|source| StorageError::Filesystem {
-        context: "Cannot run GitHub CLI".into(),
-        source,
+    let child = command.spawn().map_err(|source| {
+        if source.kind() == std::io::ErrorKind::NotFound {
+            StorageError::InvalidRequest(
+                "Pull requests need the GitHub CLI. Install gh and run gh auth login to list them here."
+                    .into(),
+            )
+        } else {
+            StorageError::Filesystem {
+                context: "Cannot run GitHub CLI".into(),
+                source,
+            }
+        }
     })?;
     collect_git_output(child, GIT_TIMEOUT)
 }

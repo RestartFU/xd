@@ -11,6 +11,10 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -23,7 +27,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ui.FatalScreen
 import com.restartfu.xd.mobile.ui.MinimalMobileApp
 import com.restartfu.xd.mobile.ui.ConnectScreen
+import com.restartfu.xd.mobile.ui.LocalXdSignals
+import com.restartfu.xd.mobile.ui.MinimalThemePreset
+import com.restartfu.xd.mobile.ui.XdTypography
 import com.restartfu.xd.mobile.ui.minimalColors
+import com.restartfu.xd.mobile.ui.xdSignals
 import com.restartfu.xd.net.Link
 
 class MainActivity : ComponentActivity() {
@@ -36,9 +44,19 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val theme by settings.theme.collectAsStateWithLifecycle()
-            MaterialTheme(colorScheme = minimalColors(theme)) {
-                Surface(Modifier.fillMaxSize()) {
-                    XdMobileApp(model, settings)
+            val view = LocalView.current
+            SideEffect {
+                // System bar icons follow the theme, not the system setting.
+                WindowCompat.getInsetsController(window, view).apply {
+                    isAppearanceLightStatusBars = theme == MinimalThemePreset.LIGHT
+                    isAppearanceLightNavigationBars = theme == MinimalThemePreset.LIGHT
+                }
+            }
+            CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
+                MaterialTheme(colorScheme = minimalColors(theme), typography = XdTypography) {
+                    Surface(Modifier.fillMaxSize()) {
+                        XdMobileApp(model, settings)
+                    }
                 }
             }
         }

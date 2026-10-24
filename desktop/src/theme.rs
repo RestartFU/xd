@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// Keeping the roles semantic lets GPUI views change theme without knowing
 /// which concrete color belongs to a background, divider, or text treatment.
+///
+/// The palette follows a library card catalog: a neutral cabinet ground,
+/// card-stock surfaces with a red ruled line, bone or ink for the primary
+/// action, and signal-tab colors that are reserved for session state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColors {
     pub background: u32,
@@ -15,118 +19,105 @@ pub struct ThemeColors {
     pub selected_border: u32,
     pub text: u32,
     pub muted: u32,
+    /// Counts, hints, and timestamps; never body copy.
+    pub faint: u32,
+    /// Fill of the primary action.
     pub accent: u32,
+    /// Links, focus rings, and the caret.
     pub accent_ink: u32,
     pub accent_hover: u32,
     pub accent_text: u32,
+    /// The red ruled line under a card's heading.
+    pub rule: u32,
+    /// Signal tab: an agent is working.
+    pub working: u32,
+    /// Signal tab: an agent is waiting on the user. Reserved for that state.
+    pub waiting: u32,
+    /// Signal tab: a finished turn the user has not seen.
+    pub done: u32,
+    pub danger: u32,
+    pub danger_surface: u32,
+    pub diff_added: u32,
+    pub diff_removed: u32,
+    /// Text selection, as `0xRRGGBBAA`.
+    pub selection: u32,
+    /// Modal backdrop, as `0xRRGGBBAA`.
+    pub backdrop: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemePreset {
+    /// Retired presets were all dark, so saved settings fall back to Dark.
     #[default]
+    #[serde(alias = "warm", alias = "nord", alias = "dracula")]
     Dark,
     Light,
-    Warm,
-    Nord,
-    Dracula,
 }
 
 impl ThemePreset {
-    pub const ALL: [Self; 5] = [
-        Self::Dark,
-        Self::Light,
-        Self::Warm,
-        Self::Nord,
-        Self::Dracula,
-    ];
+    pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Dark => "Dark",
             Self::Light => "Light",
-            Self::Warm => "Warm",
-            Self::Nord => "Nord",
-            Self::Dracula => "Dracula",
         }
     }
 
     pub const fn colors(self) -> ThemeColors {
         match self {
             Self::Dark => ThemeColors {
-                background: 0x101722,
-                sidebar: 0x131d2b,
-                surface: 0x1b293a,
-                surface_high: 0x25354b,
-                border: 0x31455e,
-                selected_surface: 0x213b5b,
-                selected_border: 0x5682bc,
-                text: 0xe6edf6,
-                muted: 0xaebdd0,
-                accent: 0x77aaff,
-                accent_ink: 0x8fbaff,
-                accent_hover: 0x91bbff,
-                accent_text: 0x101722,
+                background: 0x121314,
+                sidebar: 0x17181a,
+                surface: 0x1e1f22,
+                surface_high: 0x27292c,
+                border: 0x313338,
+                selected_surface: 0x2b2d31,
+                selected_border: 0xe8e5de,
+                text: 0xeceae5,
+                muted: 0xaaa9a3,
+                faint: 0x8b8a85,
+                accent: 0xe8e5de,
+                accent_ink: 0x93b5e9,
+                accent_hover: 0xffffff,
+                accent_text: 0x121314,
+                rule: 0xa8493c,
+                working: 0x72b783,
+                waiting: 0xeaa93a,
+                done: 0x86a9e4,
+                danger: 0xec7064,
+                danger_surface: 0x3b201e,
+                diff_added: 0x1b2b20,
+                diff_removed: 0x33201e,
+                selection: 0x93b5e955,
+                backdrop: 0x000000a6,
             },
             Self::Light => ThemeColors {
-                background: 0xf3f6fb,
-                sidebar: 0xe9eef6,
+                background: 0xf7f7f5,
+                sidebar: 0xeeeeeb,
                 surface: 0xffffff,
-                surface_high: 0xe2eaf4,
-                border: 0xc5d1e1,
-                selected_surface: 0xdae7f8,
-                selected_border: 0x5986c1,
-                text: 0x19283d,
-                muted: 0x50617a,
-                accent: 0x245caf,
-                accent_ink: 0x2357a4,
-                accent_hover: 0x1d4d95,
+                surface_high: 0xe9e9e5,
+                border: 0xd7d6d0,
+                selected_surface: 0xe6e5e0,
+                selected_border: 0x1b1c1e,
+                text: 0x1b1c1e,
+                muted: 0x56554f,
+                faint: 0x64635d,
+                accent: 0x1b1c1e,
+                accent_ink: 0x2b5897,
+                accent_hover: 0x3a3c40,
                 accent_text: 0xffffff,
-            },
-            Self::Warm => ThemeColors {
-                background: 0x17110d,
-                sidebar: 0x100b08,
-                surface: 0x201711,
-                surface_high: 0x2c2018,
-                border: 0x49362a,
-                selected_surface: 0x352219,
-                selected_border: 0x764733,
-                text: 0xf7eee7,
-                muted: 0xbba89a,
-                accent: 0xee7650,
-                accent_ink: 0xee7650,
-                accent_hover: 0xf38a66,
-                accent_text: 0x1c0f08,
-            },
-            Self::Nord => ThemeColors {
-                background: 0x2e3440,
-                sidebar: 0x272c36,
-                surface: 0x3b4252,
-                surface_high: 0x434c5e,
-                border: 0x4c566a,
-                selected_surface: 0x354253,
-                selected_border: 0x88c0d0,
-                text: 0xeceff4,
-                muted: 0xd8dee9,
-                accent: 0x88c0d0,
-                accent_ink: 0x88c0d0,
-                accent_hover: 0x8fbcbb,
-                accent_text: 0x172027,
-            },
-            Self::Dracula => ThemeColors {
-                background: 0x282a36,
-                sidebar: 0x21222c,
-                surface: 0x343746,
-                surface_high: 0x44475a,
-                border: 0x44475a,
-                selected_surface: 0x3a3c4b,
-                selected_border: 0xbd93f9,
-                text: 0xf8f8f2,
-                muted: 0xc7c8d8,
-                accent: 0xbd93f9,
-                accent_ink: 0xbd93f9,
-                accent_hover: 0xcaa8fa,
-                accent_text: 0x21162f,
+                rule: 0xc2483b,
+                working: 0x276b3c,
+                waiting: 0x8c5100,
+                done: 0x2b5897,
+                danger: 0xb2342a,
+                danger_surface: 0xf8e2df,
+                diff_added: 0xe2f0e5,
+                diff_removed: 0xf8e4e1,
+                selection: 0x2b589740,
+                backdrop: 0x1b1c1e66,
             },
         }
     }
@@ -137,10 +128,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_theme_presets_include_nord_and_dracula() {
-        assert!(ThemePreset::ALL.contains(&ThemePreset::Nord));
-        assert!(ThemePreset::ALL.contains(&ThemePreset::Dracula));
-        assert_eq!(ThemePreset::Nord.label(), "Nord");
-        assert_eq!(ThemePreset::Dracula.label(), "Dracula");
+    fn retired_presets_load_as_dark() {
+        for name in ["warm", "nord", "dracula"] {
+            let preset: ThemePreset = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(preset, ThemePreset::Dark);
+        }
     }
 }

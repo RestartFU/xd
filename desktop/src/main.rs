@@ -86,7 +86,8 @@ use input::{
     Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight, terminal_paste_bytes,
 };
 use minimal::{
-    AgentCli, MinimalRoute, project_cards, project_sessions, reconcile_route, resumable_session,
+    AgentCli, MinimalRoute, SessionCard, project_cards, project_sessions, reconcile_route,
+    resumable_session,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -94,8 +95,16 @@ use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
 
-const UI_FONT: &str = "DM Sans";
-const EMBEDDED_UI_FONT: &[u8] = include_bytes!("../../data/fonts/DMSans-Variable.ttf");
+pub(crate) const UI_FONT: &str = "Libre Franklin";
+/// Static instances: GPUI renders only the default instance of a variable
+/// font, so each weight the shell uses ships as its own face.
+const EMBEDDED_UI_FONTS: [&[u8]; 5] = [
+    include_bytes!("../../data/fonts/LibreFranklin-Regular.ttf"),
+    include_bytes!("../../data/fonts/LibreFranklin-Medium.ttf"),
+    include_bytes!("../../data/fonts/LibreFranklin-SemiBold.ttf"),
+    include_bytes!("../../data/fonts/LibreFranklin-Bold.ttf"),
+    include_bytes!("../../data/fonts/LibreFranklin-Italic.ttf"),
+];
 // The bundle ships this face and points fontconfig at itself. The generic
 // `monospace` alias resolves through the host's fontconfig instead, which lands
 // on DejaVu Sans Mono and reads nothing like the rest of the shell.
@@ -111,7 +120,13 @@ const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
 const TRASH_ICON: &str = "icons/trash.svg";
-const DONE_STATUS_COLOR: u32 = 0x43a047;
+const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
+const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
+const CLOSE_ICON: &str = "icons/close.svg";
+const TERMINAL_ICON: &str = "icons/terminal.svg";
+const SEARCH_ICON: &str = "icons/search.svg";
+const MINIMIZE_ICON: &str = "icons/minimize.svg";
+const MAXIMIZE_ICON: &str = "icons/maximize.svg";
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
 const MAX_ATTACHMENTS: usize = 4;
@@ -120,7 +135,10 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-const NAV_RAIL_WIDTH: f32 = 60.0;
+/// Width of the catalog sidebar that holds project drawers and session cards.
+const CATALOG_WIDTH: f32 = 288.0;
+/// Every session card shares one height and baseline.
+const CARD_HEIGHT: f32 = 56.0;
 const BROWSER_DIVIDER_WIDTH: f32 = 1.0;
 const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
 
@@ -128,8 +146,13 @@ fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
     // Keep the session usable even at the window's minimum size.
     f32::from(requested).clamp(
         280.0,
-        (window_width - NAV_RAIL_WIDTH - BROWSER_DIVIDER_WIDTH - 400.0).clamp(280.0, 1000.0),
+        (window_width - BROWSER_DIVIDER_WIDTH - 460.0).clamp(280.0, 1000.0),
     )
+}
+
+/// The docked pane beside a native chat keeps the chat at least 460px wide.
+fn native_dock_width(requested: u16, available: f32) -> f32 {
+    f32::from(requested).clamp(320.0, (available - 460.0).clamp(320.0, 900.0))
 }
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
@@ -202,52 +225,6 @@ fn xd_mark(color: u32) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn workbench_nav_button(
-    id: &'static str,
-    label: &'static str,
-    icon: gpui::AnyElement,
-    active: bool,
-    colors: ThemeColors,
-) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .w_full()
-        .h(px(54.0))
-        .flex_none()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap_1()
-        .rounded(px(4.0))
-        .border_l_2()
-        .border_color(if active {
-            rgb(colors.accent_ink)
-        } else {
-            rgba(0x00000000)
-        })
-        .bg(rgb(if active {
-            colors.selected_surface
-        } else {
-            colors.sidebar
-        }))
-        .text_size(px(9.0))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(if active {
-            colors.accent_ink
-        } else {
-            colors.muted
-        }))
-        .cursor_pointer()
-        .hover(|style| {
-            style
-                .bg(rgb(colors.surface_high))
-                .text_color(rgb(colors.text))
-        })
-        .child(icon)
-        .child(label)
-}
-
 fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
     div()
         .w(px(38.0))
@@ -274,24 +251,187 @@ fn settings_switch(colors: ThemeColors, enabled: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn session_status_icon(color: u32) -> gpui::AnyElement {
+/// What a session's signal tab says about its agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionSignal {
+    Idle,
+    Working,
+    /// An approval or question is waiting on the user. The only amber state.
+    Waiting,
+    /// A finished turn the user has not opened yet.
+    Done,
+}
+
+impl SessionSignal {
+    fn of(working: bool, waiting: bool, unread: bool) -> Self {
+        if waiting {
+            Self::Waiting
+        } else if working {
+            Self::Working
+        } else if unread {
+            Self::Done
+        } else {
+            Self::Idle
+        }
+    }
+
+    fn color(self, colors: ThemeColors) -> u32 {
+        match self {
+            Self::Idle => colors.faint,
+            Self::Working => colors.working,
+            Self::Waiting => colors.waiting,
+            Self::Done => colors.done,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Working => "Working",
+            Self::Waiting => "Waiting on you",
+            Self::Done => "Done",
+        }
+    }
+}
+
+/// The metal flag clipped to the top edge of a session card. Each state has its
+/// own shape as well as its own colour, so the tabs still read in grayscale:
+/// working is a solid flag, waiting a taller solid flag, done a hollow one.
+/// Idle cards carry none, so a drawer of quiet sessions reads as quiet.
+fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyElement> {
+    let color = signal.color(colors);
+    let flag = div()
+        .absolute()
+        .right(px(12.0))
+        .w(px(16.0))
+        .rounded_t(px(2.0));
+    match signal {
+        SessionSignal::Idle => None,
+        SessionSignal::Working => Some(flag.top(px(-4.0)).h(px(9.0)).bg(rgb(color))),
+        SessionSignal::Waiting => Some(flag.top(px(-7.0)).h(px(12.0)).bg(rgb(color))),
+        SessionSignal::Done => Some(
+            flag.top(px(-4.0))
+                .h(px(9.0))
+                .border(px(1.5))
+                .border_b_0()
+                .border_color(rgb(color))
+                .bg(rgb(colors.background)),
+        ),
+    }
+    .map(IntoElement::into_any_element)
+}
+
+/// The small tabs a closed drawer shows for its sessions, in the same shapes.
+fn drawer_tabs(signals: &[SessionSignal], colors: ThemeColors) -> gpui::AnyElement {
     div()
-        .relative()
-        .size(px(14.0))
         .flex_none()
-        .rounded_full()
-        .border_1()
-        .border_color(rgb(color))
-        .child(
-            div()
-                .absolute()
-                .left(px(3.0))
-                .top(px(3.0))
-                .size(px(6.0))
-                .rounded_full()
-                .bg(rgb(color)),
+        .flex()
+        .items_end()
+        .gap(px(3.0))
+        .children(
+            signals
+                .iter()
+                .filter(|signal| **signal != SessionSignal::Idle)
+                .take(6)
+                .map(|signal| {
+                    let color = signal.color(colors);
+                    let tab = div().w(px(10.0)).rounded(px(1.0));
+                    match signal {
+                        SessionSignal::Waiting => tab.h(px(8.0)).bg(rgb(color)),
+                        SessionSignal::Done => tab.h(px(5.0)).border_1().border_color(rgb(color)),
+                        _ => tab.h(px(5.0)).bg(rgb(color)),
+                    }
+                }),
         )
         .into_any_element()
+}
+
+/// A rubber-stamp label: small tracked capitals in a thin frame.
+fn stamp(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
+    div()
+        .flex_none()
+        .px(px(5.0))
+        .h(px(18.0))
+        .flex()
+        .items_center()
+        .rounded(px(2.0))
+        .border_1()
+        .border_color(rgb(color))
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(color))
+        .child(label.into().to_uppercase())
+        .into_any_element()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonKind {
+    Primary,
+    Secondary,
+    Ghost,
+    Danger,
+}
+
+/// The one button vocabulary used across the shell, popovers, and dialogs.
+fn ui_button(
+    id: impl Into<gpui::ElementId>,
+    kind: ButtonKind,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    let base = div()
+        .id(id)
+        .h(px(30.0))
+        .px_3()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .rounded(px(6.0))
+        .text_size(px(12.5))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer();
+    match kind {
+        ButtonKind::Primary => base
+            .bg(rgb(colors.accent))
+            .text_color(rgb(colors.accent_text))
+            .hover(|style| style.bg(rgb(colors.accent_hover))),
+        ButtonKind::Secondary => base
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.surface))
+            .text_color(rgb(colors.text))
+            .hover(|style| style.bg(rgb(colors.surface_high))),
+        ButtonKind::Ghost => base.text_color(rgb(colors.muted)).hover(|style| {
+            style
+                .bg(rgb(colors.surface_high))
+                .text_color(rgb(colors.text))
+        }),
+        ButtonKind::Danger => base
+            .border_1()
+            .border_color(rgb(colors.danger))
+            .text_color(rgb(colors.danger))
+            .hover(|style| style.bg(rgb(colors.danger_surface))),
+    }
+}
+
+/// A drawn stroke icon from the embedded set, tinted to the surrounding text.
+fn icon(path: &'static str, size: f32, color: u32) -> gpui::AnyElement {
+    svg()
+        .path(path)
+        .size(px(size))
+        .flex_none()
+        .text_color(rgb(color))
+        .into_any_element()
+}
+
+fn agent_icon(agent: AgentCli) -> &'static str {
+    match agent {
+        AgentCli::Codex => CODEX_ICON,
+        AgentCli::Claude => CLAUDE_ICON,
+        AgentCli::Jcode => JCODE_ICON,
+        AgentCli::Copilot => COPILOT_ICON,
+    }
 }
 
 gpui::actions!(xd, [CloseSearch, CopyRenderedSelection]);
@@ -1163,6 +1303,10 @@ struct XdDesktop {
     minimal_popup_focus_captured: bool,
     minimal_new_session_agent: AgentCli,
     native_pane: NativePane,
+    /// Drag origin and starting width while resizing the native dock.
+    dock_drag: Option<(f32, u16)>,
+    /// Width of the chat's reading column, measured by the workspace layout.
+    chat_column_width: f32,
     native_option_open: Option<&'static str>,
     expanded_activities: HashSet<i64>,
     pending_minimal_session: Option<(String, String)>,
@@ -1242,6 +1386,11 @@ struct XdDesktop {
     sidebar_move_submitting: bool,
     sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
+    /// Drawers other than the current project that the user opened by hand.
+    opened_drawers: HashSet<String>,
+    /// Filters the catalog to projects and sessions whose names match.
+    catalog_find_input: Entity<ComposerInput>,
+    catalog_query: String,
     creating_workspace: bool,
     workspace_create_name: String,
     workspace_create_repo: String,
@@ -1366,6 +1515,14 @@ impl XdDesktop {
             ComposerEvent::Changed(text) => this.sidebar_edit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_sidebar_edit(cx),
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
+        })
+        .detach();
+        let catalog_find_input = cx.new(|cx| ComposerInput::new(cx, "Find a session or project"));
+        cx.subscribe(&catalog_find_input, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                this.catalog_query = text.trim().to_lowercase();
+                cx.notify();
+            }
         })
         .detach();
         let workspace_create_input = cx.new(|cx| ComposerInput::new(cx, "Workspace name…"));
@@ -1667,6 +1824,8 @@ impl XdDesktop {
             minimal_popup_focus_captured: false,
             minimal_new_session_agent: AgentCli::Codex,
             native_pane: NativePane::Chat,
+            dock_drag: None,
+            chat_column_width: 860.0,
             native_option_open: None,
             expanded_activities: HashSet::new(),
             pending_minimal_session: None,
@@ -1745,6 +1904,9 @@ impl XdDesktop {
             sidebar_move_submitting: false,
             sidebar_move_destination: None,
             collapsed_folders,
+            opened_drawers: HashSet::new(),
+            catalog_find_input,
+            catalog_query: String::new(),
             creating_workspace: false,
             workspace_create_name: String::new(),
             workspace_create_repo: String::new(),
@@ -5790,6 +5952,13 @@ impl XdDesktop {
                 < 640.0
     }
 
+    fn finish_dock_resize(&mut self, cx: &mut Context<Self>) {
+        if self.dock_drag.take().is_some() {
+            let _ = self.settings.save();
+            cx.notify();
+        }
+    }
+
     fn finish_browser_resize(&mut self, cx: &mut Context<Self>) {
         if self.browser_drag.take().is_some() {
             let _ = self.settings.save();
@@ -7937,36 +8106,6 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn show_minimal_sessions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let requested_project_id = match &self.minimal_route {
-            MinimalRoute::Projects { project_id } | MinimalRoute::Sessions { project_id } => {
-                project_id.clone()
-            }
-            MinimalRoute::Terminal => None,
-            MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
-        };
-        let last_chat = self.cached_last_chat();
-        if let Some((project_id, chat_id, agent)) =
-            resumable_session(last_chat.as_deref(), &self.model.chats)
-        {
-            self.open_minimal_session(project_id, chat_id, agent, window, cx);
-            return;
-        }
-        let next_route = MinimalRoute::Sessions {
-            project_id: requested_project_id
-                .or_else(|| self.model.folders.first().map(|folder| folder.id.clone())),
-        };
-        if !self.flush_draft_before_navigation() {
-            cx.notify();
-            return;
-        }
-        self.minimal_route = next_route;
-        self.stash_terminal_panel();
-        self.model.selected_chat = None;
-        self.sync_terminal_input_mode(cx);
-        cx.notify();
-    }
-
     fn show_minimal_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let panel_id = global_terminal_panel_id(&self.current_connection_key());
         let same_panel = matches!(self.minimal_route, MinimalRoute::Terminal)
@@ -8344,11 +8483,11 @@ impl XdDesktop {
                     .gap_2()
                     .border_b_2()
                     .border_color(rgb(if selected {
-                        colors.accent
+                        colors.selected_border
                     } else {
-                        colors.surface
+                        colors.sidebar
                     }))
-                    .text_xs()
+                    .text_size(px(12.0))
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
                     .cursor_pointer()
                     .hover(|style| style.text_color(rgb(colors.text)))
@@ -8361,12 +8500,17 @@ impl XdDesktop {
                             .id(("minimal-close-terminal", index))
                             .px_1()
                             .rounded_sm()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .text_color(rgb(colors.faint))
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(colors.surface_high))
+                                    .text_color(rgb(colors.text))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
                                 this.close_terminal_tab(close_id.clone(), cx);
                             }))
-                            .child("×"),
+                            .child(icon(CLOSE_ICON, 12.0, colors.faint)),
                     )
             })
             .collect::<Vec<_>>();
@@ -8452,25 +8596,26 @@ impl XdDesktop {
             .relative()
             .flex()
             .flex_col()
-            .rounded(px(5.0))
+            .rounded(px(8.0))
             .border_1()
             .border_color(rgb(colors.border))
-            .bg(rgb(colors.surface))
+            .bg(rgb(colors.background))
             .overflow_hidden()
             .child(
                 div()
-                    .h(px(42.0))
+                    .h(px(36.0))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(colors.border))
+                    .bg(rgb(colors.sidebar))
                     .children(tabs)
                     .child(div().flex_1())
                     .child(
                         div()
                             .id("minimal-new-terminal")
-                            .size(px(30.0))
+                            .size(px(26.0))
                             .mr_2()
                             .flex()
                             .items_center()
@@ -8488,9 +8633,9 @@ impl XdDesktop {
                 pane.child(
                     div()
                         .absolute()
-                        .top(px(54.0))
+                        .top(px(50.0))
                         .left(px(16.0))
-                        .text_xs()
+                        .text_size(px(12.0))
                         .text_color(rgb(colors.muted))
                         .child("Starting CLI…"),
                 )
@@ -8502,8 +8647,8 @@ impl XdDesktop {
                         .top(px(54.0))
                         .left(px(16.0))
                         .right(px(16.0))
-                        .text_xs()
-                        .text_color(rgb(0xd86f7c))
+                        .text_size(px(12.0))
+                        .text_color(rgb(colors.danger))
                         .child(error),
                 )
             })
@@ -8526,14 +8671,14 @@ impl XdDesktop {
                         .id("minimal-new-tab-menu")
                         .occlude()
                         .absolute()
-                        .top(px(38.0))
+                        .top(px(34.0))
                         .right(px(8.0))
-                        .w(px(168.0))
+                        .w(px(180.0))
                         .p_1()
-                        .rounded_lg()
+                        .rounded(px(7.0))
                         .border_1()
                         .border_color(rgb(colors.border))
-                        .bg(rgb(colors.background))
+                        .bg(rgb(colors.surface))
                         .shadow_lg()
                         .flex()
                         .flex_col()
@@ -8543,19 +8688,19 @@ impl XdDesktop {
                                 .id("minimal-new-shell-tab")
                                 .w_full()
                                 .px_3()
-                                .py_2()
+                                .h(px(32.0))
                                 .flex()
                                 .items_center()
                                 .gap_3()
-                                .rounded_md()
-                                .text_sm()
+                                .rounded(px(5.0))
+                                .text_size(px(13.0))
                                 .text_color(rgb(colors.text))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(colors.surface_high)))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_minimal_terminal_tab(None, window, cx)
                                 }))
-                                .child(div().w(px(18.0)).font_family(MONO).text_xs().child(">_"))
+                                .child(icon(TERMINAL_ICON, 15.0, colors.text))
                                 .child("Terminal"),
                         )
                         .when(allow_agent_tabs, |menu| {
@@ -8564,12 +8709,12 @@ impl XdDesktop {
                                     .id("minimal-new-codex-tab")
                                     .w_full()
                                     .px_3()
-                                    .py_2()
+                                    .h(px(32.0))
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .rounded_md()
-                                    .text_sm()
+                                    .rounded(px(5.0))
+                                    .text_size(px(13.0))
                                     .text_color(rgb(colors.text))
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(colors.surface_high)))
@@ -8583,7 +8728,7 @@ impl XdDesktop {
                                     .child(
                                         svg()
                                             .path(CODEX_ICON)
-                                            .size(px(18.0))
+                                            .size(px(15.0))
                                             .text_color(rgb(colors.text)),
                                     )
                                     .child("Codex"),
@@ -8593,12 +8738,12 @@ impl XdDesktop {
                                     .id("minimal-new-claude-tab")
                                     .w_full()
                                     .px_3()
-                                    .py_2()
+                                    .h(px(32.0))
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .rounded_md()
-                                    .text_sm()
+                                    .rounded(px(5.0))
+                                    .text_size(px(13.0))
                                     .text_color(rgb(colors.text))
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(colors.surface_high)))
@@ -8612,7 +8757,7 @@ impl XdDesktop {
                                     .child(
                                         svg()
                                             .path(CLAUDE_ICON)
-                                            .size(px(18.0))
+                                            .size(px(15.0))
                                             .text_color(rgb(colors.text)),
                                     )
                                     .child("Claude Code"),
@@ -8622,12 +8767,12 @@ impl XdDesktop {
                                     .id("minimal-new-jcode-tab")
                                     .w_full()
                                     .px_3()
-                                    .py_2()
+                                    .h(px(32.0))
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .rounded_md()
-                                    .text_sm()
+                                    .rounded(px(5.0))
+                                    .text_size(px(13.0))
                                     .text_color(rgb(colors.text))
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(colors.surface_high)))
@@ -8641,7 +8786,7 @@ impl XdDesktop {
                                     .child(
                                         svg()
                                             .path(JCODE_ICON)
-                                            .size(px(18.0))
+                                            .size(px(15.0))
                                             .text_color(rgb(colors.text)),
                                     )
                                     .child("JCode"),
@@ -8651,12 +8796,12 @@ impl XdDesktop {
                                     .id("minimal-new-copilot-tab")
                                     .w_full()
                                     .px_3()
-                                    .py_2()
+                                    .h(px(32.0))
                                     .flex()
                                     .items_center()
                                     .gap_3()
-                                    .rounded_md()
-                                    .text_sm()
+                                    .rounded(px(5.0))
+                                    .text_size(px(13.0))
                                     .text_color(rgb(colors.text))
                                     .cursor_pointer()
                                     .hover(|style| style.bg(rgb(colors.surface_high)))
@@ -8670,7 +8815,7 @@ impl XdDesktop {
                                     .child(
                                         svg()
                                             .path(COPILOT_ICON)
-                                            .size(px(18.0))
+                                            .size(px(15.0))
                                             .text_color(rgb(colors.text)),
                                     )
                                     .child("GitHub Copilot"),
@@ -8706,7 +8851,7 @@ impl XdDesktop {
                         .window_control_area(WindowControlArea::Min)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(|_, window, _| window.minimize_window())
-                        .child("−"),
+                        .child(icon(MINIMIZE_ICON, 14.0, colors.muted)),
                 )
             })
             .when(!cfg!(target_os = "macos"), |titlebar| {
@@ -8729,7 +8874,7 @@ impl XdDesktop {
                         .window_control_area(WindowControlArea::Max)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(|_, window, _| window.zoom_window())
-                        .child("□"),
+                        .child(icon(MAXIMIZE_ICON, 12.0, colors.muted)),
                 )
             })
             .when(!cfg!(target_os = "macos"), |titlebar| {
@@ -8744,117 +8889,17 @@ impl XdDesktop {
                         .text_sm()
                         .text_color(rgb(colors.muted))
                         .cursor_pointer()
-                        .hover(|style| style.bg(rgb(0x5a252b)).text_color(rgb(0xffffff)))
+                        .hover(|style| {
+                            style
+                                .bg(rgb(colors.danger_surface))
+                                .text_color(rgb(colors.danger))
+                        })
                         .window_control_area(WindowControlArea::Close)
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(|_, window, _| window.remove_window())
-                        .child("×"),
+                        .child(icon(CLOSE_ICON, 14.0, colors.muted)),
                 )
             })
-            .into_any_element()
-    }
-
-    fn render_minimal_product_nav(
-        &mut self,
-        colors: ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let projects_active = matches!(self.minimal_route, MinimalRoute::Projects { .. });
-        let sessions_active = matches!(
-            self.minimal_route,
-            MinimalRoute::Sessions { .. } | MinimalRoute::Cli { .. }
-        );
-        let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
-        let create_session_for = match &self.minimal_route {
-            MinimalRoute::Cli { project_id, .. } => Some(project_id.clone()),
-            MinimalRoute::Sessions { project_id } => project_id.clone(),
-            MinimalRoute::Projects { .. } | MinimalRoute::Terminal => None,
-        };
-        let projects_icon = svg().path(FOLDER_ICON).size(px(19.0)).into_any_element();
-        let sessions_icon = div().text_size(px(23.0)).child("≡").into_any_element();
-        let terminal_icon = div()
-            .font_family(MONO)
-            .text_size(px(17.0))
-            .child(">_")
-            .into_any_element();
-
-        div()
-            .id("minimal-product-nav")
-            .w(px(NAV_RAIL_WIDTH))
-            .h_full()
-            .flex_none()
-            .flex()
-            .flex_col()
-            .items_center()
-            .px_1()
-            .py_2()
-            .gap_1()
-            .border_r_1()
-            .border_color(rgb(colors.border))
-            .bg(rgb(colors.sidebar))
-            .child(
-                workbench_nav_button(
-                    "minimal-projects-tab",
-                    "Projects",
-                    projects_icon,
-                    projects_active,
-                    colors,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.show_minimal_projects(cx))),
-            )
-            .child(
-                workbench_nav_button(
-                    "minimal-sessions-tab",
-                    "Sessions",
-                    sessions_icon,
-                    sessions_active,
-                    colors,
-                )
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.show_minimal_sessions(window, cx)),
-                ),
-            )
-            .child(
-                workbench_nav_button(
-                    "minimal-terminal-tab",
-                    "Terminal",
-                    terminal_icon,
-                    terminal_active,
-                    colors,
-                )
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.show_minimal_terminal(window, cx)),
-                ),
-            )
-            .child(div().flex_1())
-            .child(
-                workbench_nav_button(
-                    "minimal-global-create",
-                    "New",
-                    plus_icon(colors.accent_ink),
-                    false,
-                    colors,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if let Some(project_id) = create_session_for.clone() {
-                        this.begin_chat_create(project_id, window, cx);
-                    } else {
-                        this.begin_workspace_create(window, cx);
-                    }
-                })),
-            )
-            .child(
-                workbench_nav_button(
-                    "minimal-theme",
-                    "Settings",
-                    div().text_size(px(20.0)).child("⚙").into_any_element(),
-                    self.minimal_theme_open,
-                    colors,
-                )
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.toggle_minimal_theme_popup(window, cx)),
-                ),
-            )
             .into_any_element()
     }
 
@@ -8866,22 +8911,34 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let connected = self.model.connected;
         let remote_active = self.active_endpoint == ChatEndpoint::Remote;
+        let project_name = self
+            .selected_minimal_project_id()
+            .and_then(|id| self.model.folders.iter().find(|folder| folder.id == id))
+            .map(|folder| folder.name.clone());
         let context = match &self.minimal_route {
-            MinimalRoute::Projects { .. } => "Workspace".to_string(),
-            MinimalRoute::Sessions { .. } => "Sessions".to_string(),
             MinimalRoute::Terminal => "Terminal".to_string(),
-            MinimalRoute::Cli { project_id, .. } => self
-                .model
-                .folders
-                .iter()
-                .find(|folder| &folder.id == project_id)
-                .map(|folder| folder.name.clone())
-                .unwrap_or_else(|| "Session".to_string()),
+            MinimalRoute::Cli { chat_id, .. } => {
+                let title = self
+                    .model
+                    .chats
+                    .iter()
+                    .find(|chat| &chat.id == chat_id)
+                    .and_then(|chat| chat.title.clone())
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| DEFAULT_CHAT_TITLE.to_string());
+                match &project_name {
+                    Some(project) => format!("{project}  /  {title}"),
+                    None => title,
+                }
+            }
+            MinimalRoute::Projects { .. } | MinimalRoute::Sessions { .. } => project_name
+                .clone()
+                .unwrap_or_else(|| "Workspace".to_string()),
         };
 
         div()
             .id("workbench-titlebar")
-            .h(px(42.0))
+            .h(px(38.0))
             .w_full()
             .flex_none()
             .flex()
@@ -8920,16 +8977,16 @@ impl XdDesktop {
                     .when(titlebar, |brand| {
                         brand.window_control_area(WindowControlArea::Drag)
                     })
-                    .child(xd_mark(colors.accent_ink))
+                    .child(xd_mark(colors.text))
                     .child("xd"),
             )
-            .child(div().text_sm().text_color(rgb(colors.muted)).child("/"))
+            .child(div().text_sm().text_color(rgb(colors.faint)).child("/"))
             .child(
                 div()
                     .min_w_0()
                     .flex_1()
                     .truncate()
-                    .text_xs()
+                    .text_size(px(12.5))
                     .text_color(rgb(colors.muted))
                     .when(titlebar, |context| {
                         context.window_control_area(WindowControlArea::Drag)
@@ -8937,27 +8994,14 @@ impl XdDesktop {
                     .child(context),
             )
             .child(
-                div()
-                    .id("minimal-browser-toggle")
-                    .h(px(28.0))
+                ui_button("minimal-browser-toggle", ButtonKind::Ghost, colors)
+                    .h(px(26.0))
                     .px_2()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.0))
-                    .bg(rgb(if self.browser_is_open() {
-                        colors.selected_surface
-                    } else {
-                        colors.sidebar
-                    }))
-                    .text_xs()
-                    .text_color(rgb(if self.browser_is_open() {
-                        colors.accent_ink
-                    } else {
-                        colors.muted
-                    }))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .when(self.browser_is_open(), |button| {
+                        button
+                            .bg(rgb(colors.selected_surface))
+                            .text_color(rgb(colors.text))
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx)))
                     .child("Browser"),
@@ -8965,7 +9009,7 @@ impl XdDesktop {
             .child(
                 div()
                     .id("minimal-runtime")
-                    .h(px(28.0))
+                    .h(px(26.0))
                     .px_2()
                     .mr_2()
                     .flex_none()
@@ -8989,12 +9033,17 @@ impl XdDesktop {
                             this.open_remote(window, cx);
                         }
                     }))
-                    .child(div().size(px(6.0)).rounded_full().bg(rgb(if connected {
-                        0x36c75c
+                    .child(div().size(px(7.0)).rounded_full().bg(rgb(if connected {
+                        colors.working
                     } else {
-                        0xb74c58
+                        colors.danger
                     })))
-                    .child(if remote_active { "Remote" } else { "Local" }),
+                    .child(match (remote_active, connected) {
+                        (false, true) => "Local",
+                        (false, false) => "Local · reconnecting",
+                        (true, true) => "Remote",
+                        (true, false) => "Remote · reconnecting",
+                    }),
             )
             .when(titlebar && !cfg!(target_os = "macos"), |bar| {
                 bar.child(self.render_minimal_window_controls(colors))
@@ -9002,34 +9051,34 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    /// The session's header: what it is, who runs it, where, and its state.
     fn render_minimal_context_toolbar(
         &mut self,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let (project_id, route_agent, cli_active) = match &self.minimal_route {
-            MinimalRoute::Projects { project_id } => (project_id.clone(), None, false),
-            MinimalRoute::Sessions { project_id } => (project_id.clone(), None, false),
-            MinimalRoute::Terminal => (None, None, false),
-            MinimalRoute::Cli {
-                project_id, agent, ..
-            } => (Some(project_id.clone()), Some(*agent), true),
+        let (chat_id, route_agent) = match &self.minimal_route {
+            MinimalRoute::Cli { chat_id, agent, .. } => (Some(chat_id.clone()), Some(*agent)),
+            _ => (None, None),
         };
-        let project_name = project_id
+        let chat = chat_id
             .as_deref()
-            .and_then(|project_id| {
-                self.model
-                    .folders
-                    .iter()
-                    .find(|folder| folder.id == project_id)
+            .and_then(|id| self.model.chats.iter().find(|chat| chat.id == id));
+        let title = chat
+            .and_then(|chat| chat.title.as_deref())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or(DEFAULT_CHAT_TITLE)
+            .to_owned();
+        let branch = chat.and_then(|chat| chat.branch.clone());
+        let signal = chat
+            .map(|chat| {
+                SessionSignal::of(
+                    chat.working || chat.terminal_working,
+                    self.model.is_waiting(&chat.id) || !self.model.interactions.is_empty(),
+                    false,
+                )
             })
-            .map(|folder| folder.name.clone())
-            .unwrap_or_else(|| "xd".into());
-        let context_label = if cli_active {
-            project_name
-        } else {
-            "Projects".into()
-        };
+            .unwrap_or(SessionSignal::Idle);
         let selected_agent = self
             .terminal_panel
             .as_ref()
@@ -9044,419 +9093,527 @@ impl XdDesktop {
 
         div()
             .id("minimal-context-toolbar")
-            .h(px(40.0))
+            .h(px(52.0))
             .w_full()
             .flex_none()
-            .px_4()
+            .px_5()
             .flex()
             .items_center()
-            .gap_2()
+            .gap(px(10.0))
             .border_b_1()
             .border_color(rgb(colors.border))
-            .bg(rgb(colors.sidebar))
-            .when(cli_active, |toolbar| {
-                toolbar.child(
-                    div()
-                        .id("minimal-board-back")
-                        .size(px(32.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .text_xl()
-                        .text_color(rgb(colors.text))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                        .on_click(cx.listener(|this, _, _, cx| this.show_minimal_projects(cx)))
-                        .child("←"),
-                )
-            })
+            .bg(rgb(colors.background))
             .child(
                 div()
                     .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_base()
+                    .flex_shrink()
+                    .truncate()
+                    .text_size(px(15.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(colors.text))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .max_w(px(320.0))
-                            .overflow_hidden()
-                            .child(context_label),
-                    )
-                    .when(cli_active, |breadcrumbs| {
-                        breadcrumbs
-                            .child(div().text_color(rgb(colors.muted)).child("/"))
-                            .child("Sessions")
-                            .child(div().text_color(rgb(colors.muted)).child("⌄"))
-                    }),
+                    .child(title),
             )
-            .child(div().flex_1())
             .when_some(selected_agent, |toolbar, agent| {
                 toolbar.child(
                     div()
                         .id("minimal-session-agent")
-                        .h(px(32.0))
-                        .px_3()
+                        .h(px(24.0))
+                        .px_2()
                         .flex_none()
                         .flex()
                         .items_center()
-                        .gap_2()
-                        .rounded_md()
+                        .gap(px(6.0))
+                        .rounded(px(5.0))
                         .border_1()
                         .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .font_family(MONO)
-                        .text_xs()
-                        .text_color(rgb(colors.text))
+                        .text_size(px(12.0))
+                        .text_color(rgb(colors.muted))
                         .child(
                             svg()
-                                .path(match agent {
-                                    AgentCli::Codex => CODEX_ICON,
-                                    AgentCli::Claude => CLAUDE_ICON,
-                                    AgentCli::Jcode => JCODE_ICON,
-                                    AgentCli::Copilot => COPILOT_ICON,
-                                })
-                                .size(px(15.0))
+                                .path(agent_icon(agent))
+                                .size(px(13.0))
                                 .text_color(rgb(colors.muted)),
                         )
                         .child(agent.protocol_name()),
                 )
             })
+            .when_some(branch, |toolbar, branch| {
+                toolbar.child(
+                    div()
+                        .h(px(24.0))
+                        .px_2()
+                        .min_w_0()
+                        .flex_shrink()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .font_family(MONO)
+                        .text_size(px(11.5))
+                        .text_color(rgb(colors.muted))
+                        .child(
+                            svg()
+                                .path(GIT_BRANCH_ICON)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(rgb(colors.muted)),
+                        )
+                        .child(div().min_w_0().truncate().child(branch)),
+                )
+            })
+            .child(div().flex_1())
+            .when(signal != SessionSignal::Idle, |toolbar| {
+                toolbar.child(stamp(signal.label(), signal.color(colors)))
+            })
+            .when(self.native_session(), |toolbar| {
+                let current = self.native_pane;
+                toolbar.child(
+                    div()
+                        .ml_2()
+                        .p(px(2.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(2.0))
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .children(
+                            [
+                                (1usize, "Changes", NativePane::Diff),
+                                (2, "Files", NativePane::Files),
+                                (3, "Terminal", NativePane::Terminal),
+                            ]
+                            .into_iter()
+                            .map(|(index, label, pane)| {
+                                let active = current == pane;
+                                ui_button(("native-pane", index), ButtonKind::Ghost, colors)
+                                    .h(px(24.0))
+                                    .px_2()
+                                    .when(active, |button| {
+                                        button
+                                            .bg(rgb(colors.selected_surface))
+                                            .text_color(rgb(colors.text))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let next = if this.native_pane == pane {
+                                            NativePane::Chat
+                                        } else {
+                                            pane
+                                        };
+                                        this.show_native_pane(next, cx);
+                                    }))
+                                    .child(label)
+                            }),
+                        ),
+                )
+            })
             .when(has_terminal, |toolbar| {
                 toolbar
                     .child(
-                        div()
-                            .id("minimal-context-terminal")
-                            .h(px(30.0))
-                            .px_3()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .bg(rgb(colors.surface_high))
-                            .font_family(MONO)
-                            .text_xs()
-                            .text_color(rgb(colors.text))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.selected_surface)))
+                        ui_button("minimal-context-terminal", ButtonKind::Secondary, colors)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_minimal_terminal_tab(None, window, cx);
                             }))
-                            .child(">_"),
+                            .child(icon(TERMINAL_ICON, 15.0, colors.text)),
                     )
-                    .child(div().mx_1().w(px(1.0)).h(px(20.0)).bg(rgb(colors.border)))
                     .child(
-                        div()
-                            .id("minimal-stop-terminal")
-                            .h(px(32.0))
-                            .px_2()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .rounded_md()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0xc2524a))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                        ui_button("minimal-stop-terminal", ButtonKind::Danger, colors)
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.send_terminal_input(&[3], cx)),
                             )
-                            .child(
-                                div()
-                                    .size(px(12.0))
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(rgb(0xc2524a)),
-                            )
+                            .child(div().size(px(9.0)).rounded(px(1.5)).bg(rgb(colors.danger)))
                             .child("Stop"),
                     )
             })
             .into_any_element()
     }
 
-    fn render_minimal_session_board(
+    fn session_signal(&self, session: &SessionCard) -> SessionSignal {
+        SessionSignal::of(
+            session.working,
+            self.model.is_waiting(&session.id),
+            self.model.unread_chats.contains(&session.id),
+        )
+    }
+
+    fn toggle_drawer(&mut self, project_id: String, current: bool, cx: &mut Context<Self>) {
+        if current {
+            self.toggle_folder_collapsed(project_id, cx);
+        } else {
+            if !self.opened_drawers.remove(&project_id) {
+                self.opened_drawers.insert(project_id);
+            }
+            cx.notify();
+        }
+    }
+
+    fn render_session_card(
+        &mut self,
+        colors: ThemeColors,
+        project_id: &str,
+        session_index: usize,
+        session: SessionCard,
+        instance: usize,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let emphasized = selected;
+        let signal = self.session_signal(&session);
+        let open_project_id = project_id.to_owned();
+        let chat_id = session.id.clone();
+        let context_chat_id = session.id.clone();
+        let context_title = session.title.clone();
+        let drag_payload = SessionDragPayload {
+            chat_id: session.id.clone(),
+            project_id: project_id.to_owned(),
+            source_index: session_index,
+            title: session.title.clone(),
+        };
+        let drop_project_id = project_id.to_owned();
+        let drop_chat_id = session.id.clone();
+        let agent = session.agent;
+        let status_color = signal.color(colors);
+
+        div()
+            .id(("minimal-session-card", instance))
+            .relative()
+            .w_full()
+            .h(px(CARD_HEIGHT))
+            .flex_none()
+            .px_3()
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(if emphasized {
+                rgb(colors.selected_border)
+            } else {
+                rgba(0x00000000)
+            })
+            .bg(rgb(if emphasized {
+                colors.selected_surface
+            } else {
+                colors.surface
+            }))
+            .cursor_pointer()
+            .hover(|style| {
+                if emphasized {
+                    style
+                } else {
+                    style.bg(rgb(colors.surface_high))
+                }
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_minimal_session(
+                    open_project_id.clone(),
+                    chat_id.clone(),
+                    agent,
+                    window,
+                    cx,
+                );
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_session_context_menu(
+                        context_chat_id.clone(),
+                        context_title.clone(),
+                        event.position,
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .can_drop({
+                let drop_project_id = drop_project_id.clone();
+                let drop_chat_id = drop_chat_id.clone();
+                move |value, _, _| {
+                    value
+                        .downcast_ref::<SessionDragPayload>()
+                        .is_some_and(|drag| {
+                            drag.project_id == drop_project_id && drag.chat_id != drop_chat_id
+                        })
+                }
+            })
+            .drag_over::<SessionDragPayload>(move |style, _, _, _| {
+                style
+                    .border_color(rgb(colors.selected_border))
+                    .bg(rgb(colors.surface_high))
+            })
+            .on_drop(cx.listener(move |this, drag: &SessionDragPayload, _, cx| {
+                this.reorder_session_from_drop(
+                    drag,
+                    &drop_project_id,
+                    session_index,
+                    &drop_chat_id,
+                    cx,
+                );
+            }))
+            .on_drag(drag_payload, move |drag, position, _, cx| {
+                cx.new(|_| SessionDragPreview {
+                    title: drag.title.clone(),
+                    position,
+                    colors,
+                })
+            })
+            .child(
+                div()
+                    .pt(px(8.0))
+                    .pr(px(26.0))
+                    .h(px(28.0))
+                    .truncate()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.text))
+                    .child(session.title),
+            )
+            .child(div().h(px(1.0)).w_full().bg(rgb(colors.rule)))
+            .child(
+                div()
+                    .h(px(25.0))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(11.5))
+                    .text_color(rgb(colors.muted))
+                    .child(
+                        svg()
+                            .path(agent_icon(agent))
+                            .size(px(12.0))
+                            .flex_none()
+                            .text_color(rgb(colors.muted)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink()
+                            .truncate()
+                            .child(session.branch),
+                    )
+                    .child(div().flex_none().text_color(rgb(colors.faint)).child("·"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(status_color))
+                            .when(signal != SessionSignal::Idle, |status| {
+                                status.font_weight(FontWeight::MEDIUM)
+                            })
+                            .child(signal.label()),
+                    )
+                    .when(signal == SessionSignal::Working, |meta| {
+                        meta.child(working_dots(instance, status_color))
+                    }),
+            )
+            .children(signal_tab(signal, colors))
+            .into_any_element()
+    }
+
+    /// The catalog: one drawer per project, each holding its session cards.
+    /// The current project's drawer lifts out; the rest stay one line tall and
+    /// show only their sessions' signal tabs until opened.
+    fn render_catalog(
         &mut self,
         colors: ThemeColors,
         active_chat_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let projects = project_cards(&self.model.folders, &self.model.chats);
-        let mut groups = Vec::with_capacity(projects.len());
+        let current_project = self.selected_minimal_project_id();
+        let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
 
+        let query = self.catalog_query.clone();
+        let mut matches = 0usize;
         for (project_index, project) in projects.iter().enumerate() {
-            let collapsed = self.collapsed_folders.contains(&project.id);
-            let sessions = project_sessions(&project.id, &self.model.chats);
-            let mut cards = Vec::with_capacity(sessions.len());
-
-            for (session_index, session) in sessions.into_iter().enumerate() {
-                let instance = session_instance;
-                session_instance += 1;
-                let selected = active_chat_id == Some(session.id.as_str());
-                let emphasized = selected;
-                let project_id = project.id.clone();
-                let chat_id = session.id.clone();
-                let context_chat_id = session.id.clone();
-                let context_title = session.title.clone();
-                let drag_payload = SessionDragPayload {
-                    chat_id: session.id.clone(),
-                    project_id: project.id.clone(),
-                    source_index: session_index,
-                    title: session.title.clone(),
-                };
-                let drop_project_id = project.id.clone();
-                let drop_chat_id = session.id.clone();
-                let agent = session.agent;
-                let done = !session.working && self.model.unread_chats.contains(&session.id);
-                let status_color = if session.working {
-                    colors.accent_ink
-                } else if done {
-                    DONE_STATUS_COLOR
-                } else {
-                    colors.muted
-                };
-                let status = if session.working {
-                    div()
-                        .mt_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(status_color))
-                        .child(session_status_icon(status_color))
-                        .child("Working")
-                        .child(working_dots(instance, status_color))
-                        .into_any_element()
-                } else if done {
-                    div()
-                        .mt_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(status_color))
-                        .child(session_status_icon(status_color))
-                        .child("Done")
-                        .into_any_element()
-                } else {
-                    div()
-                        .mt_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(status_color))
-                        .child(session_status_icon(status_color))
-                        .child("Idle")
-                        .into_any_element()
-                };
-
-                cards.push(
-                    div()
-                        .id(("minimal-session-card", instance))
-                        .w_full()
-                        .min_h(px(76.0))
-                        .px_3()
-                        .py_2()
-                        .rounded(px(4.0))
-                        .border_l_2()
-                        .border_color(rgb(if emphasized {
-                            colors.selected_border
-                        } else {
-                            colors.border
-                        }))
-                        .bg(rgb(if emphasized {
-                            colors.selected_surface
-                        } else {
-                            colors.surface
-                        }))
-                        .cursor_move()
-                        .hover(|style| {
-                            style
-                                .bg(rgb(if emphasized {
-                                    colors.selected_surface
-                                } else {
-                                    colors.surface_high
-                                }))
-                                .border_color(rgb(if emphasized {
-                                    colors.selected_border
-                                } else {
-                                    colors.accent
-                                }))
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_minimal_session(
-                                project_id.clone(),
-                                chat_id.clone(),
-                                agent,
-                                window,
-                                cx,
-                            );
-                        }))
-                        .on_mouse_down(
-                            MouseButton::Right,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                this.open_session_context_menu(
-                                    context_chat_id.clone(),
-                                    context_title.clone(),
-                                    event.position,
-                                    window,
-                                    cx,
-                                );
-                            }),
-                        )
-                        .can_drop({
-                            let drop_project_id = drop_project_id.clone();
-                            let drop_chat_id = drop_chat_id.clone();
-                            move |value, _, _| {
-                                value
-                                    .downcast_ref::<SessionDragPayload>()
-                                    .is_some_and(|drag| {
-                                        drag.project_id == drop_project_id
-                                            && drag.chat_id != drop_chat_id
-                                    })
-                            }
-                        })
-                        .drag_over::<SessionDragPayload>(move |style, _, _, _| {
-                            style
-                                .border_color(rgb(colors.accent))
-                                .bg(rgb(colors.surface_high))
-                        })
-                        .on_drop(cx.listener(move |this, drag: &SessionDragPayload, _, cx| {
-                            this.reorder_session_from_drop(
-                                drag,
-                                &drop_project_id,
-                                session_index,
-                                &drop_chat_id,
-                                cx,
-                            );
-                        }))
-                        .on_drag(drag_payload, move |drag, position, _, cx| {
-                            cx.new(|_| SessionDragPreview {
-                                title: drag.title.clone(),
-                                position,
-                                colors,
-                            })
-                        })
-                        .child(
-                            div().flex().items_start().gap_2().child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .text_base()
-                                    .line_height(px(22.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child(session.title),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .mt_2()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_sm()
-                                .text_color(rgb(colors.muted))
-                                .child(
-                                    svg()
-                                        .path(GIT_BRANCH_ICON)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(rgb(colors.muted)),
-                                )
-                                .child(div().min_w_0().flex_1().truncate().child(session.branch)),
-                        )
-                        .child(status),
-                );
+            let current = current_project.as_deref() == Some(project.id.as_str())
+                && !matches!(self.minimal_route, MinimalRoute::Terminal);
+            let mut sessions = project_sessions(&project.id, &self.model.chats);
+            let finding = !query.is_empty();
+            if finding && !project.name.to_lowercase().contains(&query) {
+                sessions.retain(|session| {
+                    session.title.to_lowercase().contains(&query)
+                        || session.branch.to_lowercase().contains(&query)
+                });
+                if sessions.is_empty() {
+                    session_instance += project.sessions;
+                    continue;
+                }
             }
+            matches += 1;
+            let open = finding
+                || if current {
+                    !self.collapsed_folders.contains(&project.id)
+                } else {
+                    self.opened_drawers.contains(&project.id)
+                };
+            let signals = sessions
+                .iter()
+                .map(|session| self.session_signal(session))
+                .collect::<Vec<_>>();
+            let mut cards = Vec::new();
+            if open {
+                for (session_index, session) in sessions.into_iter().enumerate() {
+                    let instance = session_instance;
+                    session_instance += 1;
+                    let selected = active_chat_id == Some(session.id.as_str());
+                    cards.push(self.render_session_card(
+                        colors,
+                        &project.id,
+                        session_index,
+                        session,
+                        instance,
+                        selected,
+                        cx,
+                    ));
+                }
+            } else {
+                session_instance += sessions.len();
+            }
+            // Keep instance ids stable for sessions the filter hid.
+            session_instance += project.sessions.saturating_sub(signals.len());
 
-            let collapse_project = project.id.clone();
+            let toggle_project = project.id.clone();
+            let select_project = project.id.clone();
             let create_project = project.id.clone();
+            let name = div()
+                .min_w_0()
+                .flex_shrink()
+                .truncate()
+                .text_size(px(13.0))
+                .font_weight(if current {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
+                .text_color(rgb(colors.text))
+                .child(project.name.clone());
             let header = div()
                 .id(("minimal-session-group-header", project_index))
-                .h(px(28.0))
+                .h(px(34.0))
                 .w_full()
-                .px_1()
+                .pl_1()
+                .pr_1()
                 .flex()
                 .items_center()
                 .gap_2()
-                .rounded_md()
+                .rounded(px(5.0))
                 .cursor_pointer()
-                .hover(|style| style.bg(rgb(colors.surface_high)))
+                .when(!current, |header| {
+                    header.hover(|style| style.bg(rgb(colors.surface_high)))
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_folder_collapsed(collapse_project.clone(), cx);
+                    this.opened_drawers.remove(&select_project);
+                    this.collapsed_folders.remove(&select_project);
+                    this.persist_collapsed_folders();
+                    this.minimal_route = MinimalRoute::Projects {
+                        project_id: Some(select_project.clone()),
+                    };
+                    cx.notify();
                 }))
                 .child(
                     div()
-                        .w(px(12.0))
+                        .id(("catalog-drawer-toggle", project_index))
+                        .size(px(22.0))
                         .flex_none()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child(if collapsed { "›" } else { "⌄" }),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(colors.text))
-                        .child(project.name.to_uppercase()),
-                )
-                .child(
-                    div()
-                        .id(("minimal-session-group-add", project_index))
-                        .size(px(26.0))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded_md()
+                        .rounded(px(4.0))
+                        .text_sm()
+                        .text_color(rgb(colors.faint))
+                        .hover(|style| style.bg(rgb(colors.border)).text_color(rgb(colors.text)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_drawer(toggle_project.clone(), current, cx);
+                        }))
+                        .child(icon(
+                            if open {
+                                CHEVRON_DOWN_ICON
+                            } else {
+                                CHEVRON_RIGHT_ICON
+                            },
+                            14.0,
+                            colors.faint,
+                        )),
+                )
+                .child(if current {
+                    div()
+                        .min_w_0()
+                        .flex_shrink()
+                        .px(px(7.0))
+                        .h(px(22.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(3.0))
+                        .border(px(1.5))
+                        .border_color(rgb(colors.selected_border))
+                        .child(name)
+                        .into_any_element()
+                } else {
+                    name.into_any_element()
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .font_family(MONO)
+                        .text_size(px(11.0))
+                        .text_color(rgb(colors.faint))
+                        .child(project.sessions.to_string()),
+                )
+                .child(div().flex_1())
+                .when(!open, |header| header.child(drawer_tabs(&signals, colors)))
+                .child(
+                    div()
+                        .id(("minimal-session-group-add", project_index))
+                        .size(px(24.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(colors.border)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.begin_chat_create(create_project.clone(), window, cx);
                         }))
-                        .child(plus_icon(colors.text)),
+                        .child(plus_icon(colors.muted)),
                 );
 
-            groups.push(
+            drawers.push(
                 div()
                     .id(("minimal-session-group", project_index))
                     .w_full()
                     .flex()
                     .flex_col()
+                    .when(current, |drawer| {
+                        drawer
+                            .p(px(5.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .bg(rgb(colors.background))
+                    })
+                    .when(!current, |drawer| drawer.px(px(5.0)))
                     .child(header)
-                    .when(!collapsed, |group| {
-                        group.child(
+                    .when(open, |drawer| {
+                        drawer.child(
                             div()
-                                .mt_2()
+                                .mt(px(6.0))
+                                .mb(px(2.0))
                                 .w_full()
                                 .flex()
                                 .flex_col()
-                                .gap_2()
+                                .gap(px(7.0))
                                 .children(cards)
                                 .when(project.sessions == 0, |list| {
                                     list.child(
                                         div()
                                             .px_3()
-                                            .py_3()
-                                            .text_sm()
+                                            .py_2()
+                                            .text_size(px(12.0))
                                             .text_color(rgb(colors.muted))
                                             .child("No sessions yet."),
                                     )
@@ -9466,40 +9623,184 @@ impl XdDesktop {
             );
         }
 
+        let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
+        let create_session_for = current_project.clone();
+        let settings_open = self.minimal_theme_open;
+
         div()
             .id("minimal-session-board")
-            .w(px(236.0))
+            .w(px(CATALOG_WIDTH))
             .h_full()
             .min_h_0()
             .flex_none()
-            .overflow_y_scroll()
-            .px_3()
-            .pt_4()
-            .pb_5()
             .flex()
             .flex_col()
-            .gap_4()
             .border_r_1()
             .border_color(rgb(colors.border))
             .bg(rgb(colors.sidebar))
-            .children(groups)
-            .when(projects.is_empty(), |board| {
-                board.child(
-                    div()
-                        .px_2()
-                        .py_4()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child("No workspaces yet."),
-                )
-            })
+            .child(
+                div()
+                    .h(px(44.0))
+                    .flex_none()
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.text))
+                            .child("Projects"),
+                    )
+                    .child(
+                        div()
+                            .id("minimal-new-project")
+                            .size(px(26.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.begin_workspace_create(window, cx)
+                            }))
+                            .child(plus_icon(colors.text)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("catalog-find")
+                    .mx(px(10.0))
+                    .mb_2()
+                    .h(px(32.0))
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.background))
+                    .text_size(px(12.5))
+                    .child(icon(SEARCH_ICON, 13.0, colors.faint))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(self.catalog_find_input.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .id("minimal-project-list")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(7.0))
+                    .pb_4()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .children(drawers)
+                    .when(projects.is_empty(), |list| {
+                        list.child(
+                            div()
+                                .px_3()
+                                .py_3()
+                                .text_size(px(12.5))
+                                .line_height(px(19.0))
+                                .text_color(rgb(colors.muted))
+                                .child(
+                                    "No projects yet. Add one with +, then start a session in it.",
+                                ),
+                        )
+                    })
+                    .when(!projects.is_empty() && matches == 0, |list| {
+                        list.child(
+                            div()
+                                .px_3()
+                                .py_3()
+                                .text_size(px(12.5))
+                                .line_height(px(19.0))
+                                .text_color(rgb(colors.muted))
+                                .child(format!(
+                                    "Nothing matches \u{201c}{query}\u{201d}. Press Esc to clear."
+                                )),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(rgb(colors.border))
+                    .child(
+                        ui_button("minimal-global-create", ButtonKind::Primary, colors)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(project_id) = create_session_for.clone() {
+                                    this.begin_chat_create(project_id, window, cx);
+                                } else {
+                                    this.begin_workspace_create(window, cx);
+                                }
+                            }))
+                            .child(plus_icon(colors.accent_text))
+                            .child(if current_project.is_some() {
+                                "New session"
+                            } else {
+                                "New project"
+                            }),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
+                            .when(terminal_active, |button| {
+                                button
+                                    .bg(rgb(colors.selected_surface))
+                                    .text_color(rgb(colors.text))
+                            })
+                            .child(icon(
+                                TERMINAL_ICON,
+                                15.0,
+                                if terminal_active {
+                                    colors.text
+                                } else {
+                                    colors.muted
+                                },
+                            ))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_minimal_terminal(window, cx)
+                            })),
+                    )
+                    .child(
+                        ui_button("minimal-theme", ButtonKind::Ghost, colors)
+                            .when(settings_open, |button| {
+                                button
+                                    .bg(rgb(colors.selected_surface))
+                                    .text_color(rgb(colors.text))
+                            })
+                            .child("Settings")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_minimal_theme_popup(window, cx)
+                            })),
+                    ),
+            )
             .into_any_element()
     }
 
+    /// The project's front: its name, its actions, and every session card at
+    /// reading size. This is where "project, then session" starts.
     fn render_minimal_home(
         &mut self,
         colors: ThemeColors,
-        window: &Window,
+        _window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let projects = project_cards(&self.model.folders, &self.model.chats);
@@ -9507,9 +9808,6 @@ impl XdDesktop {
         let selected_project = selected_project_id
             .as_deref()
             .and_then(|selected| projects.iter().find(|project| project.id == selected));
-        let selected_project_name = selected_project
-            .map(|project| project.name.clone())
-            .unwrap_or_else(|| "Welcome to xd".into());
         let selected_project_rename =
             selected_project.map(|project| (project.id.clone(), project.name.clone()));
         let selected_project_delete = selected_project.map(|project| project.id.clone());
@@ -9517,78 +9815,19 @@ impl XdDesktop {
             .as_deref()
             .map(|project_id| project_sessions(project_id, &self.model.chats))
             .unwrap_or_default();
-
-        let project_rows =
-            projects
-                .iter()
-                .enumerate()
-                .map(|(index, project)| {
-                    let project_id = project.id.clone();
-                    let selected = selected_project_id.as_deref() == Some(project.id.as_str());
-                    div()
-                        .id(("minimal-project", index))
-                        .w_full()
-                        .px_3()
-                        .py_3()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .rounded(px(4.0))
-                        .border_l_2()
-                        .border_color(rgb(if selected {
-                            colors.selected_border
-                        } else {
-                            colors.border
-                        }))
-                        .bg(rgb(if selected {
-                            colors.selected_surface
-                        } else {
-                            colors.surface
-                        }))
-                        .cursor_pointer()
-                        .hover(|style| {
-                            style
-                                .bg(rgb(colors.surface_high))
-                                .border_color(rgb(colors.accent))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.minimal_route = MinimalRoute::Projects {
-                                project_id: Some(project_id.clone()),
-                            };
-                            cx.notify();
-                        }))
-                        .child(svg().path(FOLDER_ICON).size(px(18.0)).text_color(rgb(
-                            if selected {
-                                colors.accent
-                            } else {
-                                colors.muted
-                            },
-                        )))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .overflow_hidden()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(colors.text))
-                                        .child(project.name.clone()),
-                                )
-                                .child(div().mt_1().text_xs().text_color(rgb(colors.muted)).child(
-                                    format!(
-                                        "{} session{}",
-                                        project.sessions,
-                                        if project.sessions == 1 { "" } else { "s" }
-                                    ),
-                                )),
-                        )
-                        .when(project.working > 0, |row| {
-                            row.child(working_dots(index, colors.accent))
-                        })
-                })
-                .collect::<Vec<_>>();
+        let resume = resumable_session(self.cached_last_chat().as_deref(), &self.model.chats)
+            .and_then(|(project_id, chat_id, agent)| {
+                let title = project_sessions(&project_id, &self.model.chats)
+                    .into_iter()
+                    .find(|session| session.id == chat_id)?
+                    .title;
+                Some((project_id, chat_id, agent, title))
+            });
+        let working = sessions.iter().filter(|session| session.working).count();
+        let waiting = sessions
+            .iter()
+            .filter(|session| self.model.is_waiting(&session.id))
+            .count();
 
         let session_rows = sessions
             .iter()
@@ -9599,43 +9838,21 @@ impl XdDesktop {
                 let context_chat_id = session.id.clone();
                 let context_title = session.title.clone();
                 let agent = session.agent;
-                let done = !session.working && self.model.unread_chats.contains(&session.id);
-                let icon = match agent {
-                    AgentCli::Codex => CODEX_ICON,
-                    AgentCli::Claude => CLAUDE_ICON,
-                    AgentCli::Jcode => JCODE_ICON,
-                    AgentCli::Copilot => COPILOT_ICON,
-                };
-                let status = if session.working {
-                    div().child("Working").into_any_element()
-                } else if done {
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(DONE_STATUS_COLOR))
-                        .child("Done")
-                        .into_any_element()
-                } else {
-                    div().child("Idle").into_any_element()
-                };
+                let signal = self.session_signal(session);
+                let status_color = signal.color(colors);
                 div()
                     .id(("minimal-session", index))
+                    .relative()
                     .w_full()
-                    .max_w(px(760.0))
-                    .px_3()
-                    .py_3()
+                    .h(px(60.0))
+                    .px_4()
                     .flex()
                     .items_center()
                     .gap_3()
-                    .rounded(px(4.0))
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
+                    .rounded(px(6.0))
                     .bg(rgb(colors.surface))
                     .cursor_pointer()
-                    .hover(|style| {
-                        style
-                            .bg(rgb(colors.surface_high))
-                            .border_color(rgb(colors.accent))
-                    })
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_minimal_session(
                             project_id.clone(),
@@ -9660,14 +9877,21 @@ impl XdDesktop {
                     )
                     .child(
                         div()
-                            .size(px(38.0))
+                            .size(px(32.0))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded_lg()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(colors.border))
                             .bg(rgb(colors.background))
-                            .child(svg().path(icon).size(px(22.0)).text_color(rgb(colors.text))),
+                            .child(
+                                svg()
+                                    .path(agent_icon(agent))
+                                    .size(px(17.0))
+                                    .text_color(rgb(colors.text)),
+                            ),
                     )
                     .child(
                         div()
@@ -9675,245 +9899,253 @@ impl XdDesktop {
                             .flex_1()
                             .child(
                                 div()
-                                    .overflow_hidden()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(colors.text))
                                     .child(session.title.clone()),
                             )
                             .child(
                                 div()
-                                    .mt_1()
+                                    .mt(px(3.0))
                                     .flex()
                                     .items_center()
-                                    .gap_2()
-                                    .text_xs()
+                                    .gap(px(6.0))
+                                    .text_size(px(12.0))
                                     .text_color(rgb(colors.muted))
-                                    .child(format!("{} CLI", agent.label()))
-                                    .child("·")
-                                    .child(status),
+                                    .child(agent.label())
+                                    .child(div().text_color(rgb(colors.faint)).child("·"))
+                                    .child(
+                                        svg()
+                                            .path(GIT_BRANCH_ICON)
+                                            .size(px(12.0))
+                                            .flex_none()
+                                            .text_color(rgb(colors.muted)),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .when(session.branch != "Project directory", |branch| {
+                                                branch.font_family(MONO).text_size(px(11.5))
+                                            })
+                                            .child(session.branch.clone()),
+                                    ),
                             ),
                     )
-                    .when(session.working, |row| {
-                        row.child(working_dots(index + projects.len(), colors.accent))
+                    .child(if signal == SessionSignal::Idle {
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.faint))
+                            .child("Idle")
+                            .into_any_element()
+                    } else {
+                        stamp(signal.label(), status_color)
                     })
-                    .child(div().text_lg().text_color(rgb(colors.muted)).child("›"))
+                    .children(signal_tab(signal, colors))
             })
             .collect::<Vec<_>>();
 
-        let project_sidebar = div()
-            .id("minimal-project-list")
-            .w(px(236.0))
-            .h_full()
-            .min_h_0()
-            .flex_none()
-            .overflow_y_scroll()
-            .px_3()
-            .pt_4()
-            .pb_5()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .border_r_1()
-            .border_color(rgb(colors.border))
-            .bg(rgb(colors.sidebar))
-            .child(
-                div()
-                    .h(px(30.0))
-                    .w_full()
-                    .px_1()
-                    .mb_1()
-                    .flex()
-                    .items_center()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.muted))
-                            .child("PROJECTS"),
-                    )
-                    .child(
-                        div()
-                            .id("minimal-new-project")
-                            .size(px(26.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.begin_workspace_create(window, cx)
-                            }))
-                            .child(plus_icon(colors.text)),
-                    ),
-            )
-            .children(project_rows)
-            .when(projects.is_empty(), |list| {
-                list.child(
-                    div()
-                        .px_2()
-                        .py_4()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child("No projects yet."),
-                )
-            });
+        let summary = if selected_project.is_none() {
+            String::new()
+        } else {
+            let mut parts = vec![format!(
+                "{} session{}",
+                sessions.len(),
+                if sessions.len() == 1 { "" } else { "s" }
+            )];
+            if working > 0 {
+                parts.push(format!("{working} working"));
+            }
+            if waiting > 0 {
+                parts.push(format!("{waiting} waiting on you"));
+            }
+            parts.join(" · ")
+        };
 
-        let project_content = div()
+        div()
             .id("minimal-project-content")
-            .flex_1()
+            .size_full()
             .min_w_0()
-            .h_full()
             .min_h_0()
             .overflow_y_scroll()
-            .px_6()
-            .py_5()
             .bg(rgb(colors.background))
             .child(
                 div()
                     .w_full()
-                    .max_w(px(900.0))
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.muted))
-                            .child("PROJECT"),
-                    )
-                    .child(
-                        div()
-                            .mt_1()
-                            .flex()
-                            .items_center()
-                            .gap_3()
+                    .max_w(px(820.0))
+                    .px(px(36.0))
+                    .pt(px(30.0))
+                    .pb_8()
+                    .when_some(selected_project, |front, project| {
+                        front
                             .child(
                                 div()
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .text_3xl()
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child(selected_project_name),
-                            )
-                            .when_some(
-                                selected_project_rename,
-                                |heading, (folder_id, project_name)| {
-                                    heading.child(
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
                                         div()
-                                            .id("minimal-rename-project")
-                                            .size(px(34.0))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .border_1()
-                                            .border_color(rgb(colors.border))
-                                            .bg(rgb(colors.surface))
-                                            .text_lg()
-                                            .text_color(rgb(colors.muted))
-                                            .cursor_pointer()
-                                            .hover(|style| {
-                                                style
-                                                    .bg(rgb(colors.surface_high))
-                                                    .text_color(rgb(colors.text))
-                                            })
-                                            .on_click(cx.listener(
-                                                move |this, _, window, cx| {
-                                                    this.begin_sidebar_edit(
-                                                        SidebarTarget::Folder(folder_id.clone()),
-                                                        project_name.clone(),
-                                                        window,
-                                                        cx,
-                                                    );
-                                                },
-                                            ))
-                                            .child("✎"),
+                                            .min_w_0()
+                                            .px(px(10.0))
+                                            .py(px(3.0))
+                                            .rounded(px(4.0))
+                                            .border(px(1.5))
+                                            .border_color(rgb(colors.selected_border))
+                                            .truncate()
+                                            .text_size(px(22.0))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(rgb(colors.text))
+                                            .child(project.name.clone()),
                                     )
-                                },
+                                    .child(div().flex_1())
+                                    .when_some(
+                                        selected_project_rename.clone(),
+                                        |heading, (folder_id, project_name)| {
+                                            heading.child(
+                                                ui_button(
+                                                    "minimal-rename-project",
+                                                    ButtonKind::Ghost,
+                                                    colors,
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.begin_sidebar_edit(
+                                                            SidebarTarget::Folder(
+                                                                folder_id.clone(),
+                                                            ),
+                                                            project_name.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child("Rename"),
+                                            )
+                                        },
+                                    )
+                                    .when_some(
+                                        selected_project_delete.clone(),
+                                        |heading, folder_id| {
+                                            heading.child(
+                                                ui_button(
+                                                    "minimal-delete-project",
+                                                    ButtonKind::Ghost,
+                                                    colors,
+                                                )
+                                                .text_color(rgb(colors.danger))
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.begin_sidebar_delete(
+                                                            SidebarTarget::Folder(
+                                                                folder_id.clone(),
+                                                            ),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                ))
+                                                .child(
+                                                    svg()
+                                                        .path(TRASH_ICON)
+                                                        .size(px(14.0))
+                                                        .text_color(rgb(colors.danger)),
+                                                )
+                                                .child("Delete"),
+                                            )
+                                        },
+                                    ),
                             )
-                            .when_some(
-                                selected_project_delete,
-                                |heading, folder_id| {
-                                    heading.child(
-                                        div()
-                                            .id("minimal-delete-project")
-                                            .size(px(34.0))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .border_1()
-                                            .border_color(rgb(colors.border))
-                                            .bg(rgb(colors.surface))
-                                            .text_color(rgb(0xd86f7c))
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(0x5a252b)))
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.begin_sidebar_delete(
-                                                    SidebarTarget::Folder(folder_id.clone()),
-                                                    window,
-                                                    cx,
-                                                );
-                                            }))
-                                            .child(
-                                                svg()
-                                                    .path(TRASH_ICON)
-                                                    .size(px(17.0))
-                                                    .text_color(rgb(0xd86f7c)),
-                                            ),
-                                    )
-                                },
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt_8()
-                            .mb_3()
-                            .flex()
-                            .items_center()
-                            .justify_between()
                             .child(
                                 div()
-                                    .text_sm()
+                                    .mt(px(10.0))
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(colors.muted))
+                                    .child(summary.clone()),
+                            )
+                    })
+                    .when(selected_project.is_none(), |front| {
+                        front
+                            .child(
+                                div()
+                                    .text_size(px(22.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
-                                    .child("Sessions"),
+                                    .child("Welcome to xd"),
                             )
-                            .when_some(selected_project_id.clone(), |row, folder_id| {
-                                row.child(
+                            .child(
+                                div()
+                                    .mt(px(10.0))
+                                    .max_w(px(460.0))
+                                    .text_size(px(13.5))
+                                    .line_height(px(21.0))
+                                    .text_color(rgb(colors.muted))
+                                    .child(
+                                        "Create a workspace, then start a Codex, Claude, JCode, or Copilot session in it. Sessions keep running when you close the window.",
+                                    ),
+                            )
+                            .child(
+                                div().mt_5().flex().child(
+                                    ui_button("minimal-welcome-project", ButtonKind::Primary, colors)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.begin_workspace_create(window, cx)
+                                        }))
+                                        .child(plus_icon(colors.accent_text))
+                                        .child("New project"),
+                                ),
+                            )
+                    })
+                    .when_some(resume, |front, (project_id, chat_id, agent, title)| {
+                        front.child(
+                            div().mt(px(18.0)).flex().child(
+                                ui_button("minimal-resume-session", ButtonKind::Secondary, colors)
+                                    .max_w(px(420.0))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_minimal_session(
+                                            project_id.clone(),
+                                            chat_id.clone(),
+                                            agent,
+                                            window,
+                                            cx,
+                                        );
+                                    }))
+                                    .child(div().text_color(rgb(colors.muted)).child("Continue"))
+                                    .child(div().min_w_0().truncate().child(title)),
+                            ),
+                        )
+                    })
+                    .when_some(selected_project_id.clone(), |front, folder_id| {
+                        front.child(
+                            div()
+                                .mt(px(28.0))
+                                .mb(px(12.0))
+                                .flex()
+                                .items_center()
+                                .child(
                                     div()
-                                        .id("minimal-new-session")
-                                        .px_3()
-                                        .py_2()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .rounded_lg()
-                                        .bg(rgb(colors.accent))
-                                        .text_xs()
+                                        .flex_1()
+                                        .text_size(px(14.0))
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(colors.accent_text))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.accent_hover)))
+                                        .text_color(rgb(colors.text))
+                                        .child("Sessions"),
+                                )
+                                .child(
+                                    ui_button("minimal-new-session", ButtonKind::Primary, colors)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.begin_chat_create(folder_id.clone(), window, cx);
                                         }))
                                         .child(plus_icon(colors.accent_text))
                                         .child("New session"),
-                                )
-                            }),
-                    )
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .w_full()
                             .flex()
                             .flex_col()
-                            .gap_0()
+                            .gap(px(9.0))
                             .children(session_rows)
                             .when(
                                 selected_project_id.is_some() && sessions.is_empty(),
@@ -9921,52 +10153,22 @@ impl XdDesktop {
                                     list.child(
                                         div()
                                             .w_full()
-                                            .max_w(px(760.0))
-                                            .p_6()
-                                            .rounded(px(5.0))
+                                            .p_5()
+                                            .rounded(px(6.0))
                                             .border_1()
                                             .border_color(rgb(colors.border))
-                                            .text_sm()
+                                            .text_size(px(13.0))
                                             .text_color(rgb(colors.muted))
                                             .child(
                                                 "No sessions yet. Start one with Codex, Claude, JCode, or Copilot.",
                                             ),
                                     )
                                 },
-                            )
-                            .when(projects.is_empty(), |list| {
-                                list.child(
-                                    div()
-                                        .max_w(px(360.0))
-                                        .text_sm()
-                                        .text_color(rgb(colors.muted))
-                                        .child(
-                                            "Create a workspace, then start a Codex, Claude, JCode, or Copilot session.",
-                                        ),
-                                )
-                            }),
+                            ),
                     ),
-            );
-
-        div()
-            .size_full()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .bg(rgb(colors.background))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .when(!self.browser_compacts_sidebar(window), |row| {
-                        row.child(project_sidebar)
-                    })
-                    .child(project_content),
             )
             .into_any_element()
     }
-
     fn render_native_inline(
         content: &markdown::InlineText,
         colors: ThemeColors,
@@ -9992,7 +10194,7 @@ impl XdDesktop {
                     ..Default::default()
                 },
                 markdown::InlineKind::Link => HighlightStyle {
-                    color: Some(rgb(colors.accent).into()),
+                    color: Some(rgb(colors.accent_ink).into()),
                     underline: Some(gpui::UnderlineStyle {
                         thickness: px(1.0),
                         color: None,
@@ -10059,8 +10261,8 @@ impl XdDesktop {
                 .into_any_element(),
             markdown::Block::Paragraph(content) => div()
                 .id(("native-paragraph", index))
-                .text_sm()
-                .line_height(px(22.0))
+                .text_size(px(14.0))
+                .line_height(px(23.0))
                 .text_color(rgb(colors.text))
                 .child(Self::render_native_inline(content, colors, index))
                 .into_any_element(),
@@ -10069,8 +10271,8 @@ impl XdDesktop {
                 .pl_3()
                 .border_l_2()
                 .border_color(rgb(colors.border))
-                .text_sm()
-                .line_height(px(22.0))
+                .text_size(px(14.0))
+                .line_height(px(23.0))
                 .text_color(rgb(colors.muted))
                 .child(Self::render_native_inline(content, colors, index))
                 .into_any_element(),
@@ -10084,8 +10286,8 @@ impl XdDesktop {
                 .flex()
                 .items_start()
                 .gap_2()
-                .text_sm()
-                .line_height(px(22.0))
+                .text_size(px(14.0))
+                .line_height(px(23.0))
                 .text_color(rgb(colors.text))
                 .child(number.map_or_else(|| "•".into(), |number| format!("{number}.")))
                 .child(
@@ -10106,10 +10308,12 @@ impl XdDesktop {
                 .id(("native-code", index))
                 .w_full()
                 .p_3()
-                .rounded_lg()
-                .bg(rgb(colors.background))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .bg(rgb(colors.surface))
                 .font_family(MONO)
-                .text_xs()
+                .text_size(px(12.5))
                 .line_height(px(19.0))
                 .text_color(rgb(colors.text))
                 .child(code.code.clone())
@@ -10118,10 +10322,12 @@ impl XdDesktop {
                 .id(("native-table", index))
                 .w_full()
                 .p_3()
-                .rounded_lg()
-                .bg(rgb(colors.background))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .bg(rgb(colors.surface))
                 .font_family(MONO)
-                .text_xs()
+                .text_size(px(12.5))
                 .line_height(px(19.0))
                 .text_color(rgb(colors.text))
                 .child(table.text.clone())
@@ -10133,8 +10339,10 @@ impl XdDesktop {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .rounded_lg()
-                .bg(rgb(colors.background))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .bg(rgb(colors.surface))
                 .child(
                     div()
                         .text_xs()
@@ -10165,10 +10373,11 @@ impl XdDesktop {
         activity_id: i64,
         expanded: bool,
     ) -> gpui::AnyElement {
+        let failed = card.kind == ActivityKind::Failure;
         let status_color = match card.kind {
-            ActivityKind::Running => colors.accent,
-            ActivityKind::Success => 0x72bd8b,
-            ActivityKind::Failure => 0xd86f7c,
+            ActivityKind::Running => colors.working,
+            ActivityKind::Success => colors.working,
+            ActivityKind::Failure => colors.danger,
             ActivityKind::Finished => colors.muted,
         };
         let detail = card
@@ -10185,7 +10394,10 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_xs()
+                    .pl(px(20.0))
+                    .font_family(MONO)
+                    .text_size(px(12.0))
+                    .line_height(px(20.0))
                     .text_color(rgb(colors.text))
                     .child(div().min_w_0().flex_1().child(item.name))
                     .child(
@@ -10201,15 +10413,15 @@ impl XdDesktop {
             .id(("native-activity", index))
             .w_full()
             .max_w(px(860.0))
-            .px_4()
-            .py_3()
+            .px_3()
+            .py(px(7.0))
             .flex()
             .flex_col()
-            .gap_2()
-            .rounded_xl()
+            .gap(px(6.0))
+            .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(colors.border))
-            .bg(rgb(colors.surface_high))
+            .border_color(rgb(if failed { colors.danger } else { colors.border }))
+            .bg(rgb(colors.surface))
             .child(
                 div()
                     .id(("native-activity-toggle", index))
@@ -10217,25 +10429,53 @@ impl XdDesktop {
                     .on_click(move |_, window, cx| {
                         window.dispatch_action(Box::new(ToggleActivity { id: activity_id }), cx);
                     })
-                    .child(if expanded { "▾" } else { "▸" })
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.muted))
-                            .child(card.title),
+                            .w(px(12.0))
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(rgb(colors.faint))
+                            .child(icon(
+                                if expanded {
+                                    CHEVRON_DOWN_ICON
+                                } else {
+                                    CHEVRON_RIGHT_ICON
+                                },
+                                12.0,
+                                colors.faint,
+                            )),
                     )
-                    .child(div().min_w_0().flex_1().text_sm().child(card.name))
                     .child(
                         div()
                             .flex_none()
-                            .text_xs()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.text))
+                            .child(card.title),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.muted))
+                            .child(card.name),
+                    )
+                    .child(if failed {
+                        stamp(card.status, colors.danger)
+                    } else {
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
                             .text_color(rgb(status_color))
-                            .child(card.status),
-                    ),
+                            .child(card.status)
+                            .into_any_element()
+                    }),
             )
             .when_some(detail.filter(|_| expanded), |activity, detail| {
                 activity.child(
@@ -10245,10 +10485,10 @@ impl XdDesktop {
                         .max_h(px(260.0))
                         .overflow_y_scroll()
                         .p_3()
-                        .rounded_lg()
+                        .rounded(px(5.0))
                         .bg(rgb(colors.background))
                         .font_family(MONO)
-                        .text_xs()
+                        .text_size(px(12.0))
                         .line_height(px(19.0))
                         .text_color(rgb(colors.muted))
                         .child(detail),
@@ -10275,22 +10515,28 @@ impl XdDesktop {
             return div()
                 .id(("native-duration", index))
                 .w_full()
+                .max_w(px(860.0))
                 .py_2()
                 .text_center()
-                .text_xs()
-                .text_color(rgb(colors.muted))
+                .text_size(px(11.5))
+                .text_color(rgb(colors.faint))
                 .child(label)
                 .into_any_element();
         }
 
         if let Some(activity) = activity {
-            return Self::render_native_activity(
-                colors,
-                activity,
-                index,
-                message.id.unwrap_or(-(index as i64) - 1),
-                expanded,
-            );
+            return div()
+                .w_full()
+                .max_w(px(860.0))
+                .pb(px(6.0))
+                .child(Self::render_native_activity(
+                    colors,
+                    activity,
+                    index,
+                    message.id.unwrap_or(-(index as i64) - 1),
+                    expanded,
+                ))
+                .into_any_element();
         }
 
         let user = role == "user";
@@ -10306,25 +10552,28 @@ impl XdDesktop {
         let block_scope = format!("native-message:{}", message.id.unwrap_or(index as i64));
         let card = div()
             .min_w_0()
-            .max_w(px(if user { 720.0 } else { 860.0 }))
-            .px_4()
-            .py_3()
+            .max_w(px(if user { 720.0 } else { 820.0 }))
             .flex()
             .flex_col()
             .gap_2()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(if error { 0x8f3f4b } else { colors.border }))
-            .bg(rgb(if user {
-                colors.selected_surface
-            } else {
-                colors.surface
-            }))
+            .when(user || error, |card| {
+                card.px_4()
+                    .py_3()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(rgb(if error { colors.danger } else { colors.border }))
+                    .bg(rgb(if error {
+                        colors.danger_surface
+                    } else {
+                        colors.surface
+                    }))
+            })
+            .when(!user && !error, |card| card.w_full().py_1())
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(11.5))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(if error { 0xd86f7c } else { colors.muted }))
+                    .text_color(rgb(if error { colors.danger } else { colors.faint }))
                     .child(label),
             )
             .child(
@@ -10347,8 +10596,10 @@ impl XdDesktop {
             .id(("native-message", index))
             .w_full()
             .flex()
-            .when(user, |row| row.justify_end())
+            .flex_col()
+            .when(user, |row| row.items_end())
             .child(card)
+            .child(div().h(px(14.0)))
             .into_any_element()
     }
 
@@ -10418,11 +10669,12 @@ impl XdDesktop {
             .py_3()
             .flex()
             .flex_col()
-            .gap_2()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(colors.accent))
+            .gap(px(10.0))
+            .rounded(px(8.0))
+            .border(px(1.5))
+            .border_color(rgb(colors.waiting))
             .bg(rgb(colors.surface))
+            .text_size(px(13.0))
             .text_color(rgb(colors.text));
         if method == "item/tool/requestUserInput" {
             let question = params["questions"]
@@ -10437,10 +10689,23 @@ impl XdDesktop {
                 .clone();
             let question_id = question["id"].as_str()?.to_owned();
             card = card.child(
-                question["question"]
-                    .as_str()
-                    .unwrap_or("Your input is needed")
-                    .to_owned(),
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(
+                                question["question"]
+                                    .as_str()
+                                    .unwrap_or("Your input is needed")
+                                    .to_owned(),
+                            ),
+                    )
+                    .child(stamp("Waiting on you", colors.waiting)),
             );
             let buttons = question["options"]
                 .as_array()
@@ -10452,13 +10717,8 @@ impl XdDesktop {
                     let answer = label.clone();
                     let id = request_id.clone();
                     let question = question_id.clone();
-                    div()
-                        .id(("interaction-answer", index))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgb(colors.surface_high))
-                        .cursor_pointer()
+                    ui_button(("interaction-answer", index), ButtonKind::Secondary, colors)
+                        .justify_start()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.answer_interaction(
                                 id.clone(),
@@ -10470,28 +10730,26 @@ impl XdDesktop {
                         .child(label)
                 })
                 .collect::<Vec<_>>();
-            card = card.children(buttons).child(div().h(px(40.0)).child(
-                if question["isSecret"] == true {
+            card = card
+                .child(div().flex().flex_wrap().gap_2().children(buttons))
+                .child(div().h(px(40.0)).child(if question["isSecret"] == true {
                     self.secret_question_input.clone()
                 } else {
                     self.question_input.clone()
-                },
-            ));
+                }));
             card = card.child(
-                div()
-                    .id("interaction-submit")
-                    .px_3()
-                    .py_2()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.answer_interaction(
-                            request_id.clone(),
-                            question_id.clone(),
-                            this.question_answer.clone(),
-                            cx,
-                        )
-                    }))
-                    .child("Submit answer"),
+                div().flex().child(
+                    ui_button("interaction-submit", ButtonKind::Primary, colors)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.answer_interaction(
+                                request_id.clone(),
+                                question_id.clone(),
+                                this.question_answer.clone(),
+                                cx,
+                            )
+                        }))
+                        .child("Submit answer"),
+                ),
             );
         } else {
             let detail = params
@@ -10500,13 +10758,35 @@ impl XdDesktop {
                 .or_else(|| params.get("reason").and_then(Value::as_str))
                 .unwrap_or("The agent requests permission to continue");
             card = card
-                .child("Approval needed")
-                .child(div().text_sm().font_family(MONO).child(detail.to_owned()));
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child("Approval needed"),
+                        )
+                        .child(stamp("Waiting on you", colors.waiting)),
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(5.0))
+                        .bg(rgb(colors.background))
+                        .font_family(MONO)
+                        .text_size(px(12.5))
+                        .child(detail.to_owned()),
+                );
             if let Some(permissions) = params.get("permissions") {
                 card = card.child(
                     div()
-                        .text_xs()
                         .font_family(MONO)
+                        .text_size(px(11.5))
+                        .text_color(rgb(colors.muted))
                         .child(permissions.to_string()),
                 );
             }
@@ -10521,13 +10801,13 @@ impl XdDesktop {
                     .enumerate()
                     .map(|(index, (label, decision))| {
                         let id = request_id.clone();
-                        div()
-                            .id(("interaction-decision", index))
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(rgb(colors.surface_high))
-                            .cursor_pointer()
+                        let kind = match decision {
+                            "accept" => ButtonKind::Primary,
+                            "decline" => ButtonKind::Danger,
+                            _ => ButtonKind::Secondary,
+                        };
+                        ui_button(("interaction-decision", index), kind, colors)
+                            .when(decision == "decline", |button| button.ml_4())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.respond_interaction(
                                     id.clone(),
@@ -10572,13 +10852,14 @@ impl XdDesktop {
         let transcript_loading = self.transcript_loading;
         let workflow_statuses = self.workflow_statuses.clone();
         let workflow_pending = self.workflow_pending.clone();
+        let column = self.chat_column_width;
         let transcript = if transcript_loading {
             div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .text_size(px(13.0))
                 .text_color(rgb(colors.muted))
                 .child("Loading transcript…")
                 .into_any_element()
@@ -10588,7 +10869,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_sm()
+                .text_size(px(13.0))
                 .text_color(rgb(colors.muted))
                 .child(if self.transcript_loaded {
                     "Start this session with a message."
@@ -10607,13 +10888,18 @@ impl XdDesktop {
                         workflow_pending.contains(&message.content),
                     )
                 });
-                Self::render_native_message(
-                    colors,
-                    message,
-                    activity,
-                    index,
-                    expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
-                )
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(div().w(px(column)).child(Self::render_native_message(
+                        colors,
+                        message,
+                        activity,
+                        index,
+                        expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
+                    )))
+                    .into_any_element()
             })
             .size_full()
             .into_any_element()
@@ -10633,12 +10919,23 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded_lg()
-                    .bg(rgb(colors.surface_high))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.surface))
                     .child(
                         div()
                             .flex_none()
-                            .text_xs()
+                            .w(px(10.0))
+                            .h(px(5.0))
+                            .rounded(px(1.0))
+                            .border_1()
+                            .border_color(rgb(colors.working)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.5))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(colors.muted))
                             .child(format!("Queued {}", index + 1)),
@@ -10666,7 +10963,7 @@ impl XdDesktop {
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.drop_queued(index, cx)),
                             )
-                            .child("×"),
+                            .child(icon(CLOSE_ICON, 13.0, colors.muted)),
                     )
                     .into_any_element()
             })
@@ -10720,10 +11017,43 @@ impl XdDesktop {
             })
             .collect::<Vec<_>>();
         let interaction = self.render_interaction(colors, cx);
+        let options = [
+            (
+                "model",
+                self.model
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "Default model".to_owned()),
+            ),
+            ("effort", format!("{} effort", self.model.effort)),
+            ("access", self.model.access.clone()),
+            (
+                "plan",
+                if self.model.plan { "Plan" } else { "Build" }.to_owned(),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (option, label))| {
+            ui_button(("native-option", index), ButtonKind::Ghost, colors)
+                .h(px(26.0))
+                .px_2()
+                .text_size(px(12.0))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.native_option_open = Some(option);
+                    this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                    cx.notify();
+                }))
+                .child(label)
+        })
+        .collect::<Vec<_>>();
         div()
             .size_full()
             .flex()
             .flex_col()
+            .items_center()
+            .px(px(28.0))
             .bg(rgb(colors.background))
             .child(
                 div()
@@ -10731,14 +11061,30 @@ impl XdDesktop {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .px_5()
-                    .py_4()
+                    .pt_4()
                     .child(transcript),
             )
             .when(!attachments.is_empty(), |chat| {
-                chat.child(div().mx_5().flex().gap_3().children(attachments))
+                chat.child(
+                    div()
+                        .w_full()
+                        .max_w(px(860.0))
+                        .mb_2()
+                        .flex()
+                        .gap_3()
+                        .children(attachments),
+                )
             })
-            .when_some(interaction, |chat, card| chat.child(card))
+            .when_some(interaction, |chat, card| {
+                chat.child(
+                    div()
+                        .w_full()
+                        .max_w(px(860.0))
+                        .mb_3()
+                        .max_w(px(860.0))
+                        .child(card),
+                )
+            })
             .when_some(
                 self.open_question
                     .clone()
@@ -10750,11 +11096,8 @@ impl XdDesktop {
                         .enumerate()
                         .map(|(index, answer)| {
                             let label = answer.clone();
-                            div()
-                                .id(("tagged-question", index))
-                                .px_3()
-                                .py_2()
-                                .cursor_pointer()
+                            ui_button(("tagged-question", index), ButtonKind::Secondary, colors)
+                                .justify_start()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.answer_question(answer.clone(), cx)
                                 }))
@@ -10763,25 +11106,48 @@ impl XdDesktop {
                         .collect::<Vec<_>>();
                     chat.child(
                         div()
+                            .w_full()
+                            .max_w(px(860.0))
+                            .mb_3()
                             .px_4()
                             .py_3()
                             .flex()
                             .flex_col()
-                            .gap_2()
+                            .gap(px(10.0))
+                            .rounded(px(8.0))
+                            .border(px(1.5))
+                            .border_color(rgb(colors.waiting))
+                            .bg(rgb(colors.surface))
+                            .text_size(px(13.0))
                             .text_color(rgb(colors.text))
-                            .child(question.question)
-                            .children(buttons)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(question.question),
+                                    )
+                                    .child(stamp("Waiting on you", colors.waiting)),
+                            )
+                            .child(div().flex().flex_wrap().gap_2().children(buttons))
                             .when(question.accepts_input, |card| {
                                 card.child(div().h(px(40.0)).child(self.question_input.clone()))
                                     .child(
-                                        div()
-                                            .id("tagged-question-submit")
-                                            .py_2()
-                                            .cursor_pointer()
+                                        div().flex().child(
+                                            ui_button(
+                                                "tagged-question-submit",
+                                                ButtonKind::Primary,
+                                                colors,
+                                            )
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.send_question_input(cx)
                                             }))
                                             .child("Submit answer"),
+                                        ),
                                     )
                             }),
                     )
@@ -10790,15 +11156,23 @@ impl XdDesktop {
             .when(working, |chat| {
                 chat.child(
                     div()
-                        .mx_5()
+                        .w_full()
+                        .max_w(px(860.0))
                         .mb_2()
                         .flex()
                         .items_center()
                         .gap_2()
-                        .text_sm()
-                        .text_color(rgb(colors.muted))
-                        .child(working_dots(0, colors.muted))
-                        .child("Working"),
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.working))
+                        .child(
+                            div()
+                                .w(px(10.0))
+                                .h(px(5.0))
+                                .rounded(px(1.0))
+                                .bg(rgb(colors.working)),
+                        )
+                        .child("Working")
+                        .child(working_dots(0, colors.working)),
                 )
             })
             .when(!queued.is_empty(), |chat| {
@@ -10807,7 +11181,8 @@ impl XdDesktop {
                         .id("native-queue")
                         .max_h(px(150.0))
                         .overflow_y_scroll()
-                        .mx_5()
+                        .w_full()
+                        .max_w(px(860.0))
                         .mb_2()
                         .flex()
                         .flex_col()
@@ -10818,16 +11193,18 @@ impl XdDesktop {
             .child(
                 div()
                     .id("native-composer-shell")
-                    .mx_5()
-                    .mb_4()
+                    .w_full()
+                    .max_w(px(860.0))
+                    .mb(px(18.0))
+                    .max_w(px(860.0))
                     .p_2()
                     .flex()
                     .flex_col()
-                    .gap_2()
-                    .rounded_xl()
+                    .gap_1()
+                    .rounded(px(10.0))
                     .border_1()
                     .border_color(rgb(if composer_focus.is_focused(window) {
-                        colors.accent
+                        colors.accent_ink
                     } else {
                         colors.border
                     }))
@@ -10843,6 +11220,7 @@ impl XdDesktop {
                             .max_h(px(180.0))
                             .px_2()
                             .py_1()
+                            .text_size(px(14.0))
                             .track_focus(&composer_focus)
                             .child(self.composer_input.clone()),
                     )
@@ -10850,22 +11228,13 @@ impl XdDesktop {
                         div()
                             .flex()
                             .items_center()
-                            .justify_end()
-                            .gap_2()
+                            .gap_1()
+                            .children(options)
+                            .child(div().flex_1())
                             .when(working, |controls| {
                                 controls.child(
-                                    div()
-                                        .id("native-cancel-turn")
-                                        .h(px(34.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_lg()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(0xd86f7c))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    ui_button("native-cancel-turn", ButtonKind::Ghost, colors)
+                                        .text_color(rgb(colors.danger))
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.cancel_turn(cx)),
                                         )
@@ -10873,29 +11242,9 @@ impl XdDesktop {
                                 )
                             })
                             .child(
-                                div()
-                                    .id("native-queue-message")
-                                    .h(px(34.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_lg()
-                                    .bg(rgb(if can_queue {
-                                        colors.surface_high
-                                    } else {
-                                        colors.background
-                                    }))
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(if can_queue {
-                                        colors.text
-                                    } else {
-                                        colors.muted
-                                    }))
-                                    .when(can_queue, |button| {
-                                        button
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(colors.selected_surface)))
+                                ui_button("native-queue-message", ButtonKind::Ghost, colors)
+                                    .when(!can_queue, |button| {
+                                        button.cursor_default().text_color(rgb(colors.faint))
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if can_queue {
@@ -10905,36 +11254,28 @@ impl XdDesktop {
                                     .child("Queue"),
                             )
                             .child(
-                                div()
-                                    .id("native-send-message")
-                                    .h(px(34.0))
-                                    .px_4()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_lg()
-                                    .bg(rgb(if can_send {
-                                        colors.accent
+                                ui_button(
+                                    "native-send-message",
+                                    if can_send {
+                                        ButtonKind::Primary
                                     } else {
-                                        colors.surface_high
-                                    }))
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(if can_send {
-                                        colors.accent_text
-                                    } else {
-                                        colors.muted
-                                    }))
-                                    .when(can_send, |button| {
-                                        button
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(rgb(colors.accent_hover)))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if can_send {
-                                            this.send_composer(cx)
-                                        }
-                                    }))
-                                    .child(if working { "Send next" } else { "Send" }),
+                                        ButtonKind::Secondary
+                                    },
+                                    colors,
+                                )
+                                .when(!can_send, |button| {
+                                    button.cursor_default().text_color(rgb(colors.faint))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if can_send {
+                                        this.send_composer(cx)
+                                    }
+                                }))
+                                .child(if working {
+                                    "Send next"
+                                } else {
+                                    "Send"
+                                }),
                             ),
                     ),
             )
@@ -11000,89 +11341,50 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// A native session is the chat column plus, when the window has room,
+    /// one docked pane beside it: changes, files, or a shell.
     fn render_native_workspace(
         &mut self,
         colors: ThemeColors,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let tabs = [
-            ("Chat", NativePane::Chat),
-            ("Files", NativePane::Files),
-            ("Changes", NativePane::Diff),
-            ("Terminal", NativePane::Terminal),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, (label, pane))| {
-            div()
-                .id(("native-pane", index))
-                .px_3()
-                .py_2()
-                .rounded_md()
-                .text_color(rgb(if pane == self.native_pane {
-                    colors.accent
-                } else {
-                    colors.muted
-                }))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| this.show_native_pane(pane, cx)))
-                .child(label)
-        })
-        .collect::<Vec<_>>();
-        let controls = [
-            (
-                "model",
-                format!(
-                    "Model: {}",
-                    self.model.model.as_deref().unwrap_or("Default")
-                ),
-            ),
-            ("effort", format!("Effort: {}", self.model.effort)),
-            ("access", format!("Access: {}", self.model.access)),
-            (
-                "plan",
-                if self.model.plan {
-                    "Plan: on"
-                } else {
-                    "Plan: off"
-                }
-                .to_owned(),
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(index, (option, label))| {
-            div()
-                .id(("native-option", index))
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .bg(rgb(colors.surface_high))
-                .text_xs()
-                .text_color(rgb(colors.text))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.native_option_open = Some(option);
-                    this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
-                    cx.notify();
-                }))
-                .child(label)
-        })
-        .collect::<Vec<_>>();
-        let content = match self.native_pane {
-            NativePane::Chat => self.render_native_chat(colors, window, cx),
-            NativePane::Terminal => self.render_minimal_terminal(colors, window, cx),
-            NativePane::Files => {
+        let dock_pane = self.native_pane;
+        let available = f32::from(window.viewport_size().width)
+            - if self.browser_compacts_sidebar(window) {
+                0.0
+            } else {
+                CATALOG_WIDTH
+            }
+            - if self.browser_is_open() {
+                browser_pane_width(
+                    self.settings.browser_width,
+                    f32::from(window.viewport_size().width),
+                ) + BROWSER_DIVIDER_WIDTH
+            } else {
+                0.0
+            };
+        let dock_width = native_dock_width(self.settings.diff_width, available);
+        let side_by_side = available - dock_width >= 460.0;
+        let pane_content = match dock_pane {
+            NativePane::Chat => None,
+            NativePane::Terminal => Some(self.render_minimal_terminal(colors, window, cx)),
+            NativePane::Files => Some({
                 let panel = self.diff_panel.clone().unwrap_or_default();
                 let mut rows = Vec::new();
                 if !panel.browse_path.is_empty() {
                     rows.push(
                         div()
                             .id("native-files-up")
+                            .h(px(28.0))
                             .px_3()
-                            .py_2()
+                            .flex()
+                            .items_center()
+                            .rounded(px(4.0))
+                            .text_size(px(12.5))
+                            .text_color(rgb(colors.muted))
                             .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if let (Some(chat), Some(panel)) =
                                     (this.model.selected_chat.clone(), &mut this.diff_panel)
@@ -11115,13 +11417,37 @@ impl XdDesktop {
                         format!("{}/{}", panel.browse_path, entry.name)
                     };
                     let directory = entry.directory;
-                    let label = format!("{} {}", if directory { "▸" } else { "·" }, entry.name);
+                    let label = entry.name.clone();
+                    let open = panel
+                        .file_preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.path == path);
                     rows.push(
                         div()
                             .id(("native-file", index))
+                            .h(px(28.0))
                             .px_3()
-                            .py_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded(px(4.0))
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .text_color(rgb(if open { colors.text } else { colors.muted }))
+                            .when(open, |row| row.bg(rgb(colors.selected_surface)))
                             .cursor_pointer()
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(colors.surface_high))
+                                    .text_color(rgb(colors.text))
+                            })
+                            .child(
+                                svg()
+                                    .path(if directory { FOLDER_ICON } else { FILE_ICON })
+                                    .size(px(13.0))
+                                    .flex_none()
+                                    .text_color(rgb(colors.faint)),
+                            )
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(chat) = this.model.selected_chat.clone() {
                                     if let Some(panel) = &mut this.diff_panel {
@@ -11166,9 +11492,13 @@ impl XdDesktop {
                     .child(
                         div()
                             .id("native-file-list")
-                            .w(px(240.0))
+                            .w(px(220.0))
+                            .flex_none()
                             .h_full()
                             .overflow_y_scroll()
+                            .p(px(6.0))
+                            .border_r_1()
+                            .border_color(rgb(colors.border))
                             .children(rows),
                     )
                     .child(
@@ -11179,103 +11509,277 @@ impl XdDesktop {
                             .flex()
                             .flex_col()
                             .when(panel.loading || panel.file_loading, |pane| {
-                                pane.child("Loading…")
+                                pane.child(
+                                    div()
+                                        .p_3()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(colors.muted))
+                                        .child("Loading…"),
+                                )
                             })
                             .when_some(panel.error, |pane, error| {
-                                pane.child(div().text_color(rgb(0xd86f7c)).child(error))
+                                pane.child(
+                                    div()
+                                        .p_3()
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(colors.danger))
+                                        .child(error),
+                                )
                             })
                             .when_some(panel.file_preview, |pane, preview| {
                                 pane.child(
                                     div()
+                                        .h(px(36.0))
+                                        .flex_none()
                                         .flex()
+                                        .items_center()
                                         .gap_3()
                                         .px_3()
-                                        .py_2()
-                                        .child(div().flex_1().child(preview.path))
+                                        .border_b_1()
+                                        .border_color(rgb(colors.border))
                                         .child(
                                             div()
-                                                .id("native-save-file")
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.save_browse_file(cx)
-                                                }))
-                                                .child(if preview.saving {
-                                                    "Saving…"
-                                                } else {
-                                                    "Save"
-                                                }),
+                                                .min_w_0()
+                                                .flex_1()
+                                                .truncate()
+                                                .font_family(MONO)
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(colors.muted))
+                                                .child(preview.path),
+                                        )
+                                        .child(
+                                            ui_button(
+                                                "native-save-file",
+                                                ButtonKind::Secondary,
+                                                colors,
+                                            )
+                                            .h(px(26.0))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.save_browse_file(cx)
+                                            }))
+                                            .child(
+                                                if preview.saving { "Saving…" } else { "Save" },
+                                            ),
                                         ),
                                 )
-                                .child(div().flex_1().min_h_0().child(self.file_editor.clone()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_h_0()
+                                        .p_2()
+                                        .text_size(px(12.5))
+                                        .child(self.file_editor.clone()),
+                                )
                             }),
                     )
                     .into_any_element()
-            }
-            NativePane::Diff => {
+            }),
+            NativePane::Diff => Some({
                 let panel = self.diff_panel.clone().unwrap_or_default();
+                let lines = if panel.patch.is_empty() {
+                    Vec::new()
+                } else {
+                    panel
+                        .patch
+                        .lines()
+                        .take(4_000)
+                        .enumerate()
+                        .map(|(index, line)| {
+                            let (fg, bg) = if line.starts_with("+++") || line.starts_with("---") {
+                                (colors.text, None)
+                            } else if line.starts_with('+') {
+                                (colors.text, Some(colors.diff_added))
+                            } else if line.starts_with('-') {
+                                (colors.text, Some(colors.diff_removed))
+                            } else if line.starts_with("@@") {
+                                (colors.accent_ink, None)
+                            } else if line.starts_with("diff ") {
+                                (colors.text, Some(colors.surface_high))
+                            } else {
+                                (colors.muted, None)
+                            };
+                            div()
+                                .id(("native-diff-line", index))
+                                .px_3()
+                                .h(px(19.0))
+                                .whitespace_nowrap()
+                                .text_color(rgb(fg))
+                                .when_some(bg, |row, bg| row.bg(rgb(bg)))
+                                .when(line.starts_with("diff "), |row| {
+                                    row.mt_2().font_weight(FontWeight::SEMIBOLD)
+                                })
+                                .child(if line.is_empty() {
+                                    " ".to_owned()
+                                } else {
+                                    line.to_owned()
+                                })
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                };
                 div()
                     .size_full()
                     .flex()
                     .flex_col()
-                    .gap_2()
                     .text_color(rgb(colors.text))
                     .child(
-                        div().flex().gap_3().child(
-                            div()
-                                .id("native-refresh-diff")
-                                .px_3()
-                                .py_2()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_native_pane(NativePane::Diff, cx)
-                                }))
-                                .child("Refresh changes"),
-                        ),
+                        div()
+                            .h(px(36.0))
+                            .flex_none()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .border_b_1()
+                            .border_color(rgb(colors.border))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(12.5))
+                                    .text_color(rgb(colors.muted))
+                                    .child("Working tree"),
+                            )
+                            .child(
+                                ui_button("native-refresh-diff", ButtonKind::Ghost, colors)
+                                    .h(px(26.0))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_native_pane(NativePane::Diff, cx)
+                                    }))
+                                    .child("Refresh"),
+                            ),
                     )
-                    .when(panel.loading, |pane| pane.child("Loading…"))
+                    .when(panel.loading, |pane| {
+                        pane.child(
+                            div()
+                                .p_3()
+                                .text_size(px(12.5))
+                                .text_color(rgb(colors.muted))
+                                .child("Loading…"),
+                        )
+                    })
                     .when_some(panel.error, |pane, error| {
-                        pane.child(div().text_color(rgb(0xd86f7c)).child(error))
+                        pane.child(
+                            div()
+                                .p_3()
+                                .text_size(px(12.5))
+                                .text_color(rgb(colors.danger))
+                                .child(error),
+                        )
                     })
                     .child(
                         div()
                             .id("native-diff-output")
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
+                            .overflow_scroll()
+                            .py_2()
                             .font_family(MONO)
-                            .text_xs()
-                            .child(if panel.patch.is_empty() && !panel.loading {
-                                "No changes.".to_owned()
-                            } else {
-                                panel.patch
+                            .text_size(px(12.0))
+                            .children(lines)
+                            .when(panel.patch.is_empty() && !panel.loading, |output| {
+                                output.child(
+                                    div()
+                                        .px_3()
+                                        .font_family(UI_FONT)
+                                        .text_size(px(12.5))
+                                        .text_color(rgb(colors.muted))
+                                        .child("No changes."),
+                                )
                             }),
                     )
                     .child(
                         div()
+                            .flex_none()
+                            .p_2()
                             .flex()
                             .items_center()
-                            .gap_3()
-                            .h(px(44.0))
-                            .child(div().flex_1().child(self.git_commit_input.clone()))
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(rgb(colors.border))
                             .child(
                                 div()
-                                    .id("native-commit")
-                                    .cursor_pointer()
+                                    .flex_1()
+                                    .h(px(32.0))
+                                    .px_2()
+                                    .rounded(px(5.0))
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.background))
+                                    .child(self.git_commit_input.clone()),
+                            )
+                            .child(
+                                ui_button("native-commit", ButtonKind::Primary, colors)
                                     .on_click(cx.listener(|this, _, _, cx| this.commit_changes(cx)))
-                                    .child("Commit all changes"),
+                                    .child("Commit all"),
                             ),
                     )
                     .into_any_element()
-            }
+            }),
         };
+        let chat_width = if dock_pane != NativePane::Chat && side_by_side {
+            available - dock_width - 1.0
+        } else {
+            available
+        };
+        self.chat_column_width = (chat_width - 56.0).clamp(240.0, 860.0);
+        let chat = (dock_pane == NativePane::Chat || side_by_side)
+            .then(|| self.render_native_chat(colors, window, cx));
+        let dragging = self.dock_drag.is_some();
         div()
             .size_full()
             .min_h_0()
             .flex()
-            .flex_col()
-            .child(div().flex().gap_2().children(tabs))
-            .child(div().flex().flex_wrap().gap_2().pb_2().children(controls))
-            .child(div().flex_1().min_h_0().child(content))
+            .when_some(chat, |row, chat| {
+                row.child(div().flex_1().min_w_0().h_full().child(chat))
+            })
+            .when_some(pane_content, |row, pane| {
+                row.when(side_by_side, |row| {
+                    row.child(
+                        div()
+                            .id("native-dock-divider")
+                            .relative()
+                            .w(px(1.0))
+                            .h_full()
+                            .flex_none()
+                            .bg(rgb(if dragging {
+                                colors.selected_border
+                            } else {
+                                colors.border
+                            }))
+                            .child(
+                                div()
+                                    .id("native-dock-resize")
+                                    .absolute()
+                                    .left(px(-4.0))
+                                    .w(px(9.0))
+                                    .h_full()
+                                    .cursor(CursorStyle::ResizeLeftRight)
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.dock_drag = Some((
+                                                f32::from(event.position.x),
+                                                dock_width as u16,
+                                            ));
+                                            cx.notify();
+                                        }),
+                                    ),
+                            ),
+                    )
+                })
+                .child(
+                    div()
+                        .id("native-dock")
+                        .when(side_by_side, |dock| dock.w(px(dock_width)).flex_none())
+                        .when(!side_by_side, |dock| dock.flex_1().min_w_0())
+                        .h_full()
+                        .min_h_0()
+                        .bg(rgb(colors.sidebar))
+                        .when(dock_pane == NativePane::Terminal, |dock| dock.p_2())
+                        .child(pane),
+                )
+            })
             .into_any_element()
     }
 
@@ -11283,14 +11787,14 @@ impl XdDesktop {
         &mut self,
         colors: ThemeColors,
         _project_id: String,
-        chat_id: String,
+        _chat_id: String,
         _agent: AgentCli,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let toolbar = self.render_minimal_context_toolbar(colors, cx);
-        let board = self.render_minimal_session_board(colors, Some(chat_id.as_str()), cx);
-        let content = if self.native_session() {
+        let native = self.native_session();
+        let content = if native {
             self.render_native_workspace(colors, window, cx)
         } else {
             self.render_minimal_terminal(colors, window, cx)
@@ -11306,21 +11810,11 @@ impl XdDesktop {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
-                    .flex()
-                    .when(!self.browser_compacts_sidebar(window), |row| {
-                        row.child(board)
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .min_h_0()
-                            .p_4()
-                            .bg(rgb(colors.background))
-                            .child(content),
-                    ),
+                    .when(!native, |content| content.p_3())
+                    .bg(rgb(colors.background))
+                    .child(content),
             )
             .into_any_element()
     }
@@ -11335,48 +11829,61 @@ impl XdDesktop {
         div()
             .size_full()
             .min_h_0()
-            .p_4()
-            .bg(rgb(colors.background))
-            .child(terminal)
-            .into_any_element()
-    }
-
-    fn render_minimal_empty_sessions(
-        &mut self,
-        colors: ThemeColors,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let board = self.render_minimal_session_board(colors, None, cx);
-
-        div()
-            .size_full()
-            .min_h_0()
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
             .child(
                 div()
-                    .flex_1()
-                    .min_h_0()
+                    .h(px(52.0))
+                    .flex_none()
+                    .px_5()
                     .flex()
-                    .when(!self.browser_compacts_sidebar(window), |row| {
-                        row.child(board)
-                    })
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_sm()
-                            .text_color(rgb(colors.muted))
-                            .child("No session selected."),
-                    ),
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .text_size(px(15.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(colors.text))
+                    .child("Terminal"),
             )
+            .child(div().flex_1().min_h_0().p_3().child(terminal))
             .into_any_element()
+    }
+
+    /// Hand the current palette to every text input, so carets, selections,
+    /// and placeholders follow the theme instead of a fixed dark scheme.
+    fn sync_input_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
+        for editor in [
+            self.composer_input.clone(),
+            self.queue_edit_input.clone(),
+            self.file_editor.clone(),
+            self.tab_editor.clone(),
+        ] {
+            editor.update(cx, |editor, cx| editor.set_colors(colors, cx));
+        }
+        for input in [
+            self.catalog_find_input.clone(),
+            self.sidebar_edit_input.clone(),
+            self.workspace_create_input.clone(),
+            self.workspace_repo_input.clone(),
+            self.workspace_clone_input.clone(),
+            self.chat_create_input.clone(),
+            self.workspace_context_input.clone(),
+            self.workspace_workdir_input.clone(),
+            self.workspace_repo_default_input.clone(),
+            self.git_commit_input.clone(),
+            self.auth_input.clone(),
+            self.secret_name_input.clone(),
+            self.secret_value_input.clone(),
+            self.device_name_input.clone(),
+            self.remote_pairing_input.clone(),
+            self.share_host_input.clone(),
+            self.question_input.clone(),
+            self.secret_question_input.clone(),
+            self.source_build_input.clone(),
+        ] {
+            input.update(cx, |input, cx| input.set_colors(colors, cx));
+        }
     }
 
     fn render_minimal(
@@ -11389,6 +11896,7 @@ impl XdDesktop {
         let minimal_popup_open = self.minimal_popup_is_open();
         let minimal_popup_focus = self.minimal_popup_focus.clone();
         let colors = self.settings.theme.colors();
+        self.sync_input_colors(colors, cx);
         if self.browser_restore_focus {
             self.browser_restore_focus = false;
             if self.terminal_panel.is_some() {
@@ -11404,9 +11912,16 @@ impl XdDesktop {
             f32::from(window.viewport_size().width),
         );
         let route = self.minimal_route.clone();
+        let active_chat = match &route {
+            MinimalRoute::Cli { chat_id, .. } => Some(chat_id.clone()),
+            _ => None,
+        };
+        let catalog = (!self.browser_compacts_sidebar(window))
+            .then(|| self.render_catalog(colors, active_chat.as_deref(), cx));
         let content = match route {
-            MinimalRoute::Projects { .. } => self.render_minimal_home(colors, window, cx),
-            MinimalRoute::Sessions { .. } => self.render_minimal_empty_sessions(colors, window, cx),
+            MinimalRoute::Projects { .. } | MinimalRoute::Sessions { .. } => {
+                self.render_minimal_home(colors, window, cx)
+            }
             MinimalRoute::Terminal => self.render_minimal_standalone_terminal(colors, window, cx),
             MinimalRoute::Cli {
                 project_id,
@@ -11415,7 +11930,6 @@ impl XdDesktop {
             } => self.render_minimal_cli(colors, project_id, chat_id, agent, window, cx),
         };
         let titlebar = self.render_minimal_titlebar(colors, custom_titlebar, cx);
-        let product_nav = self.render_minimal_product_nav(colors, cx);
         let session_context_overlay = self.session_context_menu.clone().map(|menu| {
             let rename_chat_id = menu.chat_id.clone();
             let rename_title = menu.title.clone();
@@ -11441,7 +11955,7 @@ impl XdDesktop {
                         .top(menu.position.y)
                         .w(px(188.0))
                         .p_1()
-                        .rounded_lg()
+                        .rounded(px(7.0))
                         .border_1()
                         .border_color(rgb(colors.border))
                         .bg(rgb(colors.surface))
@@ -11477,9 +11991,9 @@ impl XdDesktop {
                                 .py_2()
                                 .rounded_md()
                                 .text_sm()
-                                .text_color(rgb(0xd86f7c))
+                                .text_color(rgb(colors.danger))
                                 .cursor_pointer()
-                                .hover(|style| style.bg(rgb(0x5a252b)))
+                                .hover(|style| style.bg(rgb(colors.danger_surface)))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.begin_sidebar_delete(
                                         SidebarTarget::Chat(delete_chat_id.clone()),
@@ -11494,6 +12008,31 @@ impl XdDesktop {
         });
         let theme_overlay = self.minimal_theme_open.then(|| {
             let allow_all_permissions = self.settings.allow_all_permissions;
+            let menu_row = |id: &'static str, label: &'static str| {
+                div()
+                    .id(id)
+                    .w_full()
+                    .h(px(32.0))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.0))
+                    .text_size(px(13.0))
+                    .text_color(rgb(colors.text))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .child(label)
+            };
+            let group_label = |label: &'static str| {
+                div()
+                    .px_3()
+                    .pt(px(10.0))
+                    .pb(px(4.0))
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(colors.faint))
+                    .child(label)
+            };
             let rows = ThemePreset::ALL
                 .into_iter()
                 .enumerate()
@@ -11502,14 +12041,30 @@ impl XdDesktop {
                     let swatch = theme.colors();
                     div()
                         .id(("minimal-theme-choice", index))
-                        .w_full()
-                        .px_3()
-                        .py_2()
+                        .flex_1()
+                        .h(px(34.0))
+                        .px_2()
                         .flex()
                         .items_center()
-                        .gap_3()
-                        .rounded_md()
-                        .text_sm()
+                        .gap_2()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(rgb(if selected {
+                            colors.selected_border
+                        } else {
+                            colors.border
+                        }))
+                        .bg(rgb(if selected {
+                            colors.selected_surface
+                        } else {
+                            colors.surface
+                        }))
+                        .text_size(px(13.0))
+                        .font_weight(if selected {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
                         .text_color(rgb(colors.text))
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(colors.surface_high)))
@@ -11518,16 +12073,21 @@ impl XdDesktop {
                         )
                         .child(
                             div()
-                                .size(px(18.0))
-                                .rounded_full()
+                                .w(px(20.0))
+                                .h(px(14.0))
+                                .rounded(px(3.0))
                                 .border_1()
                                 .border_color(rgb(swatch.border))
-                                .bg(rgb(swatch.background)),
+                                .bg(rgb(swatch.surface))
+                                .child(
+                                    div()
+                                        .mt(px(4.0))
+                                        .mx(px(3.0))
+                                        .h(px(1.0))
+                                        .bg(rgb(swatch.rule)),
+                                ),
                         )
-                        .child(div().flex_1().child(theme.label()))
-                        .when(selected, |row| {
-                            row.child(div().text_color(rgb(colors.accent)).child("✓"))
-                        })
+                        .child(theme.label())
                 })
                 .collect::<Vec<_>>();
             div()
@@ -11546,50 +12106,43 @@ impl XdDesktop {
                         .occlude()
                         .absolute()
                         .id("workbench-settings")
-                        .bottom(px(12.0))
-                        .left(px(NAV_RAIL_WIDTH + 8.0))
+                        .bottom(px(56.0))
+                        .left(px(10.0))
                         .w(px(300.0))
                         .max_h(px(f32::from(window.viewport_size().height) - 24.0))
                         .overflow_y_scroll()
-                        .p_2()
-                        .rounded(px(6.0))
+                        .p(px(6.0))
+                        .rounded(px(8.0))
                         .border_1()
                         .border_color(rgb(colors.border))
                         .bg(rgb(colors.surface))
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .px_3()
-                                .pt_2()
-                                .pb_1()
-                                .text_xs()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(colors.muted))
-                                .child("Appearance"),
-                        )
+                        .child(group_label("Appearance"))
+                        .child(div().px(px(6.0)).pb(px(4.0)).flex().gap_2().children(rows))
                         .when(self.active_endpoint == ChatEndpoint::Local, |card| {
-                            card.child(div().id("pair-device").px_3().py_2().text_sm().text_color(rgb(colors.text)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                                this.minimal_theme_open = false;
-                                this.share_panel = Some(SharePanel { loading: true, ..Default::default() });
-                                if let Some(host) = &this.host { let _ = host.peer_pairing(); }
-                                cx.notify();
-                            })).child("Pair a device"))
-                            .child(div().id("paired-devices").px_3().py_2().text_sm().text_color(rgb(colors.text)).cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                                this.minimal_theme_open = false;
-                                this.devices_panel = Some(DevicesPanel { loading: true, ..Default::default() });
-                                this.request_devices();
-                                cx.notify();
-                            })).child("Paired devices"))
+                            card.child(group_label("Devices"))
+                                .child(menu_row("pair-device", "Pair a device").on_click(cx.listener(|this, _, _, cx| {
+                                    this.minimal_theme_open = false;
+                                    this.share_panel = Some(SharePanel { loading: true, ..Default::default() });
+                                    if let Some(host) = &this.host { let _ = host.peer_pairing(); }
+                                    cx.notify();
+                                })))
+                                .child(menu_row("paired-devices", "Paired devices").on_click(cx.listener(|this, _, _, cx| {
+                                    this.minimal_theme_open = false;
+                                    this.devices_panel = Some(DevicesPanel { loading: true, ..Default::default() });
+                                    this.request_devices();
+                                    cx.notify();
+                                })))
                         })
-                        .child(div().id("assistant-accounts").px_3().py_2().text_sm().text_color(rgb(colors.text)).cursor_pointer().on_click(cx.listener(|this, _, window, cx| {
+                        .child(group_label("Assistants"))
+                        .child(menu_row("assistant-accounts", "Assistant accounts").on_click(cx.listener(|this, _, window, cx| {
                             this.minimal_theme_open = false; this.auth_open = true;
                             if let Some(host) = this.active_host() { let _ = host.agent_auth(); let _ = host.agent_clis(); }
                             this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
                             cx.notify();
-                        })).child("Assistant accounts"))
-                        .children(rows)
-                        .child(div().mx_2().my_2().h(px(1.0)).bg(rgb(colors.border)))
+                        })))
+                        .child(div().mx_2().my(px(6.0)).h(px(1.0)).bg(rgb(colors.border)))
                         .child(
                             div()
                                 .id("minimal-all-permissions")
@@ -11599,7 +12152,7 @@ impl XdDesktop {
                                 .flex()
                                 .items_center()
                                 .gap_3()
-                                .rounded_md()
+                                .rounded(px(5.0))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(colors.surface_high)))
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -11611,7 +12164,7 @@ impl XdDesktop {
                                         .flex_1()
                                         .child(
                                             div()
-                                                .text_sm()
+                                                .text_size(px(13.0))
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(rgb(colors.text))
                                                 .child("All permissions"),
@@ -11619,7 +12172,8 @@ impl XdDesktop {
                                         .child(
                                             div()
                                                 .mt_1()
-                                                .text_xs()
+                                                .text_size(px(12.0))
+                                                .line_height(px(17.0))
                                                 .text_color(rgb(colors.muted))
                                                 .child("New agent tabs skip approvals and sandboxing when the CLI supports it."),
                                         ),
@@ -11632,17 +12186,18 @@ impl XdDesktop {
         let share_overlay = self.share_panel.clone().map(|panel| {
             let invite = xd_transport::PairingInvite { host: panel.host.clone(), port: panel.port.unwrap_or(0), fingerprint: panel.fingerprint.clone(), code: panel.code.clone() };
             let can_copy = !panel.loading && xd_transport::validate_endpoint(&invite.host, invite.port, &invite.fingerprint).is_ok();
-            div().occlude().absolute().inset_0().flex().items_center().justify_center().bg(rgba(0x00000099)).child(
+            div().occlude().absolute().inset_0().flex().items_center().justify_center().bg(rgba(colors.backdrop)).child(
                 div().w(px(480.0)).p_5().flex().flex_col().gap_3().rounded_xl().bg(rgb(colors.surface)).text_color(rgb(colors.text))
-                .child(div().text_lg().child("Pair a device"))
+                .child(div().text_size(px(16.0)).child("Pair a device"))
                 .child(div().text_sm().text_color(rgb(colors.muted)).child("Choose a reachable LAN or Tailscale address. Copy this code to the other device within five minutes. Each code can be used once."))
-                .child(div().h(px(42.0)).px_3().flex().items_center().bg(rgb(colors.background)).child(self.share_host_input.clone()))
+                .child(div().h(px(36.0)).px_3().flex().items_center().bg(rgb(colors.background)).child(self.share_host_input.clone()))
                 .child(if panel.loading { "Starting listener…".to_owned() } else { format!("Port {} · {}", panel.port.unwrap_or(0), panel.code) })
-                .when_some(panel.error, |card, error| card.child(div().text_sm().text_color(rgb(0xd86f7c)).child(error)))
+                .when_some(panel.error, |card, error| card.child(div().text_sm().text_color(rgb(colors.danger)).child(error)))
                 .child(div().flex().gap_3()
-                    .child(div().id("copy-pairing-code").px_3().py_2().rounded_md().bg(rgb(colors.accent)).cursor_pointer().on_click(cx.listener(move |_, _, _, cx| { if can_copy { cx.write_to_clipboard(ClipboardItem::new_string(invite.encode())); } })).child("Copy pairing code"))
-                    .child(div().id("refresh-pairing-code").px_3().py_2().cursor_pointer().on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; } if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
-                    .child(div().id("close-pairing").px_3().py_2().cursor_pointer().on_click(cx.listener(|this, _, _, cx| { this.share_panel = None; cx.notify(); })).child("Close")))
+                    .child(ui_button("copy-pairing-code", if can_copy { ButtonKind::Primary } else { ButtonKind::Secondary }, colors).on_click(cx.listener(move |_, _, _, cx| { if can_copy { cx.write_to_clipboard(ClipboardItem::new_string(invite.encode())); } })).child("Copy pairing code"))
+                    .child(ui_button("refresh-pairing-code", ButtonKind::Secondary, colors).on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; } if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
+                    .child(div().flex_1())
+                    .child(ui_button("close-pairing", ButtonKind::Ghost, colors).on_click(cx.listener(|this, _, _, cx| { this.share_panel = None; cx.notify(); })).child("Close")))
             ).into_any_element()
         });
         let devices_overlay = self.devices_panel.clone().map(|panel| {
@@ -11674,7 +12229,7 @@ impl XdDesktop {
                                 .id(("revoke-device", index))
                                 .px_3()
                                 .py_2()
-                                .text_color(rgb(0xd86f7c))
+                                .text_color(rgb(colors.danger))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if confirmed {
@@ -11704,7 +12259,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099))
+                .bg(rgba(colors.backdrop))
                 .child(
                     div()
                         .w(px(480.0))
@@ -11715,14 +12270,14 @@ impl XdDesktop {
                         .rounded_xl()
                         .bg(rgb(colors.surface))
                         .text_color(rgb(colors.text))
-                        .child(div().text_lg().child("Paired devices"))
+                        .child(div().text_size(px(16.0)).child("Paired devices"))
                         .when(panel.loading, |card| card.child("Loading…"))
                         .when(!panel.loading && rows.is_empty(), |card| {
                             card.child("No paired devices.")
                         })
                         .children(rows)
                         .when_some(panel.error, |card, error| {
-                            card.child(div().text_color(rgb(0xd86f7c)).child(error))
+                            card.child(div().text_color(rgb(colors.danger)).child(error))
                         })
                         .child(
                             div()
@@ -11799,7 +12354,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099))
+                .bg(rgba(colors.backdrop))
                 .child(
                     div()
                         .w(px(420.0))
@@ -11811,7 +12366,7 @@ impl XdDesktop {
                         .rounded_xl()
                         .bg(rgb(colors.surface))
                         .text_color(rgb(colors.text))
-                        .child(div().text_lg().child(format!("Choose {option}")))
+                        .child(div().text_size(px(16.0)).child(format!("Choose {option}")))
                         .child(
                             div()
                                 .id("native-setting-choices")
@@ -11859,7 +12414,7 @@ impl XdDesktop {
                                 div()
                                     .id(("assistant-login-url", index))
                                     .py_2()
-                                    .text_color(rgb(colors.accent))
+                                    .text_color(rgb(colors.accent_ink))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.auth_open = false;
@@ -11872,7 +12427,7 @@ impl XdDesktop {
                             div()
                                 .id(("assistant-login", index))
                                 .py_2()
-                                .text_color(rgb(colors.accent))
+                                .text_color(rgb(colors.accent_ink))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(host) = this.active_host() {
@@ -11906,7 +12461,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099))
+                .bg(rgba(colors.backdrop))
                 .child(
                     div()
                         .w(px(480.0))
@@ -11917,14 +12472,14 @@ impl XdDesktop {
                         .rounded_xl()
                         .bg(rgb(colors.surface))
                         .text_color(rgb(colors.text))
-                        .child(div().text_lg().child("Assistant accounts"))
+                        .child(div().text_size(px(16.0)).child("Assistant accounts"))
                         .children(rows)
                         .when(
                             self.auth_providers
                                 .iter()
                                 .any(|p| p.needs_input && p.state == "signing-in"),
                             |card| {
-                                card.child(div().h(px(42.0)).child(self.auth_input.clone()))
+                                card.child(div().h(px(36.0)).child(self.auth_input.clone()))
                                     .child(
                                         div()
                                             .id("submit-assistant-auth")
@@ -11962,7 +12517,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099))
+                .bg(rgba(colors.backdrop))
                 .child(
                     div()
                         .w(px(470.0))
@@ -11970,13 +12525,14 @@ impl XdDesktop {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .rounded_xl()
+                        .rounded(px(10.0))
                         .border_1()
                         .border_color(rgb(colors.border))
                         .bg(rgb(colors.surface))
+                        .shadow_lg()
                         .child(
                             div()
-                                .text_lg()
+                                .text_size(px(16.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
                                 .child("Pair with a host"),
@@ -11992,18 +12548,18 @@ impl XdDesktop {
                         )
                         .child(
                             div()
-                                .h(px(42.0))
+                                .h(px(36.0))
                                 .px_3()
                                 .flex()
                                 .items_center()
-                                .rounded_lg()
+                                .rounded(px(6.0))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.background))
                                 .child(self.remote_pairing_input.clone()),
                         )
                         .when_some(panel.error.clone(), |card, error| {
-                            card.child(div().text_sm().text_color(rgb(0xd86f7c)).child(error))
+                            card.child(div().text_sm().text_color(rgb(colors.danger)).child(error))
                         })
                         .child(
                             div()
@@ -12014,9 +12570,11 @@ impl XdDesktop {
                                 .child(
                                     div()
                                         .id("minimal-cancel-remote")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_lg()
+                                        .h(px(30.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(6.0))
                                         .text_sm()
                                         .text_color(rgb(colors.muted))
                                         .cursor_pointer()
@@ -12029,9 +12587,11 @@ impl XdDesktop {
                                 .child(
                                     div()
                                         .id("minimal-connect-remote")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_lg()
+                                        .h(px(30.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(6.0))
                                         .bg(rgb(if can_connect {
                                             colors.accent
                                         } else {
@@ -12075,7 +12635,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099))
+                .bg(rgba(colors.backdrop))
                 .child(
                     div()
                         .w(px(500.0))
@@ -12083,24 +12643,25 @@ impl XdDesktop {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .rounded_xl()
+                        .rounded(px(10.0))
                         .border_1()
                         .border_color(rgb(colors.border))
                         .bg(rgb(colors.surface))
+                        .shadow_lg()
                         .child(
                             div()
-                                .text_lg()
+                                .text_size(px(16.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
                                 .child("New project"),
                         )
                         .child(
                             div()
-                                .h(px(42.0))
+                                .h(px(36.0))
                                 .px_3()
                                 .flex()
                                 .items_center()
-                                .rounded_lg()
+                                .rounded(px(6.0))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.background))
@@ -12108,11 +12669,11 @@ impl XdDesktop {
                         )
                         .child(
                             div()
-                                .h(px(42.0))
+                                .h(px(36.0))
                                 .px_3()
                                 .flex()
                                 .items_center()
-                                .rounded_lg()
+                                .rounded(px(6.0))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.background))
@@ -12120,11 +12681,11 @@ impl XdDesktop {
                         )
                         .child(
                             div()
-                                .h(px(42.0))
+                                .h(px(36.0))
                                 .px_3()
                                 .flex()
                                 .items_center()
-                                .rounded_lg()
+                                .rounded(px(6.0))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.background))
@@ -12148,9 +12709,11 @@ impl XdDesktop {
                                 .child(
                                     div()
                                         .id("minimal-cancel-project")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_lg()
+                                        .h(px(30.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(6.0))
                                         .text_sm()
                                         .text_color(rgb(colors.muted))
                                         .cursor_pointer()
@@ -12163,9 +12726,11 @@ impl XdDesktop {
                                 .child(
                                     div()
                                         .id("minimal-save-project")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_lg()
+                                        .h(px(30.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(6.0))
                                         .bg(rgb(if can_save {
                                             colors.accent
                                         } else {
@@ -12222,7 +12787,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x00000099))
+                    .bg(rgba(colors.backdrop))
                     .child(
                         div()
                             .w(px(430.0))
@@ -12230,24 +12795,25 @@ impl XdDesktop {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .rounded_xl()
+                            .rounded(px(10.0))
                             .border_1()
                             .border_color(rgb(colors.border))
                             .bg(rgb(colors.surface))
+                            .shadow_lg()
                             .child(
                                 div()
-                                    .text_lg()
+                                    .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
                                     .child(heading),
                             )
                             .child(
                                 div()
-                                    .h(px(42.0))
+                                    .h(px(36.0))
                                     .px_3()
                                     .flex()
                                     .items_center()
-                                    .rounded_lg()
+                                    .rounded(px(6.0))
                                     .border_1()
                                     .border_color(rgb(colors.border))
                                     .bg(rgb(colors.background))
@@ -12262,9 +12828,11 @@ impl XdDesktop {
                                     .child(
                                         div()
                                             .id(cancel_id)
-                                            .px_4()
-                                            .py_2()
-                                            .rounded_lg()
+                                            .h(px(30.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
                                             .text_sm()
                                             .text_color(rgb(colors.muted))
                                             .cursor_pointer()
@@ -12277,9 +12845,11 @@ impl XdDesktop {
                                     .child(
                                         div()
                                             .id(save_id)
-                                            .px_4()
-                                            .py_2()
-                                            .rounded_lg()
+                                            .h(px(30.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
                                             .bg(rgb(if can_save {
                                                 colors.accent
                                             } else {
@@ -12333,7 +12903,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x00000099))
+                    .bg(rgba(colors.backdrop))
                     .child(
                         div()
                             .w(px(450.0))
@@ -12341,13 +12911,14 @@ impl XdDesktop {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .rounded_xl()
+                            .rounded(px(10.0))
                             .border_1()
                             .border_color(rgb(colors.border))
                             .bg(rgb(colors.surface))
+                            .shadow_lg()
                             .child(
                                 div()
-                                    .text_lg()
+                                    .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
                                     .child("Delete project?"),
@@ -12369,9 +12940,11 @@ impl XdDesktop {
                                     .child(
                                         div()
                                             .id("minimal-cancel-project-delete")
-                                            .px_4()
-                                            .py_2()
-                                            .rounded_lg()
+                                            .h(px(30.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
                                             .text_sm()
                                             .text_color(rgb(colors.muted))
                                             .when(!submitting, |button| {
@@ -12387,25 +12960,27 @@ impl XdDesktop {
                                     .child(
                                         div()
                                             .id("minimal-confirm-project-delete")
-                                            .px_4()
-                                            .py_2()
-                                            .rounded_lg()
+                                            .h(px(30.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
                                             .bg(rgb(if submitting {
                                                 colors.surface_high
                                             } else {
-                                                0x9f3544
+                                                colors.danger
                                             }))
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(if submitting {
                                                 colors.muted
                                             } else {
-                                                0xffffff
+                                                colors.surface
                                             }))
                                             .when(!submitting, |button| {
                                                 button
                                                     .cursor_pointer()
-                                                    .hover(|style| style.bg(rgb(0xb84252)))
+                                                    .hover(|style| style.bg(rgb(colors.danger)))
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.confirm_sidebar_delete(cx)
@@ -12444,7 +13019,7 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x00000099))
+                    .bg(rgba(colors.backdrop))
                     .child(
                         div()
                             .w(px(450.0))
@@ -12452,13 +13027,14 @@ impl XdDesktop {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .rounded_xl()
+                            .rounded(px(10.0))
                             .border_1()
                             .border_color(rgb(colors.border))
                             .bg(rgb(colors.surface))
+                            .shadow_lg()
                             .child(
                                 div()
-                                    .text_lg()
+                                    .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
                                     .child("Delete session?"),
@@ -12480,9 +13056,11 @@ impl XdDesktop {
                                     .child(
                                         div()
                                             .id("minimal-cancel-session-delete")
-                                            .px_4()
-                                            .py_2()
-                                            .rounded_lg()
+                                            .h(px(30.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
                                             .text_sm()
                                             .text_color(rgb(colors.muted))
                                             .when(!submitting, |button| {
@@ -12498,25 +13076,27 @@ impl XdDesktop {
                                     .child(
                                         div()
                                             .id("minimal-confirm-session-delete")
-                                            .px_4()
-                                            .py_2()
-                                            .rounded_lg()
+                                            .h(px(30.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded(px(6.0))
                                             .bg(rgb(if submitting {
                                                 colors.surface_high
                                             } else {
-                                                0x9f3544
+                                                colors.danger
                                             }))
                                             .text_sm()
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(if submitting {
                                                 colors.muted
                                             } else {
-                                                0xffffff
+                                                colors.surface
                                             }))
                                             .when(!submitting, |button| {
                                                 button
                                                     .cursor_pointer()
-                                                    .hover(|style| style.bg(rgb(0xb84252)))
+                                                    .hover(|style| style.bg(rgb(colors.danger)))
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.confirm_sidebar_delete(cx)
@@ -12546,7 +13126,7 @@ impl XdDesktop {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099))
+                .bg(rgba(colors.backdrop))
                 .child(
                     div()
                         .w(px(520.0))
@@ -12554,24 +13134,25 @@ impl XdDesktop {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .rounded_xl()
+                        .rounded(px(10.0))
                         .border_1()
                         .border_color(rgb(colors.border))
                         .bg(rgb(colors.surface))
+                        .shadow_lg()
                         .child(
                             div()
-                                .text_lg()
+                                .text_size(px(16.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
                                 .child("New agent session"),
                         )
                         .child(
                             div()
-                                .h(px(42.0))
+                                .h(px(36.0))
                                 .px_3()
                                 .flex()
                                 .items_center()
-                                .rounded_lg()
+                                .rounded(px(6.0))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .bg(rgb(colors.background))
@@ -12598,7 +13179,7 @@ impl XdDesktop {
                                         .items_center()
                                         .justify_center()
                                         .gap_2()
-                                        .rounded_lg()
+                                        .rounded(px(6.0))
                                         .border_1()
                                         .border_color(rgb(if selected {
                                             colors.accent
@@ -12673,7 +13254,7 @@ impl XdDesktop {
                                             .id("minimal-session-new-worktree")
                                             .px_3()
                                             .py_2()
-                                            .rounded_lg()
+                                            .rounded(px(6.0))
                                             .border_1()
                                             .border_color(rgb(if selected {
                                                 colors.accent
@@ -12738,7 +13319,7 @@ impl XdDesktop {
                                                     .id(("minimal-session-worktree", index))
                                                     .px_3()
                                                     .py_2()
-                                                    .rounded_lg()
+                                                    .rounded(px(6.0))
                                                     .border_1()
                                                     .border_color(rgb(if selected {
                                                         colors.accent
@@ -12812,7 +13393,7 @@ impl XdDesktop {
                                                 .id(("minimal-session-branch", index))
                                                 .px_3()
                                                 .py_2()
-                                                .rounded_lg()
+                                                .rounded(px(6.0))
                                                 .border_1()
                                                 .border_color(rgb(if selected { colors.accent } else { colors.border }))
                                                 .bg(rgb(if selected { colors.surface_high } else { colors.background }))
@@ -12853,7 +13434,7 @@ impl XdDesktop {
                                                 .id(("minimal-session-pull-request", index))
                                                 .px_3()
                                                 .py_2()
-                                                .rounded_lg()
+                                                .rounded(px(6.0))
                                                 .border_1()
                                                 .border_color(rgb(if selected { colors.accent } else { colors.border }))
                                                 .bg(rgb(if selected { colors.surface_high } else { colors.background }))
@@ -12883,9 +13464,11 @@ impl XdDesktop {
                                 .child(
                                     div()
                                         .id("minimal-cancel-session")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_lg()
+                                        .h(px(30.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(6.0))
                                         .text_sm()
                                         .text_color(rgb(colors.muted))
                                         .cursor_pointer()
@@ -12900,9 +13483,11 @@ impl XdDesktop {
                                 .child(
                                     div()
                                         .id("minimal-save-session")
-                                        .px_4()
-                                        .py_2()
-                                        .rounded_lg()
+                                        .h(px(30.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(6.0))
                                         .bg(rgb(if can_save {
                                             colors.accent
                                         } else {
@@ -12945,12 +13530,13 @@ impl XdDesktop {
                 .max_w(px(760.0))
                 .px_4()
                 .py_3()
-                .rounded_lg()
+                .rounded(px(8.0))
                 .border_1()
-                .border_color(rgb(0x8f3f4b))
-                .bg(rgb(colors.surface))
-                .text_sm()
-                .text_color(rgb(0xd86f7c))
+                .border_color(rgb(colors.danger))
+                .bg(rgb(colors.danger_surface))
+                .shadow_lg()
+                .text_size(px(13.0))
+                .text_color(rgb(colors.danger))
                 .child(error)
                 .into_any_element()
         });
@@ -12966,6 +13552,17 @@ impl XdDesktop {
             .font_family(UI_FONT)
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
+                    if let Some((start_x, start_width)) = this.dock_drag {
+                        if event.dragging() {
+                            this.settings.diff_width =
+                                (f32::from(start_width) + start_x - f32::from(event.position.x))
+                                    .round()
+                                    .clamp(320.0, 900.0) as u16;
+                            cx.notify();
+                        } else {
+                            this.finish_dock_resize(cx);
+                        }
+                    }
                     if let Some((start_x, start_width)) = this.browser_drag {
                         if event.dragging() {
                             let requested =
@@ -12987,12 +13584,14 @@ impl XdDesktop {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_browser_resize(cx);
+                    this.finish_dock_resize(cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_browser_resize(cx);
+                    this.finish_dock_resize(cx);
                 }),
             )
             .on_action(cx.listener(|this, action: &ToggleActivity, _, cx| {
@@ -13007,6 +13606,13 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if !this.catalog_query.is_empty() {
+                    this.catalog_query.clear();
+                    this.catalog_find_input
+                        .update(cx, |input, cx| input.set_text("", cx));
+                    cx.notify();
+                    return;
+                }
                 if this.auth_open {
                     this.auth_open = false;
                     cx.notify();
@@ -13052,7 +13658,7 @@ impl XdDesktop {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(product_nav)
+                    .when_some(catalog, |row, catalog| row.child(catalog))
                     .child(div().flex_1().min_w_0().min_h_0().h_full().child(content))
                     .when_some(browser_pane, |row, pane| {
                         row.child(
@@ -13419,6 +14025,27 @@ impl AssetSource for EmbeddedIcons {
             TRASH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/trash.svg").as_slice(),
             )),
+            CHEVRON_RIGHT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/chevron-right.svg").as_slice(),
+            )),
+            CHEVRON_DOWN_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/chevron-down.svg").as_slice(),
+            )),
+            CLOSE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/close.svg").as_slice(),
+            )),
+            TERMINAL_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/terminal.svg").as_slice(),
+            )),
+            SEARCH_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/search.svg").as_slice(),
+            )),
+            MINIMIZE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/minimize.svg").as_slice(),
+            )),
+            MAXIMIZE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/maximize.svg").as_slice(),
+            )),
             _ => None,
         })
     }
@@ -13436,6 +14063,13 @@ impl AssetSource for EmbeddedIcons {
             FILE_ICON.into(),
             GIT_BRANCH_ICON.into(),
             TRASH_ICON.into(),
+            CHEVRON_RIGHT_ICON.into(),
+            CHEVRON_DOWN_ICON.into(),
+            CLOSE_ICON.into(),
+            TERMINAL_ICON.into(),
+            SEARCH_ICON.into(),
+            MINIMIZE_ICON.into(),
+            MAXIMIZE_ICON.into(),
         ])
     }
 }
@@ -13732,8 +14366,10 @@ mod tests {
 
     #[gpui::test]
     fn bundled_ui_font_can_be_registered(cx: &mut gpui::TestAppContext) {
-        assert_eq!(UI_FONT, "DM Sans");
-        assert!(EMBEDDED_UI_FONT.starts_with(&[0x00, 0x01, 0x00, 0x00]));
+        assert_eq!(UI_FONT, "Libre Franklin");
+        for font in EMBEDDED_UI_FONTS {
+            assert!(font.starts_with(&[0x00, 0x01, 0x00, 0x00]));
+        }
         install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
     }
 
@@ -13743,28 +14379,20 @@ mod tests {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.run_until_parked();
 
-        cx.simulate_click(point(px(30.0), px(131.0)), gpui::Modifiers::default());
-        cx.update(|_, cx| {
-            assert!(matches!(
-                desktop.read(cx).minimal_route,
-                MinimalRoute::Sessions { .. }
-            ));
-        });
-
-        cx.simulate_click(point(px(30.0), px(77.0)), gpui::Modifiers::default());
-        cx.update(|_, cx| {
-            assert!(matches!(
-                desktop.read(cx).minimal_route,
-                MinimalRoute::Projects { .. }
-            ));
-        });
-
-        let settings_y = cx.update(|window, _| window.viewport_size().height - px(35.0));
-        cx.simulate_click(point(px(30.0), settings_y), gpui::Modifiers::default());
+        // The catalog footer holds New session, Terminal, and Settings.
+        let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
+        cx.simulate_click(
+            point(px(CATALOG_WIDTH - 50.0), footer_y),
+            gpui::Modifiers::default(),
+        );
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
 
-        cx.simulate_click(point(px(500.0), px(90.0)), gpui::Modifiers::default());
+        cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
+
+        // With no projects yet, the primary footer action creates one.
+        cx.simulate_click(point(px(60.0), footer_y), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(desktop.read(cx).creating_workspace));
     }
 
     #[gpui::test]
@@ -14258,11 +14886,35 @@ mod tests {
     }
 
     #[test]
+    fn native_dock_keeps_the_chat_readable() {
+        for requested in [0, 320, 460, u16::MAX] {
+            let width = native_dock_width(requested, 900.0);
+            assert!(width >= 320.0);
+            assert!(900.0 - width >= 440.0);
+        }
+        assert_eq!(native_dock_width(460, 1400.0), 460.0);
+        assert_eq!(native_dock_width(u16::MAX, 3000.0), 900.0);
+    }
+
+    #[test]
+    fn session_signals_put_waiting_ahead_of_work() {
+        assert_eq!(SessionSignal::of(true, true, true), SessionSignal::Waiting);
+        assert_eq!(SessionSignal::of(true, false, true), SessionSignal::Working);
+        assert_eq!(SessionSignal::of(false, false, true), SessionSignal::Done);
+        assert_eq!(SessionSignal::of(false, false, false), SessionSignal::Idle);
+        let colors = ThemePreset::Dark.colors();
+        assert!(signal_tab(SessionSignal::Idle, colors).is_none());
+        assert_eq!(SessionSignal::Waiting.color(colors), colors.waiting);
+    }
+
+    #[test]
     fn browser_width_keeps_room_for_the_session_at_minimum_window_size() {
         for requested in [0, 280, 460, u16::MAX] {
             let width = browser_pane_width(requested, 760.0);
             assert!(width >= 280.0);
-            assert!(760.0 - width - NAV_RAIL_WIDTH - BROWSER_DIVIDER_WIDTH >= 400.0);
+            // The catalog compacts beside a wide browser, so the session keeps
+            // the rest of the window.
+            assert!(760.0 - width - BROWSER_DIVIDER_WIDTH >= 460.0);
         }
         assert_eq!(browser_pane_width(460, 1180.0), 460.0);
         assert_eq!(browser_pane_width(u16::MAX, 3000.0), 1000.0);
@@ -15979,116 +16631,145 @@ mod tests {
     }
 
     #[test]
-    fn projects_and_cli_have_distinct_browsing_surfaces() {
+    fn the_catalog_is_the_one_browsing_surface() {
         let source = include_str!("main.rs");
         let production = source
             .split_once("#[cfg(test)]")
             .expect("desktop production source")
             .0;
-        assert!(production.contains("fn render_minimal_session_board("));
-
         let board = production
-            .split_once("fn render_minimal_session_board(")
-            .expect("shared session board")
+            .split_once("fn session_signal(&self")
+            .expect("catalog renderer")
             .1
             .split_once("fn render_minimal_home(")
-            .expect("end of shared session board")
+            .expect("end of catalog renderer")
             .0;
+        let home = production
+            .split_once("fn render_minimal_home(")
+            .expect("project front renderer")
+            .1
+            .split_once("fn render_native_inline(")
+            .expect("end of project front renderer")
+            .0;
+
         for behavior in [
             "minimal-session-board",
             "minimal-session-group",
             "minimal-session-card",
-            "GIT_BRANCH_ICON",
+            "minimal-project-list",
+            "minimal-new-project",
             ".child(session.branch)",
-            "this.toggle_folder_collapsed",
+            "self.toggle_folder_collapsed(project_id, cx)",
             "this.begin_chat_create",
-            ".child(\"Working\")",
-            ".child(\"Idle\")",
+            "signal_tab(signal, colors)",
+            "drawer_tabs(&signals, colors)",
         ] {
             assert!(board.contains(behavior), "missing {behavior}");
         }
-        assert!(!board.contains("format!(\"{} CLI\", agent.label())"));
+        assert!(home.contains("project_cards(&self.model.folders, &self.model.chats)"));
+        assert!(home.contains("minimal-project-content"));
+        assert!(home.contains("minimal-new-session"));
+        assert!(!home.contains("self.render_catalog("));
 
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("minimal home renderer")
-            .1
-            .split_once("fn render_minimal_cli(")
-            .expect("end of minimal home renderer")
-            .0;
+        let root = production
+            .split_once("fn render_minimal(")
+            .expect("minimal root renderer")
+            .1;
+        assert!(root.contains("self.render_catalog(colors, active_chat.as_deref(), cx)"));
         let cli = production
             .split_once("fn render_minimal_cli(")
             .expect("minimal CLI renderer")
             .1
-            .split_once("fn render_minimal(")
+            .split_once("fn render_minimal_standalone_terminal(")
             .expect("end of minimal CLI renderer")
             .0;
-        assert!(home.contains("project_cards(&self.model.folders, &self.model.chats)"));
-        assert!(home.contains("minimal-project-list"));
-        assert!(home.contains("minimal-project-content"));
-        assert!(home.contains("minimal-new-session"));
-        assert!(!home.contains("self.render_minimal_session_board("));
-        assert!(cli.contains("self.render_minimal_session_board("));
-        assert!(!cli.contains("minimal-cli-session-list"));
+        assert!(!cli.contains("self.render_catalog("));
     }
 
     #[test]
     fn completed_unread_sessions_render_done_until_they_are_viewed() {
         let source = include_str!("main.rs");
-        let board = source
-            .split_once("fn render_minimal_session_board(")
-            .expect("shared session board")
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let board = production
+            .split_once("fn session_signal(&self")
+            .expect("catalog renderer")
             .1
             .split_once("fn render_minimal_home(")
-            .expect("end of shared session board")
+            .expect("end of catalog renderer")
+            .0;
+        let home = production
+            .split_once("fn render_minimal_home(")
+            .expect("project front renderer")
+            .1
+            .split_once("fn render_native_inline(")
+            .expect("end of project front renderer")
             .0;
 
         assert!(board.contains("self.model.unread_chats.contains(&session.id)"));
-        assert!(board.contains(".child(\"Done\")"));
-        assert!(board.contains("DONE_STATUS_COLOR"));
-
-        let home = source
-            .split_once("fn render_minimal_home(")
-            .expect("projects home")
-            .1
-            .split_once("fn render_minimal_cli(")
-            .expect("end of projects home")
-            .0;
-        assert!(home.contains("self.model.unread_chats.contains(&session.id)"));
-        assert!(home.contains(".child(\"Done\")"));
-        assert!(home.contains("DONE_STATUS_COLOR"));
+        assert!(board.contains("signal.label()"));
+        assert!(home.contains("self.session_signal(session)"));
+        assert!(production.contains("Self::Done => \"Done\""));
+        assert!(production.contains("Self::Done => colors.done"));
     }
 
     #[test]
     fn session_board_truncates_branch_names_inside_cards() {
         let source = include_str!("main.rs");
-        let board = source
-            .split_once("fn render_minimal_session_board(")
-            .expect("shared session board")
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let board = production
+            .split_once("fn session_signal(&self")
+            .expect("catalog renderer")
             .1
             .split_once("fn render_minimal_home(")
-            .expect("end of shared session board")
+            .expect("end of catalog renderer")
+            .0;
+        let home = production
+            .split_once("fn render_minimal_home(")
+            .expect("project front renderer")
+            .1
+            .split_once("fn render_native_inline(")
+            .expect("end of project front renderer")
             .0;
 
+        let compact = board.split_whitespace().collect::<String>();
         assert!(
-            board.contains(".child(div().min_w_0().flex_1().truncate().child(session.branch))"),
+            compact.contains("div().min_w_0().flex_shrink().truncate().child(session.branch)"),
             "branch text needs a shrinking, truncating flex child"
         );
+        let _ = home;
     }
 
     #[test]
     fn session_board_only_emphasizes_the_selected_chat() {
         let source = include_str!("main.rs");
-        let board = source
-            .split_once("fn render_minimal_session_board(")
-            .expect("shared session board")
+        let production = source
+            .split_once("#[cfg(test)]")
+            .expect("desktop production source")
+            .0;
+        let board = production
+            .split_once("fn session_signal(&self")
+            .expect("catalog renderer")
             .1
             .split_once("fn render_minimal_home(")
-            .expect("end of shared session board")
+            .expect("end of catalog renderer")
+            .0;
+        let home = production
+            .split_once("fn render_minimal_home(")
+            .expect("project front renderer")
+            .1
+            .split_once("fn render_native_inline(")
+            .expect("end of project front renderer")
             .0;
 
         assert!(board.contains("let emphasized = selected;"));
         assert!(!board.contains("let emphasized = selected || session.working;"));
+        let _ = home;
     }
 
     #[test]
@@ -16099,18 +16780,18 @@ mod tests {
             .expect("desktop production source")
             .0;
         let board = production
-            .split_once("fn render_minimal_session_board(")
-            .expect("shared session board")
+            .split_once("fn session_signal(&self")
+            .expect("catalog renderer")
             .1
             .split_once("fn render_minimal_home(")
-            .expect("end of shared session board")
+            .expect("end of catalog renderer")
             .0;
         let home = production
             .split_once("fn render_minimal_home(")
-            .expect("minimal home renderer")
+            .expect("project front renderer")
             .1
-            .split_once("fn render_minimal_cli(")
-            .expect("end of minimal home renderer")
+            .split_once("fn render_native_inline(")
+            .expect("end of project front renderer")
             .0;
 
         for cards in [board, home] {
@@ -16173,25 +16854,31 @@ mod tests {
             .split_once("#[cfg(test)]")
             .expect("desktop production source")
             .0;
+        let board = production
+            .split_once("fn session_signal(&self")
+            .expect("catalog renderer")
+            .1
+            .split_once("fn render_minimal_home(")
+            .expect("end of catalog renderer")
+            .0;
         let home = production
             .split_once("fn render_minimal_home(")
-            .expect("minimal home renderer")
+            .expect("project front renderer")
             .1
-            .split_once("fn render_minimal_cli(")
-            .expect("end of minimal home renderer")
+            .split_once("fn render_native_inline(")
+            .expect("end of project front renderer")
             .0;
+
         for behavior in [
             "minimal-delete-project",
             "this.begin_sidebar_delete(",
             "SidebarTarget::Folder",
             ".path(TRASH_ICON)",
+            ".text_color(rgb(colors.danger))",
         ] {
             assert!(home.contains(behavior), "missing {behavior}");
         }
-        assert!(
-            !home.contains(".child(\"Delete\")"),
-            "the project delete control should use an icon instead of text"
-        );
+        let _ = board;
 
         let root = production
             .split_once("fn render_minimal(")
@@ -16217,19 +16904,20 @@ mod tests {
             .expect("desktop production source")
             .0;
         let board = production
-            .split_once("fn render_minimal_session_board(")
-            .expect("shared session board")
+            .split_once("fn session_signal(&self")
+            .expect("catalog renderer")
             .1
             .split_once("fn render_minimal_home(")
-            .expect("end of shared session board")
+            .expect("end of catalog renderer")
             .0;
         let home = production
             .split_once("fn render_minimal_home(")
-            .expect("minimal home renderer")
+            .expect("project front renderer")
             .1
-            .split_once("fn render_minimal_cli(")
-            .expect("end of minimal home renderer")
+            .split_once("fn render_native_inline(")
+            .expect("end of project front renderer")
             .0;
+
         for surface in [board, home] {
             assert!(surface.contains("this.open_session_context_menu("));
             assert!(!surface.contains("minimal-delete-session"));
@@ -16603,7 +17291,7 @@ mod tests {
 
 fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
     text_system
-        .add_fonts(vec![Cow::Borrowed(EMBEDDED_UI_FONT)])
+        .add_fonts(EMBEDDED_UI_FONTS.into_iter().map(Cow::Borrowed).collect())
         .map_err(|error| error.to_string())
 }
 

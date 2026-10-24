@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!--
-      Dark whatever the system is set to, because the app is: the window this
-      theme draws is what shows for the frame before Compose paints, and a
-      white one there is a flash of a program xd is not.
+      The window shows for the frame before Compose paints. It uses the Dark
+      theme's ground, which is the default; Compose takes over from there.
     -->
     <style name="Theme.Xd" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:windowBackground">@color/xd_ground</item>
     </style>
+    <color name="xd_ground">#121314</color>
 </resources>

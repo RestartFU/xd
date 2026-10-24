@@ -231,6 +231,9 @@ pub struct AppModel {
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
     pub unread_chats: HashSet<String>,
+    /// Pending approval or question request ids per chat, for every chat the
+    /// daemon reports on, so the sidebar can flag sessions waiting on the user.
+    pub waiting_chats: HashMap<String, HashSet<String>>,
     pub messages: Vec<Message>,
     pub queue: Vec<String>,
     pub working: bool,
@@ -454,6 +457,32 @@ impl AppModel {
         self.todos.clear();
     }
 
+    /// Whether a chat has an approval or question waiting on the user.
+    pub fn is_waiting(&self, chat_id: &str) -> bool {
+        self.waiting_chats
+            .get(chat_id)
+            .is_some_and(|pending| !pending.is_empty())
+    }
+
+    fn track_waiting(&mut self, name: &str, chat: &str, body: &Value) {
+        if name == "interactions-cleared" {
+            self.waiting_chats.remove(chat);
+            return;
+        }
+        let Some(id) = body.get("request_id").and_then(Value::as_str) else {
+            return;
+        };
+        let pending = self.waiting_chats.entry(chat.to_owned()).or_default();
+        if name == "interaction" {
+            pending.insert(id.to_owned());
+        } else {
+            pending.remove(id);
+        }
+        if pending.is_empty() {
+            self.waiting_chats.remove(chat);
+        }
+    }
+
     pub fn apply_chat(&mut self, body: &Value) {
         let epoch = body
             .get("interaction_epoch")
@@ -475,6 +504,19 @@ impl AppModel {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            if let Some(chat) = self.selected_chat.clone() {
+                let pending = self
+                    .interactions
+                    .iter()
+                    .filter_map(|pending| pending.get("request_id").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect::<HashSet<_>>();
+                if pending.is_empty() {
+                    self.waiting_chats.remove(&chat);
+                } else {
+                    self.waiting_chats.insert(chat, pending);
+                }
+            }
         }
         if let Some(backend) = body.get("backend").and_then(Value::as_str) {
             self.backend = backend.to_owned();
@@ -779,6 +821,13 @@ impl AppModel {
         if matches!(
             name,
             "interaction" | "interaction-resolved" | "interactions-cleared"
+        ) && let Some(chat) = body.get("chat").and_then(Value::as_str)
+        {
+            self.track_waiting(name, chat, body);
+        }
+        if matches!(
+            name,
+            "interaction" | "interaction-resolved" | "interactions-cleared"
         ) && body.get("chat").and_then(Value::as_str) == self.selected_chat.as_deref()
         {
             let epoch = body
@@ -1044,6 +1093,7 @@ impl AppModel {
             terminal_activity_by_chat: HashMap::new(),
             selected_chat: Some("chat-gpui".into()),
             unread_chats: HashSet::new(),
+            waiting_chats: HashMap::new(),
             messages: vec![
                 Message::new(
                     Some(1),
@@ -1145,6 +1195,31 @@ mod tests {
         assert!(model.live_items.is_empty());
         assert!(model.live_text.is_empty());
         assert_eq!(model.turn_watermark_id, 1);
+    }
+
+    #[test]
+    fn interactions_flag_their_chat_as_waiting_until_resolved() {
+        let mut model = AppModel::default();
+        model.apply_event(
+            "interaction",
+            &json!({"chat":"background","request_id":"a","interaction_epoch":"e","interaction_revision":1}),
+        );
+        assert!(model.is_waiting("background"));
+        assert!(!model.is_waiting("other"));
+        model.apply_event(
+            "interaction-resolved",
+            &json!({"chat":"background","request_id":"a","interaction_epoch":"e","interaction_revision":2}),
+        );
+        assert!(!model.is_waiting("background"));
+        model.apply_event(
+            "interaction",
+            &json!({"chat":"background","request_id":"b","interaction_epoch":"e","interaction_revision":3}),
+        );
+        model.apply_event(
+            "interactions-cleared",
+            &json!({"chat":"background","interaction_epoch":"e","interaction_revision":4}),
+        );
+        assert!(!model.is_waiting("background"));
     }
 
     #[test]

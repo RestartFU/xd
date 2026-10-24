@@ -282,7 +282,7 @@ mod tests {
         ));
         let path = directory.join("settings.json");
         let settings = AppSettings {
-            theme: ThemePreset::Warm,
+            theme: ThemePreset::Light,
             accent: AccentPreset::Purple,
             notifications: false,
             speech: true,

@@ -28,7 +28,6 @@ import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -159,7 +158,7 @@ private fun List<Span>.annotated(): AnnotatedString {
                 val style = SpanStyle(
                     fontWeight = if (span.bold) FontWeight.Bold else null,
                     fontStyle = if (span.italic) FontStyle.Italic else null,
-                    fontFamily = if (span.code) FontFamily.Monospace else null,
+                    fontFamily = if (span.code) XdMonoFamily else null,
                     background = if (span.code) codeColour else Color.Unspecified,
                     textDecoration = if (span.strike) TextDecoration.LineThrough else null,
                 )

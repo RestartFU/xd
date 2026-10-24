@@ -1,9 +1,18 @@
 package com.restartfu.xd.mobile.ui
 
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.ExperimentalTextApi
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
+import androidx.compose.ui.text.font.FontWeight
+import com.restartfu.xd.mobile.R
 
 /**
  * The desktop's colours, so the two clients look like one program.
@@ -126,17 +135,14 @@ public fun xdColors(accent: AccentPreset = AccentPreset.BLUE): ColorScheme =
 /** The default desktop-matching palette for callers that do not need settings. */
 public val XdColors: ColorScheme = xdColors()
 
-/** The same complete palettes exposed by the minimal desktop. */
+/** The desktop's two themes. Saved names of retired themes load as Dark. */
 public enum class MinimalThemePreset(
     val key: String,
     val label: String,
     val preview: Color,
 ) {
-    DARK("dark", "Dark", Color(0xFF202020)),
-    LIGHT("light", "Light", Color(0xFFF7F7F5)),
-    WARM("warm", "Warm", Color(0xFF201711)),
-    NORD("nord", "Nord", Color(0xFF3B4252)),
-    DRACULA("dracula", "Dracula", Color(0xFF343746)),
+    DARK("dark", "Dark", Color(0xFF1E1F22)),
+    LIGHT("light", "Light", Color(0xFFFFFFFF)),
     ;
 
     public companion object {
@@ -145,85 +151,168 @@ public enum class MinimalThemePreset(
     }
 }
 
+/**
+ * Colours Material has no role for: the signal tabs that say what a session's
+ * agent is doing, and the red ruled line under a card's title.
+ */
+@Immutable
+public data class XdSignals(
+    val working: Color,
+    val waiting: Color,
+    val done: Color,
+    val rule: Color,
+    val link: Color,
+    val faint: Color,
+    val diffAdded: Color,
+    val diffRemoved: Color,
+)
+
+public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
+    MinimalThemePreset.DARK -> XdSignals(
+        working = Color(0xFF72B783),
+        waiting = Color(0xFFEAA93A),
+        done = Color(0xFF86A9E4),
+        rule = Color(0xFFA8493C),
+        link = Color(0xFF93B5E9),
+        faint = Color(0xFF8B8A85),
+        diffAdded = Color(0xFF1B2B20),
+        diffRemoved = Color(0xFF33201E),
+    )
+    MinimalThemePreset.LIGHT -> XdSignals(
+        working = Color(0xFF276B3C),
+        waiting = Color(0xFF8C5100),
+        done = Color(0xFF2B5897),
+        rule = Color(0xFFC2483B),
+        link = Color(0xFF2B5897),
+        faint = Color(0xFF64635D),
+        diffAdded = Color(0xFFE2F0E5),
+        diffRemoved = Color(0xFFF8E4E1),
+    )
+}
+
+public val LocalXdSignals = staticCompositionLocalOf { xdSignals(MinimalThemePreset.DARK) }
+
+/** The desktop palette as complete Material roles, so no default violet leaks in. */
 public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
     MinimalThemePreset.DARK -> darkColorScheme(
-        primary = Color(0xFFF07A55),
-        onPrimary = Color(0xFF1B0E09),
-        primaryContainer = Color(0xFF2B201C),
-        onPrimaryContainer = Color(0xFFF1F1F1),
-        background = Color(0xFF11110F),
-        onBackground = Color(0xFFF1F1F1),
-        surface = Color(0xFF202020),
-        onSurface = Color(0xFFF1F1F1),
-        surfaceContainerLow = Color(0xFF181818),
-        surfaceContainerHigh = Color(0xFF282826),
-        onSurfaceVariant = Color(0xFFA0A0A0),
-        outline = Color(0xFF704333),
-        outlineVariant = Color(0xFF303030),
-        error = Color(0xFFC2524A),
+        primary = Color(0xFFE8E5DE),
+        onPrimary = Color(0xFF121314),
+        primaryContainer = Color(0xFF2B2D31),
+        onPrimaryContainer = Color(0xFFECEAE5),
+        secondary = Color(0xFFAAA9A3),
+        onSecondary = Color(0xFF121314),
+        secondaryContainer = Color(0xFF27292C),
+        onSecondaryContainer = Color(0xFFECEAE5),
+        tertiary = Color(0xFF93B5E9),
+        onTertiary = Color(0xFF121314),
+        tertiaryContainer = Color(0xFF1E2A3B),
+        onTertiaryContainer = Color(0xFFD6E3F7),
+        background = Color(0xFF121314),
+        onBackground = Color(0xFFECEAE5),
+        surface = Color(0xFF17181A),
+        onSurface = Color(0xFFECEAE5),
+        surfaceVariant = Color(0xFF27292C),
+        onSurfaceVariant = Color(0xFFAAA9A3),
+        surfaceContainerLowest = Color(0xFF0E0F10),
+        surfaceContainerLow = Color(0xFF17181A),
+        surfaceContainer = Color(0xFF1E1F22),
+        surfaceContainerHigh = Color(0xFF27292C),
+        surfaceContainerHighest = Color(0xFF2B2D31),
+        surfaceBright = Color(0xFF2B2D31),
+        surfaceDim = Color(0xFF121314),
+        inverseSurface = Color(0xFFECEAE5),
+        inverseOnSurface = Color(0xFF121314),
+        inversePrimary = Color(0xFF1B1C1E),
+        outline = Color(0xFF55575C),
+        outlineVariant = Color(0xFF313338),
+        scrim = Color(0xFF000000),
+        error = Color(0xFFEC7064),
+        onError = Color(0xFF121314),
+        errorContainer = Color(0xFF3B201E),
+        onErrorContainer = Color(0xFFF6C3BD),
     )
     MinimalThemePreset.LIGHT -> lightColorScheme(
-        primary = Color(0xFFE96A43),
-        onPrimary = Color(0xFF2A1008),
-        primaryContainer = Color(0xFFFDF0EB),
-        onPrimaryContainer = Color(0xFF202020),
+        primary = Color(0xFF1B1C1E),
+        onPrimary = Color(0xFFFFFFFF),
+        primaryContainer = Color(0xFFE6E5E0),
+        onPrimaryContainer = Color(0xFF1B1C1E),
+        secondary = Color(0xFF56554F),
+        onSecondary = Color(0xFFFFFFFF),
+        secondaryContainer = Color(0xFFE9E9E5),
+        onSecondaryContainer = Color(0xFF1B1C1E),
+        tertiary = Color(0xFF2B5897),
+        onTertiary = Color(0xFFFFFFFF),
+        tertiaryContainer = Color(0xFFDCE6F5),
+        onTertiaryContainer = Color(0xFF13305A),
         background = Color(0xFFF7F7F5),
-        onBackground = Color(0xFF202020),
-        surface = Color(0xFFFAFAFA),
-        onSurface = Color(0xFF202020),
-        surfaceContainerLow = Color(0xFFFFFFFF),
-        surfaceContainerHigh = Color(0xFFF3F3F1),
-        onSurfaceVariant = Color(0xFF6F6F6F),
-        outline = Color(0xFFF1D2CB),
-        outlineVariant = Color(0xFFEBEBEB),
-        error = Color(0xFFB34238),
+        onBackground = Color(0xFF1B1C1E),
+        surface = Color(0xFFEEEEEB),
+        onSurface = Color(0xFF1B1C1E),
+        surfaceVariant = Color(0xFFE9E9E5),
+        onSurfaceVariant = Color(0xFF56554F),
+        surfaceContainerLowest = Color(0xFFFFFFFF),
+        surfaceContainerLow = Color(0xFFF7F7F5),
+        surfaceContainer = Color(0xFFFFFFFF),
+        surfaceContainerHigh = Color(0xFFE9E9E5),
+        surfaceContainerHighest = Color(0xFFE6E5E0),
+        surfaceBright = Color(0xFFFFFFFF),
+        surfaceDim = Color(0xFFE6E5E0),
+        inverseSurface = Color(0xFF1B1C1E),
+        inverseOnSurface = Color(0xFFF7F7F5),
+        inversePrimary = Color(0xFFE8E5DE),
+        outline = Color(0xFF9A9993),
+        outlineVariant = Color(0xFFD7D6D0),
+        scrim = Color(0xFF000000),
+        error = Color(0xFFB2342A),
+        onError = Color(0xFFFFFFFF),
+        errorContainer = Color(0xFFF8E2DF),
+        onErrorContainer = Color(0xFF5C140E),
     )
-    MinimalThemePreset.WARM -> darkColorScheme(
-        primary = Color(0xFFEE7650),
-        onPrimary = Color(0xFF1C0F08),
-        primaryContainer = Color(0xFF352219),
-        onPrimaryContainer = Color(0xFFF7EEE7),
-        background = Color(0xFF17110D),
-        onBackground = Color(0xFFF7EEE7),
-        surface = Color(0xFF201711),
-        onSurface = Color(0xFFF7EEE7),
-        surfaceContainerLow = Color(0xFF100B08),
-        surfaceContainerHigh = Color(0xFF2C2018),
-        onSurfaceVariant = Color(0xFFBBA89A),
-        outline = Color(0xFF764733),
-        outlineVariant = Color(0xFF49362A),
-        error = Color(0xFFE05E55),
-    )
-    MinimalThemePreset.NORD -> darkColorScheme(
-        primary = Color(0xFF88C0D0),
-        onPrimary = Color(0xFF172027),
-        primaryContainer = Color(0xFF354253),
-        onPrimaryContainer = Color(0xFFECEFF4),
-        background = Color(0xFF2E3440),
-        onBackground = Color(0xFFECEFF4),
-        surface = Color(0xFF3B4252),
-        onSurface = Color(0xFFECEFF4),
-        surfaceContainerLow = Color(0xFF272C36),
-        surfaceContainerHigh = Color(0xFF434C5E),
-        onSurfaceVariant = Color(0xFFD8DEE9),
-        outline = Color(0xFF88C0D0),
-        outlineVariant = Color(0xFF4C566A),
-        error = Color(0xFFBF616A),
-    )
-    MinimalThemePreset.DRACULA -> darkColorScheme(
-        primary = Color(0xFFBD93F9),
-        onPrimary = Color(0xFF21162F),
-        primaryContainer = Color(0xFF3A3C4B),
-        onPrimaryContainer = Color(0xFFF8F8F2),
-        background = Color(0xFF282A36),
-        onBackground = Color(0xFFF8F8F2),
-        surface = Color(0xFF343746),
-        onSurface = Color(0xFFF8F8F2),
-        surfaceContainerLow = Color(0xFF21222C),
-        surfaceContainerHigh = Color(0xFF44475A),
-        onSurfaceVariant = Color(0xFFC7C8D8),
-        outline = Color(0xFFBD93F9),
-        outlineVariant = Color(0xFF44475A),
-        error = Color(0xFFFF5555),
+}
+
+@OptIn(ExperimentalTextApi::class)
+private fun franklin(weight: FontWeight) = Font(
+    R.font.libre_franklin,
+    weight = weight,
+    variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight)),
+)
+
+/** Libre Franklin, the desktop's face, carried through Material's type scale. */
+public val XdFontFamily: FontFamily = FontFamily(
+    franklin(FontWeight.Normal),
+    franklin(FontWeight.Medium),
+    franklin(FontWeight.SemiBold),
+    franklin(FontWeight.Bold),
+)
+
+/** JetBrains Mono, the desktop's code face, for code, branches, and the terminal. */
+@OptIn(ExperimentalTextApi::class)
+public val XdMonoFamily: FontFamily = FontFamily(
+    listOf(FontWeight.Normal, FontWeight.Medium, FontWeight.Bold).map { weight ->
+        Font(
+            R.font.jetbrains_mono,
+            weight = weight,
+            variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight)),
+        )
+    },
+)
+
+public val XdTypography: Typography = Typography().let { base ->
+    Typography(
+        displayLarge = base.displayLarge.copy(fontFamily = XdFontFamily),
+        displayMedium = base.displayMedium.copy(fontFamily = XdFontFamily),
+        displaySmall = base.displaySmall.copy(fontFamily = XdFontFamily),
+        headlineLarge = base.headlineLarge.copy(fontFamily = XdFontFamily),
+        headlineMedium = base.headlineMedium.copy(fontFamily = XdFontFamily),
+        headlineSmall = base.headlineSmall.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
+        titleLarge = base.titleLarge.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
+        titleMedium = base.titleMedium.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
+        titleSmall = base.titleSmall.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
+        bodyLarge = base.bodyLarge.copy(fontFamily = XdFontFamily),
+        bodyMedium = base.bodyMedium.copy(fontFamily = XdFontFamily),
+        bodySmall = base.bodySmall.copy(fontFamily = XdFontFamily),
+        labelLarge = base.labelLarge.copy(fontFamily = XdFontFamily),
+        labelMedium = base.labelMedium.copy(fontFamily = XdFontFamily),
+        labelSmall = base.labelSmall.copy(fontFamily = XdFontFamily),
     )
 }

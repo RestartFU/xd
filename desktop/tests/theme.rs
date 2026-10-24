@@ -3,21 +3,9 @@ use xd_desktop::theme::ThemePreset;
 #[test]
 fn theme_presets_have_stable_names_and_default_to_dark() {
     assert_eq!(ThemePreset::default(), ThemePreset::Dark);
-    assert_eq!(
-        ThemePreset::ALL,
-        [
-            ThemePreset::Dark,
-            ThemePreset::Light,
-            ThemePreset::Warm,
-            ThemePreset::Nord,
-            ThemePreset::Dracula,
-        ]
-    );
+    assert_eq!(ThemePreset::ALL, [ThemePreset::Dark, ThemePreset::Light]);
     assert_eq!(ThemePreset::Dark.label(), "Dark");
     assert_eq!(ThemePreset::Light.label(), "Light");
-    assert_eq!(ThemePreset::Warm.label(), "Warm");
-    assert_eq!(ThemePreset::Nord.label(), "Nord");
-    assert_eq!(ThemePreset::Dracula.label(), "Dracula");
 
     assert_eq!(
         serde_json::to_string(&ThemePreset::Dark).unwrap(),
@@ -26,18 +14,6 @@ fn theme_presets_have_stable_names_and_default_to_dark() {
     assert_eq!(
         serde_json::to_string(&ThemePreset::Light).unwrap(),
         r#""light""#
-    );
-    assert_eq!(
-        serde_json::to_string(&ThemePreset::Warm).unwrap(),
-        r#""warm""#
-    );
-    assert_eq!(
-        serde_json::to_string(&ThemePreset::Nord).unwrap(),
-        r#""nord""#
-    );
-    assert_eq!(
-        serde_json::to_string(&ThemePreset::Dracula).unwrap(),
-        r#""dracula""#
     );
 }
 
@@ -109,6 +85,38 @@ fn default_theme_controls_remain_readable_on_every_surface() {
                 "{preset:?} accent ink on {role}"
             );
         }
+    }
+}
+
+#[test]
+fn signal_colors_read_as_text_on_every_surface() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        for (role, background) in [
+            ("background", colors.background),
+            ("sidebar", colors.sidebar),
+            ("surface", colors.surface),
+            ("surface_high", colors.surface_high),
+            ("selected_surface", colors.selected_surface),
+        ] {
+            for (signal, color) in [
+                ("working", colors.working),
+                ("waiting", colors.waiting),
+                ("done", colors.done),
+                ("danger", colors.danger),
+            ] {
+                assert!(
+                    contrast(color, background) >= 4.5,
+                    "{preset:?} {signal} on {role}"
+                );
+            }
+            assert!(
+                contrast(colors.faint, background) >= 3.0,
+                "{preset:?} faint on {role}"
+            );
+        }
+        assert!(contrast(colors.danger, colors.danger_surface) >= 4.5);
+        assert_ne!(colors.waiting, colors.working, "{preset:?}");
     }
 }
 

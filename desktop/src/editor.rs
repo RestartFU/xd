@@ -11,7 +11,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use xd_desktop::markdown::{self, CodeKind, CodeSpan};
 
-use crate::{MONO, selection::TextSelection};
+use crate::{MONO, UI_FONT, selection::TextSelection};
+use xd_desktop::theme::{ThemeColors, ThemePreset};
 
 actions!(
     file_editor,
@@ -66,6 +67,7 @@ pub struct FileEditor {
     syntax_language: Option<String>,
     syntax_spans: Vec<CodeSpan>,
     line_ranges: Vec<Range<usize>>,
+    colors: ThemeColors,
 }
 
 #[derive(Clone)]
@@ -103,6 +105,14 @@ impl FileEditor {
             syntax_language: None,
             syntax_spans: Vec::new(),
             line_ranges: vec![0..0],
+            colors: ThemePreset::Dark.colors(),
+        }
+    }
+
+    pub fn set_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
+        if self.colors != colors {
+            self.colors = colors;
+            cx.notify();
         }
     }
 
@@ -734,7 +744,7 @@ impl Element for EditorElement {
             );
             let line_number = (!input.composer).then(|| {
                 let number: SharedString = (index + 1).to_string().into();
-                let runs = vec![text_run(number.len(), &style, 0x6f737a)];
+                let runs = vec![text_run(number.len(), &style, input.colors.faint)];
                 let layout = window
                     .text_system()
                     .shape_line(number, px(12.0), &runs, None);
@@ -765,7 +775,7 @@ impl Element for EditorElement {
                             line_bounds.bottom(),
                         ),
                     ),
-                    rgba(0x6b8cff55),
+                    rgba(input.colors.selection),
                 ));
             }
             if input.selected_range.is_empty()
@@ -778,7 +788,7 @@ impl Element for EditorElement {
                         point(line_bounds.left() + x, line_bounds.top()),
                         size(px(2.), line_bounds.size.height),
                     ),
-                    rgb(0x6b8cff),
+                    rgb(input.colors.accent_ink),
                 ));
             }
             lines.push(PaintedLine {
@@ -874,7 +884,7 @@ impl Render for FileEditor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .font_family(MONO)
+            .font_family(if self.composer { UI_FONT } else { MONO })
             .child(EditorElement { input: cx.entity() })
     }
 }
@@ -885,7 +895,12 @@ fn text_runs(
     style: &gpui::TextStyle,
     placeholder: bool,
 ) -> Vec<TextRun> {
-    let default_color = if placeholder { 0xa8a8ad } else { 0xdde1ea };
+    let default_color = if placeholder {
+        input.colors.faint
+    } else {
+        input.colors.text
+    };
+    let light = input.colors.background > 0x808080;
     if placeholder || range.is_empty() || input.syntax_spans.is_empty() {
         return vec![text_run(
             display_run_len(range, placeholder.then_some(input.placeholder.len())),
@@ -909,7 +924,7 @@ fn text_runs(
             runs.push(text_run(start - cursor, style, default_color));
         }
         if start < end {
-            runs.push(text_run(end - start, style, syntax_color(span.kind)));
+            runs.push(text_run(end - start, style, syntax_color(span.kind, light)));
             cursor = end;
         }
     }
@@ -985,12 +1000,16 @@ fn text_run(len: usize, style: &gpui::TextStyle, color: u32) -> TextRun {
     }
 }
 
-fn syntax_color(kind: CodeKind) -> u32 {
-    match kind {
-        CodeKind::Keyword => 0xc792ea,
-        CodeKind::String => 0xc3e88d,
-        CodeKind::Comment => 0x758195,
-        CodeKind::Number => 0xf78c6c,
+fn syntax_color(kind: CodeKind, light: bool) -> u32 {
+    match (kind, light) {
+        (CodeKind::Keyword, false) => 0xc7a0e8,
+        (CodeKind::String, false) => 0xa9cf8f,
+        (CodeKind::Comment, false) => 0x8b8a85,
+        (CodeKind::Number, false) => 0xe9a07a,
+        (CodeKind::Keyword, true) => 0x7a3fa8,
+        (CodeKind::String, true) => 0x3d6d22,
+        (CodeKind::Comment, true) => 0x6e6d67,
+        (CodeKind::Number, true) => 0xa0461c,
     }
 }
 
