@@ -23,13 +23,13 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    Animation, AnimationExt, App, Application, AssetSource, Bounds, ClipboardItem, Context,
-    CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    KeyBinding, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point,
-    Render, ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
-    TitlebarOptions, WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, list, point, prelude::*, px,
-    rgb, rgba, size, svg,
+    App, Application, AssetSource, Bounds, ClipboardItem, Context, CursorStyle, Decorations,
+    Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyBinding, ListAlignment,
+    ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render, ResizeEdge,
+    ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer, TitlebarOptions,
+    WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowDecorations, WindowOptions, canvas, div, list, point, prelude::*, px, rgb, rgba, size,
+    svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -140,7 +140,22 @@ const CATALOG_WIDTH: f32 = 288.0;
 /// Every session card shares one height and baseline.
 const CARD_HEIGHT: f32 = 56.0;
 const BROWSER_DIVIDER_WIDTH: f32 = 1.0;
-const WORKING_DOT_CYCLE: Duration = Duration::from_millis(1_600);
+/// How often working dots, pulses, and running timers advance. They move a
+/// few times a second instead of on every frame: a repeating animation asks
+/// for a frame at display rate, and each frame re-renders the whole window.
+const PULSE_INTERVAL: Duration = Duration::from_millis(400);
+
+/// Steps of the shared pulse, advanced only while something is working.
+static PULSE_FRAME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn pulse_frame() -> usize {
+    PULSE_FRAME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Opacity of a pulsing dot on the current pulse step.
+fn pulse_opacity() -> f32 {
+    [0.35, 0.65, 1.0, 0.65][pulse_frame() % 4]
+}
 
 fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
     // Keep the session usable even at the window's minimum size.
@@ -160,32 +175,25 @@ fn working_dot_alphas(frame: usize) -> [u8; 3] {
     std::array::from_fn(|index| if index < lit { 0xff } else { 0x4d })
 }
 
-fn working_dots(animation_instance: usize, color: u32) -> gpui::AnyElement {
+/// Three dots that fill in one by one, in step with the shared pulse. The
+/// size is inherited so the dots sit on the label's baseline.
+fn working_dots(_instance: usize, color: u32) -> gpui::AnyElement {
+    let highlights = working_dot_alphas(pulse_frame())
+        .into_iter()
+        .enumerate()
+        .map(|(index, alpha)| {
+            (
+                index..index + 1,
+                HighlightStyle {
+                    color: Some(rgba((color << 8) | u32::from(alpha)).into()),
+                    ..Default::default()
+                },
+            )
+        });
     div()
         .w(px(13.0))
         .flex_none()
-        .text_sm()
-        .with_animation(
-            ("working-dots", animation_instance),
-            Animation::new(WORKING_DOT_CYCLE).repeat(),
-            move |dots, progress| {
-                let frame = ((progress * 4.0).floor() as usize).min(3);
-                let highlights =
-                    working_dot_alphas(frame)
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, alpha)| {
-                            (
-                                index..index + 1,
-                                HighlightStyle {
-                                    color: Some(rgba((color << 8) | u32::from(alpha)).into()),
-                                    ..Default::default()
-                                },
-                            )
-                        });
-                dots.child(StyledText::new("...").with_highlights(highlights))
-            },
-        )
+        .child(StyledText::new("...").with_highlights(highlights))
         .into_any_element()
 }
 
@@ -1118,6 +1126,9 @@ impl WorkRun {
     }
 }
 
+/// Live replies up to this size are formatted on every flush.
+const LIVE_MARKDOWN_BYTES: usize = 48 * 1024;
+
 /// A delegated agent still at work, and where its card is.
 #[derive(Clone)]
 struct RunningAgent {
@@ -1185,13 +1196,15 @@ impl TranscriptSnapshot {
     }
 
     fn sync_live_text(&mut self, model: &AppModel) {
+        // Formatted while it streams, so closing the text does not reflow it.
+        // A very long reply streams as plain text to keep each flush cheap.
         self.live_text = (!model.live_text.is_empty()).then(|| {
-            Arc::new(Message::new_plain(
-                None,
-                "assistant",
-                model.live_text.clone(),
-                model.selected_summary().map(|chat| chat.backend.clone()),
-            ))
+            let label = model.live_label();
+            Arc::new(if model.live_text.len() <= LIVE_MARKDOWN_BYTES {
+                Message::new_streaming(None, "assistant", model.live_text.clone(), label)
+            } else {
+                Message::new_plain(None, "assistant", model.live_text.clone(), label)
+            })
         });
     }
 
@@ -1488,8 +1501,9 @@ struct XdDesktop {
     remote_reconnect_attempt: u32,
     transcript: ListState,
     transcript_scroll_handler_attached: bool,
-    /// The transcript shows its newest row, so new output keeps it pinned.
-    transcript_pinned: bool,
+    /// Rows the transcript last showed, so the agents tray can leave out
+    /// agents whose cards are already in view.
+    transcript_visible: Range<usize>,
     transcript_snapshot: TranscriptSnapshot,
     /// Whether the selected chat has returned at least one transcript page.
     /// This is deliberately separate from `messages.is_empty()`: a new chat is
@@ -2015,7 +2029,7 @@ impl XdDesktop {
             remote_reconnect_attempt: 0,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_scroll_handler_attached: false,
-            transcript_pinned: true,
+            transcript_visible: 0..0,
             transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loaded: false,
             transcript_loading: false,
@@ -2137,6 +2151,24 @@ impl XdDesktop {
             }
         }
         desktop.listen_for_terminal_runtime(terminal_updates, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(PULSE_INTERVAL).await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if this.anything_working() {
+                            PULSE_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            cx.notify();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(500)).await;
@@ -2396,7 +2428,6 @@ impl XdDesktop {
         self.transcript_snapshot = TranscriptSnapshot::default();
         self.transcript_loaded = false;
         self.transcript.reset(0);
-        self.transcript_pinned = true;
         self.pending_speech = None;
         self.speech_output.stop();
         self.diff_panel = None;
@@ -3519,7 +3550,6 @@ impl XdDesktop {
                     self.transcript_snapshot = TranscriptSnapshot::default();
                     self.transcript_loaded = false;
                     self.transcript.reset(0);
-                    self.transcript_pinned = true;
                 }
                 if self
                     .sidebar_edit
@@ -4988,13 +5018,12 @@ impl XdDesktop {
                         had_live_text && self.transcript_snapshot.live_text.is_none();
                     if closed_live_text {
                         // The streamed row became an item; the tool follows it.
-                        self.transcript
-                            .splice(old_count - 1..old_count, new_count + 1 - old_count);
+                        self.remeasure_rows(old_count - 1..old_count, new_count + 1 - old_count);
                     } else if new_count > old_count {
                         self.transcript
                             .splice(old_count..old_count, new_count - old_count);
                     } else if new_count > 0 {
-                        self.transcript.splice(new_count - 1..new_count, 1);
+                        self.remeasure_rows(new_count - 1..new_count, 1);
                     }
                     // A new tail row changes the run's header count and which
                     // of its earlier rows the collapsed log still shows.
@@ -5004,9 +5033,7 @@ impl XdDesktop {
                     {
                         let first = run.start;
                         let last = new_count - 1;
-                        let anchor = self.transcript.logical_scroll_top();
-                        self.transcript.splice(first..last, last - first);
-                        self.transcript.scroll_to(anchor);
+                        self.remeasure_rows(first..last, last - first);
                     }
                     self.request_workflow_statuses();
                 }
@@ -5034,9 +5061,8 @@ impl XdDesktop {
                         body.get("text").and_then(Value::as_str),
                     )
                     && let Some(row) = self.transcript_snapshot.replace_record(id, text)
-                    && row < self.transcript.item_count()
                 {
-                    self.transcript.splice(row..row + 1, 1);
+                    self.remeasure_rows(row..row + 1, 1);
                 }
             }
             "turn-finished" if self.event_is_active(&body) => {
@@ -7744,6 +7770,8 @@ impl XdDesktop {
                 .push(Message::new(None, "user", text, None));
             self.transcript_snapshot.sync_messages(&self.model);
             self.sync_transcript_count(false);
+            // Sending is a request to see the reply, wherever the reader was.
+            self.pin_transcript();
             index
         });
         self.model.start_working();
@@ -8236,6 +8264,18 @@ impl XdDesktop {
         }
     }
 
+    /// Whether anything on screen shows motion: a turn, a session card, a
+    /// terminal, or an agent still at work.
+    fn anything_working(&self) -> bool {
+        self.model.working
+            || !self.transcript_snapshot.running_agents.is_empty()
+            || self
+                .model
+                .chats
+                .iter()
+                .any(|chat| chat.working || chat.terminal_working)
+    }
+
     fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
         if self.transcript_has_newer {
             // The newest page is not loaded; the tail request lands pinned.
@@ -8243,12 +8283,48 @@ impl XdDesktop {
                 self.request_message_page(&chat_id, MessageCursor::Tail);
             }
         }
+        self.pin_transcript();
+        cx.notify();
+    }
+
+    /// Whether the transcript follows new output: a bottom-aligned list
+    /// reports its end as the scroll top only while it is pinned there.
+    fn transcript_pinned(&self) -> bool {
+        self.transcript.logical_scroll_top().item_ix >= self.transcript.item_count()
+    }
+
+    /// Scrolls to the newest row and follows new output from there.
+    fn pin_transcript(&self) {
         self.transcript.scroll_to(ListOffset {
             item_ix: self.transcript.item_count(),
             offset_in_item: px(0.0),
         });
-        self.transcript_pinned = true;
-        cx.notify();
+    }
+
+    /// Holds the transcript where the reader sees it before a row they
+    /// clicked changes height. A pinned list grows upward, which would push
+    /// the header they just clicked off the top.
+    fn freeze_transcript(&self) {
+        if self.transcript_pinned() && self.transcript.item_count() > 0 {
+            let height = self.transcript.viewport_bounds().size.height;
+            self.transcript.scroll_by(-height);
+        }
+    }
+
+    /// Re-measures rows whose content changed without moving the reader: a
+    /// pinned list stays pinned, and a reader inside a changed row keeps their
+    /// place in it instead of being thrown to its top.
+    fn remeasure_rows(&self, range: Range<usize>, count: usize) {
+        if range.end > self.transcript.item_count() {
+            return;
+        }
+        let anchor = self.transcript.logical_scroll_top();
+        let pinned = self.transcript_pinned();
+        let start = range.start;
+        self.transcript.splice(range.clone(), count);
+        if !pinned && range.contains(&anchor.item_ix) && anchor.item_ix - start < count {
+            self.transcript.scroll_to(anchor);
+        }
     }
 
     fn invalidate_live_render(&mut self) {
@@ -8279,13 +8355,12 @@ impl XdDesktop {
                 this.transcript_snapshot.sync_live_text(&this.model);
                 let index = this.transcript_snapshot.messages.len()
                     + this.transcript_snapshot.live_items.len();
-                let anchor = this.transcript.logical_scroll_top();
                 if had_live_text {
-                    this.transcript.splice(index..index + 1, 1);
+                    this.remeasure_rows(index..index + 1, 1);
                 } else {
+                    // A new tail row: a pinned list follows it by itself.
                     this.transcript.splice(index..index, 1);
                 }
-                this.transcript.scroll_to(anchor);
                 cx.notify();
             });
         })
@@ -8297,11 +8372,9 @@ impl XdDesktop {
         if indices.is_empty() {
             return;
         }
-        let anchor = self.transcript.logical_scroll_top();
         for index in indices {
-            self.transcript.splice(index..index + 1, 1);
+            self.remeasure_rows(index..index + 1, 1);
         }
-        self.transcript.scroll_to(anchor);
     }
 }
 
@@ -8417,7 +8490,6 @@ impl XdDesktop {
             self.transcript_loading = false;
             self.transcript_page_loading = false;
             self.transcript.reset(0);
-            self.transcript_pinned = true;
         }
         self.minimal_route = MinimalRoute::Cli {
             project_id,
@@ -10768,14 +10840,7 @@ impl XdDesktop {
                             .flex_none()
                             .rounded_full()
                             .bg(rgb(colors.working))
-                            .with_animation(
-                                ("agents-tray-pulse", index),
-                                Animation::new(Duration::from_millis(1_400)).repeat(),
-                                |dot, delta| {
-                                    let wave = 1.0 - (2.0 * delta - 1.0).abs();
-                                    dot.opacity(0.35 + 0.65 * wave)
-                                },
-                            ),
+                            .opacity(pulse_opacity()),
                     )
                     .child(
                         div()
@@ -11903,10 +11968,10 @@ impl XdDesktop {
                 .set_scroll_handler(move |event, _window, cx| {
                     let near_start = event.visible_range.start <= 8;
                     let near_end = event.visible_range.end.saturating_add(8) >= event.count;
-                    let pinned = event.visible_range.end >= event.count;
+                    let visible = event.visible_range.clone();
                     let _ = desktop.update(cx, |this, cx| {
-                        if this.transcript_pinned != pinned {
-                            this.transcript_pinned = pinned;
+                        if this.transcript_visible != visible {
+                            this.transcript_visible = visible;
                             cx.notify();
                         }
                         if near_start && this.transcript_has_older {
@@ -12217,7 +12282,7 @@ impl XdDesktop {
                     .pt_4()
                     .child(transcript)
                     .when(
-                        !self.transcript_pinned && !transcript_empty && !transcript_loading,
+                        !self.transcript_pinned() && !transcript_empty && !transcript_loading,
                         |pane| {
                             pane.child(
                                 div()
@@ -12236,6 +12301,7 @@ impl XdDesktop {
                                         .h(px(28.0))
                                         .rounded(px(14.0))
                                         .text_size(px(12.0))
+                                        .shadow_md()
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.jump_to_latest(cx)),
                                         )
@@ -12248,7 +12314,7 @@ impl XdDesktop {
                                             )
                                         })
                                         .child(if working {
-                                            "Following new output"
+                                            "New output below"
                                         } else {
                                             "Jump to latest"
                                         })
@@ -14788,6 +14854,7 @@ impl XdDesktop {
                 }),
             )
             .on_action(cx.listener(|this, action: &ToggleActivity, _, cx| {
+                this.freeze_transcript();
                 if !this.expanded_activities.insert(action.id) {
                     this.expanded_activities.remove(&action.id);
                 }
@@ -14796,8 +14863,14 @@ impl XdDesktop {
             .on_action(cx.listener(|this, action: &RevealSubagent, _, cx| {
                 this.expanded_activities.insert(action.card_id);
                 if action.row < this.transcript.item_count() {
+                    // The card's top at the top of the view: its height is not
+                    // known until it is drawn open, so "just visible" would
+                    // land below the fold.
                     this.transcript.splice(action.row..action.row + 1, 1);
-                    this.transcript.scroll_to_reveal_item(action.row);
+                    this.transcript.scroll_to(ListOffset {
+                        item_ix: action.row,
+                        offset_in_item: px(0.0),
+                    });
                 }
                 cx.notify();
             }))
@@ -14809,11 +14882,10 @@ impl XdDesktop {
                     this.expanded_work_logs.remove(&action.id);
                 }
                 // Hidden rows change height, so the list measures them again.
+                this.freeze_transcript();
                 let rows = action.rows.clone();
-                if rows.end <= this.transcript.item_count() && !rows.is_empty() {
-                    let anchor = this.transcript.logical_scroll_top();
-                    this.transcript.splice(rows.clone(), rows.len());
-                    this.transcript.scroll_to(anchor);
+                if !rows.is_empty() {
+                    this.remeasure_rows(rows.clone(), rows.len());
                 }
                 cx.notify();
             }))
@@ -15812,11 +15884,19 @@ mod tests {
     }
 
     #[test]
-    fn working_dots_are_mounted_as_a_native_animation() {
+    fn working_dots_follow_the_shared_pulse_instead_of_animating_every_frame() {
         assert!(
             working_dots(0, 0xa8a8ad)
                 .downcast_mut::<gpui::AnimationElement<gpui::Div>>()
-                .is_some()
+                .is_none()
+        );
+        assert_eq!(working_dot_alphas(0), [0x4d, 0x4d, 0x4d]);
+        assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
+        let source = include_str!("main.rs");
+        let production = source.split_once("#[cfg(test)]").expect("production").0;
+        assert!(
+            !production.contains(".repeat()"),
+            "no per-frame repeating animations"
         );
     }
 

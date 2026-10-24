@@ -243,6 +243,13 @@ pub fn code_document(language: Option<&str>, source: &str, truncated: bool) -> D
     }
 }
 
+/// A reply still streaming, formatted as far as it goes: partial wrapper
+/// tags stay hidden, and an unclosed fence reads as a code block, so closing
+/// the text later changes nothing on screen.
+pub fn parse_streaming(source: &str) -> Document {
+    parse(&display_text(source))
+}
+
 pub fn plain_document(source: &str) -> Document {
     let display = display_text(source);
     let (display, truncated) = bounded_prefix(&display, MAX_MARKDOWN_BYTES);

@@ -159,6 +159,28 @@ impl Message {
         }
     }
 
+    /// A streaming reply, formatted while it streams.
+    pub fn new_streaming(
+        id: Option<i64>,
+        role: impl Into<String>,
+        content: impl Into<String>,
+        label: Option<String>,
+    ) -> Self {
+        let content = content.into();
+        let role = role.into();
+        let (_, image_paths) = message_content(&role, &content);
+        let markdown = Some(Arc::new(markdown::parse_streaming(&content)));
+        Self {
+            id,
+            role,
+            content,
+            label,
+            markdown,
+            image_paths,
+            tool: None,
+        }
+    }
+
     pub fn new_plain(
         id: Option<i64>,
         role: impl Into<String>,
@@ -278,6 +300,9 @@ pub struct AppModel {
     pub queue: Vec<String>,
     pub working: bool,
     pub working_started_at: Option<Instant>,
+    /// The running turn's label ("Sonnet · High"), which its stored reply
+    /// will carry, so the live reply does not change name when it lands.
+    pub turn_label: Option<String>,
     pub new_worktree: bool,
     pub has_messages: bool,
     pub worktrees: Vec<Worktree>,
@@ -472,6 +497,7 @@ impl AppModel {
         self.queue.clear();
         self.working = false;
         self.working_started_at = None;
+        self.turn_label = None;
         self.new_worktree = false;
         self.has_messages = false;
         self.worktrees.clear();
@@ -621,6 +647,9 @@ impl AppModel {
             .filter_map(Value::as_str)
             .map(ToOwned::to_owned)
             .collect();
+        if let Some(label) = body.get("label").and_then(Value::as_str) {
+            self.turn_label = Some(label.to_owned());
+        }
         let snapshot_working = body
             .get("working")
             .and_then(Value::as_bool)
@@ -970,6 +999,9 @@ impl AppModel {
                 }
             }
             "turn-started" if self.event_is_active(body) => {
+                if let Some(label) = body.get("label").and_then(Value::as_str) {
+                    self.turn_label = Some(label.to_owned());
+                }
                 self.start_working();
                 self.live_text.clear();
                 self.live_items.clear();
@@ -990,7 +1022,7 @@ impl AppModel {
                 }
                 if !self.live_text.is_empty() {
                     let text = std::mem::take(&mut self.live_text);
-                    let label = self.selected_summary().map(|chat| chat.backend.clone());
+                    let label = self.live_label();
                     self.live_items
                         .push(Message::new(None, "assistant", text, label));
                 }
@@ -1108,6 +1140,13 @@ impl AppModel {
         messages
     }
 
+    /// What a live reply is labelled: the turn's label, or its assistant.
+    pub fn live_label(&self) -> Option<String> {
+        self.turn_label
+            .clone()
+            .or_else(|| self.selected_summary().map(|chat| chat.backend.clone()))
+    }
+
     pub fn display_message_count(&self) -> usize {
         self.messages.len() + self.live_items.len() + usize::from(!self.live_text.is_empty())
     }
@@ -1191,6 +1230,7 @@ impl AppModel {
             queue: vec!["Port workspace and chat shortcuts".into()],
             working: true,
             working_started_at: Some(Instant::now()),
+            turn_label: None,
             new_worktree: false,
             has_messages: true,
             worktrees: Vec::new(),
