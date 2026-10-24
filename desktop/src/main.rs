@@ -95,15 +95,15 @@ use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
 
-pub(crate) const UI_FONT: &str = "Libre Franklin";
+pub(crate) const UI_FONT: &str = "Inter";
 /// Static instances: GPUI renders only the default instance of a variable
 /// font, so each weight the shell uses ships as its own face.
 const EMBEDDED_UI_FONTS: [&[u8]; 5] = [
-    include_bytes!("../../data/fonts/LibreFranklin-Regular.ttf"),
-    include_bytes!("../../data/fonts/LibreFranklin-Medium.ttf"),
-    include_bytes!("../../data/fonts/LibreFranklin-SemiBold.ttf"),
-    include_bytes!("../../data/fonts/LibreFranklin-Bold.ttf"),
-    include_bytes!("../../data/fonts/LibreFranklin-Italic.ttf"),
+    include_bytes!("../../data/fonts/Inter-Regular.ttf"),
+    include_bytes!("../../data/fonts/Inter-Medium.ttf"),
+    include_bytes!("../../data/fonts/Inter-SemiBold.ttf"),
+    include_bytes!("../../data/fonts/Inter-Bold.ttf"),
+    include_bytes!("../../data/fonts/Inter-Italic.ttf"),
 ];
 // The bundle ships this face and points fontconfig at itself. The generic
 // `monospace` alias resolves through the host's fontconfig instead, which lands
@@ -137,8 +137,8 @@ const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Width of the catalog sidebar that holds project drawers and session cards.
 const CATALOG_WIDTH: f32 = 288.0;
-/// Every session card shares one height and baseline.
-const CARD_HEIGHT: f32 = 56.0;
+/// Every session row shares one height and baseline.
+const CARD_HEIGHT: f32 = 30.0;
 const BROWSER_DIVIDER_WIDTH: f32 = 1.0;
 /// How often working dots, pulses, and running timers advance. They move a
 /// few times a second instead of on every frame: a repeating animation asks
@@ -302,53 +302,43 @@ impl SessionSignal {
     }
 }
 
-/// The metal flag clipped to the top edge of a session card. Each state has its
-/// own shape as well as its own colour, so the tabs still read in grayscale:
-/// working is a solid flag, waiting a taller solid flag, done a hollow one.
-/// Idle cards carry none, so a drawer of quiet sessions reads as quiet.
+/// The small status mark at the end of a session row: a dot for work and
+/// unread turns, and nothing for a quiet session so a list of them reads quiet.
+/// Waiting on the user is the one state that also says so in words.
 fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyElement> {
     let color = signal.color(colors);
-    let flag = div()
-        .absolute()
-        .right(px(12.0))
-        .w(px(16.0))
-        .rounded_t(px(2.0));
+    let dot = |size: f32| {
+        div()
+            .size(px(size))
+            .flex_none()
+            .rounded_full()
+            .bg(rgb(color))
+    };
     match signal {
         SessionSignal::Idle => None,
-        SessionSignal::Working => Some(flag.top(px(-4.0)).h(px(9.0)).bg(rgb(color))),
-        SessionSignal::Waiting => Some(flag.top(px(-7.0)).h(px(12.0)).bg(rgb(color))),
-        SessionSignal::Done => Some(
-            flag.top(px(-4.0))
-                .h(px(9.0))
-                .border(px(1.5))
-                .border_b_0()
-                .border_color(rgb(color))
-                .bg(rgb(colors.background)),
-        ),
+        SessionSignal::Working => Some(dot(7.0).opacity(pulse_opacity()).into_any_element()),
+        SessionSignal::Waiting => Some(pill("Waiting", color)),
+        SessionSignal::Done => Some(dot(7.0).into_any_element()),
     }
-    .map(IntoElement::into_any_element)
 }
 
-/// The small tabs a closed drawer shows for its sessions, in the same shapes.
+/// The marks a collapsed project shows for its sessions that need a look.
 fn drawer_tabs(signals: &[SessionSignal], colors: ThemeColors) -> gpui::AnyElement {
     div()
         .flex_none()
         .flex()
-        .items_end()
-        .gap(px(3.0))
+        .items_center()
+        .gap(px(4.0))
         .children(
             signals
                 .iter()
                 .filter(|signal| **signal != SessionSignal::Idle)
-                .take(6)
+                .take(5)
                 .map(|signal| {
-                    let color = signal.color(colors);
-                    let tab = div().w(px(10.0)).rounded(px(1.0));
-                    match signal {
-                        SessionSignal::Waiting => tab.h(px(8.0)).bg(rgb(color)),
-                        SessionSignal::Done => tab.h(px(5.0)).border_1().border_color(rgb(color)),
-                        _ => tab.h(px(5.0)).bg(rgb(color)),
-                    }
+                    div()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(rgb(signal.color(colors)))
                 }),
         )
         .into_any_element()
@@ -382,21 +372,24 @@ fn first_line(text: &str) -> String {
         .replace('`', "")
 }
 
-/// A rubber-stamp label: small tracked capitals in a thin frame.
+/// A small status label on a soft tint of its own color.
 fn stamp(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
+    pill(label, color)
+}
+
+fn pill(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
     div()
         .flex_none()
-        .px(px(5.0))
-        .h(px(18.0))
+        .px(px(7.0))
+        .h(px(20.0))
         .flex()
         .items_center()
-        .rounded(px(2.0))
-        .border_1()
-        .border_color(rgb(color))
-        .text_size(px(10.0))
-        .font_weight(FontWeight::SEMIBOLD)
+        .rounded_full()
+        .bg(rgba((color << 8) | 0x24))
+        .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(color))
-        .child(label.into().to_uppercase())
+        .child(label.into())
         .into_any_element()
 }
 
@@ -422,8 +415,8 @@ fn ui_button(
         .flex()
         .items_center()
         .justify_center()
-        .gap_2()
-        .rounded(px(6.0))
+        .gap(px(6.0))
+        .rounded(px(8.0))
         .text_size(px(12.5))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer();
@@ -1989,7 +1982,7 @@ impl XdDesktop {
             minimal_new_session_agent: AgentCli::Codex,
             native_pane: NativePane::Chat,
             dock_drag: None,
-            chat_column_width: 860.0,
+            chat_column_width: 780.0,
             native_option_open: None,
             expanded_activities: HashSet::new(),
             expanded_work_logs: HashSet::new(),
@@ -9218,10 +9211,7 @@ impl XdDesktop {
                     .and_then(|chat| chat.title.clone())
                     .filter(|title| !title.trim().is_empty())
                     .unwrap_or_else(|| DEFAULT_CHAT_TITLE.to_string());
-                match &project_name {
-                    Some(project) => format!("{project}  /  {title}"),
-                    None => title,
-                }
+                project_name.clone().unwrap_or(title)
             }
             MinimalRoute::Projects { .. } | MinimalRoute::Sessions { .. } => project_name
                 .clone()
@@ -9385,10 +9375,10 @@ impl XdDesktop {
 
         div()
             .id("minimal-context-toolbar")
-            .h(px(52.0))
+            .h(px(48.0))
             .w_full()
             .flex_none()
-            .px_5()
+            .px(px(20.0))
             .flex()
             .items_center()
             .gap(px(10.0))
@@ -9400,8 +9390,8 @@ impl XdDesktop {
                     .min_w_0()
                     .flex_shrink()
                     .truncate()
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(colors.text))
                     .child(title),
             )
@@ -9409,16 +9399,15 @@ impl XdDesktop {
                 toolbar.child(
                     div()
                         .id("minimal-session-agent")
-                        .h(px(24.0))
-                        .px_2()
+                        .h(px(22.0))
+                        .px(px(8.0))
                         .flex_none()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .text_size(px(12.0))
+                        .rounded_full()
+                        .bg(rgb(colors.surface_high))
+                        .text_size(px(11.5))
                         .text_color(rgb(colors.muted))
                         .child(
                             svg()
@@ -9432,16 +9421,15 @@ impl XdDesktop {
             .when_some(branch, |toolbar, branch| {
                 toolbar.child(
                     div()
-                        .h(px(24.0))
-                        .px_2()
+                        .h(px(22.0))
+                        .px(px(8.0))
                         .min_w_0()
                         .flex_shrink()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
-                        .rounded(px(5.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
+                        .rounded_full()
+                        .bg(rgb(colors.surface_high))
                         .font_family(MONO)
                         .text_size(px(11.5))
                         .text_color(rgb(colors.muted))
@@ -9462,43 +9450,34 @@ impl XdDesktop {
             .when(self.native_session(), |toolbar| {
                 let current = self.native_pane;
                 toolbar.child(
-                    div()
-                        .ml_2()
-                        .p(px(2.0))
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .children(
-                            [
-                                (1usize, "Changes", NativePane::Diff),
-                                (2, "Files", NativePane::Files),
-                                (3, "Terminal", NativePane::Terminal),
-                            ]
-                            .into_iter()
-                            .map(|(index, label, pane)| {
-                                let active = current == pane;
-                                ui_button(("native-pane", index), ButtonKind::Ghost, colors)
-                                    .h(px(24.0))
-                                    .px_2()
-                                    .when(active, |button| {
-                                        button
-                                            .bg(rgb(colors.selected_surface))
-                                            .text_color(rgb(colors.text))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let next = if this.native_pane == pane {
-                                            NativePane::Chat
-                                        } else {
-                                            pane
-                                        };
-                                        this.show_native_pane(next, cx);
-                                    }))
-                                    .child(label)
-                            }),
-                        ),
+                    div().ml_2().flex().items_center().gap(px(2.0)).children(
+                        [
+                            (1usize, "Changes", NativePane::Diff),
+                            (2, "Files", NativePane::Files),
+                            (3, "Terminal", NativePane::Terminal),
+                        ]
+                        .into_iter()
+                        .map(|(index, label, pane)| {
+                            let active = current == pane;
+                            ui_button(("native-pane", index), ButtonKind::Ghost, colors)
+                                .h(px(28.0))
+                                .px(px(10.0))
+                                .when(active, |button| {
+                                    button
+                                        .bg(rgb(colors.selected_surface))
+                                        .text_color(rgb(colors.text))
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let next = if this.native_pane == pane {
+                                        NativePane::Chat
+                                    } else {
+                                        pane
+                                    };
+                                    this.show_native_pane(next, cx);
+                                }))
+                                .child(label)
+                        }),
+                    ),
                 )
             })
             .when(has_terminal, |toolbar| {
@@ -9566,7 +9545,6 @@ impl XdDesktop {
         let drop_project_id = project_id.to_owned();
         let drop_chat_id = session.id.clone();
         let agent = session.agent;
-        let status_color = signal.color(colors);
 
         div()
             .id(("minimal-session-card", instance))
@@ -9574,19 +9552,13 @@ impl XdDesktop {
             .w_full()
             .h(px(CARD_HEIGHT))
             .flex_none()
-            .px_3()
-            .rounded(px(5.0))
-            .border_1()
-            .border_color(if emphasized {
-                rgb(colors.selected_border)
-            } else {
-                rgba(0x00000000)
-            })
-            .bg(rgb(if emphasized {
-                colors.selected_surface
-            } else {
-                colors.surface
-            }))
+            .pl(px(10.0))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(7.0))
+            .when(emphasized, |row| row.bg(rgb(colors.selected_surface)))
             .cursor_pointer()
             .hover(|style| {
                 if emphasized {
@@ -9650,53 +9622,44 @@ impl XdDesktop {
                 })
             })
             .child(
-                div()
-                    .pt(px(8.0))
-                    .pr(px(26.0))
-                    .h(px(28.0))
-                    .truncate()
-                    .text_size(px(13.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(colors.text))
-                    .child(session.title),
+                svg()
+                    .path(agent_icon(agent))
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(rgb(if emphasized {
+                        colors.text
+                    } else {
+                        colors.faint
+                    })),
             )
-            .child(div().h(px(1.0)).w_full().bg(rgb(colors.rule)))
             .child(
                 div()
-                    .h(px(25.0))
+                    .flex_1()
                     .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .text_size(px(11.5))
-                    .text_color(rgb(colors.muted))
-                    .child(
-                        svg()
-                            .path(agent_icon(agent))
-                            .size(px(12.0))
-                            .flex_none()
-                            .text_color(rgb(colors.muted)),
-                    )
-                    .child(
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(rgb(if emphasized {
+                        colors.text
+                    } else {
+                        colors.muted
+                    }))
+                    .when(emphasized, |title| title.font_weight(FontWeight::MEDIUM))
+                    .child(session.title),
+            )
+            .when(
+                signal == SessionSignal::Idle && session.branch != "Project directory",
+                |row| {
+                    row.child(
                         div()
-                            .min_w_0()
-                            .flex_shrink()
+                            .max_w(px(96.0))
+                            .flex_none()
                             .truncate()
+                            .font_family(MONO)
+                            .text_size(px(10.5))
+                            .text_color(rgb(colors.faint))
                             .child(session.branch),
                     )
-                    .child(div().flex_none().text_color(rgb(colors.faint)).child("·"))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(status_color))
-                            .when(signal != SessionSignal::Idle, |status| {
-                                status.font_weight(FontWeight::MEDIUM)
-                            })
-                            .child(signal.label()),
-                    )
-                    .when(signal == SessionSignal::Working, |meta| {
-                        meta.child(working_dots(instance, status_color))
-                    }),
+                },
             )
             .children(signal_tab(signal, colors))
             .into_any_element()
@@ -9773,28 +9736,23 @@ impl XdDesktop {
                 .min_w_0()
                 .flex_shrink()
                 .truncate()
-                .text_size(px(13.0))
-                .font_weight(if current {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
-                .text_color(rgb(colors.text))
+                .text_size(px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(if current { colors.text } else { colors.muted }))
                 .child(project.name.clone());
             let header = div()
                 .id(("minimal-session-group-header", project_index))
-                .h(px(34.0))
+                .h(px(30.0))
                 .w_full()
-                .pl_1()
-                .pr_1()
+                .pl(px(4.0))
+                .pr(px(2.0))
                 .flex()
                 .items_center()
-                .gap_2()
-                .rounded(px(5.0))
+                .gap(px(6.0))
+                .rounded(px(7.0))
+                .group("catalog-project")
                 .cursor_pointer()
-                .when(!current, |header| {
-                    header.hover(|style| style.bg(rgb(colors.surface_high)))
-                })
+                .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.opened_drawers.remove(&select_project);
                     this.collapsed_folders.remove(&select_project);
@@ -9807,12 +9765,12 @@ impl XdDesktop {
                 .child(
                     div()
                         .id(("catalog-drawer-toggle", project_index))
-                        .size(px(22.0))
+                        .size(px(20.0))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(4.0))
+                        .rounded(px(5.0))
                         .text_sm()
                         .text_color(rgb(colors.faint))
                         .hover(|style| style.bg(rgb(colors.border)).text_color(rgb(colors.text)))
@@ -9826,30 +9784,19 @@ impl XdDesktop {
                             } else {
                                 CHEVRON_RIGHT_ICON
                             },
-                            14.0,
+                            12.0,
                             colors.faint,
                         )),
                 )
-                .child(if current {
-                    div()
-                        .min_w_0()
-                        .flex_shrink()
-                        .px(px(7.0))
-                        .h(px(22.0))
-                        .flex()
-                        .items_center()
-                        .rounded(px(3.0))
-                        .border(px(1.5))
-                        .border_color(rgb(colors.selected_border))
-                        .child(name)
-                        .into_any_element()
-                } else {
-                    name.into_any_element()
-                })
+                .child(icon(
+                    FOLDER_ICON,
+                    13.0,
+                    if current { colors.muted } else { colors.faint },
+                ))
+                .child(name)
                 .child(
                     div()
                         .flex_none()
-                        .font_family(MONO)
                         .text_size(px(11.0))
                         .text_color(rgb(colors.faint))
                         .child(project.sessions.to_string()),
@@ -9859,19 +9806,21 @@ impl XdDesktop {
                 .child(
                     div()
                         .id(("minimal-session-group-add", project_index))
-                        .size(px(24.0))
+                        .invisible()
+                        .group_hover("catalog-project", |style| style.visible())
+                        .size(px(22.0))
                         .flex_none()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(4.0))
+                        .rounded(px(5.0))
                         .cursor_pointer()
                         .hover(|style| style.bg(rgb(colors.border)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             cx.stop_propagation();
                             this.begin_chat_create(create_project.clone(), window, cx);
                         }))
-                        .child(plus_icon(colors.muted)),
+                        .child(plus_icon(colors.faint)),
                 );
 
             drawers.push(
@@ -9880,25 +9829,17 @@ impl XdDesktop {
                     .w_full()
                     .flex()
                     .flex_col()
-                    .when(current, |drawer| {
-                        drawer
-                            .p(px(5.0))
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .bg(rgb(colors.background))
-                    })
-                    .when(!current, |drawer| drawer.px(px(5.0)))
                     .child(header)
                     .when(open, |drawer| {
                         drawer.child(
                             div()
-                                .mt(px(6.0))
-                                .mb(px(2.0))
+                                .mt(px(1.0))
+                                .mb(px(6.0))
+                                .pl(px(12.0))
                                 .w_full()
                                 .flex()
                                 .flex_col()
-                                .gap(px(7.0))
+                                .gap(px(1.0))
                                 .children(cards)
                                 .when(project.sessions == 0, |list| {
                                     list.child(
@@ -9932,17 +9873,18 @@ impl XdDesktop {
             .bg(rgb(colors.sidebar))
             .child(
                 div()
-                    .h(px(44.0))
+                    .h(px(40.0))
                     .flex_none()
-                    .px_4()
+                    .pl(px(14.0))
+                    .pr(px(8.0))
                     .flex()
                     .items_center()
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.text))
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(colors.faint))
                             .child("Projects"),
                     )
                     .child(
@@ -9958,7 +9900,7 @@ impl XdDesktop {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.begin_workspace_create(window, cx)
                             }))
-                            .child(plus_icon(colors.text)),
+                            .child(plus_icon(colors.muted)),
                     ),
             )
             .child(
@@ -9966,16 +9908,14 @@ impl XdDesktop {
                     .id("catalog-find")
                     .mx(px(10.0))
                     .mb_2()
-                    .h(px(32.0))
-                    .px_2()
+                    .h(px(30.0))
+                    .px(px(9.0))
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.background))
+                    .rounded(px(8.0))
+                    .bg(rgb(colors.surface))
                     .text_size(px(12.5))
                     .child(icon(SEARCH_ICON, 13.0, colors.faint))
                     .child(
@@ -9991,11 +9931,11 @@ impl XdDesktop {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px(px(7.0))
+                    .px(px(8.0))
                     .pb_4()
                     .flex()
                     .flex_col()
-                    .gap(px(3.0))
+                    .gap(px(1.0))
                     .children(drawers)
                     .when(projects.is_empty(), |list| {
                         list.child(
@@ -10035,7 +9975,7 @@ impl XdDesktop {
                     .border_t_1()
                     .border_color(rgb(colors.border))
                     .child(
-                        ui_button("minimal-global-create", ButtonKind::Primary, colors)
+                        ui_button("minimal-global-create", ButtonKind::Secondary, colors)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(project_id) = create_session_for.clone() {
                                     this.begin_chat_create(project_id, window, cx);
@@ -10043,7 +9983,7 @@ impl XdDesktop {
                                     this.begin_workspace_create(window, cx);
                                 }
                             }))
-                            .child(plus_icon(colors.accent_text))
+                            .child(plus_icon(colors.muted))
                             .child(if current_project.is_some() {
                                 "New session"
                             } else {
@@ -10136,13 +10076,14 @@ impl XdDesktop {
                     .id(("minimal-session", index))
                     .relative()
                     .w_full()
-                    .h(px(60.0))
-                    .px_4()
+                    .h(px(54.0))
+                    .px(px(14.0))
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .rounded(px(6.0))
-                    .bg(rgb(colors.surface))
+                    .gap(px(12.0))
+                    .when(index > 0, |row| {
+                        row.border_t_1().border_color(rgb(colors.border))
+                    })
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface_high)))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -10169,20 +10110,18 @@ impl XdDesktop {
                     )
                     .child(
                         div()
-                            .size(px(32.0))
+                            .size(px(28.0))
                             .flex_none()
                             .flex()
                             .items_center()
                             .justify_center()
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .bg(rgb(colors.background))
+                            .rounded(px(8.0))
+                            .bg(rgb(colors.surface_high))
                             .child(
                                 svg()
                                     .path(agent_icon(agent))
-                                    .size(px(17.0))
-                                    .text_color(rgb(colors.text)),
+                                    .size(px(15.0))
+                                    .text_color(rgb(colors.muted)),
                             ),
                     )
                     .child(
@@ -10192,27 +10131,27 @@ impl XdDesktop {
                             .child(
                                 div()
                                     .truncate()
-                                    .text_size(px(13.5))
+                                    .text_size(px(13.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(colors.text))
                                     .child(session.title.clone()),
                             )
                             .child(
                                 div()
-                                    .mt(px(3.0))
+                                    .mt(px(2.0))
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
                                     .text_size(px(12.0))
-                                    .text_color(rgb(colors.muted))
+                                    .text_color(rgb(colors.faint))
                                     .child(agent.label())
-                                    .child(div().text_color(rgb(colors.faint)).child("·"))
+                                    .child(div().child("·"))
                                     .child(
                                         svg()
                                             .path(GIT_BRANCH_ICON)
                                             .size(px(12.0))
                                             .flex_none()
-                                            .text_color(rgb(colors.muted)),
+                                            .text_color(rgb(colors.faint)),
                                     )
                                     .child(
                                         div()
@@ -10235,7 +10174,6 @@ impl XdDesktop {
                     } else {
                         stamp(signal.label(), status_color)
                     })
-                    .children(signal_tab(signal, colors))
             })
             .collect::<Vec<_>>();
 
@@ -10266,9 +10204,10 @@ impl XdDesktop {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(820.0))
-                    .px(px(36.0))
-                    .pt(px(30.0))
+                    .max_w(px(760.0))
+                    .mx_auto()
+                    .px(px(32.0))
+                    .pt(px(44.0))
                     .pb_8()
                     .when_some(selected_project, |front, project| {
                         front
@@ -10280,13 +10219,8 @@ impl XdDesktop {
                                     .child(
                                         div()
                                             .min_w_0()
-                                            .px(px(10.0))
-                                            .py(px(3.0))
-                                            .rounded(px(4.0))
-                                            .border(px(1.5))
-                                            .border_color(rgb(colors.selected_border))
                                             .truncate()
-                                            .text_size(px(22.0))
+                                            .text_size(px(20.0))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(rgb(colors.text))
                                             .child(project.name.clone()),
@@ -10351,9 +10285,9 @@ impl XdDesktop {
                             )
                             .child(
                                 div()
-                                    .mt(px(10.0))
+                                    .mt(px(4.0))
                                     .text_size(px(13.0))
-                                    .text_color(rgb(colors.muted))
+                                    .text_color(rgb(colors.faint))
                                     .child(summary.clone()),
                             )
                     })
@@ -10410,16 +10344,16 @@ impl XdDesktop {
                     .when_some(selected_project_id.clone(), |front, folder_id| {
                         front.child(
                             div()
-                                .mt(px(28.0))
-                                .mb(px(12.0))
+                                .mt(px(32.0))
+                                .mb(px(10.0))
                                 .flex()
                                 .items_center()
                                 .child(
                                     div()
                                         .flex_1()
-                                        .text_size(px(14.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(colors.text))
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(colors.muted))
                                         .child("Sessions"),
                                 )
                                 .child(
@@ -10437,7 +10371,13 @@ impl XdDesktop {
                             .w_full()
                             .flex()
                             .flex_col()
-                            .gap(px(9.0))
+                            .when(!session_rows.is_empty(), |list| {
+                                list.rounded(px(12.0))
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.surface))
+                                    .overflow_hidden()
+                            })
                             .children(session_rows)
                             .when(
                                 selected_project_id.is_some() && sessions.is_empty(),
@@ -10446,7 +10386,7 @@ impl XdDesktop {
                                         div()
                                             .w_full()
                                             .p_5()
-                                            .rounded(px(6.0))
+                                            .rounded(px(12.0))
                                             .border_1()
                                             .border_color(rgb(colors.border))
                                             .text_size(px(13.0))
@@ -10704,13 +10644,13 @@ impl XdDesktop {
         div()
             .id(("native-activity", index))
             .w_full()
-            .max_w(px(860.0))
-            .px_3()
-            .py(px(7.0))
+            .max_w(px(780.0))
+            .px(px(14.0))
+            .py(px(9.0))
             .flex()
             .flex_col()
             .gap(px(6.0))
-            .rounded(px(6.0))
+            .rounded(px(12.0))
             .border_1()
             .border_color(rgb(if failed { colors.danger } else { colors.border }))
             .bg(rgb(colors.surface))
@@ -10820,12 +10760,12 @@ impl XdDesktop {
                     .map(|started| activity::compact_duration(now.saturating_sub(started)));
                 div()
                     .id(("agents-tray-pill", index))
-                    .h(px(26.0))
-                    .px(px(10.0))
+                    .h(px(28.0))
+                    .px(px(11.0))
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .rounded(px(13.0))
+                    .rounded_full()
                     .border_1()
                     .border_color(rgb(colors.border))
                     .bg(rgb(colors.surface))
@@ -10846,7 +10786,7 @@ impl XdDesktop {
                         div()
                             .flex_none()
                             .text_size(px(12.0))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(colors.text))
                             .child(agent.view.agent.clone()),
                     )
@@ -10877,7 +10817,7 @@ impl XdDesktop {
         Some(
             div()
                 .w_full()
-                .max_w(px(860.0))
+                .max_w(px(780.0))
                 .mb_2()
                 .flex()
                 .flex_wrap()
@@ -10937,18 +10877,17 @@ impl XdDesktop {
             div()
                 .id(("work-log-header", index))
                 .w_full()
-                .px_3()
-                .pt(px(7.0))
+                .px(px(14.0))
+                .pt(px(10.0))
                 .pb(px(4.0))
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(11.5))
+                .text_size(px(12.0))
                 .child(
                     div()
                         .flex_1()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(colors.muted))
+                        .text_color(rgb(colors.faint))
                         .child(format!("Work log · {} steps", run.len)),
                 )
                 .when(run.len > WORK_LOG_VISIBLE, |header| {
@@ -10979,11 +10918,11 @@ impl XdDesktop {
             div()
                 .id(("work-log-entry", index))
                 .w_full()
-                .px_3()
-                .py(px(3.0))
+                .px(px(14.0))
+                .py(px(2.0))
                 .flex()
                 .items_center()
-                .gap_2()
+                .gap(px(8.0))
                 .when(detail.is_some() || !card.items.is_empty(), |row| {
                     row.cursor_pointer()
                         .hover(|style| style.bg(rgb(colors.surface_high)))
@@ -10991,7 +10930,16 @@ impl XdDesktop {
                             window.dispatch_action(Box::new(ToggleActivity { id: row_key }), cx);
                         })
                 })
-                .child(div().size(px(6.0)).flex_none().rounded_full().bg(rgb(mark)))
+                .child(
+                    div()
+                        .size(px(5.0))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(rgb(mark))
+                        .when(card.kind == ActivityKind::Running, |dot| {
+                            dot.opacity(pulse_opacity())
+                        }),
+                )
                 .child(
                     div()
                         .min_w_0()
@@ -11000,7 +10948,7 @@ impl XdDesktop {
                         .font_family(MONO)
                         .text_size(px(12.0))
                         .line_height(px(20.0))
-                        .text_color(rgb(if failed { colors.danger } else { colors.text }))
+                        .text_color(rgb(if failed { colors.danger } else { colors.muted }))
                         .child(card.name.clone()),
                 )
                 .when(card.kind == ActivityKind::Running || failed, |row| {
@@ -11016,7 +10964,7 @@ impl XdDesktop {
         let opened = expanded && entry.is_some();
         div()
             .w_full()
-            .max_w(px(860.0))
+            .max_w(px(780.0))
             .when(tail, |row| row.pb(px(8.0)))
             .child(
                 div()
@@ -11027,9 +10975,9 @@ impl XdDesktop {
                     .border_color(rgb(colors.border))
                     .border_l_1()
                     .border_r_1()
-                    .when(head, |frame| frame.border_t_1().rounded_t(px(6.0)))
+                    .when(head, |frame| frame.border_t_1().rounded_t(px(12.0)))
                     .when(tail, |frame| {
-                        frame.border_b_1().rounded_b(px(6.0)).pb(px(4.0))
+                        frame.border_b_1().rounded_b(px(12.0)).pb(px(8.0))
                     })
                     .children(header)
                     .children(entry)
@@ -11126,9 +11074,9 @@ impl XdDesktop {
         };
         let section = |label: String| {
             div()
-                .pt(px(4.0))
-                .text_size(px(10.5))
-                .font_weight(FontWeight::SEMIBOLD)
+                .pt(px(6.0))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(colors.faint))
                 .child(label)
         };
@@ -11182,43 +11130,35 @@ impl XdDesktop {
             .w_full()
             .flex()
             .items_center()
-            .gap_2()
-            .child(icon(
-                if expanded {
-                    CHEVRON_DOWN_ICON
-                } else {
-                    CHEVRON_RIGHT_ICON
-                },
-                12.0,
-                colors.faint,
-            ))
-            .when_some(provider_icon, |header, path| {
-                header.child(icon(path, 13.0, colors.muted))
-            })
+            .gap(px(8.0))
+            .child(
+                div()
+                    .size(px(13.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when_some(provider_icon, |slot, path| {
+                        slot.child(icon(path, 13.0, colors.muted))
+                    })
+                    .when(provider_icon.is_none(), |slot| {
+                        slot.child(div().size(px(7.0)).rounded_full().bg(rgb(signal)))
+                    }),
+            )
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(colors.text))
                     .child(view.agent.clone()),
             )
-            .when(!view.model.is_empty(), |header| {
-                header.child(
-                    div()
-                        .flex_none()
-                        .font_family(MONO)
-                        .text_size(px(11.0))
-                        .text_color(rgb(colors.faint))
-                        .child(view.model.clone()),
-                )
-            })
             .child(
                 div()
                     .min_w_0()
                     .flex_1()
                     .truncate()
-                    .text_size(px(12.5))
+                    .text_size(px(13.0))
                     .text_color(rgb(colors.muted))
                     .child(view.description.clone()),
             )
@@ -11229,7 +11169,7 @@ impl XdDesktop {
                 header.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.5))
+                        .text_size(px(12.0))
                         .text_color(rgb(colors.muted))
                         .child(format!("{label}…")),
                 )
@@ -11241,13 +11181,16 @@ impl XdDesktop {
                         div()
                             .id((id, index))
                             .flex_none()
-                            .h(px(20.0))
-                            .px(px(6.0))
+                            .h(px(22.0))
+                            .px(px(8.0))
                             .flex()
                             .items_center()
-                            .rounded(px(4.0))
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(colors.border))
                             .cursor_pointer()
                             .text_size(px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(tone))
                             .hover(|style| style.bg(rgb(colors.surface_high)))
                             .on_click(move |_, window, cx| {
@@ -11283,24 +11226,39 @@ impl XdDesktop {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap(px(6.0))
                     .text_size(px(12.0))
-                    .text_color(rgb(colors.working))
+                    .text_color(rgb(colors.muted))
+                    .child(
+                        div()
+                            .size(px(7.0))
+                            .rounded_full()
+                            .bg(rgb(colors.working))
+                            .opacity(pulse_opacity()),
+                    )
                     .child(view.status.label())
-                    .child(working_dots(index, colors.working))
                     .into_any_element(),
                 SubagentState::Failed => stamp(view.status.label(), colors.danger),
                 _ => div()
                     .flex_none()
                     .text_size(px(12.0))
-                    .text_color(rgb(colors.muted))
+                    .text_color(rgb(colors.faint))
                     .child(view.status.label())
                     .into_any_element(),
-            });
+            })
+            .child(icon(
+                if expanded {
+                    CHEVRON_DOWN_ICON
+                } else {
+                    CHEVRON_RIGHT_ICON
+                },
+                12.0,
+                colors.faint,
+            ));
         let glance = (!preview.is_empty() || !stats.is_empty()).then(|| {
             div()
                 .w_full()
-                .pl(px(20.0))
+                .pl(px(21.0))
                 .flex()
                 .items_center()
                 .gap_3()
@@ -11309,10 +11267,19 @@ impl XdDesktop {
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(12.0))
-                        .text_color(rgb(if running { colors.text } else { colors.muted }))
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.muted))
                         .child(preview),
                 )
+                .when(!view.model.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .text_color(rgb(colors.faint))
+                            .child(view.model.clone()),
+                    )
+                })
                 .when(!stats.is_empty(), |row| {
                     row.child(
                         div()
@@ -11352,8 +11319,9 @@ impl XdDesktop {
                         .w_full()
                         .max_h(px(240.0))
                         .overflow_y_scroll()
-                        .p_2()
-                        .rounded(px(5.0))
+                        .px(px(10.0))
+                        .py(px(8.0))
+                        .rounded(px(8.0))
                         .bg(rgb(colors.background))
                         .flex()
                         .flex_col()
@@ -11406,9 +11374,9 @@ impl XdDesktop {
         div()
             .id(("native-subagent", index))
             .w_full()
-            .max_w(px(860.0))
+            .max_w(px(780.0))
             .flex()
-            .rounded(px(6.0))
+            .rounded(px(12.0))
             .border_1()
             .border_color(rgb(if view.status == SubagentState::Failed {
                 colors.danger
@@ -11417,25 +11385,31 @@ impl XdDesktop {
             }))
             .bg(rgb(colors.surface))
             .overflow_hidden()
-            .child(div().w(px(3.0)).flex_none().bg(rgb(signal)))
             .child(
                 div()
                     .min_w_0()
                     .flex_1()
-                    .px_3()
-                    .py(px(8.0))
+                    .px(px(14.0))
+                    .py(px(10.0))
                     .flex()
                     .flex_col()
-                    .gap(px(5.0))
+                    .gap(px(6.0))
                     .child(header)
                     .children(glance)
                     .when(!recent_steps.is_empty(), |card| {
-                        card.child(div().pl(px(20.0)).flex().flex_col().children(recent_steps))
+                        card.child(
+                            div()
+                                .pl(px(21.0))
+                                .pt(px(2.0))
+                                .flex()
+                                .flex_col()
+                                .children(recent_steps),
+                        )
                     })
                     .when(!details.is_empty(), |card| {
                         card.child(
                             div()
-                                .pl(px(20.0))
+                                .pl(px(21.0))
                                 .flex()
                                 .flex_col()
                                 .gap(px(6.0))
@@ -11471,7 +11445,7 @@ impl XdDesktop {
             return div()
                 .id(("native-duration", index))
                 .w_full()
-                .max_w(px(860.0))
+                .max_w(px(780.0))
                 .pt_1()
                 .pb(px(14.0))
                 .flex()
@@ -11492,7 +11466,7 @@ impl XdDesktop {
         if let Some((subagent, pending)) = subagent {
             return div()
                 .w_full()
-                .max_w(px(860.0))
+                .max_w(px(780.0))
                 .pb(px(8.0))
                 .child(Self::render_native_subagent(
                     colors,
@@ -11508,7 +11482,7 @@ impl XdDesktop {
         if let Some(activity) = activity {
             return div()
                 .w_full()
-                .max_w(px(860.0))
+                .max_w(px(780.0))
                 .pb(px(6.0))
                 .child(Self::render_native_activity(
                     colors,
@@ -11522,89 +11496,79 @@ impl XdDesktop {
 
         let user = role == "user";
         let error = role == "error";
-        let label = if user {
-            "You".to_owned()
-        } else if error {
-            "Host".to_owned()
-        } else {
-            message.label.clone().unwrap_or_else(|| "Assistant".into())
-        };
         let markdown = message.markdown();
         let block_scope = format!("native-message:{}", message.id.unwrap_or(index as i64));
+        let body = div().w_full().flex().flex_col().gap_2().children(
+            markdown
+                .blocks
+                .iter()
+                .enumerate()
+                .map(|(block_index, block)| {
+                    Self::render_native_markdown_block(
+                        colors,
+                        block,
+                        scoped_element_id(&block_scope, block_index) as usize,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
+        // Prose sits on the page; only what the user wrote and host errors are
+        // set apart, the way a conversation reads.
         let card = div()
             .min_w_0()
-            .max_w(px(if user { 720.0 } else { 820.0 }))
             .flex()
             .flex_col()
             .gap_2()
-            .when(user || error, |card| {
-                card.px_4()
-                    .py_3()
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(if error { colors.danger } else { colors.border }))
-                    .bg(rgb(if error {
-                        colors.danger_surface
-                    } else {
-                        colors.surface
-                    }))
+            .when(user, |card| {
+                card.max_w(px(600.0))
+                    .px(px(14.0))
+                    .py(px(9.0))
+                    .rounded(px(18.0))
+                    .bg(rgb(colors.surface_high))
             })
-            .when(!user && !error, |card| card.w_full().py_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+            .when(error, |card| {
+                card.max_w(px(760.0))
+                    .px_4()
+                    .py_3()
+                    .rounded(px(12.0))
+                    .border_1()
+                    .border_color(rgb(colors.danger))
+                    .bg(rgb(colors.danger_surface))
                     .child(
                         div()
                             .text_size(px(11.5))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(if error { colors.danger } else { colors.faint }))
-                            .child(label),
+                            .text_color(rgb(colors.danger))
+                            .child("Host"),
                     )
-                    .when(!error && !message.content.trim().is_empty(), |row| {
-                        let text = message.content.clone();
-                        row.child(
-                            div()
-                                .id(("native-copy-message", index))
-                                .invisible()
-                                .group_hover("native-message", |style| style.visible())
-                                .px(px(5.0))
-                                .h(px(18.0))
-                                .flex()
-                                .items_center()
-                                .rounded(px(4.0))
-                                .cursor_pointer()
-                                .text_size(px(11.0))
-                                .text_color(rgb(colors.faint))
-                                .hover(|style| {
-                                    style
-                                        .bg(rgb(colors.surface_high))
-                                        .text_color(rgb(colors.text))
-                                })
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                                })
-                                .child("Copy"),
-                        )
-                    }),
-            )
-            .child(
-                div().w_full().flex().flex_col().gap_2().children(
-                    markdown
-                        .blocks
-                        .iter()
-                        .enumerate()
-                        .map(|(block_index, block)| {
-                            Self::render_native_markdown_block(
-                                colors,
-                                block,
-                                scoped_element_id(&block_scope, block_index) as usize,
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-            );
+            })
+            .when(!user && !error, |card| card.w_full().max_w(px(780.0)))
+            .child(body);
+        let copy = (!error && !message.content.trim().is_empty()).then(|| {
+            let text = message.content.clone();
+            div()
+                .id(("native-copy-message", index))
+                .invisible()
+                .group_hover("native-message", |style| style.visible())
+                .mt(px(4.0))
+                .px(px(6.0))
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_size(px(11.0))
+                .text_color(rgb(colors.faint))
+                .hover(|style| {
+                    style
+                        .bg(rgb(colors.surface_high))
+                        .text_color(rgb(colors.text))
+                })
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                })
+                .child("Copy")
+        });
         div()
             .id(("native-message", index))
             .group("native-message")
@@ -11613,7 +11577,8 @@ impl XdDesktop {
             .flex_col()
             .when(user, |row| row.items_end())
             .child(card)
-            .child(div().h(px(14.0)))
+            .children(copy)
+            .child(div().h(px(if user { 10.0 } else { 6.0 })))
             .into_any_element()
     }
 
@@ -12191,6 +12156,7 @@ impl XdDesktop {
             && !self.composer.trim().is_empty()
             && self.model.draft_attachments.is_empty();
         let working = self.model.working;
+        let agent = AgentCli::from_backend(&self.model.backend);
 
         let attachments = self
             .model
@@ -12253,8 +12219,9 @@ impl XdDesktop {
         .enumerate()
         .map(|(index, (option, label))| {
             ui_button(("native-option", index), ButtonKind::Ghost, colors)
-                .h(px(26.0))
-                .px_2()
+                .h(px(28.0))
+                .px(px(8.0))
+                .gap(px(5.0))
                 .text_size(px(12.0))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
@@ -12262,7 +12229,11 @@ impl XdDesktop {
                     this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
                     cx.notify();
                 }))
+                .when(option == "model", |chip| {
+                    chip.children(agent.map(|agent| icon(agent_icon(agent), 13.0, colors.muted)))
+                })
                 .child(label)
+                .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
         })
         .collect::<Vec<_>>();
         div()
@@ -12270,7 +12241,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .items_center()
-            .px(px(28.0))
+            .px(px(24.0))
             .bg(rgb(colors.background))
             .child(
                 div()
@@ -12332,7 +12303,7 @@ impl XdDesktop {
                 chat.child(
                     div()
                         .w_full()
-                        .max_w(px(860.0))
+                        .max_w(px(780.0))
                         .mb_2()
                         .flex()
                         .gap_3()
@@ -12340,7 +12311,7 @@ impl XdDesktop {
                 )
             })
             .when_some(interaction, |chat, card| {
-                chat.child(div().w_full().max_w(px(860.0)).mb_3().child(card))
+                chat.child(div().w_full().max_w(px(780.0)).mb_3().child(card))
             })
             .children(agents_tray)
             .when_some(
@@ -12365,7 +12336,7 @@ impl XdDesktop {
                     chat.child(
                         div()
                             .w_full()
-                            .max_w(px(860.0))
+                            .max_w(px(780.0))
                             .mb_3()
                             .px_4()
                             .py_3()
@@ -12415,22 +12386,23 @@ impl XdDesktop {
                 chat.child(
                     div()
                         .w_full()
-                        .max_w(px(860.0))
+                        .max_w(px(780.0))
                         .mb_2()
+                        .px(px(2.0))
                         .flex()
                         .items_center()
-                        .gap_2()
+                        .gap(px(8.0))
                         .text_size(px(12.5))
-                        .text_color(rgb(colors.working))
+                        .text_color(rgb(colors.muted))
                         .child(
                             div()
-                                .w(px(10.0))
-                                .h(px(5.0))
-                                .rounded(px(1.0))
-                                .bg(rgb(colors.working)),
+                                .size(px(7.0))
+                                .rounded_full()
+                                .bg(rgb(colors.working))
+                                .opacity(pulse_opacity()),
                         )
                         .child("Working")
-                        .child(working_dots(0, colors.working)),
+                        .child(working_dots(0, colors.muted)),
                 )
             })
             .when(!queued.is_empty(), |chat| {
@@ -12440,7 +12412,7 @@ impl XdDesktop {
                         .max_h(px(150.0))
                         .overflow_y_scroll()
                         .w_full()
-                        .max_w(px(860.0))
+                        .max_w(px(780.0))
                         .mb_2()
                         .flex()
                         .flex_col()
@@ -12452,21 +12424,23 @@ impl XdDesktop {
                 div()
                     .id("native-composer-shell")
                     .w_full()
-                    .max_w(px(860.0))
-                    .mb(px(18.0))
-                    .max_w(px(860.0))
-                    .p_2()
+                    .max_w(px(780.0))
+                    .mb(px(16.0))
+                    .pt(px(10.0))
+                    .pb(px(8.0))
+                    .px(px(8.0))
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .rounded(px(10.0))
+                    .rounded(px(20.0))
                     .border_1()
                     .border_color(rgb(if composer_focus.is_focused(window) {
-                        colors.accent_ink
+                        colors.selected_border
                     } else {
                         colors.border
                     }))
                     .bg(rgb(colors.surface))
+                    .shadow_md()
                     .on_click(cx.listener(|this, _, window, cx| {
                         let focus = this.composer_input.read(cx).focus_handle(cx);
                         window.focus(&focus);
@@ -12474,9 +12448,9 @@ impl XdDesktop {
                     .child(
                         div()
                             .id("native-composer")
-                            .min_h(px(44.0))
-                            .max_h(px(180.0))
-                            .px_2()
+                            .min_h(px(48.0))
+                            .max_h(px(200.0))
+                            .px(px(8.0))
                             .py_1()
                             .text_size(px(14.0))
                             .track_focus(&composer_focus)
@@ -12490,52 +12464,75 @@ impl XdDesktop {
                             .children(options)
                             .child(div().flex_1())
                             .when_some(context_meter, |controls, meter| controls.child(meter))
+                            .when(can_queue, |controls| {
+                                controls.child(
+                                    ui_button("native-queue-message", ButtonKind::Ghost, colors)
+                                        .h(px(28.0))
+                                        .px(px(8.0))
+                                        .text_size(px(12.0))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_queue {
+                                                this.queue_composer(cx)
+                                            }
+                                        }))
+                                        .child("Queue"),
+                                )
+                            })
                             .when(working, |controls| {
                                 controls.child(
-                                    ui_button("native-cancel-turn", ButtonKind::Ghost, colors)
-                                        .text_color(rgb(colors.danger))
+                                    div()
+                                        .id("native-cancel-turn")
+                                        .size(px(32.0))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(rgb(colors.surface_high))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.danger_surface)))
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.cancel_turn(cx)),
                                         )
-                                        .child("Cancel"),
+                                        .child(icon(STOP_ICON, 13.0, colors.text)),
                                 )
                             })
-                            .child(
-                                ui_button("native-queue-message", ButtonKind::Ghost, colors)
-                                    .when(!can_queue, |button| {
-                                        button.cursor_default().text_color(rgb(colors.faint))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if can_queue {
-                                            this.queue_composer(cx)
-                                        }
-                                    }))
-                                    .child("Queue"),
-                            )
-                            .child(
-                                ui_button(
-                                    "native-send-message",
-                                    if can_send {
-                                        ButtonKind::Primary
-                                    } else {
-                                        ButtonKind::Secondary
-                                    },
-                                    colors,
+                            .when(!working || can_send, |controls| {
+                                controls.child(
+                                    div()
+                                        .id("native-send-message")
+                                        .size(px(32.0))
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_full()
+                                        .bg(rgb(if can_send {
+                                            colors.accent
+                                        } else {
+                                            colors.surface_high
+                                        }))
+                                        .when(can_send, |button| {
+                                            button
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.accent_hover)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if can_send {
+                                                this.send_composer(cx)
+                                            }
+                                        }))
+                                        .child(icon(
+                                            SEND_ICON,
+                                            16.0,
+                                            if can_send {
+                                                colors.accent_text
+                                            } else {
+                                                colors.faint
+                                            },
+                                        )),
                                 )
-                                .when(!can_send, |button| {
-                                    button.cursor_default().text_color(rgb(colors.faint))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if can_send {
-                                        this.send_composer(cx)
-                                    }
-                                }))
-                                .child(if working {
-                                    "Send next"
-                                } else {
-                                    "Send"
-                                }),
-                            ),
+                            }),
                     ),
             )
             .into_any_element()
@@ -12980,7 +12977,7 @@ impl XdDesktop {
         } else {
             available
         };
-        self.chat_column_width = (chat_width - 56.0).clamp(240.0, 860.0);
+        self.chat_column_width = (chat_width - 48.0).clamp(240.0, 780.0);
         let chat = (dock_pane == NativePane::Chat || side_by_side)
             .then(|| self.render_native_chat(colors, window, cx));
         let dragging = self.dock_drag.is_some();
@@ -15715,7 +15712,7 @@ mod tests {
 
     #[gpui::test]
     fn bundled_ui_font_can_be_registered(cx: &mut gpui::TestAppContext) {
-        assert_eq!(UI_FONT, "Libre Franklin");
+        assert_eq!(UI_FONT, "Inter");
         for font in EMBEDDED_UI_FONTS {
             assert!(font.starts_with(&[0x00, 0x01, 0x00, 0x00]));
         }
@@ -18066,7 +18063,7 @@ mod tests {
             .0;
 
         assert!(board.contains("self.model.unread_chats.contains(&session.id)"));
-        assert!(board.contains("signal.label()"));
+        assert!(board.contains("signal_tab(signal, colors)"));
         assert!(home.contains("self.session_signal(session)"));
         assert!(production.contains("Self::Done => \"Done\""));
         assert!(production.contains("Self::Done => colors.done"));
@@ -18096,8 +18093,8 @@ mod tests {
 
         let compact = board.split_whitespace().collect::<String>();
         assert!(
-            compact.contains("div().min_w_0().flex_shrink().truncate().child(session.branch)"),
-            "branch text needs a shrinking, truncating flex child"
+            compact.contains("div().max_w(px(96.0)).flex_none().truncate()"),
+            "branch text needs a bounded, truncating child"
         );
         let _ = home;
     }

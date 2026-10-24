@@ -209,7 +209,7 @@ RUN set -eux; \
       /stage/usr/share/fonts/xd \
       /stage/usr/share/licenses/xd \
       /stage/usr/share/icons/hicolor/scalable/apps; \
-    install -m0644 data/fonts/LibreFranklin-*.ttf /stage/usr/share/fonts/xd/; \
+    install -m0644 data/fonts/Inter-*.ttf /stage/usr/share/fonts/xd/; \
     install -m0644 \
       data/licenses/alacritty-terminal-LICENSE-APACHE \
       /stage/usr/share/licenses/xd/alacritty-terminal-LICENSE-APACHE; \

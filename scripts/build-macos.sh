@@ -100,7 +100,7 @@ install -m0755 host/target/release/xd-host \
   "$APP/Contents/Resources/libexec/xd-host"
 install -m0755 scripts/install-macos.sh \
   "$APP/Contents/Resources/libexec/install.sh"
-for font in data/fonts/LibreFranklin-*.ttf; do
+for font in data/fonts/Inter-*.ttf; do
   install -m0644 "$font" "$APP/Contents/Resources/fonts/$(basename "$font")"
 done
 install -m0644 data/licenses/alacritty-terminal-LICENSE-APACHE \
