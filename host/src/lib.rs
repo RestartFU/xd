@@ -29,6 +29,12 @@ mod runtime;
 mod secrets;
 mod self_update;
 mod storage;
+mod subagent;
+
+/// Tests that point an agent executable at a stand-in take this first, since
+/// the override is process-wide.
+#[cfg(test)]
+pub(crate) static AGENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod terminal;
 mod terminal_activity;
 mod terminal_agent;

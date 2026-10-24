@@ -9,7 +9,10 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::tool_diff;
+use crate::{
+    subagent::{SubagentPatch, SubagentStatus, SubagentStep},
+    tool_diff,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentEvent {
@@ -26,6 +29,14 @@ pub enum AgentEvent {
     Text(String),
     TextDelta(String),
     Tool(String),
+    /// A delegated agent changed. The runtime keeps one record per agent and
+    /// rewrites it in place.
+    Subagent(SubagentPatch),
+    /// A tool card that is replaced rather than repeated, keyed per turn.
+    Record {
+        key: String,
+        text: String,
+    },
     Todos(TodoUpdate),
     Usage {
         input: u64,
@@ -323,13 +334,13 @@ impl AgentCommand<'_> {
             "--effort",
             self.effort,
             "--permission-mode",
-            match self.access {
-                "plan" => "plan",
-                "edit" => "acceptEdits",
-                "full" => "bypassPermissions",
-                _ => "manual",
-            },
+            claude_permission_mode(self.access),
         ]);
+        // Anything that would prompt comes to xd as a control request, so the
+        // user sees an approval card instead of a silent denial.
+        if self.access != "full" {
+            command.args(["--permission-prompt-tool", "stdio"]);
+        }
         if let Some(system_prompt) = self.system_prompt.filter(|prompt| !prompt.is_empty()) {
             command.args(["--append-system-prompt", system_prompt]);
         }
@@ -514,6 +525,8 @@ fn append_system_prompt(command: &mut Command, prompt: Option<&str>) {
 
 #[derive(Default)]
 pub struct ClaudeParser {
+    /// Agent/Task tool calls in this turn, by tool use id.
+    agent_tools: HashSet<String>,
     saw_streamed_text: bool,
     saw_text: bool,
     /// Newlines the text so far already ends with, so a new block is separated
@@ -556,6 +569,31 @@ impl ClaudeParser {
         let Ok(root) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
+        // A delegated agent's own messages carry the id of the tool call that
+        // started it. They belong on its card, never in the parent's reply.
+        if let Some(parent) = root
+            .get("parent_tool_use_id")
+            .and_then(Value::as_str)
+            .filter(|parent| !parent.is_empty())
+        {
+            return claude_child_event(parent, &root);
+        }
+        match root.get("type").and_then(Value::as_str) {
+            Some("control_request") => claude_control_request(&root),
+            Some("control_cancel_request") => root
+                .get("request_id")
+                .map(|id| vec![AgentEvent::InteractionResolved(id.clone())])
+                .unwrap_or_default(),
+            Some("system") if root.get("subtype").and_then(Value::as_str) != Some("init") => {
+                claude_task_event(&root)
+                    .map(|patch| vec![AgentEvent::Subagent(patch)])
+                    .unwrap_or_default()
+            }
+            _ => self.feed_main(root),
+        }
+    }
+
+    fn feed_main(&mut self, root: Value) -> Vec<AgentEvent> {
         match root.get("type").and_then(Value::as_str) {
             Some("system") if root.get("subtype").and_then(Value::as_str) == Some("init") => {
                 let mut events = Vec::new();
@@ -728,6 +766,15 @@ impl ClaudeParser {
                 if let Some(event) = claude_task_update(&tool.name, arguments.as_ref()) {
                     return vec![AgentEvent::Todos(event)];
                 }
+                if matches!(tool.name.as_str(), "Task" | "Agent")
+                    && let Some(id) = tool.id.clone()
+                {
+                    self.agent_tools.insert(id.clone());
+                    return vec![AgentEvent::Subagent(claude_agent_started(
+                        &id,
+                        arguments.as_ref(),
+                    ))];
+                }
                 if matches!(tool.name.as_str(), "TaskCreate" | "TaskList" | "TaskGet")
                     && let Some(id) = tool.id.clone()
                 {
@@ -754,6 +801,9 @@ impl ClaudeParser {
             .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
             .filter_map(|block| {
                 let id = block.get("tool_use_id").and_then(Value::as_str)?;
+                if self.agent_tools.remove(id) {
+                    return claude_agent_result(id, block).map(AgentEvent::Subagent);
+                }
                 let tool = self.completed_task_tools.remove(id)?;
                 let content = tool_result_text(block.get("content")?)?;
                 let arguments = (!tool.overflowed)
@@ -792,6 +842,267 @@ impl ClaudeParser {
         }
         events
     }
+}
+
+fn claude_permission_mode(access: &str) -> &'static str {
+    match access {
+        "plan" => "plan",
+        "edit" => "acceptEdits",
+        "full" => "bypassPermissions",
+        _ => "manual",
+    }
+}
+
+fn text_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+}
+
+/// The parent's Agent/Task call, the moment its arguments are complete.
+fn claude_agent_started(id: &str, arguments: Option<&Value>) -> SubagentPatch {
+    let empty = Value::Null;
+    let arguments = arguments.unwrap_or(&empty);
+    SubagentPatch {
+        provider: Some("Claude".into()),
+        agent: Some(
+            text_field(arguments, "subagent_type")
+                .unwrap_or("general-purpose")
+                .into(),
+        ),
+        model: text_field(arguments, "model").map(str::to_owned),
+        description: text_field(arguments, "description")
+            .or_else(|| text_field(arguments, "prompt"))
+            .map(str::to_owned),
+        prompt: text_field(arguments, "prompt").map(str::to_owned),
+        background: arguments.get("run_in_background").and_then(Value::as_bool),
+        status: Some(SubagentStatus::Running),
+        ..SubagentPatch::new(id)
+    }
+}
+
+/// What the parent was told when the agent call returned. A background agent
+/// returns at once with a launch notice; a foreground one returns its report.
+fn claude_agent_result(id: &str, block: &Value) -> Option<SubagentPatch> {
+    let text = block.get("content").and_then(tool_result_text)?;
+    if text.trim_start().starts_with("Async agent launched") {
+        return Some(SubagentPatch {
+            background: Some(true),
+            ..SubagentPatch::new(id)
+        });
+    }
+    let failed = block
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(SubagentPatch {
+        status: Some(if failed {
+            SubagentStatus::Failed
+        } else {
+            SubagentStatus::Completed
+        }),
+        summary: Some(text),
+        ..SubagentPatch::new(id)
+    })
+}
+
+/// One line for a tool call, for a subagent's step list.
+fn claude_step(name: &str, input: Option<&Value>) -> SubagentStep {
+    let empty = Value::Null;
+    let input = input.unwrap_or(&empty);
+    let text = if let Some(command) = text_field(input, "command") {
+        format!("$ {}", compact(command, 200))
+    } else if let Some(path) = text_field(input, "file_path")
+        .or_else(|| text_field(input, "path"))
+        .or_else(|| text_field(input, "notebook_path"))
+    {
+        format!("{name} {}", compact(path, 200))
+    } else if let Some(detail) = ["pattern", "query", "url", "description", "prompt"]
+        .iter()
+        .find_map(|key| text_field(input, key))
+    {
+        format!("{name} {}", compact(detail, 200))
+    } else {
+        name.to_owned()
+    };
+    SubagentStep {
+        tool: name.to_owned(),
+        text,
+    }
+}
+
+fn claude_child_event(parent: &str, root: &Value) -> Vec<AgentEvent> {
+    if root.get("type").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+    let Some(blocks) = root
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("tool_use") => {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                let step = claude_step(name, block.get("input"));
+                events.push(AgentEvent::Subagent(SubagentPatch {
+                    activity: Some(step.text.clone()),
+                    step: Some(step),
+                    ..SubagentPatch::new(parent)
+                }));
+            }
+            Some("text") => {
+                if let Some(text) = text_field(block, "text") {
+                    events.push(AgentEvent::Subagent(SubagentPatch {
+                        latest: Some(text.to_owned()),
+                        ..SubagentPatch::new(parent)
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    events
+}
+
+/// Claude's own bookkeeping for delegated agents: started, progress, finished.
+fn claude_task_event(root: &Value) -> Option<SubagentPatch> {
+    let subtype = root.get("subtype").and_then(Value::as_str)?;
+    let task_id = text_field(root, "task_id").map(str::to_owned);
+    let key = text_field(root, "tool_use_id")
+        .unwrap_or_default()
+        .to_owned();
+    let usage = root.get("usage");
+    let usage_field = |name: &str| {
+        usage
+            .and_then(|usage| usage.get(name))
+            .and_then(Value::as_u64)
+    };
+    let mut patch = SubagentPatch {
+        task_id,
+        ..SubagentPatch::new(key)
+    };
+    match subtype {
+        "task_started" => {
+            patch.provider = Some("Claude".into());
+            patch.agent = text_field(root, "subagent_type").map(str::to_owned);
+            patch.description = text_field(root, "description").map(str::to_owned);
+            patch.prompt = text_field(root, "prompt").map(str::to_owned);
+            patch.background = root.get("is_backgrounded").and_then(Value::as_bool);
+            patch.status = Some(SubagentStatus::Running);
+        }
+        "task_progress" => {
+            patch.activity = text_field(root, "description").map(str::to_owned);
+            patch.tokens = usage_field("total_tokens");
+            patch.tool_uses = usage_field("tool_uses");
+            patch.duration_ms = usage_field("duration_ms");
+        }
+        "task_updated" => {
+            patch.status = root
+                .get("patch")
+                .and_then(|patch| text_field(patch, "status"))
+                .and_then(SubagentStatus::from_wire);
+        }
+        "task_notification" => {
+            patch.status = text_field(root, "status").and_then(SubagentStatus::from_wire);
+            patch.summary = text_field(root, "summary").map(str::to_owned);
+            patch.tokens = usage_field("total_tokens");
+            patch.tool_uses = usage_field("tool_uses");
+            patch.duration_ms = usage_field("duration_ms");
+        }
+        _ => return None,
+    }
+    (!patch.key.is_empty() || patch.task_id.is_some()).then_some(patch)
+}
+
+/// A permission prompt or a question, which Claude asks over the control
+/// channel because xd runs it with `--permission-prompt-tool stdio`.
+fn claude_control_request(root: &Value) -> Vec<AgentEvent> {
+    let Some(id) = root.get("request_id").cloned() else {
+        return Vec::new();
+    };
+    let request = root.get("request").cloned().unwrap_or(Value::Null);
+    if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
+        return vec![AgentEvent::Rpc(json!({
+            "type": "control_response",
+            "response": {
+                "subtype": "error",
+                "request_id": id,
+                "error": "xd does not handle this control request",
+            },
+        }))];
+    }
+    let tool = request
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool")
+        .to_owned();
+    let input = request.get("input").cloned().unwrap_or(Value::Null);
+    if tool == "AskUserQuestion" {
+        let questions = input
+            .get("questions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, question)| {
+                json!({
+                    "id": format!("q{index}"),
+                    "header": question.get("header").cloned().unwrap_or(Value::Null),
+                    "question": question.get("question").cloned().unwrap_or(Value::Null),
+                    "options": question.get("options").cloned().unwrap_or_else(|| json!([])),
+                    "multiSelect": question.get("multiSelect").cloned().unwrap_or(Value::Bool(false)),
+                })
+            })
+            .collect::<Vec<_>>();
+        return vec![AgentEvent::Interaction {
+            id,
+            method: "item/tool/requestUserInput".into(),
+            params: json!({"questions": questions, "claude": {"tool": tool, "input": input}}),
+        }];
+    }
+    let step = claude_step(&tool, Some(&input));
+    let editing = matches!(
+        tool.as_str(),
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
+    );
+    let command = if tool == "ExitPlanMode" {
+        "Leave plan mode and start working".to_owned()
+    } else {
+        step.text
+    };
+    let reason = if tool == "ExitPlanMode" {
+        text_field(&input, "plan").map(str::to_owned)
+    } else {
+        text_field(&request, "description")
+            .or_else(|| text_field(&input, "description"))
+            .map(str::to_owned)
+    };
+    vec![AgentEvent::Interaction {
+        id,
+        method: if editing {
+            "item/fileChange/requestApproval"
+        } else {
+            "item/commandExecution/requestApproval"
+        }
+        .into(),
+        params: json!({
+            "command": command,
+            "reason": reason,
+            "tool": tool,
+            "patch": tool_diff::build(&tool, Some(&input)),
+            "claude": {
+                "tool": tool,
+                "input": input,
+                "suggestions": request.get("permission_suggestions").cloned().unwrap_or_else(|| json!([])),
+            },
+        }),
+    }]
 }
 
 fn codex_todo_update(item: &Value) -> Vec<AgentEvent> {
@@ -1784,6 +2095,143 @@ mod tests {
                     TodoItem::new("8", "Verify it", TodoStatus::Pending),
                 ])),
             ]
+        );
+    }
+
+    fn subagent_patches(events: Vec<AgentEvent>) -> Vec<SubagentPatch> {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::Subagent(patch) => Some(patch),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_delegated_agents_own_messages_go_to_its_card_not_the_reply() {
+        let mut parser = ClaudeParser::default();
+        let started = subagent_patches(
+            [
+                r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"Agent"}}}"#,
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"subagent_type\":\"Explore\",\"description\":\"Map the parser\",\"prompt\":\"Read agent.rs\"}"}}}"#,
+                r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#,
+            ]
+            .iter()
+            .flat_map(|line| parser.feed(line))
+            .collect(),
+        );
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].key, "toolu_a");
+        assert_eq!(started[0].agent.as_deref(), Some("Explore"));
+        assert_eq!(started[0].description.as_deref(), Some("Map the parser"));
+
+        // Before this, the child's final text was replayed as the parent's.
+        let child_text = parser.feed(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_a","message":{"content":[{"type":"text","text":"The parser has four entry points."}]}}"#,
+        );
+        assert!(
+            !child_text
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TextDelta(_) | AgentEvent::Text(_))),
+            "{child_text:?}"
+        );
+        assert_eq!(
+            subagent_patches(child_text)[0].latest.as_deref(),
+            Some("The parser has four entry points.")
+        );
+        let child_tool = subagent_patches(parser.feed(
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_a","message":{"content":[{"type":"tool_use","id":"c1","name":"Read","input":{"file_path":"/src/agent.rs"}}]}}"#,
+        ));
+        assert_eq!(
+            child_tool[0].step.as_ref().unwrap().text,
+            "Read /src/agent.rs"
+        );
+
+        // A foreground agent's result is its report.
+        let finished = subagent_patches(parser.feed(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Four entry points."}]}}"#,
+        ));
+        assert_eq!(finished[0].status, Some(SubagentStatus::Completed));
+        assert_eq!(finished[0].summary.as_deref(), Some("Four entry points."));
+
+        // The parent's own text still streams as the reply.
+        let parent = parser
+            .feed(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}"#);
+        assert!(
+            parent.contains(&AgentEvent::TextDelta("Done.".into())),
+            "{parent:?}"
+        );
+    }
+
+    #[test]
+    fn background_agents_report_through_claudes_task_events() {
+        let mut parser = ClaudeParser::default();
+        let launched = subagent_patches(parser.feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_b","description":"List files","subagent_type":"Explore","prompt":"ls","is_backgrounded":true}"#,
+        ));
+        assert_eq!(launched[0].background, Some(true));
+        assert_eq!(launched[0].task_id.as_deref(), Some("t1"));
+        let progress = subagent_patches(parser.feed(
+            r#"{"type":"system","subtype":"task_progress","task_id":"t1","tool_use_id":"toolu_b","description":"Reading main.rs","usage":{"total_tokens":13901,"tool_uses":2,"duration_ms":2940}}"#,
+        ));
+        assert_eq!(progress[0].activity.as_deref(), Some("Reading main.rs"));
+        assert_eq!(progress[0].tool_uses, Some(2));
+        // task_updated names only the task, which the runtime resolves.
+        let updated = subagent_patches(parser.feed(
+            r#"{"type":"system","subtype":"task_updated","task_id":"t1","patch":{"status":"completed"}}"#,
+        ));
+        assert!(updated[0].key.is_empty());
+        assert_eq!(updated[0].status, Some(SubagentStatus::Completed));
+        let notified = subagent_patches(parser.feed(
+            r#"{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_b","status":"completed","summary":"One file.","usage":{"total_tokens":16210}}"#,
+        ));
+        assert_eq!(notified[0].summary.as_deref(), Some("One file."));
+        assert_eq!(notified[0].tokens, Some(16_210));
+        // The init that opens a turn is still the session marker.
+        assert_eq!(
+            parser.feed(r#"{"type":"system","subtype":"init","session_id":"s9"}"#),
+            vec![AgentEvent::Session("s9".into())]
+        );
+    }
+
+    #[test]
+    fn claude_permission_prompts_and_questions_become_interactions() {
+        let mut parser = ClaudeParser::default();
+        let asked = parser.feed(
+            r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"touch x","description":"Create x"},"permission_suggestions":[{"type":"addRules"}]}}"#,
+        );
+        let AgentEvent::Interaction { id, method, params } = &asked[0] else {
+            panic!("{asked:?}");
+        };
+        assert_eq!(id, "r1");
+        assert_eq!(method, "item/commandExecution/requestApproval");
+        assert_eq!(params["command"], "$ touch x");
+        assert_eq!(params["reason"], "Create x");
+        assert_eq!(params["claude"]["input"]["command"], "touch x");
+
+        let edit = parser.feed(
+            r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/a.txt","content":"hi\n"}}}"#,
+        );
+        assert!(
+            matches!(&edit[0], AgentEvent::Interaction { method, .. } if method == "item/fileChange/requestApproval")
+        );
+
+        let question = parser.feed(
+            r#"{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which?","header":"Pick","options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}}"#,
+        );
+        let AgentEvent::Interaction { method, params, .. } = &question[0] else {
+            panic!("{question:?}");
+        };
+        assert_eq!(method, "item/tool/requestUserInput");
+        assert_eq!(params["questions"][0]["id"], "q0");
+        assert_eq!(params["questions"][0]["options"][1]["label"], "B");
+
+        let other = parser.feed(
+            r#"{"type":"control_request","request_id":"r4","request":{"subtype":"hook_callback"}}"#,
+        );
+        assert!(
+            matches!(&other[0], AgentEvent::Rpc(frame) if frame["response"]["subtype"] == "error")
         );
     }
 }

@@ -880,7 +880,7 @@ mod tests {
     use crate::local_socket::UnixStream;
 
     static NEXT_AGENT_TEST: AtomicU64 = AtomicU64::new(1);
-    static AGENT_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::AGENT_ENV_LOCK;
 
     fn terminal_output(manager: &TerminalManager, chat_id: &str) -> Vec<u8> {
         manager.list(chat_id)["terminals"]

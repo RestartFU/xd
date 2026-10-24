@@ -1,10 +1,11 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, ChildStdout, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -18,6 +19,7 @@ use crate::{
     ask::{self, Ask},
     secrets::SecretsStore,
     storage::TurnSpec,
+    subagent::{SubagentPatch, SubagentRun},
 };
 
 /// How often a streamed reply is parked on the chat so an interrupted turn
@@ -45,6 +47,160 @@ struct RuntimeInner {
     interactions: Mutex<HashMap<String, PendingInteractions>>,
     next_interaction: AtomicU64,
     interaction_epoch: String,
+    /// Tool records rewritten in place -- subagent cards, a turn's diff -- by
+    /// chat, so a later report updates the card it belongs to.
+    records: Mutex<HashMap<String, ChatRecords>>,
+}
+
+/// Records kept per chat before the oldest are forgotten. A forgotten record
+/// stays in the transcript; it just stops receiving updates.
+const MAX_RECORDS_PER_CHAT: usize = 200;
+/// Lines held between turns for a process whose idle output waits for the
+/// next turn.
+const MAX_BACKLOG_LINES: usize = 10_000;
+/// A turn the agent started by itself ends if it goes this long without a
+/// word, so a lost result cannot leave the chat working forever.
+const BACKGROUND_QUIET_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Default)]
+struct ChatRecords {
+    entries: HashMap<String, RecordEntry>,
+    /// Other ids an agent is reported under, such as Claude's task id.
+    aliases: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+struct RecordEntry {
+    /// Zero until the record's first snapshot is stored.
+    message_id: i64,
+    run: Option<SubagentRun>,
+}
+
+/// What storing a record's newest snapshot takes.
+enum RecordWrite {
+    New {
+        key: String,
+        text: String,
+    },
+    Update {
+        message_id: i64,
+        key: String,
+        text: String,
+    },
+}
+
+/// One line of a kept process's output, or its end.
+enum Feed {
+    Line(String),
+    End,
+}
+
+/// Where a kept process's output goes.
+///
+/// One reader thread owns the pipe for the process's whole life. A turn
+/// installs itself as the sink while it runs; between turns the runtime
+/// handles what arrives -- a background agent's progress, or a turn the agent
+/// starts by itself to report back -- instead of leaving it in the pipe for the
+/// next turn to misread as its own answer.
+struct Router {
+    sink: Option<mpsc::Sender<Feed>>,
+    backlog: VecDeque<String>,
+    backend: String,
+    child: Arc<Mutex<Child>>,
+    complaint: Arc<Mutex<String>>,
+    /// The latest turn this process answered. A turn the agent starts by
+    /// itself is modelled on it.
+    template: TurnSpec,
+}
+
+/// Where a turn reads its agent's output from.
+enum LineSource {
+    /// A process that answers one turn and exits.
+    Pipe(BufReader<ChildStdout>),
+    /// A kept process, through its router.
+    Feed {
+        lines: mpsc::Receiver<Feed>,
+        background: bool,
+    },
+}
+
+enum NextLine {
+    Line,
+    End,
+    Quiet,
+    Failed,
+}
+
+impl LineSource {
+    fn next(&mut self, line: &mut String) -> NextLine {
+        line.clear();
+        match self {
+            Self::Pipe(reader) => match reader.read_line(line) {
+                Ok(0) => NextLine::End,
+                Ok(_) => NextLine::Line,
+                Err(_) => NextLine::Failed,
+            },
+            Self::Feed { lines, background } => {
+                let received = if *background {
+                    match lines.recv_timeout(BACKGROUND_QUIET_LIMIT) {
+                        Ok(feed) => feed,
+                        Err(mpsc::RecvTimeoutError::Timeout) => return NextLine::Quiet,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => Feed::End,
+                    }
+                } else {
+                    lines.recv().unwrap_or(Feed::End)
+                };
+                match received {
+                    Feed::Line(text) => {
+                        *line = text;
+                        NextLine::Line
+                    }
+                    Feed::End => NextLine::End,
+                }
+            }
+        }
+    }
+}
+
+/// What a Claude line that arrives between turns calls for.
+enum IdleLine {
+    /// Progress for a background agent's card.
+    Records(Vec<SubagentPatch>),
+    /// The agent is talking or asking: that needs a turn.
+    Wake,
+    Ignore,
+}
+
+fn claude_idle_line(line: &str) -> IdleLine {
+    let Ok(root) = serde_json::from_str::<Value>(line) else {
+        return IdleLine::Ignore;
+    };
+    let kind = root.get("type").and_then(Value::as_str).unwrap_or_default();
+    let subtype = root
+        .get("subtype")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let child = root
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .is_some_and(|parent| !parent.is_empty());
+    if child || (kind == "system" && subtype.starts_with("task_")) {
+        let records = crate::agent::ClaudeParser::default()
+            .feed(line)
+            .into_iter()
+            .filter_map(|event| match event {
+                AgentEvent::Subagent(patch) => Some(patch),
+                _ => None,
+            })
+            .collect();
+        return IdleLine::Records(records);
+    }
+    match (kind, subtype) {
+        ("system", "init") | ("stream_event", _) | ("assistant", _) | ("control_request", _) => {
+            IdleLine::Wake
+        }
+        _ => IdleLine::Ignore,
+    }
 }
 
 #[derive(Default)]
@@ -58,6 +214,8 @@ struct PendingInteraction {
     method: String,
     params: Value,
     turn_id: u64,
+    /// Claude asks over its control channel and is answered the same way.
+    claude: bool,
 }
 
 /// An agent process that outlives the turn it was started for.
@@ -70,9 +228,8 @@ struct PendingInteraction {
 struct AgentSession {
     child: Arc<Mutex<Child>>,
     stdin: ChildStdin,
-    /// Lent to the turn being answered, and handed back when it ends. Absent
-    /// while a turn holds it.
-    stdout: Option<BufReader<ChildStdout>>,
+    /// Where the process's output goes; see [`Router`].
+    router: Arc<Mutex<Router>>,
     /// What this process was started with. A turn that wants anything else --
     /// another model, another directory -- needs its own process, because all
     /// of it was fixed in argv when this one started.
@@ -171,6 +328,7 @@ impl TurnRuntime {
                 interactions: Mutex::new(HashMap::new()),
                 next_interaction: AtomicU64::new(1),
                 interaction_epoch: uuid::Uuid::new_v4().to_string(),
+                records: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -236,6 +394,24 @@ impl TurnRuntime {
                 .is_some_and(|turn| turn.turn_id == request.turn_id)
         }) {
             return Err("This turn has ended".into());
+        }
+        if request.claude {
+            let answer = claude_answer(request, response)?;
+            self.write_rpc(
+                chat_id,
+                &json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request.id,
+                        "response": answer,
+                    },
+                }),
+            )?;
+            pending.requests.remove(request_id);
+            pending.revision = self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
+            self.inner.events.publish(json!({"event":"interaction-resolved","chat":chat_id,"request_id":request_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
+            return Ok(());
         }
         let result = match request.method.as_str() {
             "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => {
@@ -343,7 +519,7 @@ impl TurnRuntime {
         } else {
             specification.build()
         };
-        let (child, stdout, complaint) = if keeps_process {
+        let (child, source, complaint) = if keeps_process {
             self.session_for(
                 &turn.chat_id,
                 &fingerprint,
@@ -370,10 +546,24 @@ impl TurnRuntime {
             drain_stderr(stderr, complaint.clone());
             (
                 Arc::new(Mutex::new(child)),
-                BufReader::new(stdout),
+                LineSource::Pipe(BufReader::new(stdout)),
                 complaint,
             )
         };
+        self.launch(turn, child, source, complaint, keeps_process, false)
+    }
+
+    /// Registers a turn and starts the thread that reads it.
+    fn launch(
+        &self,
+        turn: TurnSpec,
+        child: Arc<Mutex<Child>>,
+        source: LineSource,
+        complaint: Arc<Mutex<String>>,
+        keeps_process: bool,
+        background: bool,
+    ) -> Result<(), String> {
+        let app_server = turn.backend == "codex";
         let message_boundary = self
             .inner
             .store
@@ -389,7 +579,7 @@ impl TurnRuntime {
                 .lock()
                 .map_err(|_| "Agent state is unavailable.".to_string())?;
             if active.contains_key(&turn.chat_id) {
-                if let Ok(mut process) = child.lock() {
+                if !background && let Ok(mut process) = child.lock() {
                     let _ = terminate_agent(&mut process);
                 }
                 return Err("That chat already has a running turn.".into());
@@ -417,8 +607,9 @@ impl TurnRuntime {
             "label": label,
             "turn_id": turn_id,
             "turn_sequence": 0,
+            "background": background,
         }));
-        if app_server {
+        if app_server && !background {
             let child = child.clone();
             let active = self.inner.clone();
             let chat = chat_id.clone();
@@ -451,9 +642,10 @@ impl TurnRuntime {
                         child,
                         cancelled,
                         progress,
-                        stdout,
+                        source,
                         complaint,
                         keeps_process,
+                        background,
                     )
                 }
             })
@@ -468,6 +660,149 @@ impl TurnRuntime {
             return Err(format!("Cannot supervise {backend}: {error}"));
         }
         Ok(())
+    }
+
+    /// Starts a turn for output the agent produced on its own, between turns:
+    /// Claude reporting back once a background agent finishes, or a background
+    /// agent asking for permission. `first` is the line that called for it.
+    fn start_background(&self, chat_id: &str, router: &mut Router, first: String) -> bool {
+        if !matches!(self.inner.store.begin_background_turn(chat_id), Ok(true)) {
+            return false;
+        }
+        let (sink, lines) = mpsc::channel();
+        let _ = sink.send(Feed::Line(first));
+        let mut turn = router.template.clone();
+        turn.prompt.clear();
+        let started = self.launch(
+            turn,
+            router.child.clone(),
+            LineSource::Feed {
+                lines,
+                background: true,
+            },
+            router.complaint.clone(),
+            true,
+            true,
+        );
+        if started.is_err() {
+            let _ = self.inner.store.clear_interrupted_turn(chat_id);
+            return false;
+        }
+        router.sink = Some(sink);
+        true
+    }
+
+    /// Hands lines that arrived between turns to whoever should have them.
+    fn pump(&self, chat_id: &str, router: &mut Router) {
+        while let Some(line) = router.backlog.pop_front() {
+            if let Some(sink) = &router.sink {
+                if sink.send(Feed::Line(line.clone())).is_ok() {
+                    continue;
+                }
+                router.sink = None;
+            }
+            if router.backend != "claude" {
+                // Codex's idle output waits for its next turn, as it always has.
+                router.backlog.push_front(line);
+                while router.backlog.len() > MAX_BACKLOG_LINES {
+                    router.backlog.pop_front();
+                }
+                return;
+            }
+            match claude_idle_line(&line) {
+                IdleLine::Records(patches) => {
+                    for patch in patches {
+                        self.idle_subagent(chat_id, patch);
+                    }
+                }
+                IdleLine::Wake => {
+                    if !self.start_background(chat_id, router, line.clone()) {
+                        // A turn is about to start; it takes these lines first.
+                        router.backlog.push_front(line);
+                        return;
+                    }
+                }
+                IdleLine::Ignore => {}
+            }
+        }
+    }
+
+    /// Reads a kept process for its whole life.
+    fn spawn_reader(
+        inner: Weak<RuntimeInner>,
+        chat_id: String,
+        stdout: ChildStdout,
+        router: Arc<Mutex<Router>>,
+    ) {
+        let _ = thread::Builder::new()
+            .name(format!("xd-agent-output-{chat_id}"))
+            .spawn(move || {
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    let text = line.trim_end_matches(['\r', '\n']).to_owned();
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
+                    let runtime = TurnRuntime { inner };
+                    let Ok(mut router) = router.lock() else {
+                        return;
+                    };
+                    router.backlog.push_back(text);
+                    runtime.pump(&chat_id, &mut router);
+                }
+                if let Ok(mut router) = router.lock()
+                    && let Some(sink) = router.sink.take()
+                {
+                    let _ = sink.send(Feed::End);
+                }
+            });
+    }
+
+    fn router(&self, chat_id: &str) -> Option<Arc<Mutex<Router>>> {
+        self.inner
+            .sessions
+            .lock()
+            .ok()?
+            .get(chat_id)
+            .map(|session| session.router.clone())
+    }
+
+    /// Ends a turn's hold on its process's output. Lines it had not read yet
+    /// go back to the front of the line, for whatever handles them next.
+    fn detach_feed(&self, chat_id: &str, source: LineSource) {
+        let LineSource::Feed { lines, .. } = source else {
+            return;
+        };
+        let Some(router) = self.router(chat_id) else {
+            return;
+        };
+        let Ok(mut router) = router.lock() else {
+            return;
+        };
+        router.sink = None;
+        let mut unread = Vec::new();
+        while let Ok(Feed::Line(line)) = lines.try_recv() {
+            unread.push(line);
+        }
+        for line in unread.into_iter().rev() {
+            router.backlog.push_front(line);
+        }
+    }
+
+    /// Deals with output that is waiting now that no turn holds the process.
+    fn pump_idle(&self, chat_id: &str) {
+        if let Some(router) = self.router(chat_id)
+            && let Ok(mut router) = router.lock()
+            && router.sink.is_none()
+        {
+            self.pump(chat_id, &mut router);
+        }
     }
 
     /// Stops the running turn, which for every backend means killing it.
@@ -535,14 +870,7 @@ impl TurnRuntime {
         turn: &TurnSpec,
         command: &mut std::process::Command,
         backend: &str,
-    ) -> Result<
-        (
-            Arc<Mutex<Child>>,
-            BufReader<ChildStdout>,
-            Arc<Mutex<String>>,
-        ),
-        String,
-    > {
+    ) -> Result<(Arc<Mutex<Child>>, LineSource, Arc<Mutex<String>>), String> {
         let mut sessions = self
             .inner
             .sessions
@@ -556,8 +884,22 @@ impl TurnRuntime {
                 .ok()
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_some();
-            let usable = !dead && session.fingerprint == fingerprint && session.stdout.is_some();
-            if usable {
+            if !dead && session.fingerprint == fingerprint {
+                let router = session.router.clone();
+                let mut router = router
+                    .lock()
+                    .map_err(|_| "Agent output is unavailable.".to_string())?;
+                if router.sink.is_some() {
+                    return Err("That chat already has a running turn.".into());
+                }
+                // The turn's reader goes in before the turn does, so not one
+                // line of the answer can land anywhere else.
+                let (sink, lines) = mpsc::channel();
+                while let Some(line) = router.backlog.pop_front() {
+                    let _ = sink.send(Feed::Line(line));
+                }
+                router.sink = Some(sink);
+                router.template = turn.clone();
                 // Writing the turn is also the test of whether the pipe is
                 // still there; a broken one falls through to a fresh process.
                 let frame = if backend == "codex" {
@@ -571,15 +913,21 @@ impl TurnRuntime {
                     .and_then(|()| session.stdin.flush())
                     .is_ok();
                 if written {
-                    let stdout = session.stdout.take().expect("checked above");
-                    return Ok((session.child.clone(), stdout, session.complaint.clone()));
+                    return Ok((
+                        session.child.clone(),
+                        LineSource::Feed {
+                            lines,
+                            background: false,
+                        },
+                        session.complaint.clone(),
+                    ));
                 }
+                router.sink = None;
             }
-            if let Some(mut gone) = sessions.remove(chat_id)
+            if let Some(gone) = sessions.remove(chat_id)
                 && let Ok(mut child) = gone.child.lock()
             {
                 let _ = terminate_agent(&mut child);
-                gone.stdout.take();
             }
         }
 
@@ -606,32 +954,48 @@ impl TurnRuntime {
         } else {
             AgentCommand::encode_turn(&turn.prompt)
         };
-        writeln!(stdin, "{}", frame)
-            .and_then(|()| stdin.flush())
-            .map_err(|error| format!("Cannot send the turn to {backend}: {error}"))?;
         let complaint = Arc::new(Mutex::new(String::new()));
         drain_stderr(stderr, complaint.clone());
         let child = Arc::new(Mutex::new(child));
+        let (sink, lines) = mpsc::channel();
+        let router = Arc::new(Mutex::new(Router {
+            sink: Some(sink),
+            backlog: VecDeque::new(),
+            backend: backend.to_owned(),
+            child: child.clone(),
+            complaint: complaint.clone(),
+            template: turn.clone(),
+        }));
+        Self::spawn_reader(
+            Arc::downgrade(&self.inner),
+            chat_id.to_owned(),
+            stdout,
+            router.clone(),
+        );
+        if let Err(error) = writeln!(stdin, "{}", frame).and_then(|()| stdin.flush()) {
+            if let Ok(mut child) = child.lock() {
+                let _ = terminate_agent(&mut child);
+            }
+            return Err(format!("Cannot send the turn to {backend}: {error}"));
+        }
         sessions.insert(
             chat_id.to_owned(),
             AgentSession {
                 child: child.clone(),
                 stdin,
-                stdout: None,
+                router,
                 fingerprint: fingerprint.to_owned(),
                 complaint: complaint.clone(),
             },
         );
-        Ok((child, BufReader::new(stdout), complaint))
-    }
-
-    /// Hands a kept process's output back, so the next turn can have it.
-    fn return_stdout(&self, chat_id: &str, stdout: BufReader<ChildStdout>) {
-        if let Ok(mut sessions) = self.inner.sessions.lock()
-            && let Some(session) = sessions.get_mut(chat_id)
-        {
-            session.stdout = Some(stdout);
-        }
+        Ok((
+            child,
+            LineSource::Feed {
+                lines,
+                background: false,
+            },
+            complaint,
+        ))
     }
 
     /// Ends the kept process for a chat, if there is one.
@@ -652,9 +1016,10 @@ impl TurnRuntime {
         child: Arc<Mutex<Child>>,
         cancelled: Arc<AtomicBool>,
         progress: Arc<TurnProgress>,
-        stdout: BufReader<ChildStdout>,
+        mut source: LineSource,
         complaint: Arc<Mutex<String>>,
         keeps_process: bool,
+        background: bool,
     ) {
         let started = Instant::now();
         let mut parser = match if turn.backend == "codex" {
@@ -680,17 +1045,39 @@ impl TurnRuntime {
         let mut context_usage = None;
         let mut parked = Instant::now();
 
-        // Owned back after the loop so a kept process can be lent out again.
-        let mut reader = stdout;
         let mut line = String::new();
+        // Stores the reply streamed so far as its own message, which a tool
+        // card that follows it must come after.
+        macro_rules! close_segment {
+            () => {
+                if !streamed_text.is_empty() {
+                    let segment = std::mem::take(&mut streamed_text);
+                    if let Err(error) = self.inner.store.append_turn_message(
+                        &turn.chat_id,
+                        "assistant",
+                        &segment,
+                        Some(&turn.label),
+                    ) {
+                        latest_error = Some(error.to_string());
+                    } else {
+                        had_activity = true;
+                    }
+                    visible_streamed_bytes = 0;
+                    let _ = self.inner.store.set_partial_reply(&turn.chat_id, "", None);
+                }
+            };
+        }
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
+            match source.next(&mut line) {
+                NextLine::Line => {}
                 // End of output. For a process that answers once this is the
                 // end of the turn; for a kept one it means it died.
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => {
+                NextLine::End => break,
+                NextLine::Quiet => {
+                    completed = true;
+                    break;
+                }
+                NextLine::Failed => {
                     latest_error = Some(format!("Cannot read {} output.", turn.backend));
                     break;
                 }
@@ -709,6 +1096,7 @@ impl TurnRuntime {
                     AgentEvent::Interaction { id, method, params } => {
                         let request_id =
                             format!("{}:{turn_id}:{}", self.inner.interaction_epoch, id);
+                        let claude = turn.backend == "claude";
                         if matches!(
                             method.as_str(),
                             "item/commandExecution/requestApproval"
@@ -725,6 +1113,7 @@ impl TurnRuntime {
                                         method: method.clone(),
                                         params: params.clone(),
                                         turn_id,
+                                        claude,
                                     },
                                 );
                                 pending.revision =
@@ -829,23 +1218,30 @@ impl TurnRuntime {
                             parked = Instant::now();
                         }
                     }
-                    AgentEvent::Tool(text) => {
-                        if !streamed_text.is_empty() {
-                            let segment = std::mem::take(&mut streamed_text);
-                            if let Err(error) = self.inner.store.append_turn_message(
-                                &turn.chat_id,
-                                "assistant",
-                                &segment,
-                                Some(&turn.label),
-                            ) {
-                                latest_error = Some(error.to_string());
-                            } else {
-                                had_activity = true;
+                    AgentEvent::Subagent(patch) => {
+                        if let Some(write) = self.fold_subagent(&turn.chat_id, patch) {
+                            if matches!(write, RecordWrite::New { .. }) {
+                                close_segment!();
                             }
-                            visible_streamed_bytes = 0;
-
-                            let _ = self.inner.store.set_partial_reply(&turn.chat_id, "", None);
+                            match self.write_record(&turn, turn_id, &progress, write) {
+                                Ok(()) => had_activity = true,
+                                Err(error) => latest_error = Some(error),
+                            }
                         }
+                    }
+                    AgentEvent::Record { key, text } => {
+                        let write =
+                            self.fold_record(&turn.chat_id, format!("{turn_id}:{key}"), text);
+                        if matches!(write, RecordWrite::New { .. }) {
+                            close_segment!();
+                        }
+                        match self.write_record(&turn, turn_id, &progress, write) {
+                            Ok(()) => had_activity = true,
+                            Err(error) => latest_error = Some(error),
+                        }
+                    }
+                    AgentEvent::Tool(text) => {
+                        close_segment!();
                         match self.inner.store.append_turn_message(
                             &turn.chat_id,
                             "tool",
@@ -944,7 +1340,7 @@ impl TurnRuntime {
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_none();
             if alive && completed && !was_cancelled {
-                self.return_stdout(&turn.chat_id, reader);
+                self.detach_feed(&turn.chat_id, source);
             } else {
                 self.drop_session(&turn.chat_id);
             }
@@ -983,6 +1379,7 @@ impl TurnRuntime {
             self.inner.events.publish(json!({"event":"interactions-cleared", "chat":turn.chat_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
         }
         let asked = ask::parse(&assistant_text);
+        let chat_id = turn.chat_id.clone();
         self.finish(
             turn,
             turn_id,
@@ -990,10 +1387,13 @@ impl TurnRuntime {
             success,
             error,
             started.elapsed().as_secs(),
-            !had_activity && !was_cancelled,
+            !had_activity && !was_cancelled && !background,
             asked,
             context_usage,
         );
+        if keeps_process {
+            self.pump_idle(&chat_id);
+        }
     }
 
     fn todo_snapshot(&self, chat_id: &str, update: TodoUpdate) -> Result<Vec<TodoItem>, String> {
@@ -1109,6 +1509,173 @@ impl TurnRuntime {
         }
     }
 
+    /// Folds an agent's report into its record. `None` when the report names
+    /// no agent this host has seen.
+    fn fold_subagent(&self, chat_id: &str, patch: SubagentPatch) -> Option<RecordWrite> {
+        let mut records = self.inner.records.lock().ok()?;
+        let book = records.entry(chat_id.to_owned()).or_default();
+        let key = if patch.key.is_empty() {
+            book.aliases.get(patch.task_id.as_deref()?)?.clone()
+        } else {
+            if let Some(task) = &patch.task_id {
+                book.aliases.insert(task.clone(), patch.key.clone());
+            }
+            patch.key.clone()
+        };
+        let record_key = format!("subagent:{key}");
+        let entry = Self::record_entry(book, &record_key);
+        let run = entry.run.get_or_insert_with(|| SubagentRun::new(&key));
+        run.apply(SubagentPatch { key, ..patch });
+        let text = run.encode();
+        Some(if entry.message_id == 0 {
+            RecordWrite::New {
+                key: record_key,
+                text,
+            }
+        } else {
+            RecordWrite::Update {
+                message_id: entry.message_id,
+                key: record_key,
+                text,
+            }
+        })
+    }
+
+    fn fold_record(&self, chat_id: &str, key: String, text: String) -> RecordWrite {
+        let Ok(mut records) = self.inner.records.lock() else {
+            return RecordWrite::New { key, text };
+        };
+        let book = records.entry(chat_id.to_owned()).or_default();
+        let entry = Self::record_entry(book, &key);
+        if entry.message_id == 0 {
+            RecordWrite::New { key, text }
+        } else {
+            RecordWrite::Update {
+                message_id: entry.message_id,
+                key,
+                text,
+            }
+        }
+    }
+
+    fn record_entry<'a>(book: &'a mut ChatRecords, key: &str) -> &'a mut RecordEntry {
+        if !book.entries.contains_key(key) {
+            book.order.push_back(key.to_owned());
+            while book.order.len() > MAX_RECORDS_PER_CHAT {
+                if let Some(old) = book.order.pop_front() {
+                    book.entries.remove(&old);
+                    book.aliases
+                        .retain(|_, target| format!("subagent:{target}") != old);
+                }
+            }
+        }
+        book.entries.entry(key.to_owned()).or_insert(RecordEntry {
+            message_id: 0,
+            run: None,
+        })
+    }
+
+    fn bind_record(&self, chat_id: &str, key: &str, message_id: i64) {
+        if let Ok(mut records) = self.inner.records.lock()
+            && let Some(entry) = records
+                .get_mut(chat_id)
+                .and_then(|book| book.entries.get_mut(key))
+        {
+            entry.message_id = message_id;
+        }
+    }
+
+    /// Stores a record's newest snapshot during a turn and tells clients.
+    fn write_record(
+        &self,
+        turn: &TurnSpec,
+        turn_id: u64,
+        progress: &TurnProgress,
+        write: RecordWrite,
+    ) -> Result<(), String> {
+        match write {
+            RecordWrite::New { key, text } => {
+                let id = self
+                    .inner
+                    .store
+                    .append_turn_message(&turn.chat_id, "tool", &text, None)
+                    .map_err(|error| error.to_string())?;
+                self.bind_record(&turn.chat_id, &key, id);
+                self.publish_sequenced(
+                    "tool",
+                    turn,
+                    turn_id,
+                    progress,
+                    json!({
+                        "text": text,
+                        "record": key,
+                        "message_id": id,
+                        "workdir": turn.workdir,
+                        "context": turn.workdir,
+                    }),
+                );
+            }
+            RecordWrite::Update {
+                message_id,
+                key,
+                text,
+            } => {
+                self.inner
+                    .store
+                    .replace_message_content(&turn.chat_id, message_id, &text)
+                    .map_err(|error| error.to_string())?;
+                self.publish_sequenced(
+                    "record",
+                    turn,
+                    turn_id,
+                    progress,
+                    json!({"text": text, "record": key, "message_id": message_id}),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A background agent's progress while no turn is running: its card is
+    /// updated in place, and the chat stays free for the user.
+    fn idle_subagent(&self, chat_id: &str, patch: SubagentPatch) {
+        match self.fold_subagent(chat_id, patch) {
+            Some(RecordWrite::Update {
+                message_id,
+                key,
+                text,
+            }) => {
+                if self
+                    .inner
+                    .store
+                    .replace_message_content(chat_id, message_id, &text)
+                    .is_ok()
+                {
+                    self.inner.events.publish(json!({
+                        "event": "record",
+                        "chat": chat_id,
+                        "record": key,
+                        "message_id": message_id,
+                        "text": text,
+                    }));
+                }
+            }
+            Some(RecordWrite::New { key, text }) => {
+                if let Ok(id) = self
+                    .inner
+                    .store
+                    .append_turn_message(chat_id, "tool", &text, None)
+                {
+                    self.bind_record(chat_id, &key, id);
+                    self.inner
+                        .events
+                        .publish(json!({"event": "changed", "chat": chat_id}));
+                }
+            }
+            None => {}
+        }
+    }
+
     fn publish_sequenced(
         &self,
         name: &str,
@@ -1140,7 +1707,22 @@ impl TurnRuntime {
                     let text = std::mem::take(&mut state.segment);
                     state.items.push(json!({"tool":false,"text":text}));
                 }
-                state.items.push(json!({"tool":true,"text":fields["text"]}));
+                let mut item = json!({"tool":true,"text":fields["text"]});
+                if let Some(record) = fields.get("record") {
+                    item["record"] = record.clone();
+                    item["message_id"] = fields["message_id"].clone();
+                }
+                state.items.push(item);
+            } else if name == "record" {
+                // A client loading mid-turn gets the newest snapshot, in the
+                // place the record first appeared.
+                if let Some(item) = state
+                    .items
+                    .iter_mut()
+                    .find(|item| item.get("record") == fields.get("record"))
+                {
+                    item["text"] = fields["text"].clone();
+                }
             }
             state.sequence
         };
@@ -1154,6 +1736,55 @@ impl TurnRuntime {
         );
         event.insert("turn_sequence".into(), sequence.into());
         self.inner.events.publish(Value::Object(event));
+    }
+}
+
+/// Claude's answer to a permission prompt or a question, in the shape its
+/// control channel expects.
+fn claude_answer(request: &PendingInteraction, response: &Value) -> Result<Value, String> {
+    let claude = &request.params["claude"];
+    let input = claude.get("input").cloned().unwrap_or_else(|| json!({}));
+    if request.method == "item/tool/requestUserInput" {
+        let answers = response
+            .get("answers")
+            .and_then(Value::as_object)
+            .ok_or("Question needs answers")?;
+        let mut by_question = serde_json::Map::new();
+        for question in request.params["questions"].as_array().into_iter().flatten() {
+            let id = question["id"].as_str().ok_or("Invalid question request")?;
+            let chosen = answers
+                .get(id)
+                .and_then(|answer| answer.get("answers"))
+                .and_then(Value::as_array)
+                .filter(|chosen| !chosen.is_empty())
+                .ok_or("Answer each requested question")?
+                .iter()
+                .map(|choice| choice.as_str().ok_or("Invalid question answers"))
+                .collect::<Result<Vec<_>, _>>()?;
+            let text = question["question"].as_str().unwrap_or(id);
+            by_question.insert(text.to_owned(), Value::String(chosen.join(", ")));
+        }
+        let mut updated = input;
+        updated["answers"] = Value::Object(by_question);
+        return Ok(json!({"behavior": "allow", "updatedInput": updated}));
+    }
+    match response.get("decision").and_then(Value::as_str) {
+        Some("accept") => Ok(json!({"behavior": "allow", "updatedInput": input})),
+        Some("acceptForSession") => Ok(json!({
+            "behavior": "allow",
+            "updatedInput": input,
+            "updatedPermissions": claude.get("suggestions").cloned().unwrap_or_else(|| json!([])),
+        })),
+        Some("decline") => Ok(json!({
+            "behavior": "deny",
+            "message": "The user declined this tool call.",
+        })),
+        Some("cancel") => Ok(json!({
+            "behavior": "deny",
+            "message": "The user stopped this turn.",
+            "interrupt": true,
+        })),
+        _ => Err("Approval needs a decision".into()),
     }
 }
 
@@ -1365,5 +1996,154 @@ mod tests {
         );
         assert_eq!(usage_snapshot(0, 0, 1_000_000, 0), None);
         assert_eq!(usage_snapshot(1, 0, 0, 0), None);
+    }
+
+    fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
+        for _ in 0..200 {
+            if ready() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    fn contents(store: &StateStore, chat: &str) -> Vec<(String, String)> {
+        store.messages(&json!({"chat": chat})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| {
+                (
+                    message["role"].as_str().unwrap().to_owned(),
+                    message["content"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// Claude ends a turn while a background agent still runs, then reports
+    /// back on its own once the agent finishes. That report used to sit in
+    /// the pipe and come out as the answer to the user's next message.
+    #[cfg(unix)]
+    #[test]
+    fn a_background_report_becomes_its_own_turn_and_the_next_answer_is_not_shifted() {
+        use std::{env, fs, os::unix::fs::PermissionsExt};
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = env::temp_dir().join(format!(
+            "xd-runtime-background-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let agent = root.join("claude");
+        fs::write(
+            &agent,
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_helper","name":"Agent"}}}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"subagent_type\":\"Explore\",\"description\":\"Look around\",\"prompt\":\"Look\",\"run_in_background\":true}"}}}'
+echo '{"type":"stream_event","event":{"type":"content_block_stop","index":0}}'
+echo '{"type":"system","subtype":"task_started","task_id":"task-1","tool_use_id":"toolu_helper","description":"Look around","subagent_type":"Explore","is_backgrounded":true}'
+echo '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_helper","content":"Async agent launched successfully."}]}}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Started a helper."}]}}'
+echo '{"type":"result","subtype":"success","result":"Started a helper."}'
+sleep 0.3
+echo '{"type":"assistant","parent_tool_use_id":"toolu_helper","message":{"content":[{"type":"tool_use","id":"c1","name":"Bash","input":{"command":"ls"}}]}}'
+echo '{"type":"system","subtype":"task_progress","task_id":"task-1","tool_use_id":"toolu_helper","description":"Running ls","usage":{"total_tokens":900,"tool_uses":1,"duration_ms":400}}'
+echo '{"type":"system","subtype":"task_notification","task_id":"task-1","tool_use_id":"toolu_helper","status":"completed","summary":"Found two files.","usage":{"total_tokens":1200,"tool_uses":1,"duration_ms":800}}'
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"The helper found two files."}]}}'
+echo '{"type":"result","subtype":"success","result":"The helper found two files."}'
+read second
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Answer two."}]}}'
+echo '{"type":"result","subtype":"success","result":"Answer two."}'
+read third
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "claude"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let runtime = TurnRuntime::new(
+            store.clone(),
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        );
+        let send = |text: &str| match store
+            .prepare_send(&json!({"chat": chat, "text": text}))
+            .unwrap()
+        {
+            crate::storage::SendDisposition::Start { turn, .. } => runtime.start(turn).unwrap(),
+            crate::storage::SendDisposition::Queued { .. } => panic!("{text} was queued"),
+        };
+
+        send("first");
+        wait_for("the background report", || {
+            contents(&store, &chat)
+                .iter()
+                .any(|(_, content)| content == "The helper found two files.")
+        });
+        wait_for("the background turn to end", || {
+            runtime.live_turn(&chat).is_none()
+        });
+
+        send("second");
+        wait_for("the second answer", || {
+            contents(&store, &chat)
+                .iter()
+                .any(|(_, content)| content == "Answer two.")
+        });
+        wait_for("the second turn to end", || {
+            runtime.live_turn(&chat).is_none()
+        });
+
+        let messages = contents(&store, &chat);
+        let texts = messages
+            .iter()
+            .filter(|(role, _)| role == "user" || role == "assistant")
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            texts,
+            vec![
+                "first",
+                "Started a helper.",
+                "The helper found two files.",
+                "second",
+                "Answer two."
+            ]
+        );
+        // One card for the helper, finished, with its step and its report.
+        let records = messages
+            .iter()
+            .filter_map(|(_, content)| crate::subagent::decode(content))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1, "{messages:?}");
+        assert_eq!(records[0]["status"], "completed");
+        assert_eq!(records[0]["agent"], "Explore");
+        assert_eq!(records[0]["summary"], "Found two files.");
+        assert_eq!(records[0]["steps"][0]["text"], "$ ls");
+        assert_eq!(records[0]["background"], true);
+
+        drop(runtime);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = fs::remove_dir_all(root);
     }
 }

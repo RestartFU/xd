@@ -1821,6 +1821,33 @@ impl StateStore {
         Ok(true)
     }
 
+    /// Rewrites a stored tool record, such as a subagent's card, in place.
+    pub fn replace_message_content(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+        content: &str,
+    ) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE messages SET content = ? WHERE id = ? AND chat_id = ? AND role = 'tool'",
+            params![content, message_id, chat_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Marks a chat busy for a turn the agent started by itself, such as
+    /// Claude reporting back on a background agent. Returns false when a turn
+    /// already holds the chat, so the agent's output joins that one instead.
+    pub fn begin_background_turn(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ? AND host_working = 0",
+            params![now_seconds(), chat_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn abort_turn_start(&self, chat_id: &str, error: &str) -> Result<(), StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
@@ -7320,6 +7347,60 @@ mod tests {
         assert_eq!(event["queue"], json!([]));
         assert!(event.get("text").is_none());
         assert_eq!(store.chat("chat-1").unwrap()["queue"], json!([]));
+    }
+
+    #[test]
+    fn tool_records_rewrite_in_place_and_background_turns_claim_idle_chats() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let id = store
+            .append_turn_message(
+                "chat-1",
+                "tool",
+                "subagent_run\n{\"status\":\"running\"}",
+                None,
+            )
+            .unwrap();
+        assert!(
+            store
+                .replace_message_content("chat-1", id, "subagent_run\n{\"status\":\"completed\"}")
+                .unwrap()
+        );
+        let user = store
+            .append_turn_message("chat-1", "user", "hi", None)
+            .unwrap();
+        // Only tool records are rewritable, and only in their own chat.
+        assert!(
+            !store
+                .replace_message_content("chat-1", user, "changed")
+                .unwrap()
+        );
+        assert!(
+            !store
+                .replace_message_content("chat-2", id, "changed")
+                .unwrap()
+        );
+        let page = store.messages(&json!({"chat": "chat-1"})).unwrap();
+        let contents = page["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["content"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec![
+                "subagent_run\n{\"status\":\"completed\"}".to_owned(),
+                "hi".to_owned()
+            ]
+        );
+
+        assert!(store.begin_background_turn("chat-1").unwrap());
+        assert!(!store.begin_background_turn("chat-1").unwrap());
     }
 
     #[test]
