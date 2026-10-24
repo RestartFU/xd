@@ -178,7 +178,8 @@ When a turn is live the reply also carries its snapshot:
 - `turn_epoch`: string identifying the current daemon runtime
 - `turn_id`, `turn_sequence`: integers — the turn watermark
 - `working_for`: elapsed seconds
-- `items`: ordered array of `{"tool":bool,"text":string}`
+- `items`: ordered array of `{"tool":bool,"text":string}`; record rows also
+  carry `record` and `message_id`, and hold the record's newest text
 - `segment`: unfinished assistant text
 
 A client renders each non-tool item as finished assistant text, each tool item
@@ -400,7 +401,7 @@ command is slow.
 {"op":"respond","chat":"chat-1","request_id":"opaque-id","response":{"answers":{"question-id":{"answers":["Keep it"]}}}}
 ```
 
-Responds to a pending Codex app-server approval or question. Approval decisions
+Responds to a pending Codex app-server or Claude Code approval or question. Approval decisions
 are `accept`, `acceptForSession`, `decline`, or `cancel`. Permission decisions
 grant only the permissions requested by the backend. Question responses must
 answer every question in the request. Stale, already answered, or foreign-chat
@@ -410,6 +411,42 @@ IDs are refused. Cancellation clears pending requests.
 interaction_epoch}`. `interaction-resolved` removes one ID; `interactions-cleared`
 removes all prompts for the chat. Both carry the revision and epoch. Pending
 requests survive client disconnects and are available from `chat` snapshots.
+
+### `subagent`
+
+```json
+{"op":"subagent","chat":"chat-1","key":"toolu_01","action":"stop"}
+{"op":"subagent","chat":"chat-1","key":"toolu_01","action":"background"}
+```
+
+Controls a running Claude Code subagent. `key` is the `key` from its
+`subagent_run` record. `stop` ends the agent; `background` lets the turn carry
+on without waiting for it. The host refuses agents that have finished, that
+are not Claude's, or that Claude has not reported a task for yet. A control
+operation: answered even while a serialized command is slow. The agent's
+record reports the outcome.
+
+### Subagent records
+
+Each delegated agent is one `tool` message whose content is `subagent_run\n`
+followed by a JSON object. The host rewrites that message in place as the
+agent works rather than appending new rows, so a stored transcript holds only
+the newest snapshot.
+
+```json
+{"key":"toolu_01","provider":"Claude","agent":"Explore","model":"claude-haiku-5-5",
+ "description":"Map the parser","prompt":"…","status":"running","background":false,
+ "activity":"Reading runtime.rs","steps":[{"tool":"Read","text":"host/src/runtime.rs"}],
+ "tool_uses":3,"tokens":9100,"duration_ms":23000,"started_at":1753700000000,
+ "latest":"…","summary":"…"}
+```
+
+`status` is `running`, `completed`, `failed`, or `stopped`. `steps` keeps the
+newest 40 tool calls; `tool_uses` counts all of them. `started_at` is Unix
+milliseconds, for a live elapsed time. `latest` is the agent's newest message
+and `summary` its final report. `model`, `prompt`, `activity`, `latest`,
+`summary`, `tokens`, `duration_ms`, and `started_at` are absent until known;
+ignore unknown members.
 
 ### `set-option`
 
@@ -513,7 +550,8 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `commands` | `chat`, `backend`, `commands` | Slash-command list for a backend. |
 | `turn-started` | `chat`, `label`, `turn_id`, `turn_sequence` | A turn began. |
 | `text` | `chat`, `text`, `turn_id`, `turn_sequence` | Assistant text delta. |
-| `tool` | `chat`, `text`, `workdir`, `context`, `turn_id`, `turn_sequence` | Tool row. |
+| `tool` | `chat`, `text`, `workdir`, `context`, `turn_id`, `turn_sequence`, optional `record`, `message_id` | Tool row. `record` marks a row the host will rewrite; `message_id` is its stored id. |
+| `record` | `chat`, `text`, `record`, `message_id`, optional `turn_id`, `turn_sequence` | A record row was rewritten, such as a subagent's progress; replace the row with that `message_id`. Arrives without turn members when a background agent reports while no turn is running. |
 | `turn-finished` | `chat`, `turn_id`, `turn_sequence`, `ok`, `waiting`, `silent`, `duration`, `last_message_id`, optional `error`, `question`, `options`, `accepts_input` | The turn ended. |
 | `repository-changed` | `chat` | HEAD moved outside the app. |
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |
