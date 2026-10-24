@@ -9,7 +9,10 @@ use gpui::{Image, ImageFormat};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::markdown::{self, Document};
+use crate::{
+    activity::{ActivityCard, SubagentView},
+    markdown::{self, Document},
+};
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
@@ -89,6 +92,25 @@ pub struct Message {
     markdown: Option<Arc<Document>>,
     #[serde(skip)]
     image_paths: Vec<String>,
+    /// A tool row's card, parsed once when the row arrives rather than on
+    /// every frame it is drawn.
+    #[serde(skip)]
+    tool: Option<Arc<ToolView>>,
+}
+
+/// What a tool row draws.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolView {
+    Subagent(SubagentView),
+    Activity(ActivityCard),
+}
+
+impl ToolView {
+    fn parse(content: &str) -> Self {
+        SubagentView::parse(content)
+            .map(Self::Subagent)
+            .unwrap_or_else(|| Self::Activity(ActivityCard::parse(content)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,11 +138,16 @@ impl Message {
         let content = content.into();
         let role = role.into();
         let (shown, image_paths) = message_content(&role, &content);
-        let markdown = Some(Arc::new(if role == "assistant" {
-            markdown::parse_assistant(&shown)
-        } else {
-            markdown::parse(&shown)
-        }));
+        // A tool row draws its card, not its text as markdown; a patch can be
+        // large, so its document is only built if something asks for it.
+        let tool = (role == "tool").then(|| Arc::new(ToolView::parse(&content)));
+        let markdown = tool.is_none().then(|| {
+            Arc::new(if role == "assistant" {
+                markdown::parse_assistant(&shown)
+            } else {
+                markdown::parse(&shown)
+            })
+        });
         Self {
             id,
             role,
@@ -128,6 +155,7 @@ impl Message {
             label,
             markdown,
             image_paths,
+            tool,
         }
     }
 
@@ -141,6 +169,7 @@ impl Message {
         let role = role.into();
         let (shown, image_paths) = message_content(&role, &content);
         let markdown = Some(Arc::new(markdown::plain_document(&shown)));
+        let tool = (role == "tool").then(|| Arc::new(ToolView::parse(&content)));
         Self {
             id,
             role,
@@ -148,6 +177,7 @@ impl Message {
             label,
             markdown,
             image_paths,
+            tool,
         }
     }
 
@@ -161,13 +191,23 @@ impl Message {
         &self.image_paths
     }
 
+    /// The card a tool row draws; `None` for every other role.
+    pub fn tool_view(&self) -> Option<&ToolView> {
+        self.tool.as_deref()
+    }
+
     fn cache_markdown(&mut self) {
         let (shown, image_paths) = message_content(&self.role, &self.content);
-        self.markdown = Some(Arc::new(if self.role == "assistant" {
-            markdown::parse_assistant(&shown)
+        if self.role == "tool" {
+            self.tool = Some(Arc::new(ToolView::parse(&self.content)));
+            self.markdown = None;
         } else {
-            markdown::parse(&shown)
-        }));
+            self.markdown = Some(Arc::new(if self.role == "assistant" {
+                markdown::parse_assistant(&shown)
+            } else {
+                markdown::parse(&shown)
+            }));
+        }
         self.image_paths = image_paths;
     }
 }

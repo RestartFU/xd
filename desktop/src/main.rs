@@ -37,7 +37,7 @@ use xd_desktop::{
     activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
-    model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, Worktree},
+    model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, ToolView, Worktree},
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     session_host::{AgentCommand, SessionHost, SshCommand, TMUX_CONFIGURATION},
     session_runtime::{
@@ -475,6 +475,22 @@ struct OpenBrowserUrl {
 #[action(namespace = xd, no_json)]
 struct ToggleActivity {
     id: i64,
+}
+
+/// Scrolls to an agent's card and opens it.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct RevealSubagent {
+    row: usize,
+    card_id: i64,
+}
+
+/// Stops a running agent or sends it to the background, by its record key.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct ControlSubagent {
+    key: String,
+    action: String,
 }
 
 /// Shows or hides the earlier steps of a work log, keyed by its head row.
@@ -1102,16 +1118,70 @@ impl WorkRun {
     }
 }
 
+/// A delegated agent still at work, and where its card is.
+#[derive(Clone)]
+struct RunningAgent {
+    row: usize,
+    card_id: i64,
+    view: SubagentView,
+}
+
 #[derive(Clone, Default)]
 struct TranscriptSnapshot {
     messages: Arc<Vec<Message>>,
     live_text: Option<Arc<Message>>,
     live_items: Arc<Vec<Message>>,
+    /// Agents still running, kept with the rows so a frame need not parse
+    /// every record to find them.
+    running_agents: Arc<Vec<RunningAgent>>,
 }
 
 impl TranscriptSnapshot {
     fn sync_messages(&mut self, model: &AppModel) {
         self.messages = Arc::new(model.messages.clone());
+        self.sync_running_agents();
+    }
+
+    /// Rows the list draws. The list's item count must always equal this,
+    /// so every change to the count is computed from the snapshot, never from
+    /// the model, which can run ahead of it (live text waits for its frame).
+    fn len(&self) -> usize {
+        self.messages.len() + self.live_items.len() + usize::from(self.live_text.is_some())
+    }
+
+    /// Replaces a record's row with its newest snapshot, found by message id.
+    /// The row count never changes.
+    fn replace_record(&mut self, id: i64, text: &str) -> Option<usize> {
+        let message = Message::new(Some(id), "tool", text, None);
+        let row = if let Some(index) = self.messages.iter().position(|row| row.id == Some(id)) {
+            Arc::make_mut(&mut self.messages)[index] = message;
+            index
+        } else {
+            let index = self.live_items.iter().position(|row| row.id == Some(id))?;
+            Arc::make_mut(&mut self.live_items)[index] = message;
+            self.messages.len() + index
+        };
+        self.sync_running_agents();
+        Some(row)
+    }
+
+    fn sync_running_agents(&mut self) {
+        let rows = self.messages.iter().chain(self.live_items.iter());
+        self.running_agents = Arc::new(
+            rows.enumerate()
+                .filter(|(_, message)| message.role == "tool")
+                .filter_map(|(row, message)| match message.tool_view() {
+                    Some(ToolView::Subagent(view)) if view.status == SubagentState::Running => {
+                        Some(RunningAgent {
+                            row,
+                            card_id: message.id.unwrap_or(-(row as i64) - 1),
+                            view: view.clone(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect(),
+        );
     }
 
     fn sync_live_text(&mut self, model: &AppModel) {
@@ -1127,6 +1197,7 @@ impl TranscriptSnapshot {
 
     fn sync_live_items(&mut self, model: &AppModel) {
         self.live_items = Arc::new(model.live_items.clone());
+        self.sync_running_agents();
     }
 
     fn stacks_activity(&self, index: usize) -> bool {
@@ -1383,6 +1454,9 @@ struct XdDesktop {
     native_option_open: Option<&'static str>,
     expanded_activities: HashSet<i64>,
     expanded_work_logs: HashSet<i64>,
+    /// Agents asked to stop or move to the background, until their record
+    /// says they did.
+    subagent_actions: HashMap<String, &'static str>,
     pending_minimal_session: Option<(String, String)>,
     settings: AppSettings,
     settings_open: bool,
@@ -1905,6 +1979,7 @@ impl XdDesktop {
             native_option_open: None,
             expanded_activities: HashSet::new(),
             expanded_work_logs: HashSet::new(),
+            subagent_actions: HashMap::new(),
             pending_minimal_session: None,
             settings,
             settings_open: false,
@@ -4187,7 +4262,9 @@ impl XdDesktop {
                     MessageCursor::Before(_) => MessagePageDirection::Before,
                     MessageCursor::After(_) => MessagePageDirection::After,
                 };
-                let old_message_count = self.model.messages.len();
+                // Rows the list holds for stored messages, which is what the
+                // splices below shift.
+                let old_message_count = self.transcript_snapshot.messages.len();
                 let change = match self.model.apply_message_page(&value, direction) {
                     Ok(change) => change,
                     Err(error) => {
@@ -4232,7 +4309,7 @@ impl XdDesktop {
                 }
                 match direction {
                     MessagePageDirection::Tail => {
-                        self.transcript.reset(self.model.display_message_count());
+                        self.transcript.reset(self.transcript_snapshot.len());
                     }
                     MessagePageDirection::Before => {
                         if change.inserted_at_start > 0 {
@@ -4780,6 +4857,12 @@ impl XdDesktop {
             self.request_tree();
         }
         match name {
+            // Approvals and questions, for this chat and for the "waiting on
+            // you" marks on every other one. Without this they only appeared
+            // when something else happened to reload the chat.
+            "interaction" | "interaction-resolved" | "interactions-cleared" => {
+                self.model.apply_event(name, &body);
+            }
             "terminal-activity" => {
                 self.record_terminal_tab_activity(self.active_endpoint, &body);
                 self.model.apply_event(name, &body);
@@ -4892,18 +4975,21 @@ impl XdDesktop {
                 }
             }
             "text" | "tool" if self.event_is_active(&body) => {
-                let old_count = self.model.display_message_count();
-                let had_live_text = name == "tool" && !self.model.live_text.is_empty();
+                let old_count = self.transcript_snapshot.len();
+                let had_live_text = self.transcript_snapshot.live_text.is_some();
                 self.model.apply_event(name, &body);
                 if name == "text" {
                     self.schedule_live_text_render(cx);
                 } else {
                     self.transcript_snapshot.sync_live_items(&self.model);
                     self.transcript_snapshot.sync_live_text(&self.model);
-                    let new_count = self.model.display_message_count();
-                    let closed_live_text = had_live_text && self.model.live_text.is_empty();
+                    let new_count = self.transcript_snapshot.len();
+                    let closed_live_text =
+                        had_live_text && self.transcript_snapshot.live_text.is_none();
                     if closed_live_text {
-                        self.transcript.splice(old_count - 1..old_count, 2);
+                        // The streamed row became an item; the tool follows it.
+                        self.transcript
+                            .splice(old_count - 1..old_count, new_count + 1 - old_count);
                     } else if new_count > old_count {
                         self.transcript
                             .splice(old_count..old_count, new_count - old_count);
@@ -4926,15 +5012,31 @@ impl XdDesktop {
                 }
             }
             "record" if self.event_is_active(&body) => {
-                if let Some(row) = self.model.apply_record(&body) {
-                    if row < self.model.messages.len() {
-                        self.transcript_snapshot.sync_messages(&self.model);
-                    } else {
-                        self.transcript_snapshot.sync_live_items(&self.model);
+                if let Some(view) = body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .and_then(SubagentView::parse)
+                {
+                    let settled = match self.subagent_actions.get(view.key.as_str()) {
+                        Some(&"Moving to background") => {
+                            view.background || view.status != SubagentState::Running
+                        }
+                        Some(_) => view.status != SubagentState::Running,
+                        None => false,
+                    };
+                    if settled {
+                        self.subagent_actions.remove(&view.key);
                     }
-                    if row < self.transcript.item_count() {
-                        self.transcript.splice(row..row + 1, 1);
-                    }
+                }
+                if self.model.apply_record(&body).is_some()
+                    && let (Some(id), Some(text)) = (
+                        body.get("message_id").and_then(Value::as_i64),
+                        body.get("text").and_then(Value::as_str),
+                    )
+                    && let Some(row) = self.transcript_snapshot.replace_record(id, text)
+                    && row < self.transcript.item_count()
+                {
+                    self.transcript.splice(row..row + 1, 1);
                 }
             }
             "turn-finished" if self.event_is_active(&body) => {
@@ -8120,7 +8222,7 @@ impl XdDesktop {
     }
 
     fn sync_transcript_count(&self, reset: bool) {
-        let count = self.model.display_message_count();
+        let count = self.transcript_snapshot.len();
         if reset {
             self.transcript.reset(count);
             return;
@@ -8175,7 +8277,8 @@ impl XdDesktop {
                 }
                 let had_live_text = this.transcript_snapshot.live_text.is_some();
                 this.transcript_snapshot.sync_live_text(&this.model);
-                let index = this.model.messages.len() + this.model.live_items.len();
+                let index = this.transcript_snapshot.messages.len()
+                    + this.transcript_snapshot.live_items.len();
                 let anchor = this.transcript.logical_scroll_top();
                 if had_live_text {
                     this.transcript.splice(index..index + 1, 1);
@@ -10615,6 +10718,129 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    /// Every agent still at work, above the composer: background agents keep
+    /// running after the turn and the reader may have scrolled far away from
+    /// their cards. A pill jumps to its card and opens it.
+    fn render_agents_tray(
+        colors: ThemeColors,
+        agents: &[RunningAgent],
+    ) -> Option<gpui::AnyElement> {
+        if agents.is_empty() {
+            return None;
+        }
+        const SHOWN: usize = 4;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        let pills = agents
+            .iter()
+            .take(SHOWN)
+            .enumerate()
+            .map(|(index, agent)| {
+                let reveal = RevealSubagent {
+                    row: agent.row,
+                    card_id: agent.card_id,
+                };
+                let elapsed = agent
+                    .view
+                    .started_at
+                    .map(|started| activity::compact_duration(now.saturating_sub(started)));
+                div()
+                    .id(("agents-tray-pill", index))
+                    .h(px(26.0))
+                    .px(px(10.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .rounded(px(13.0))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.surface))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(move |_, window, cx| {
+                        window.dispatch_action(Box::new(reveal.clone()), cx);
+                    })
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(colors.working))
+                            .with_animation(
+                                ("agents-tray-pulse", index),
+                                Animation::new(Duration::from_millis(1_400)).repeat(),
+                                |dot, delta| {
+                                    let wave = 1.0 - (2.0 * delta - 1.0).abs();
+                                    dot.opacity(0.35 + 0.65 * wave)
+                                },
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.text))
+                            .child(agent.view.agent.clone()),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(220.0))
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.muted))
+                            .child(if agent.view.activity.is_empty() {
+                                agent.view.description.clone()
+                            } else {
+                                agent.view.activity.clone()
+                            }),
+                    )
+                    .when_some(elapsed, |pill, elapsed| {
+                        pill.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(rgb(colors.faint))
+                                .child(elapsed),
+                        )
+                    })
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        Some(
+            div()
+                .w_full()
+                .max_w(px(860.0))
+                .mb_2()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(rgb(colors.faint))
+                        .child(format!(
+                            "{} agent{} working",
+                            agents.len(),
+                            if agents.len() == 1 { "" } else { "s" }
+                        )),
+                )
+                .children(pills)
+                .when(agents.len() > SHOWN, |tray| {
+                    tray.child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(colors.faint))
+                            .child(format!("+{} more", agents.len() - SHOWN)),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     /// One row of a work log. Rows draw their own slice of the shared frame, so
     /// a run of virtualized rows reads as a single card.
     #[allow(clippy::too_many_arguments)]
@@ -10797,6 +11023,7 @@ impl XdDesktop {
     fn render_native_subagent(
         colors: ThemeColors,
         view: SubagentView,
+        pending: Option<&'static str>,
         index: usize,
         card_id: i64,
         expanded: bool,
@@ -10808,12 +11035,21 @@ impl XdDesktop {
             SubagentState::Failed => colors.danger,
             SubagentState::Stopped => colors.muted,
         };
-        let provider_icon = match view.provider.to_ascii_lowercase().as_str() {
-            "claude" => Some(CLAUDE_ICON),
-            "codex" => Some(CODEX_ICON),
-            _ => None,
+        let provider_icon = if view.agent == "Shell" {
+            Some(TERMINAL_ICON)
+        } else {
+            match view.provider.to_ascii_lowercase().as_str() {
+                "claude" => Some(CLAUDE_ICON),
+                "codex" => Some(CODEX_ICON),
+                _ => None,
+            }
         };
-        let stats = view.stats();
+        let stats = view.stats_at(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(0),
+        );
         let preview = if running {
             view.activity.clone()
         } else {
@@ -10924,6 +11160,59 @@ impl XdDesktop {
             .when(view.background, |header| {
                 header.child(stamp("Background", colors.faint))
             })
+            .when_some(pending.filter(|_| running), |header, label| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(rgb(colors.muted))
+                        .child(format!("{label}…")),
+                )
+            })
+            .when(pending.is_none() && view.can_stop(), |header| {
+                let action =
+                    |id: &'static str, label: &'static str, verb: &'static str, tone: u32| {
+                        let key = view.key.clone();
+                        div()
+                            .id((id, index))
+                            .flex_none()
+                            .h(px(20.0))
+                            .px(px(6.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(4.0))
+                            .cursor_pointer()
+                            .text_size(px(11.5))
+                            .text_color(rgb(tone))
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                window.dispatch_action(
+                                    Box::new(ControlSubagent {
+                                        key: key.clone(),
+                                        action: verb.to_owned(),
+                                    }),
+                                    cx,
+                                );
+                            })
+                            .child(label)
+                    };
+                header
+                    .when(view.can_background(), |header| {
+                        header.child(action(
+                            "native-subagent-background",
+                            "Background",
+                            "background",
+                            colors.muted,
+                        ))
+                    })
+                    .child(action(
+                        "native-subagent-stop",
+                        "Stop",
+                        "stop",
+                        colors.danger,
+                    ))
+            })
             .child(match view.status {
                 SubagentState::Running => div()
                     .flex_none()
@@ -10987,8 +11276,11 @@ impl XdDesktop {
                 );
             }
             if !view.steps.is_empty() {
-                let earlier = (view.tool_uses as usize).saturating_sub(view.steps.len());
-                details.push(section(format!("Steps · {}", view.tool_uses)).into_any_element());
+                let earlier = view.dropped_steps();
+                details.push(
+                    section(format!("Steps · {}", view.steps.len() as u64 + earlier))
+                        .into_any_element(),
+                );
                 details.push(
                     div()
                         .id(("native-subagent-steps", index))
@@ -11093,7 +11385,7 @@ impl XdDesktop {
         colors: ThemeColors,
         message: &Message,
         activity: Option<ActivityCard>,
-        subagent: Option<SubagentView>,
+        subagent: Option<(SubagentView, Option<&'static str>)>,
         index: usize,
         expanded: bool,
     ) -> gpui::AnyElement {
@@ -11132,7 +11424,7 @@ impl XdDesktop {
                 .into_any_element();
         }
 
-        if let Some(subagent) = subagent {
+        if let Some((subagent, pending)) = subagent {
             return div()
                 .w_full()
                 .max_w(px(860.0))
@@ -11140,6 +11432,7 @@ impl XdDesktop {
                 .child(Self::render_native_subagent(
                     colors,
                     subagent,
+                    pending,
                     index,
                     message.id.unwrap_or(-(index as i64) - 1),
                     expanded,
@@ -11259,6 +11552,26 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    fn control_subagent(&mut self, key: String, action: &str, cx: &mut Context<Self>) {
+        let label = match action {
+            "stop" => "Stopping",
+            "background" => "Moving to background",
+            _ => return,
+        };
+        if let (Some(chat), Some(host)) = (self.model.selected_chat.as_deref(), self.active_host())
+        {
+            match host.control_subagent(chat, &key, action) {
+                Ok(()) => {
+                    // The card reads this map when it draws, so it shows the
+                    // pending action at once.
+                    self.subagent_actions.insert(key, label);
+                }
+                Err(error) => self.model.connection_error = Some(error),
+            }
+        }
+        cx.notify();
+    }
+
     fn respond_interaction(&mut self, request_id: String, response: Value, cx: &mut Context<Self>) {
         if let (Some(chat), Some(host)) = (self.model.selected_chat.as_deref(), self.active_host())
         {
@@ -11321,6 +11634,10 @@ impl XdDesktop {
         let params = &pending["params"];
         let mut card = div()
             .w_full()
+            // Long patch lines scroll inside the preview; they must not
+            // widen the card past the column.
+            .min_w_0()
+            .overflow_hidden()
             .px_4()
             .py_3()
             .flex()
@@ -11499,6 +11816,8 @@ impl XdDesktop {
                 .child(
                     div()
                         .id("interaction-detail")
+                        .w_full()
+                        .min_w_0()
                         .max_h(px(140.0))
                         .overflow_y_scroll()
                         .px_3()
@@ -11513,6 +11832,8 @@ impl XdDesktop {
                     card.child(
                         div()
                             .id("interaction-patch")
+                            .w_full()
+                            .min_w_0()
                             .max_h(px(260.0))
                             .overflow_scroll()
                             .py_1()
@@ -11598,6 +11919,7 @@ impl XdDesktop {
         }
         let expanded_activities = self.expanded_activities.clone();
         let expanded_work_logs = self.expanded_work_logs.clone();
+        let subagent_actions = self.subagent_actions.clone();
         let messages = self.transcript_snapshot.clone();
         let transcript_empty = messages.get(0).is_none();
         let transcript_loading = self.transcript_loading;
@@ -11630,18 +11952,22 @@ impl XdDesktop {
                 .into_any_element()
         } else {
             list(self.transcript.clone(), move |index, _window, _cx| {
-                let message = messages
-                    .get(index)
-                    .expect("transcript list index must match its snapshot");
-                let subagent = (message.role == "tool")
-                    .then(|| SubagentView::parse(&message.content))
-                    .flatten();
-                let activity = (message.role == "tool" && subagent.is_none()).then(|| {
-                    ActivityCard::parse(&message.content).with_workflow_status(
-                        workflow_statuses.get(&message.content),
-                        workflow_pending.contains(&message.content),
-                    )
-                });
+                // The list's count follows the snapshot; should they ever
+                // disagree for a frame, draw nothing rather than crash.
+                let Some(message) = messages.get(index) else {
+                    return div().into_any_element();
+                };
+                let (subagent, activity) = match message.tool_view() {
+                    Some(ToolView::Subagent(view)) => (Some(view.clone()), None),
+                    Some(ToolView::Activity(card)) => (
+                        None,
+                        Some(card.clone().with_workflow_status(
+                            workflow_statuses.get(&message.content),
+                            workflow_pending.contains(&message.content),
+                        )),
+                    ),
+                    None => (None, None),
+                };
                 if let (Some(run), Some(card)) = (messages.work_run(index), activity.clone()) {
                     let log_key = messages.row_key(run.start);
                     let log_expanded = expanded_work_logs.contains(&log_key);
@@ -11672,7 +11998,10 @@ impl XdDesktop {
                         colors,
                         message,
                         activity,
-                        subagent,
+                        subagent.map(|view| {
+                            let pending = subagent_actions.get(view.key.as_str()).copied();
+                            (view, pending)
+                        }),
                         index,
                         expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
                     )))
@@ -11838,6 +12167,8 @@ impl XdDesktop {
             })
             .collect::<Vec<_>>();
         let interaction = self.render_interaction(colors, cx);
+        let agents_tray =
+            Self::render_agents_tray(colors, &self.transcript_snapshot.running_agents);
         let options = [
             (
                 "model",
@@ -11943,15 +12274,9 @@ impl XdDesktop {
                 )
             })
             .when_some(interaction, |chat, card| {
-                chat.child(
-                    div()
-                        .w_full()
-                        .max_w(px(860.0))
-                        .mb_3()
-                        .max_w(px(860.0))
-                        .child(card),
-                )
+                chat.child(div().w_full().max_w(px(860.0)).mb_3().child(card))
             })
+            .children(agents_tray)
             .when_some(
                 self.open_question
                     .clone()
@@ -14468,6 +14793,17 @@ impl XdDesktop {
                 }
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, action: &RevealSubagent, _, cx| {
+                this.expanded_activities.insert(action.card_id);
+                if action.row < this.transcript.item_count() {
+                    this.transcript.splice(action.row..action.row + 1, 1);
+                    this.transcript.scroll_to_reveal_item(action.row);
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, action: &ControlSubagent, _, cx| {
+                this.control_subagent(action.key.clone(), &action.action, cx);
+            }))
             .on_action(cx.listener(|this, action: &ToggleWorkLog, _, cx| {
                 if !this.expanded_work_logs.insert(action.id) {
                     this.expanded_work_logs.remove(&action.id);
@@ -15245,6 +15581,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn live_approvals_reach_the_model_without_waiting_for_a_reload() {
+        let source = include_str!("main.rs");
+        let handler = source
+            .split_once("fn handle_event(")
+            .expect("event handler")
+            .1
+            .split_once("fn request_tree(")
+            .expect("end of event handler")
+            .0;
+        assert!(handler.contains(
+            "\"interaction\" | \"interaction-resolved\" | \"interactions-cleared\" => {"
+        ));
+    }
+
+    #[test]
+    fn records_replace_their_snapshot_row_without_changing_the_count() {
+        let mut model = AppModel::default();
+        model.messages = vec![
+            Message::new(Some(1), "user", "go", None),
+            Message::new(
+                Some(2),
+                "tool",
+                "subagent_run\n{\"status\":\"running\"}",
+                None,
+            ),
+        ];
+        model.live_items = vec![Message::new(Some(5), "tool", "subagent_run\n{}", None)];
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+        snapshot.sync_live_items(&model);
+        assert_eq!(snapshot.len(), 3);
+        assert_eq!(snapshot.running_agents.len(), 2);
+
+        // The model may already have moved on (a reply cleared its live rows);
+        // the snapshot keeps what the list draws until it is synced.
+        model.live_items.clear();
+        assert_eq!(
+            snapshot.replace_record(5, "subagent_run\n{\"status\":\"completed\"}"),
+            Some(2)
+        );
+        assert_eq!(
+            snapshot.replace_record(2, "subagent_run\n{\"status\":\"stopped\"}"),
+            Some(1)
+        );
+        assert_eq!(snapshot.len(), 3);
+        assert!(snapshot.running_agents.is_empty());
+        assert_eq!(snapshot.replace_record(99, "x"), None);
+    }
+
+    #[test]
     fn previews_read_as_plain_text() {
         assert_eq!(
             first_line("\n## Found **two** files in `src/`\n- more"),
@@ -15522,7 +15908,7 @@ mod tests {
         for behavior in [
             "self.transcript_snapshot.clone()",
             "list(self.transcript.clone()",
-            "ActivityCard::parse",
+            "message.tool_view()",
             "message.markdown()",
             "render_native_message",
             "self.composer_input.clone()",

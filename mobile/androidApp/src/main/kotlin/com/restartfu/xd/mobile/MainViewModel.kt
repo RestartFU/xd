@@ -510,6 +510,24 @@ class ChatViewModel(
     fun approve(requestId: String, decision: String) {
         viewModelScope.launch { runCatching { session.approve(requestId, decision) } }
     }
+
+    /** Agents asked to stop or move to the background, until their record changes. */
+    private val _subagentActions = MutableStateFlow(emptyMap<String, String>())
+    val subagentActions: StateFlow<Map<String, String>> = _subagentActions
+
+    fun controlSubagent(key: String, action: String) {
+        val label = if (action == "stop") "Stopping" else "Moving to background"
+        _subagentActions.value = _subagentActions.value + (key to label)
+        viewModelScope.launch {
+            runCatching { session.controlSubagent(key, action) }
+                .onFailure { _subagentActions.value = _subagentActions.value - key }
+        }
+    }
+
+    /** Forgets a pending action once the agent's record shows it took effect. */
+    fun settleSubagentAction(key: String) {
+        if (key in _subagentActions.value) _subagentActions.value = _subagentActions.value - key
+    }
     fun answer(requestId: String, answers: Map<String, String>) {
         viewModelScope.launch { runCatching { session.answer(requestId, answers) } }
     }

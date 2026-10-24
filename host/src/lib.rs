@@ -316,6 +316,20 @@ impl Engine {
                     _ => error_reply("respond needs chat, request_id, and response"),
                 }
             }
+            Some("subagent") => {
+                match (
+                    request.get("chat").and_then(Value::as_str),
+                    request.get("key").and_then(Value::as_str),
+                    request.get("action").and_then(Value::as_str),
+                    &self.runtime,
+                ) {
+                    (Some(chat), Some(key), Some(action), Some(runtime)) => runtime
+                        .control_subagent(chat, key, action)
+                        .map(|()| json!({"ok":true}))
+                        .unwrap_or_else(error_reply),
+                    _ => error_reply("subagent needs chat, key, and action"),
+                }
+            }
             Some("cancel") => self.cancel(&request),
             Some("new-folder") => self.new_folder(&request),
             Some("set-folder-context") => {
@@ -1550,7 +1564,14 @@ pub fn serve_daemon_connection(
             let control = !authenticated
                 || matches!(
                     request["op"].as_str(),
-                    Some("ping" | "cancel" | "respond" | "agent-auth-cancel" | "daemon-stop")
+                    Some(
+                        "ping"
+                            | "cancel"
+                            | "respond"
+                            | "subagent"
+                            | "agent-auth-cancel"
+                            | "daemon-stop"
+                    )
                 );
             if control {
                 let authenticating = matches!(request["op"].as_str(), Some("pair" | "hello"));

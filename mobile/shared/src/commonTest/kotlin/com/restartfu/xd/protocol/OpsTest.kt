@@ -35,6 +35,15 @@ class OpsTest {
     }
 
     @Test
+    fun subagentActionsNameTheAgentAndRejectUnknownVerbs() {
+        val stop = Ops.subagent("chat", "toolu_1", "stop")
+        assertEquals("subagent", stop.getValue("op").jsonPrimitive.content)
+        assertEquals("toolu_1", stop.getValue("key").jsonPrimitive.content)
+        assertEquals("stop", stop.getValue("action").jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.subagent("chat", "toolu_1", "pause") }
+    }
+
+    @Test
     fun dropQueueDistinguishesOneFromAll() {
         assertFalse("index" in Ops.dropQueue("chat", null))
         assertEquals(2, Ops.dropQueue("chat", 2).getValue("index").jsonPrimitive.content.toInt())

@@ -1434,6 +1434,17 @@ impl HostHandle {
         )
     }
 
+    /// Stops a running agent (`"stop"`) or sends one the turn waits on to the
+    /// background (`"background"`).
+    pub fn control_subagent(&self, chat_id: &str, key: &str, action: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetOption {
+                chat_id: chat_id.to_owned(),
+            },
+            json!({"op": "subagent", "chat": chat_id, "key": key, "action": action}),
+        )
+    }
+
     pub fn set_model(&self, chat_id: &str, model: &str) -> Result<(), String> {
         self.send(
             RequestKind::SetOption {

@@ -64,6 +64,26 @@ class SubagentRunTest {
     }
 
     @Test
+    fun runningAgentsCountUpAndOnlyTruncatedListsReportDroppedSteps() {
+        val run = SubagentRun.parse(
+            "subagent_run\n" +
+                """{"key":"toolu_9","provider":"Claude","agent":"Explore","status":"running",""" +
+                """"steps":[{"tool":"Bash","text":"ls"}],"tool_uses":2,"started_at":1000}""",
+        )!!
+        assertEquals("2 tools · 47s", run.statsAt(48_000))
+        assertEquals("2 tools", run.stats)
+        // Claude counts a call the record never saw; nothing was cut.
+        assertEquals(0, run.droppedSteps)
+        assertEquals(true, run.canStop)
+        assertEquals(true, run.canBackground)
+
+        val codex = SubagentRun.parse(
+            "subagent_run\n" + """{"key":"t","provider":"Codex","agent":"worker","status":"running"}""",
+        )!!
+        assertEquals(false, codex.canStop)
+    }
+
+    @Test
     fun countsAndDurationsReadCompactly() {
         assertEquals("950", compactCount(950))
         assertEquals("16.2k", compactCount(16_210))

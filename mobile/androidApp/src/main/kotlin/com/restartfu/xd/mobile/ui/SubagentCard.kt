@@ -28,9 +28,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.model.SubagentRun
 import com.restartfu.xd.model.SubagentState
+import kotlinx.coroutines.delay
 
 /**
  * One delegated agent: who it is and what it is doing right now, with its
@@ -50,7 +56,11 @@ import com.restartfu.xd.model.SubagentState
  * every step it took, and its report.
  */
 @Composable
-internal fun SubagentCard(run: SubagentRun) {
+internal fun SubagentCard(
+    run: SubagentRun,
+    pendingAction: String? = null,
+    onAction: (key: String, action: String) -> Unit = { _, _ -> },
+) {
     // Keyed by the agent, not the text: the host rewrites the record as the
     // agent works, and an open card stays open through those updates.
     var expanded by rememberSaveable(run.key ?: run.marker) { mutableStateOf(false) }
@@ -68,6 +78,17 @@ internal fun SubagentCard(run: SubagentRun) {
     } else {
         firstLine(run.summary.ifBlank { run.latest })
     }
+    // A running agent counts up once a second; a finished one shows its total.
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    if (running && run.startedAtMillis != null) {
+        LaunchedEffect(run.key) {
+            while (true) {
+                now = System.currentTimeMillis()
+                delay(1_000)
+            }
+        }
+    }
+    val stats = run.statsAt(if (running) now else null)
 
     Row(
         modifier = Modifier
@@ -134,6 +155,40 @@ internal fun SubagentCard(run: SubagentRun) {
                 Spacer(Modifier.width(6.dp))
                 Text(run.status, color = signal, style = MaterialTheme.typography.labelMedium)
             }
+            val key = run.key
+            if (key != null && (run.canStop || pendingAction != null)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (pendingAction != null) {
+                        Text(
+                            "$pendingAction…",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    } else {
+                        if (run.canBackground) {
+                            TextButton(
+                                onClick = { onAction(key, "background") },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                modifier = Modifier.heightIn(min = 32.dp),
+                            ) { Text("Background", style = MaterialTheme.typography.labelMedium) }
+                        }
+                        TextButton(
+                            onClick = { onAction(key, "stop") },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.heightIn(min = 32.dp),
+                        ) {
+                            Text(
+                                "Stop",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                    }
+                }
+            }
             if (run.detail.isNotBlank()) {
                 Text(
                     run.detail,
@@ -143,7 +198,7 @@ internal fun SubagentCard(run: SubagentRun) {
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (preview.isNotBlank() || run.stats.isNotBlank()) {
+            if (preview.isNotBlank() || stats.isNotBlank()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         preview,
@@ -157,9 +212,9 @@ internal fun SubagentCard(run: SubagentRun) {
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (run.stats.isNotBlank()) {
+                    if (stats.isNotBlank()) {
                         Spacer(Modifier.width(8.dp))
-                        Text(run.stats, color = signals.faint, style = MaterialTheme.typography.labelSmall)
+                        Text(stats, color = signals.faint, style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
@@ -179,7 +234,8 @@ internal fun SubagentCard(run: SubagentRun) {
                     )
                 }
                 if (run.steps.isNotEmpty()) {
-                    Section("Steps · ${run.toolUses}")
+                    val earlier = run.droppedSteps
+                    Section("Steps · ${run.steps.size + earlier}")
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -189,7 +245,6 @@ internal fun SubagentCard(run: SubagentRun) {
                             .verticalScroll(rememberScrollState())
                             .padding(8.dp),
                     ) {
-                        val earlier = run.toolUses - run.steps.size
                         if (earlier > 0) {
                             Text(
                                 "$earlier earlier steps not kept",

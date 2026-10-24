@@ -83,6 +83,9 @@ public class ChatSession internal constructor(
 
     public suspend fun cancel(): Unit = core.call(Ops.cancel(core.chatId))
 
+    public suspend fun controlSubagent(key: String, action: String): Unit =
+        core.call(Ops.subagent(core.chatId, key, action))
+
     public suspend fun enqueue(text: String): Unit = core.call(Ops.queue(core.chatId, text))
 
     public suspend fun setDraft(

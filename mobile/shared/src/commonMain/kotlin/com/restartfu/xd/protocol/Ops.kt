@@ -127,6 +127,15 @@ public object Ops {
         }
     }
 
+    /** Stops a running agent ("stop") or sends one the turn waits on to the background ("background"). */
+    public fun subagent(chatId: String, key: String, action: String): JsonObject = buildJsonObject {
+        require(action == "stop" || action == "background") { "Unknown agent action" }
+        put("op", "subagent")
+        put("chat", chatId)
+        put("key", key)
+        put("action", action)
+    }
+
     public fun queue(chatId: String, text: String): JsonObject = buildJsonObject {
         require(text.isNotEmpty()) { "Queued text must not be empty" }
         put("op", "queue")

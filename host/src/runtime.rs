@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, ChildStdout, Stdio},
     sync::{
@@ -19,7 +19,7 @@ use crate::{
     ask::{self, Ask},
     secrets::SecretsStore,
     storage::TurnSpec,
-    subagent::{SubagentPatch, SubagentRun},
+    subagent::{SubagentPatch, SubagentRun, SubagentStatus},
 };
 
 /// How often a streamed reply is parked on the chat so an interrupted turn
@@ -67,6 +67,8 @@ struct ChatRecords {
     entries: HashMap<String, RecordEntry>,
     /// Other ids an agent is reported under, such as Claude's task id.
     aliases: HashMap<String, String>,
+    /// Tasks the agent marks as housekeeping, which get no card.
+    hidden: HashSet<String>,
     order: VecDeque<String>,
 }
 
@@ -368,6 +370,57 @@ impl TurnRuntime {
 
     pub(crate) fn interactions(&self, chat_id: &str) -> Value {
         self.inner.interactions.lock().ok().and_then(|all| all.get(chat_id).map(|pending| json!({"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision,"interactions":pending.requests.iter().map(|(id, request)| json!({"request_id":id,"method":request.method,"params":request.params})).collect::<Vec<_>>()}))).unwrap_or_else(|| json!({"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":0,"interactions":[]}))
+    }
+
+    /// Stops a running Claude agent, or sends one the turn is waiting on to
+    /// the background so the turn can go on without it.
+    pub(crate) fn control_subagent(
+        &self,
+        chat_id: &str,
+        key: &str,
+        action: &str,
+    ) -> Result<(), String> {
+        let task_id = {
+            let records = self
+                .inner
+                .records
+                .lock()
+                .map_err(|_| "Agent records unavailable".to_owned())?;
+            let book = records
+                .get(chat_id)
+                .ok_or("That agent is no longer tracked")?;
+            let run = book
+                .entries
+                .get(&format!("subagent:{key}"))
+                .and_then(|entry| entry.run.as_ref())
+                .ok_or("That agent is no longer tracked")?;
+            if run.status != SubagentStatus::Running {
+                return Err("That agent has already finished".into());
+            }
+            if run.provider != "Claude" {
+                return Err("Only Claude agents can be stopped from xd".into());
+            }
+            book.aliases
+                .iter()
+                .find(|(_, target)| target.as_str() == key)
+                .map(|(task, _)| task.clone())
+        };
+        let request = match action {
+            "stop" => json!({
+                "subtype": "stop_task",
+                "task_id": task_id.ok_or("Claude has not reported this agent's task yet")?,
+            }),
+            "background" => json!({"subtype": "background_tasks", "tool_use_id": key}),
+            _ => return Err("Unknown agent action".into()),
+        };
+        let id = format!(
+            "xd-{action}-{}",
+            self.inner.next_interaction.fetch_add(1, Ordering::Relaxed)
+        );
+        self.write_rpc(
+            chat_id,
+            &json!({"type": "control_request", "request_id": id, "request": request}),
+        )
     }
 
     pub(crate) fn respond(
@@ -711,8 +764,9 @@ impl TurnRuntime {
             }
             match claude_idle_line(&line) {
                 IdleLine::Records(patches) => {
+                    let workdir = router.template.workdir.clone();
                     for patch in patches {
-                        self.idle_subagent(chat_id, patch);
+                        self.idle_subagent(chat_id, &workdir, patch);
                     }
                 }
                 IdleLine::Wake => {
@@ -1093,7 +1147,18 @@ impl TurnRuntime {
                             latest_error = Some(error);
                         }
                     }
-                    AgentEvent::Interaction { id, method, params } => {
+                    AgentEvent::Interaction {
+                        id,
+                        method,
+                        mut params,
+                    } => {
+                        // What people read: paths relative to the project. The
+                        // agent's own copy of the input stays as it sent it.
+                        for field in ["command", "reason", "patch"] {
+                            if let Some(text) = params.get(field).and_then(Value::as_str) {
+                                params[field] = Value::String(relative_paths(text, &turn.workdir));
+                            }
+                        }
                         let request_id =
                             format!("{}:{turn_id}:{}", self.inner.interaction_epoch, id);
                         let claude = turn.backend == "claude";
@@ -1219,7 +1284,8 @@ impl TurnRuntime {
                         }
                     }
                     AgentEvent::Subagent(patch) => {
-                        if let Some(write) = self.fold_subagent(&turn.chat_id, patch) {
+                        if let Some(write) = self.fold_subagent(&turn.chat_id, &turn.workdir, patch)
+                        {
                             if matches!(write, RecordWrite::New { .. }) {
                                 close_segment!();
                             }
@@ -1242,6 +1308,7 @@ impl TurnRuntime {
                     }
                     AgentEvent::Tool(text) => {
                         close_segment!();
+                        let text = relative_paths(&text, &turn.workdir);
                         match self.inner.store.append_turn_message(
                             &turn.chat_id,
                             "tool",
@@ -1511,7 +1578,38 @@ impl TurnRuntime {
 
     /// Folds an agent's report into its record. `None` when the report names
     /// no agent this host has seen.
-    fn fold_subagent(&self, chat_id: &str, patch: SubagentPatch) -> Option<RecordWrite> {
+    fn fold_subagent(
+        &self,
+        chat_id: &str,
+        workdir: &str,
+        mut patch: SubagentPatch,
+    ) -> Option<RecordWrite> {
+        {
+            let mut records = self.inner.records.lock().ok()?;
+            let book = records.entry(chat_id.to_owned()).or_default();
+            let ids = || {
+                [Some(patch.key.as_str()), patch.task_id.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|id| !id.is_empty())
+            };
+            // Claude's housekeeping tasks are not the reader's business.
+            if patch.hidden {
+                for id in ids() {
+                    book.hidden.insert(id.to_owned());
+                }
+                return None;
+            }
+            if ids().any(|id| book.hidden.contains(id)) {
+                return None;
+            }
+        }
+        if let Some(step) = &mut patch.step {
+            step.text = relative_paths(&step.text, workdir);
+        }
+        patch.activity = patch
+            .activity
+            .map(|activity| relative_paths(&activity, workdir));
         let mut records = self.inner.records.lock().ok()?;
         let book = records.entry(chat_id.to_owned()).or_default();
         let key = if patch.key.is_empty() {
@@ -1638,8 +1736,8 @@ impl TurnRuntime {
 
     /// A background agent's progress while no turn is running: its card is
     /// updated in place, and the chat stays free for the user.
-    fn idle_subagent(&self, chat_id: &str, patch: SubagentPatch) {
-        match self.fold_subagent(chat_id, patch) {
+    fn idle_subagent(&self, chat_id: &str, workdir: &str, patch: SubagentPatch) {
+        match self.fold_subagent(chat_id, workdir, patch) {
             Some(RecordWrite::Update {
                 message_id,
                 key,
@@ -1741,6 +1839,16 @@ impl TurnRuntime {
 
 /// Claude's answer to a permission prompt or a question, in the shape its
 /// control channel expects.
+/// Paths inside the chat's working directory, written relative to it: the
+/// way people read them, and what fits on one line.
+fn relative_paths(text: &str, workdir: &str) -> String {
+    let root = workdir.trim_end_matches('/');
+    if root.len() < 2 {
+        return text.to_owned();
+    }
+    text.replace(&format!("{root}/"), "")
+}
+
 fn claude_answer(request: &PendingInteraction, response: &Value) -> Result<Value, String> {
     let claude = &request.params["claude"];
     let input = claude.get("input").cloned().unwrap_or_else(|| json!({}));
@@ -1887,6 +1995,24 @@ fn usage_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_inside_the_workdir_read_relative() {
+        let root = "/home/me/project";
+        assert_eq!(
+            relative_paths("$ cat -n /home/me/project/src/main.rs", root),
+            "$ cat -n src/main.rs"
+        );
+        assert_eq!(
+            relative_paths("Read  /home/me/project2/x.rs", root),
+            "Read  /home/me/project2/x.rs"
+        );
+        assert_eq!(relative_paths("Read /etc/hosts", "/"), "Read /etc/hosts");
+        assert_eq!(
+            relative_paths("Read /home/me/project/a.rs", "/home/me/project/"),
+            "Read a.rs"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

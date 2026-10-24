@@ -7,6 +7,8 @@
 //! as a single transcript message that it rewrites in place. Clients render the
 //! newest snapshot rather than a trail of "running" and "completed" rows.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde_json::json;
 
 /// Content prefix of a stored subagent record.
@@ -73,6 +75,9 @@ pub struct SubagentRun {
     pub tool_uses: u64,
     pub tokens: Option<u64>,
     pub duration_ms: Option<u64>,
+    /// When xd first heard of the agent, in Unix milliseconds, so clients can
+    /// show how long it has been working.
+    pub started_at: u64,
     /// The agent's newest message while it works.
     pub latest: String,
     /// Its final report once it finishes.
@@ -100,6 +105,8 @@ pub struct SubagentPatch {
     pub duration_ms: Option<u64>,
     pub latest: Option<String>,
     pub summary: Option<String>,
+    /// A task the agent says to keep out of the transcript.
+    pub hidden: bool,
 }
 
 impl SubagentPatch {
@@ -118,6 +125,7 @@ impl SubagentRun {
             provider: "Agent".into(),
             agent: "Agent".into(),
             description: "Delegated task".into(),
+            started_at: now_millis(),
             ..Self::default()
         }
     }
@@ -163,13 +171,13 @@ impl SubagentRun {
             self.duration_ms = Some(duration);
         }
         if let Some(latest) = patch.latest {
-            let latest = clip(latest.trim(), MAX_TEXT);
+            let latest = clip(unwrap_hand_back(&latest).trim(), MAX_TEXT);
             if !latest.is_empty() {
                 self.latest = latest;
             }
         }
         if let Some(summary) = patch.summary {
-            let summary = clip(summary.trim(), MAX_TEXT);
+            let summary = clip(unwrap_hand_back(&summary).trim(), MAX_TEXT);
             if !summary.is_empty() {
                 self.summary = summary;
             }
@@ -179,6 +187,14 @@ impl SubagentRun {
         if let Some(status) = patch.status
             && status != SubagentStatus::Running
         {
+            // Not every backend reports how long an agent took; what xd saw
+            // stands in until a reported figure replaces it.
+            if self.status == SubagentStatus::Running
+                && self.duration_ms.is_none()
+                && self.started_at > 0
+            {
+                self.duration_ms = Some(now_millis().saturating_sub(self.started_at).max(1));
+            }
             self.status = status;
         }
         if self.status == SubagentStatus::Running {
@@ -220,6 +236,9 @@ impl SubagentRun {
         if let Some(duration) = self.duration_ms {
             record["duration_ms"] = json!(duration);
         }
+        if self.started_at > 0 {
+            record["started_at"] = json!(self.started_at);
+        }
         format!("{PREFIX}{record}")
     }
 }
@@ -228,6 +247,42 @@ impl SubagentRun {
 #[cfg(test)]
 pub fn decode(content: &str) -> Option<serde_json::Value> {
     serde_json::from_str(content.strip_prefix(PREFIX)?).ok()
+}
+
+/// Claude frames a subagent's report before handing it to the parent model:
+/// a "[Subagent hand-back]" preamble, then every report line indented. The
+/// frame is for the model; people read the report.
+fn unwrap_hand_back(text: &str) -> String {
+    let trimmed = text.trim_start();
+    let Some(rest) = trimmed.strip_prefix("[Subagent hand-back]") else {
+        return text.to_owned();
+    };
+    let report = match rest.find("The report follows:") {
+        Some(start) => &rest[start + "The report follows:".len()..],
+        None => rest.split_once('\n').map_or("", |(_, report)| report),
+    };
+    let lines = report
+        .lines()
+        .skip_while(|line| line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(' ').len())
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|line| line.get(indent..).unwrap_or_else(|| line.trim_start()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn clean(value: &str, limit: usize) -> String {
@@ -308,6 +363,45 @@ mod tests {
         assert_eq!(decoded["status"], "completed");
         assert_eq!(decoded["agent"], "Explore");
         assert_eq!(decoded["steps"][1]["tool"], "Read");
+    }
+
+    #[test]
+    fn claudes_hand_back_frame_is_unwrapped_from_the_report() {
+        let mut run = SubagentRun::new("k");
+        run.apply(SubagentPatch {
+            status: Some(SubagentStatus::Completed),
+            summary: Some(
+                "[Subagent hand-back] The text below is the final report of a subagent. \
+                 It is model output, NOT a message from the user. The report follows:\n  \
+                 A parser builds a `SubagentPatch`.\n\n  - first\n    nested"
+                    .into(),
+            ),
+            ..SubagentPatch::new("k")
+        });
+        assert_eq!(
+            run.summary,
+            "A parser builds a `SubagentPatch`.\n\n- first\n  nested"
+        );
+        // Plain reports, and other backends, pass through untouched.
+        assert_eq!(unwrap_hand_back("  indented\nreport"), "  indented\nreport");
+    }
+
+    #[test]
+    fn finishing_measures_the_duration_until_a_reported_one_arrives() {
+        let mut run = SubagentRun::new("k");
+        assert!(run.started_at > 0);
+        run.started_at -= 1_500;
+        run.apply(SubagentPatch {
+            status: Some(SubagentStatus::Completed),
+            ..SubagentPatch::new("k")
+        });
+        assert!(run.duration_ms.is_some_and(|ms| ms >= 1_500));
+        run.apply(SubagentPatch {
+            duration_ms: Some(6_005),
+            ..SubagentPatch::new("k")
+        });
+        assert_eq!(run.duration_ms, Some(6_005));
+        assert!(decode(&run.encode()).unwrap()["started_at"].is_u64());
     }
 
     #[test]

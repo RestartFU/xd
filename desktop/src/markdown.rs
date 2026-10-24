@@ -920,13 +920,46 @@ fn parse_inline(source: &str) -> InlineText {
         if let Some(parsed) = parsed {
             text.push_str(parsed.prefix);
             let start = text.len();
-            text.push_str(parsed.value);
-            if parsed.kind != InlineKind::Link || parsed.url.is_some() {
-                spans.push(InlineSpan {
-                    range: start..text.len(),
-                    kind: parsed.kind,
-                    url: parsed.url,
-                });
+            if matches!(
+                parsed.kind,
+                InlineKind::Strong | InlineKind::Emphasis | InlineKind::StrongEmphasis
+            ) {
+                // Emphasis can hold code and links of its own: `**see `x`**`.
+                // The pieces stay non-overlapping so each run has one style.
+                let inner = parse_inline(parsed.value);
+                text.push_str(&inner.text);
+                let mut cursor = 0;
+                for span in inner.spans {
+                    if span.range.start > cursor {
+                        spans.push(InlineSpan {
+                            range: start + cursor..start + span.range.start,
+                            kind: parsed.kind,
+                            url: None,
+                        });
+                    }
+                    cursor = span.range.end;
+                    spans.push(InlineSpan {
+                        range: start + span.range.start..start + span.range.end,
+                        kind: nested_kind(parsed.kind, span.kind),
+                        url: span.url,
+                    });
+                }
+                if cursor < inner.text.len() {
+                    spans.push(InlineSpan {
+                        range: start + cursor..text.len(),
+                        kind: parsed.kind,
+                        url: None,
+                    });
+                }
+            } else {
+                text.push_str(parsed.value);
+                if parsed.kind != InlineKind::Link || parsed.url.is_some() {
+                    spans.push(InlineSpan {
+                        range: start..text.len(),
+                        kind: parsed.kind,
+                        url: parsed.url,
+                    });
+                }
             }
             rest = &rest[parsed.consumed..];
         } else {
@@ -936,6 +969,17 @@ fn parse_inline(source: &str) -> InlineText {
         }
     }
     InlineText { text, spans }
+}
+
+/// The style of a span inside emphasis: code and links keep their own look,
+/// and emphasis inside strong text (or the reverse) is both.
+fn nested_kind(outer: InlineKind, inner: InlineKind) -> InlineKind {
+    match (outer, inner) {
+        (_, InlineKind::Code | InlineKind::Link) => inner,
+        (InlineKind::Strong, InlineKind::Strong) => InlineKind::Strong,
+        (InlineKind::Emphasis, InlineKind::Emphasis) => InlineKind::Emphasis,
+        _ => InlineKind::StrongEmphasis,
+    }
 }
 
 fn starts_web_url(source: &str) -> bool {
@@ -1411,6 +1455,31 @@ fn is_keyword(language: Option<&str>, word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_and_emphasis_inside_strong_text_keep_their_own_style() {
+        let text = parse_inline("**Line counts for `src/*.rs`:** and *see [docs](https://x.dev)*");
+        assert_eq!(text.text, "Line counts for src/*.rs: and see docs");
+        let kinds = text
+            .spans
+            .iter()
+            .map(|span| (&text.text[span.range.clone()], span.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                ("Line counts for ", InlineKind::Strong),
+                ("src/*.rs", InlineKind::Code),
+                (":", InlineKind::Strong),
+                ("see ", InlineKind::Emphasis),
+                ("docs", InlineKind::Link),
+            ]
+        );
+        assert_eq!(
+            parse_inline("**bold _both_**").spans[1].kind,
+            InlineKind::StrongEmphasis
+        );
+    }
 
     #[test]
     fn parses_common_markdown_blocks_and_inline_styles() {

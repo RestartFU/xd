@@ -49,6 +49,8 @@ pub fn is_plain_activity(content: &str) -> bool {
 /// A delegated agent, as the host's live record describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentView {
+    /// The host's id for the agent, which actions on it name.
+    pub key: String,
     pub provider: String,
     pub agent: String,
     pub model: String,
@@ -61,9 +63,14 @@ pub struct SubagentView {
     pub tool_uses: u64,
     pub tokens: Option<u64>,
     pub duration_ms: Option<u64>,
+    /// When the host first heard of the agent, in Unix milliseconds.
+    pub started_at: Option<u64>,
     pub latest: String,
     pub summary: String,
 }
+
+/// Steps the host keeps per agent; a longer run keeps only its newest.
+pub const SUBAGENT_KEPT_STEPS: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentStepView {
@@ -102,6 +109,7 @@ impl SubagentView {
                 .to_owned()
         };
         Some(Self {
+            key: text("key"),
             provider: text("provider"),
             agent: text("agent"),
             model: text("model"),
@@ -144,9 +152,44 @@ impl SubagentView {
             duration_ms: record
                 .get("duration_ms")
                 .and_then(serde_json::Value::as_u64),
+            started_at: record.get("started_at").and_then(serde_json::Value::as_u64),
             latest: text("latest"),
             summary: text("summary"),
         })
+    }
+
+    /// "2 tools · 13.9k tokens · 2.9s", whatever of it is known. A running
+    /// agent counts up from when it started.
+    pub fn stats_at(&self, now_ms: u64) -> String {
+        let mut view = self.clone();
+        if view.status == SubagentState::Running
+            && let Some(started) = view.started_at
+        {
+            view.duration_ms = Some(now_ms.saturating_sub(started).max(1));
+        }
+        view.stats()
+    }
+
+    /// Claude can stop its agents, and send one the turn waits on to the
+    /// background; other backends report theirs but take no orders.
+    pub fn can_stop(&self) -> bool {
+        self.status == SubagentState::Running
+            && !self.key.is_empty()
+            && self.provider.eq_ignore_ascii_case("claude")
+    }
+
+    pub fn can_background(&self) -> bool {
+        self.can_stop() && !self.background
+    }
+
+    /// Steps the record no longer lists: only a run longer than the host
+    /// keeps has any.
+    pub fn dropped_steps(&self) -> u64 {
+        if self.steps.len() < SUBAGENT_KEPT_STEPS {
+            0
+        } else {
+            self.tool_uses.saturating_sub(self.steps.len() as u64)
+        }
     }
 
     /// "2 tools · 13.9k tokens · 2.9s", whatever of it is known.
@@ -580,6 +623,15 @@ mod tests {
         assert_eq!(view.steps[0].text, "$ ls");
         assert_eq!(view.stats(), "2 tools · 13.9k tokens · 2.9s");
         assert!(!is_plain_activity("subagent_run\n{}"));
+        // Claude counts calls the record never saw as steps; only a list cut
+        // at the host's limit has steps it no longer shows.
+        assert_eq!(view.dropped_steps(), 0);
+        let running = SubagentView::parse(
+            r#"subagent_run
+{"agent":"Explore","status":"running","tool_uses":1,"started_at":1000}"#,
+        )
+        .unwrap();
+        assert_eq!(running.stats_at(48_000), "1 tool · 47s");
         assert!(SubagentView::parse("subagent\nExplore\nRunning · x").is_none());
     }
 

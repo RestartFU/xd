@@ -30,6 +30,8 @@ public data class SubagentRun(
     val toolUses: Long = 0,
     val tokens: Long? = null,
     val durationMillis: Long? = null,
+    /** When the host first heard of the agent, in Unix milliseconds. */
+    val startedAtMillis: Long? = null,
     /** Its newest message while it works. */
     val latest: String = "",
     /** Its final report. */
@@ -37,15 +39,40 @@ public data class SubagentRun(
 ) {
     /** "2 tools · 13.9k tokens · 2.9s", whatever of it is known. */
     val stats: String
-        get() = listOfNotNull(
+        get() = statsAt(null)
+
+    /** [stats], with a running agent counting up from when it started. */
+    public fun statsAt(nowMillis: Long?): String {
+        val elapsed = if (state == SubagentState.RUNNING && nowMillis != null && startedAtMillis != null) {
+            (nowMillis - startedAtMillis).coerceAtLeast(1)
+        } else {
+            durationMillis
+        }
+        return listOfNotNull(
             toolUses.takeIf { it > 0 }?.let { "$it tool${if (it == 1L) "" else "s"}" },
             tokens?.let { "${compactCount(it)} tokens" },
-            durationMillis?.let(::compactDuration),
+            elapsed?.let(::compactDuration),
         ).joinToString(" · ")
+    }
+
+    /** Steps the record no longer lists; only a run longer than the host keeps has any. */
+    val droppedSteps: Long
+        get() = if (steps.size < KEPT_STEPS) 0 else (toolUses - steps.size).coerceAtLeast(0)
+
+    /** Claude agents can be stopped, and one the turn waits on sent to the background. */
+    val canStop: Boolean
+        get() = state == SubagentState.RUNNING && !key.isNullOrBlank() &&
+            provider.equals("claude", ignoreCase = true)
+
+    val canBackground: Boolean
+        get() = canStop && !background
 
     public companion object {
         private const val PREFIX = "subagent\n"
         private const val RECORD_PREFIX = "subagent_run\n"
+
+        /** Steps the host keeps per agent. */
+        public const val KEPT_STEPS: Int = 40
 
         public fun parse(text: String): SubagentRun? =
             if (text.startsWith(RECORD_PREFIX)) parseRecord(text) else parseLegacy(text)
@@ -88,6 +115,7 @@ public data class SubagentRun(
                 toolUses = (record["tool_uses"] as? JsonPrimitive)?.longOrNull ?: 0,
                 tokens = (record["tokens"] as? JsonPrimitive)?.longOrNull,
                 durationMillis = (record["duration_ms"] as? JsonPrimitive)?.longOrNull,
+                startedAtMillis = (record["started_at"] as? JsonPrimitive)?.longOrNull,
                 latest = field("latest"),
                 summary = field("summary"),
             )

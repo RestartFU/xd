@@ -989,8 +989,21 @@ fn claude_task_event(root: &Value) -> Option<SubagentPatch> {
     };
     match subtype {
         "task_started" => {
+            patch.hidden = root.get("skip_transcript").and_then(Value::as_bool) == Some(true);
             patch.provider = Some("Claude".into());
-            patch.agent = text_field(root, "subagent_type").map(str::to_owned);
+            // Not every task is a delegated agent: a backgrounded shell
+            // command or a workflow is reported the same way.
+            patch.agent = text_field(root, "subagent_type")
+                .map(str::to_owned)
+                .or_else(|| match text_field(root, "task_type") {
+                    Some("local_bash") => Some("Shell".into()),
+                    Some("local_workflow") => Some(
+                        text_field(root, "workflow_name")
+                            .map(|name| format!("Workflow {name}"))
+                            .unwrap_or_else(|| "Workflow".into()),
+                    ),
+                    _ => None,
+                });
             patch.description = text_field(root, "description").map(str::to_owned);
             patch.prompt = text_field(root, "prompt").map(str::to_owned);
             patch.background = root.get("is_backgrounded").and_then(Value::as_bool);
@@ -1003,10 +1016,17 @@ fn claude_task_event(root: &Value) -> Option<SubagentPatch> {
             patch.duration_ms = usage_field("duration_ms");
         }
         "task_updated" => {
-            patch.status = root
-                .get("patch")
-                .and_then(|patch| text_field(patch, "status"))
+            let changed = root.get("patch");
+            patch.status = changed
+                .and_then(|changed| text_field(changed, "status"))
                 .and_then(SubagentStatus::from_wire);
+            // Sent to the background mid-run, from xd or from Claude itself.
+            patch.background = changed
+                .and_then(|changed| changed.get("is_backgrounded"))
+                .and_then(Value::as_bool);
+            patch.summary = changed
+                .and_then(|changed| text_field(changed, "error"))
+                .map(str::to_owned);
         }
         "task_notification" => {
             patch.status = text_field(root, "status").and_then(SubagentStatus::from_wire);
@@ -1095,7 +1115,8 @@ fn claude_control_request(root: &Value) -> Vec<AgentEvent> {
             "command": command,
             "reason": reason,
             "tool": tool,
-            "patch": tool_diff::build(&tool, Some(&input)),
+            "patch": tool_diff::build(&tool, Some(&input))
+                .map(|patch| patch.strip_prefix(tool_diff::PREFIX).unwrap_or(&patch).to_owned()),
             "claude": {
                 "tool": tool,
                 "input": input,
@@ -2188,6 +2209,21 @@ mod tests {
         ));
         assert_eq!(notified[0].summary.as_deref(), Some("One file."));
         assert_eq!(notified[0].tokens, Some(16_210));
+        // A backgrounded shell command is not an "Agent", and housekeeping
+        // tasks say to stay out of the transcript.
+        let shell = subagent_patches(parser.feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"t2","tool_use_id":"toolu_s","description":"Sleep then print","task_type":"local_bash","is_backgrounded":true}"#,
+        ));
+        assert_eq!(shell[0].agent.as_deref(), Some("Shell"));
+        assert!(!shell[0].hidden);
+        let chore = subagent_patches(parser.feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"t3","description":"Index","task_type":"local_agent","skip_transcript":true}"#,
+        ));
+        assert!(chore[0].hidden);
+        let moved = subagent_patches(parser.feed(
+            r#"{"type":"system","subtype":"task_updated","task_id":"t1","patch":{"is_backgrounded":true}}"#,
+        ));
+        assert_eq!(moved[0].background, Some(true));
         // The init that opens a turn is still the session marker.
         assert_eq!(
             parser.feed(r#"{"type":"system","subtype":"init","session_id":"s9"}"#),
@@ -2213,9 +2249,12 @@ mod tests {
         let edit = parser.feed(
             r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/a.txt","content":"hi\n"}}}"#,
         );
-        assert!(
-            matches!(&edit[0], AgentEvent::Interaction { method, .. } if method == "item/fileChange/requestApproval")
-        );
+        let AgentEvent::Interaction { method, params, .. } = &edit[0] else {
+            panic!("{edit:?}");
+        };
+        assert_eq!(method, "item/fileChange/requestApproval");
+        // The preview is the patch itself, without the row marker.
+        assert!(params["patch"].as_str().unwrap().starts_with("diff --git"));
 
         let question = parser.feed(
             r#"{"type":"control_request","request_id":"r3","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Which?","header":"Pick","options":[{"label":"A"},{"label":"B"}],"multiSelect":false}]}}}"#,

@@ -88,6 +88,7 @@ import com.restartfu.xd.model.AskBlock
 import com.restartfu.xd.model.AssistantSection
 import com.restartfu.xd.model.AssistantSectionKind
 import com.restartfu.xd.model.AssistantSections
+import com.restartfu.xd.model.SubagentState
 import com.restartfu.xd.model.ToolGrouping
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
@@ -121,6 +122,7 @@ internal fun ChatScreen(
     val sending by model.sending.collectAsStateWithLifecycle()
     val cancelling by model.cancelling.collectAsStateWithLifecycle()
     val steering by model.steering.collectAsStateWithLifecycle()
+    val subagentActions by model.subagentActions.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
     val speechEnabled by settings.speechEnabled.collectAsStateWithLifecycle()
 
@@ -322,7 +324,16 @@ internal fun ChatScreen(
                     is TranscriptRow.Single -> TranscriptRow(row.item, model)
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
-                    is TranscriptRow.Subagent -> SubagentCard(row.run)
+                    is TranscriptRow.Subagent -> {
+                        val key = row.run.key
+                        val pending = key?.let { subagentActions[it] }
+                        if (key != null && pending != null) {
+                            val settled = row.run.state != SubagentState.RUNNING ||
+                                (pending == "Moving to background" && row.run.background)
+                            LaunchedEffect(settled) { if (settled) model.settleSubagentAction(key) }
+                        }
+                        SubagentCard(row.run, pending, model::controlSubagent)
+                    }
                 }
             }
             if (state.working) {

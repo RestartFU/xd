@@ -662,6 +662,10 @@ impl Element for EditorElement {
         style.size.width = relative(1.).into();
         if composer {
             let input = self.input.clone();
+            // Measured later, outside this element's ancestors, so the text
+            // style they set (the UI font) must be captured now. Wrapping
+            // with another font counts different rows than prepaint paints.
+            let text_style = window.text_style();
             let layout = window.request_measured_layout(
                 style,
                 move |known_dimensions, available_space, window, cx| {
@@ -673,7 +677,6 @@ impl Element for EditorElement {
                         })
                         .unwrap_or(px(1.));
                     let input = input.read(cx);
-                    let text_style = window.text_style();
                     let rows = visual_line_ranges(&input, width, &text_style, window)
                         .len()
                         .max(1);
