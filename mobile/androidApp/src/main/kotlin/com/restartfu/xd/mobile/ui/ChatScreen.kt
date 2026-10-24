@@ -7,6 +7,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -949,14 +950,57 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
     }
 }
 
+private fun approvalTitle(request: com.restartfu.xd.model.PendingInteraction): String =
+    when (request.tool) {
+        "Bash" -> "Run this command?"
+        "Edit", "MultiEdit", "NotebookEdit" -> "Apply this edit?"
+        "Write" -> "Write this file?"
+        "WebFetch" -> "Fetch this page?"
+        "WebSearch" -> "Search the web?"
+        "ExitPlanMode" -> "Approve the plan?"
+        null -> when (request.method) {
+            "item/fileChange/requestApproval" -> "Apply these changes?"
+            "item/commandExecution/requestApproval" -> "Run this command?"
+            else -> "Approval needed"
+        }
+        else -> "Allow ${request.tool}?"
+    }
+
 @Composable
 private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, model: ChatViewModel) {
     var answers by remember(request.requestId) { mutableStateOf(emptyMap<String, String>()) }
     Card(Modifier.fillMaxWidth().padding(8.dp)) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (request.questions.isEmpty()) {
-                Text("Approval needed", style = MaterialTheme.typography.titleSmall)
-                Text(request.detail)
+                Text(approvalTitle(request), style = MaterialTheme.typography.titleSmall)
+                request.reason?.let {
+                    Text(
+                        it,
+                        modifier = Modifier
+                            .heightIn(max = 200.dp)
+                            .verticalScroll(rememberScrollState()),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Text(
+                    request.detail,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.small)
+                        .background(MaterialTheme.colorScheme.background)
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    fontFamily = XdMonoFamily,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                request.patch?.let { patch ->
+                    DiffText(
+                        patch,
+                        Modifier
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState()),
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = { model.approve(request.requestId, "accept") }) { Text("Allow once") }
                     TextButton(onClick = { model.approve(request.requestId, "acceptForSession") }) { Text("This session") }

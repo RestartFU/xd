@@ -503,7 +503,8 @@ internal class ChatSessionCore(
                 spoken.forEach { _speech.tryEmit(it) }
             }
             "tool" -> (value["text"] as? JsonPrimitive)?.contentOrNull?.let { text ->
-                if (apply(TranscriptInput.Tool(text, turnId, turnSequence), arrivalGate)) {
+                val messageId = value.longOrNull("message_id")
+                if (apply(TranscriptInput.Tool(text, turnId, turnSequence, messageId), arrivalGate)) {
                     // A tool ends the block, but what was already said is said.
                     speechMutex.withLock { speakParser.finish() }
                         .forEach { _speech.tryEmit(it) }
@@ -521,6 +522,11 @@ internal class ChatSessionCore(
                     speechMutex.withLock { speakParser.finish() }
                         .forEach { _speech.tryEmit(it) }
                 }
+            }
+            "record" -> {
+                val messageId = value.longOrNull("message_id") ?: return
+                val text = (value["text"] as? JsonPrimitive)?.contentOrNull ?: return
+                apply(TranscriptInput.Record(messageId, text, turnId, turnSequence), arrivalGate)
             }
             "changed" -> apply(TranscriptInput.Changed, event.sequence)
             "shortcuts-changed" -> apply(TranscriptInput.Changed, event.sequence)
@@ -679,6 +685,7 @@ internal class ChatSessionCore(
             "turn-started",
             "text",
             "tool",
+            "record",
             "turn-finished",
             "queued",
             "draft",

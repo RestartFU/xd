@@ -25,8 +25,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     Animation, AnimationExt, App, Application, AssetSource, Bounds, ClipboardItem, Context,
     CursorStyle, Decorations, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle,
-    KeyBinding, ListAlignment, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
+    KeyBinding, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
     TitlebarOptions, WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowDecorations, WindowOptions, canvas, div, list, point, prelude::*, px,
     rgb, rgba, size, svg,
@@ -34,7 +34,7 @@ use gpui::{
 use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
-    activity::{self, ActivityCard, ActivityKind},
+    activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
     model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, Worktree},
@@ -346,6 +346,34 @@ fn drawer_tabs(signals: &[SessionSignal], colors: ThemeColors) -> gpui::AnyEleme
         .into_any_element()
 }
 
+/// What an approval asks for, in the words of the tool asking.
+fn approval_title(method: &str, tool: &str) -> String {
+    match tool {
+        "Bash" => "Run this command?".into(),
+        "Edit" | "MultiEdit" | "NotebookEdit" => "Apply this edit?".into(),
+        "Write" => "Write this file?".into(),
+        "WebFetch" => "Fetch this page?".into(),
+        "WebSearch" => "Search the web?".into(),
+        "ExitPlanMode" => "Approve the plan?".into(),
+        "" if method == "item/fileChange/requestApproval" => "Apply these changes?".into(),
+        "" if method == "item/commandExecution/requestApproval" => "Run this command?".into(),
+        "" => "Approval needed".into(),
+        tool => format!("Allow {tool}?"),
+    }
+}
+
+/// The first non-empty line of some markdown as plain text, for a one-line
+/// preview: no heading or list markers, emphasis, or code ticks.
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(|line| line.trim().trim_start_matches(['#', '-', '*', '>', ' ']))
+        .find(|line| !line.is_empty() && !line.starts_with("```"))
+        .unwrap_or_default()
+        .replace("**", "")
+        .replace("__", "")
+        .replace('`', "")
+}
+
 /// A rubber-stamp label: small tracked capitals in a thin frame.
 fn stamp(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
     div()
@@ -447,6 +475,14 @@ struct OpenBrowserUrl {
 #[action(namespace = xd, no_json)]
 struct ToggleActivity {
     id: i64,
+}
+
+/// Shows or hides the earlier steps of a work log, keyed by its head row.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct ToggleWorkLog {
+    id: i64,
+    rows: std::ops::Range<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1031,11 +1067,39 @@ struct PendingSpeech {
     previous_assistant_id: Option<i64>,
 }
 
+/// Plain tool calls in a row read as one work log, showing its newest steps.
+const WORK_LOG_VISIBLE: usize = 6;
+
 /// Where a row sits inside a run of consecutive plain activity, so the run reads
 /// as one card instead of one card per command.
-#[derive(Clone, Copy, Default)]
-struct ActivityRun {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WorkRun {
+    start: usize,
+    len: usize,
     position: usize,
+}
+
+impl WorkRun {
+    /// Rows the collapsed log leaves out: everything but the newest steps.
+    /// The head row stays to carry the log's header.
+    fn hides(self, expanded: bool) -> bool {
+        !expanded
+            && self.len > WORK_LOG_VISIBLE
+            && self.position > 0
+            && self.position < self.len - WORK_LOG_VISIBLE
+    }
+
+    fn head_shows_entry(self, expanded: bool) -> bool {
+        expanded || self.len <= WORK_LOG_VISIBLE
+    }
+
+    fn hidden_count(self, expanded: bool) -> usize {
+        if expanded {
+            0
+        } else {
+            self.len.saturating_sub(WORK_LOG_VISIBLE)
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1071,22 +1135,31 @@ impl TranscriptSnapshot {
         })
     }
 
-    fn activity_run(&self, index: usize) -> ActivityRun {
+    /// The run of plain activity a row belongs to, when there is more than one.
+    fn work_run(&self, index: usize) -> Option<WorkRun> {
         if !self.stacks_activity(index) {
-            return ActivityRun::default();
+            return None;
         }
         let mut start = index;
         while start > 0 && self.stacks_activity(start - 1) {
             start -= 1;
         }
-        ActivityRun {
-            position: index - start,
+        let mut end = index + 1;
+        while self.stacks_activity(end) {
+            end += 1;
         }
+        (end - start > 1).then_some(WorkRun {
+            start,
+            len: end - start,
+            position: index - start,
+        })
     }
 
-    /// One summary card for the head of a plain activity run. The remaining
-    /// transcript rows render empty; expanding this card reveals every command
-    /// without adding a second disclosure level to each one.
+    fn row_key(&self, index: usize) -> i64 {
+        self.get(index)
+            .and_then(|message| message.id)
+            .unwrap_or(-(index as i64) - 1)
+    }
 
     fn get(&self, index: usize) -> Option<&Message> {
         if let Some(message) = self.messages.get(index) {
@@ -1309,6 +1382,7 @@ struct XdDesktop {
     chat_column_width: f32,
     native_option_open: Option<&'static str>,
     expanded_activities: HashSet<i64>,
+    expanded_work_logs: HashSet<i64>,
     pending_minimal_session: Option<(String, String)>,
     settings: AppSettings,
     settings_open: bool,
@@ -1340,6 +1414,8 @@ struct XdDesktop {
     remote_reconnect_attempt: u32,
     transcript: ListState,
     transcript_scroll_handler_attached: bool,
+    /// The transcript shows its newest row, so new output keeps it pinned.
+    transcript_pinned: bool,
     transcript_snapshot: TranscriptSnapshot,
     /// Whether the selected chat has returned at least one transcript page.
     /// This is deliberately separate from `messages.is_empty()`: a new chat is
@@ -1828,6 +1904,7 @@ impl XdDesktop {
             chat_column_width: 860.0,
             native_option_open: None,
             expanded_activities: HashSet::new(),
+            expanded_work_logs: HashSet::new(),
             pending_minimal_session: None,
             settings,
             settings_open: false,
@@ -1863,6 +1940,7 @@ impl XdDesktop {
             remote_reconnect_attempt: 0,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_scroll_handler_attached: false,
+            transcript_pinned: true,
             transcript_snapshot: TranscriptSnapshot::default(),
             transcript_loaded: false,
             transcript_loading: false,
@@ -2192,6 +2270,7 @@ impl XdDesktop {
                 | "turn-started"
                 | "text"
                 | "tool"
+                | "record"
                 | "turn-finished"
                 | "queued"
                 | "shortcuts-changed"
@@ -2242,6 +2321,7 @@ impl XdDesktop {
         self.transcript_snapshot = TranscriptSnapshot::default();
         self.transcript_loaded = false;
         self.transcript.reset(0);
+        self.transcript_pinned = true;
         self.pending_speech = None;
         self.speech_output.stop();
         self.diff_panel = None;
@@ -3364,6 +3444,7 @@ impl XdDesktop {
                     self.transcript_snapshot = TranscriptSnapshot::default();
                     self.transcript_loaded = false;
                     self.transcript.reset(0);
+                    self.transcript_pinned = true;
                 }
                 if self
                     .sidebar_edit
@@ -4765,6 +4846,11 @@ impl XdDesktop {
             "changed" if self.event_is_active(&body) => {
                 if let Some(chat_id) = self.model.selected_chat.clone() {
                     self.request_chat(&chat_id);
+                    // A background agent that starts between turns adds its card
+                    // as a stored row; during a turn the live items carry it.
+                    if !self.model.working {
+                        self.request_messages(&chat_id);
+                    }
                 }
             }
             "repository-changed" if self.event_is_active(&body) => {
@@ -4824,16 +4910,31 @@ impl XdDesktop {
                     } else if new_count > 0 {
                         self.transcript.splice(new_count - 1..new_count, 1);
                     }
-                    // A new tail row can change the count and status displayed
-                    // by the run's head, which is a different virtualized row.
-                    if new_count > 0 {
-                        let run = self.transcript_snapshot.activity_run(new_count - 1);
-                        if run.position > 0 {
-                            let head = new_count - 1 - run.position;
-                            self.transcript.splice(head..head + 1, 1);
-                        }
+                    // A new tail row changes the run's header count and which
+                    // of its earlier rows the collapsed log still shows.
+                    if new_count > 0
+                        && let Some(run) = self.transcript_snapshot.work_run(new_count - 1)
+                        && run.position > 0
+                    {
+                        let first = run.start;
+                        let last = new_count - 1;
+                        let anchor = self.transcript.logical_scroll_top();
+                        self.transcript.splice(first..last, last - first);
+                        self.transcript.scroll_to(anchor);
                     }
                     self.request_workflow_statuses();
+                }
+            }
+            "record" if self.event_is_active(&body) => {
+                if let Some(row) = self.model.apply_record(&body) {
+                    if row < self.model.messages.len() {
+                        self.transcript_snapshot.sync_messages(&self.model);
+                    } else {
+                        self.transcript_snapshot.sync_live_items(&self.model);
+                    }
+                    if row < self.transcript.item_count() {
+                        self.transcript.splice(row..row + 1, 1);
+                    }
                 }
             }
             "turn-finished" if self.event_is_active(&body) => {
@@ -8033,6 +8134,21 @@ impl XdDesktop {
         }
     }
 
+    fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        if self.transcript_has_newer {
+            // The newest page is not loaded; the tail request lands pinned.
+            if let Some(chat_id) = self.model.selected_chat.clone() {
+                self.request_message_page(&chat_id, MessageCursor::Tail);
+            }
+        }
+        self.transcript.scroll_to(ListOffset {
+            item_ix: self.transcript.item_count(),
+            offset_in_item: px(0.0),
+        });
+        self.transcript_pinned = true;
+        cx.notify();
+    }
+
     fn invalidate_live_render(&mut self) {
         self.live_render_generation = self.live_render_generation.saturating_add(1);
         self.live_render_scheduled = None;
@@ -8198,6 +8314,7 @@ impl XdDesktop {
             self.transcript_loading = false;
             self.transcript_page_loading = false;
             self.transcript.reset(0);
+            self.transcript_pinned = true;
         }
         self.minimal_route = MinimalRoute::Cli {
             project_id,
@@ -10498,10 +10615,485 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    /// One row of a work log. Rows draw their own slice of the shared frame, so
+    /// a run of virtualized rows reads as a single card.
+    #[allow(clippy::too_many_arguments)]
+    fn render_work_log_row(
+        colors: ThemeColors,
+        card: ActivityCard,
+        run: WorkRun,
+        index: usize,
+        row_key: i64,
+        log_key: i64,
+        log_expanded: bool,
+        expanded: bool,
+    ) -> gpui::AnyElement {
+        let head = run.position == 0;
+        let tail = run.position + 1 == run.len;
+        let failed = card.kind == ActivityKind::Failure;
+        let mark = match card.kind {
+            ActivityKind::Running => colors.working,
+            ActivityKind::Failure => colors.danger,
+            _ => colors.faint,
+        };
+        let detail = card
+            .patch
+            .clone()
+            .or_else(|| (!card.detail.is_empty()).then(|| card.detail.clone()));
+        let header = head.then(|| {
+            let hidden = run.hidden_count(log_expanded);
+            let rows = run.start..run.start + run.len;
+            div()
+                .id(("work-log-header", index))
+                .w_full()
+                .px_3()
+                .pt(px(7.0))
+                .pb(px(4.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(px(11.5))
+                .child(
+                    div()
+                        .flex_1()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(colors.muted))
+                        .child(format!("Work log · {} steps", run.len)),
+                )
+                .when(run.len > WORK_LOG_VISIBLE, |header| {
+                    header.child(
+                        div()
+                            .id(("work-log-toggle", index))
+                            .cursor_pointer()
+                            .text_color(rgb(colors.accent_ink))
+                            .hover(|style| style.text_color(rgb(colors.text)))
+                            .on_click(move |_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(ToggleWorkLog {
+                                        id: log_key,
+                                        rows: rows.clone(),
+                                    }),
+                                    cx,
+                                );
+                            })
+                            .child(if hidden > 0 {
+                                format!("Show {hidden} earlier")
+                            } else {
+                                "Show fewer".to_owned()
+                            }),
+                    )
+                })
+        });
+        let entry = (!head || run.head_shows_entry(log_expanded)).then(|| {
+            div()
+                .id(("work-log-entry", index))
+                .w_full()
+                .px_3()
+                .py(px(3.0))
+                .flex()
+                .items_center()
+                .gap_2()
+                .when(detail.is_some() || !card.items.is_empty(), |row| {
+                    row.cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(Box::new(ToggleActivity { id: row_key }), cx);
+                        })
+                })
+                .child(div().size(px(6.0)).flex_none().rounded_full().bg(rgb(mark)))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .font_family(MONO)
+                        .text_size(px(12.0))
+                        .line_height(px(20.0))
+                        .text_color(rgb(if failed { colors.danger } else { colors.text }))
+                        .child(card.name.clone()),
+                )
+                .when(card.kind == ActivityKind::Running || failed, |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .text_color(rgb(mark))
+                            .child(card.status.clone()),
+                    )
+                })
+        });
+        let opened = expanded && entry.is_some();
+        div()
+            .w_full()
+            .max_w(px(860.0))
+            .when(tail, |row| row.pb(px(8.0)))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(colors.surface))
+                    .border_color(rgb(colors.border))
+                    .border_l_1()
+                    .border_r_1()
+                    .when(head, |frame| frame.border_t_1().rounded_t(px(6.0)))
+                    .when(tail, |frame| {
+                        frame.border_b_1().rounded_b(px(6.0)).pb(px(4.0))
+                    })
+                    .children(header)
+                    .children(entry)
+                    .when_some(detail.filter(|_| opened), |frame, detail| {
+                        frame.child(
+                            div()
+                                .id(("work-log-detail", index))
+                                .mx_3()
+                                .my_1()
+                                .max_h(px(260.0))
+                                .overflow_y_scroll()
+                                .p_3()
+                                .rounded(px(5.0))
+                                .bg(rgb(colors.background))
+                                .font_family(MONO)
+                                .text_size(px(12.0))
+                                .line_height(px(19.0))
+                                .text_color(rgb(colors.muted))
+                                .child(detail),
+                        )
+                    })
+                    .when(opened, |frame| {
+                        frame.children(card.items.into_iter().enumerate().map(
+                            |(item_index, item)| {
+                                div()
+                                    .id(("work-log-item", item_index))
+                                    .px_3()
+                                    .pl(px(28.0))
+                                    .flex()
+                                    .gap_2()
+                                    .font_family(MONO)
+                                    .text_size(px(12.0))
+                                    .line_height(px(20.0))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .text_color(rgb(colors.text))
+                                            .child(item.name),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(colors.muted))
+                                            .child(item.status),
+                                    )
+                            },
+                        ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// One delegated agent: who it is, what it is doing right now, and, once
+    /// opened, its task, every step it took, and its report.
+    fn render_native_subagent(
+        colors: ThemeColors,
+        view: SubagentView,
+        index: usize,
+        card_id: i64,
+        expanded: bool,
+    ) -> gpui::AnyElement {
+        let running = view.status == SubagentState::Running;
+        let signal = match view.status {
+            SubagentState::Running => colors.working,
+            SubagentState::Completed => colors.faint,
+            SubagentState::Failed => colors.danger,
+            SubagentState::Stopped => colors.muted,
+        };
+        let provider_icon = match view.provider.to_ascii_lowercase().as_str() {
+            "claude" => Some(CLAUDE_ICON),
+            "codex" => Some(CODEX_ICON),
+            _ => None,
+        };
+        let stats = view.stats();
+        let preview = if running {
+            view.activity.clone()
+        } else {
+            first_line(if view.summary.is_empty() {
+                &view.latest
+            } else {
+                &view.summary
+            })
+        };
+        let section = |label: String| {
+            div()
+                .pt(px(4.0))
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(colors.faint))
+                .child(label)
+        };
+        let step_row = |step_index: usize, tool: String, text: String| {
+            div()
+                .id(("native-subagent-step", step_index))
+                .w_full()
+                .flex()
+                .gap_2()
+                .font_family(MONO)
+                .text_size(px(11.5))
+                .line_height(px(18.0))
+                .child(
+                    div()
+                        .w(px(52.0))
+                        .flex_none()
+                        .truncate()
+                        .text_color(rgb(colors.faint))
+                        .child(tool),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_color(rgb(colors.muted))
+                        .child(text),
+                )
+                .into_any_element()
+        };
+        // While it works, the newest few steps show without opening the card.
+        let recent_steps = if running && !expanded {
+            let skip = view.steps.len().saturating_sub(3);
+            view.steps
+                .iter()
+                .enumerate()
+                .skip(skip)
+                .map(|(step_index, step)| {
+                    step_row(step_index, step.tool.clone(), step.text.clone())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let header = div()
+            .id(("native-subagent-toggle", index))
+            .cursor_pointer()
+            .on_click(move |_, window, cx| {
+                window.dispatch_action(Box::new(ToggleActivity { id: card_id }), cx);
+            })
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon(
+                if expanded {
+                    CHEVRON_DOWN_ICON
+                } else {
+                    CHEVRON_RIGHT_ICON
+                },
+                12.0,
+                colors.faint,
+            ))
+            .when_some(provider_icon, |header, path| {
+                header.child(icon(path, 13.0, colors.muted))
+            })
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(colors.text))
+                    .child(view.agent.clone()),
+            )
+            .when(!view.model.is_empty(), |header| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .font_family(MONO)
+                        .text_size(px(11.0))
+                        .text_color(rgb(colors.faint))
+                        .child(view.model.clone()),
+                )
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(12.5))
+                    .text_color(rgb(colors.muted))
+                    .child(view.description.clone()),
+            )
+            .when(view.background, |header| {
+                header.child(stamp("Background", colors.faint))
+            })
+            .child(match view.status {
+                SubagentState::Running => div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(12.0))
+                    .text_color(rgb(colors.working))
+                    .child(view.status.label())
+                    .child(working_dots(index, colors.working))
+                    .into_any_element(),
+                SubagentState::Failed => stamp(view.status.label(), colors.danger),
+                _ => div()
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .text_color(rgb(colors.muted))
+                    .child(view.status.label())
+                    .into_any_element(),
+            });
+        let glance = (!preview.is_empty() || !stats.is_empty()).then(|| {
+            div()
+                .w_full()
+                .pl(px(20.0))
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_size(px(12.0))
+                        .text_color(rgb(if running { colors.text } else { colors.muted }))
+                        .child(preview),
+                )
+                .when(!stats.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(rgb(colors.faint))
+                            .child(stats),
+                    )
+                })
+        });
+        let mut details = Vec::new();
+        if expanded {
+            if !view.prompt.is_empty() {
+                details.push(section("Task".into()).into_any_element());
+                details.push(
+                    div()
+                        .id(("native-subagent-prompt", index))
+                        .w_full()
+                        .max_h(px(160.0))
+                        .overflow_y_scroll()
+                        .text_size(px(12.0))
+                        .line_height(px(18.0))
+                        .text_color(rgb(colors.muted))
+                        .child(view.prompt.clone())
+                        .into_any_element(),
+                );
+            }
+            if !view.steps.is_empty() {
+                let earlier = (view.tool_uses as usize).saturating_sub(view.steps.len());
+                details.push(section(format!("Steps · {}", view.tool_uses)).into_any_element());
+                details.push(
+                    div()
+                        .id(("native-subagent-steps", index))
+                        .w_full()
+                        .max_h(px(240.0))
+                        .overflow_y_scroll()
+                        .p_2()
+                        .rounded(px(5.0))
+                        .bg(rgb(colors.background))
+                        .flex()
+                        .flex_col()
+                        .when(earlier > 0, |steps| {
+                            steps.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(colors.faint))
+                                    .child(format!("{earlier} earlier steps not kept")),
+                            )
+                        })
+                        .children(view.steps.iter().enumerate().map(|(step_index, step)| {
+                            step_row(step_index, step.tool.clone(), step.text.clone())
+                        }))
+                        .into_any_element(),
+                );
+            }
+            let (report_label, report) = if !view.summary.is_empty() {
+                ("Report", view.summary.as_str())
+            } else {
+                ("Latest message", view.latest.as_str())
+            };
+            if !report.is_empty() {
+                let document = markdown::parse_assistant(report);
+                let scope = format!("native-subagent-report:{card_id}");
+                details.push(section(report_label.into()).into_any_element());
+                details.push(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(
+                            document
+                                .blocks
+                                .iter()
+                                .enumerate()
+                                .map(|(block_index, block)| {
+                                    Self::render_native_markdown_block(
+                                        colors,
+                                        block,
+                                        scoped_element_id(&scope, block_index) as usize,
+                                    )
+                                }),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        div()
+            .id(("native-subagent", index))
+            .w_full()
+            .max_w(px(860.0))
+            .flex()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(if view.status == SubagentState::Failed {
+                colors.danger
+            } else {
+                colors.border
+            }))
+            .bg(rgb(colors.surface))
+            .overflow_hidden()
+            .child(div().w(px(3.0)).flex_none().bg(rgb(signal)))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .px_3()
+                    .py(px(8.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.0))
+                    .child(header)
+                    .children(glance)
+                    .when(!recent_steps.is_empty(), |card| {
+                        card.child(div().pl(px(20.0)).flex().flex_col().children(recent_steps))
+                    })
+                    .when(!details.is_empty(), |card| {
+                        card.child(
+                            div()
+                                .pl(px(20.0))
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .children(details),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
     fn render_native_message(
         colors: ThemeColors,
         message: &Message,
         activity: Option<ActivityCard>,
+        subagent: Option<SubagentView>,
         index: usize,
         expanded: bool,
     ) -> gpui::AnyElement {
@@ -10510,17 +11102,48 @@ impl XdDesktop {
             let label = message
                 .content
                 .parse::<u64>()
-                .map(|seconds| format!("Finished in {seconds}s"))
+                .map(|seconds| {
+                    if seconds < 60 {
+                        format!("Worked for {seconds}s")
+                    } else {
+                        format!("Worked for {}", activity::compact_duration(seconds * 1_000))
+                    }
+                })
                 .unwrap_or_else(|_| "Finished".into());
+            let rule = || div().h(px(1.0)).flex_1().bg(rgb(colors.border));
             return div()
                 .id(("native-duration", index))
                 .w_full()
                 .max_w(px(860.0))
-                .py_2()
-                .text_center()
-                .text_size(px(11.5))
-                .text_color(rgb(colors.faint))
-                .child(label)
+                .pt_1()
+                .pb(px(14.0))
+                .flex()
+                .items_center()
+                .gap_3()
+                .child(rule())
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.5))
+                        .text_color(rgb(colors.faint))
+                        .child(label),
+                )
+                .child(rule())
+                .into_any_element();
+        }
+
+        if let Some(subagent) = subagent {
+            return div()
+                .w_full()
+                .max_w(px(860.0))
+                .pb(px(8.0))
+                .child(Self::render_native_subagent(
+                    colors,
+                    subagent,
+                    index,
+                    message.id.unwrap_or(-(index as i64) - 1),
+                    expanded,
+                ))
                 .into_any_element();
         }
 
@@ -10571,10 +11194,42 @@ impl XdDesktop {
             .when(!user && !error, |card| card.w_full().py_1())
             .child(
                 div()
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(if error { colors.danger } else { colors.faint }))
-                    .child(label),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(if error { colors.danger } else { colors.faint }))
+                            .child(label),
+                    )
+                    .when(!error && !message.content.trim().is_empty(), |row| {
+                        let text = message.content.clone();
+                        row.child(
+                            div()
+                                .id(("native-copy-message", index))
+                                .invisible()
+                                .group_hover("native-message", |style| style.visible())
+                                .px(px(5.0))
+                                .h(px(18.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .text_size(px(11.0))
+                                .text_color(rgb(colors.faint))
+                                .hover(|style| {
+                                    style
+                                        .bg(rgb(colors.surface_high))
+                                        .text_color(rgb(colors.text))
+                                })
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                })
+                                .child("Copy"),
+                        )
+                    }),
             )
             .child(
                 div().w_full().flex().flex_col().gap_2().children(
@@ -10594,6 +11249,7 @@ impl XdDesktop {
             );
         div()
             .id(("native-message", index))
+            .group("native-message")
             .w_full()
             .flex()
             .flex_col()
@@ -10752,11 +11408,60 @@ impl XdDesktop {
                 ),
             );
         } else {
-            let detail = params
-                .get("command")
+            let command = params.get("command").and_then(Value::as_str);
+            let reason = params
+                .get("reason")
                 .and_then(Value::as_str)
-                .or_else(|| params.get("reason").and_then(Value::as_str))
+                .filter(|reason| !reason.trim().is_empty() && Some(*reason) != command);
+            let detail = command
+                .or(reason)
                 .unwrap_or("The agent requests permission to continue");
+            let tool = params
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let title = approval_title(method, tool);
+            let waiting = self.model.interactions.len();
+            let patch = params
+                .get("patch")
+                .and_then(Value::as_str)
+                .filter(|patch| !patch.trim().is_empty())
+                .map(|patch| {
+                    patch
+                        .lines()
+                        .take(400)
+                        .enumerate()
+                        .map(|(index, line)| {
+                            let background = if line.starts_with("+++") || line.starts_with("---") {
+                                None
+                            } else if line.starts_with('+') {
+                                Some(colors.diff_added)
+                            } else if line.starts_with('-') {
+                                Some(colors.diff_removed)
+                            } else {
+                                None
+                            };
+                            div()
+                                .id(("interaction-patch-line", index))
+                                .px_2()
+                                .whitespace_nowrap()
+                                .text_color(rgb(if line.starts_with("@@") {
+                                    colors.accent_ink
+                                } else if background.is_some() {
+                                    colors.text
+                                } else {
+                                    colors.muted
+                                }))
+                                .when_some(background, |row, background| row.bg(rgb(background)))
+                                .child(if line.is_empty() {
+                                    " ".to_owned()
+                                } else {
+                                    line.to_owned()
+                                })
+                                .into_any_element()
+                        })
+                        .collect::<Vec<_>>()
+                });
             card = card
                 .child(
                     div()
@@ -10767,12 +11472,35 @@ impl XdDesktop {
                             div()
                                 .flex_1()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("Approval needed"),
+                                .child(title),
                         )
+                        .when(waiting > 1, |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(colors.faint))
+                                    .child(format!("1 of {waiting}")),
+                            )
+                        })
                         .child(stamp("Waiting on you", colors.waiting)),
                 )
+                .when_some(reason.filter(|_| command.is_some()), |card, reason| {
+                    card.child(
+                        div()
+                            .id("interaction-reason")
+                            .max_h(px(220.0))
+                            .overflow_y_scroll()
+                            .text_size(px(12.5))
+                            .line_height(px(19.0))
+                            .text_color(rgb(colors.muted))
+                            .child(reason.to_owned()),
+                    )
+                })
                 .child(
                     div()
+                        .id("interaction-detail")
+                        .max_h(px(140.0))
+                        .overflow_y_scroll()
                         .px_3()
                         .py_2()
                         .rounded(px(5.0))
@@ -10780,7 +11508,24 @@ impl XdDesktop {
                         .font_family(MONO)
                         .text_size(px(12.5))
                         .child(detail.to_owned()),
-                );
+                )
+                .when_some(patch, |card, lines| {
+                    card.child(
+                        div()
+                            .id("interaction-patch")
+                            .max_h(px(260.0))
+                            .overflow_scroll()
+                            .py_1()
+                            .rounded(px(5.0))
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .bg(rgb(colors.background))
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .children(lines),
+                    )
+                });
             if let Some(permissions) = params.get("permissions") {
                 card = card.child(
                     div()
@@ -10837,7 +11582,12 @@ impl XdDesktop {
                 .set_scroll_handler(move |event, _window, cx| {
                     let near_start = event.visible_range.start <= 8;
                     let near_end = event.visible_range.end.saturating_add(8) >= event.count;
-                    let _ = desktop.update(cx, |this, _cx| {
+                    let pinned = event.visible_range.end >= event.count;
+                    let _ = desktop.update(cx, |this, cx| {
+                        if this.transcript_pinned != pinned {
+                            this.transcript_pinned = pinned;
+                            cx.notify();
+                        }
                         if near_start && this.transcript_has_older {
                             this.request_older_messages();
                         } else if near_end {
@@ -10847,6 +11597,7 @@ impl XdDesktop {
                 });
         }
         let expanded_activities = self.expanded_activities.clone();
+        let expanded_work_logs = self.expanded_work_logs.clone();
         let messages = self.transcript_snapshot.clone();
         let transcript_empty = messages.get(0).is_none();
         let transcript_loading = self.transcript_loading;
@@ -10882,12 +11633,37 @@ impl XdDesktop {
                 let message = messages
                     .get(index)
                     .expect("transcript list index must match its snapshot");
-                let activity = (message.role == "tool").then(|| {
+                let subagent = (message.role == "tool")
+                    .then(|| SubagentView::parse(&message.content))
+                    .flatten();
+                let activity = (message.role == "tool" && subagent.is_none()).then(|| {
                     ActivityCard::parse(&message.content).with_workflow_status(
                         workflow_statuses.get(&message.content),
                         workflow_pending.contains(&message.content),
                     )
                 });
+                if let (Some(run), Some(card)) = (messages.work_run(index), activity.clone()) {
+                    let log_key = messages.row_key(run.start);
+                    let log_expanded = expanded_work_logs.contains(&log_key);
+                    if run.hides(log_expanded) {
+                        return div().w_full().into_any_element();
+                    }
+                    return div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(div().w(px(column)).child(Self::render_work_log_row(
+                            colors,
+                            card,
+                            run,
+                            index,
+                            messages.row_key(index),
+                            log_key,
+                            log_expanded,
+                            expanded_activities.contains(&messages.row_key(index)),
+                        )))
+                        .into_any_element();
+                }
                 div()
                     .w_full()
                     .flex()
@@ -10896,6 +11672,7 @@ impl XdDesktop {
                         colors,
                         message,
                         activity,
+                        subagent,
                         index,
                         expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
                     )))
@@ -10968,6 +11745,50 @@ impl XdDesktop {
                     .into_any_element()
             })
             .collect::<Vec<_>>();
+        // How much of the model's context the conversation fills, as the agent
+        // last reported it.
+        let context_meter = (self.model.context_window > 0).then(|| {
+            let used = self.model.context_used.min(self.model.context_window);
+            let share = used as f32 / self.model.context_window as f32;
+            let tone = if share >= 0.9 {
+                colors.danger
+            } else if share >= 0.75 {
+                colors.waiting
+            } else {
+                colors.faint
+            };
+            div()
+                .id("native-context-meter")
+                .flex_none()
+                .mr_2()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .w(px(36.0))
+                        .h(px(4.0))
+                        .rounded(px(2.0))
+                        .bg(rgb(colors.border))
+                        .child(
+                            div()
+                                .h_full()
+                                .w(px((36.0 * share).max(2.0)))
+                                .rounded(px(2.0))
+                                .bg(rgb(tone)),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(tone))
+                        .child(format!(
+                            "{} / {}",
+                            activity::compact_count(used),
+                            activity::compact_count(self.model.context_window)
+                        )),
+                )
+        });
         let composer_focus = self.composer_input.read(cx).focus_handle(cx);
         let can_send = self.model.connected
             && !self.sending
@@ -11058,11 +11879,57 @@ impl XdDesktop {
             .child(
                 div()
                     .id("native-transcript")
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .w_full()
                     .pt_4()
-                    .child(transcript),
+                    .child(transcript)
+                    .when(
+                        !self.transcript_pinned && !transcript_empty && !transcript_loading,
+                        |pane| {
+                            pane.child(
+                                div()
+                                    .absolute()
+                                    .bottom(px(12.0))
+                                    .left_0()
+                                    .right_0()
+                                    .flex()
+                                    .justify_center()
+                                    .child(
+                                        ui_button(
+                                            "native-jump-latest",
+                                            ButtonKind::Secondary,
+                                            colors,
+                                        )
+                                        .h(px(28.0))
+                                        .rounded(px(14.0))
+                                        .text_size(px(12.0))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.jump_to_latest(cx)),
+                                        )
+                                        .when(working, |button| {
+                                            button.child(
+                                                div()
+                                                    .size(px(6.0))
+                                                    .rounded_full()
+                                                    .bg(rgb(colors.working)),
+                                            )
+                                        })
+                                        .child(if working {
+                                            "Following new output"
+                                        } else {
+                                            "Jump to latest"
+                                        })
+                                        .child(icon(
+                                            CHEVRON_DOWN_ICON,
+                                            12.0,
+                                            colors.muted,
+                                        )),
+                                    ),
+                            )
+                        },
+                    ),
             )
             .when(!attachments.is_empty(), |chat| {
                 chat.child(
@@ -11231,6 +12098,7 @@ impl XdDesktop {
                             .gap_1()
                             .children(options)
                             .child(div().flex_1())
+                            .when_some(context_meter, |controls, meter| controls.child(meter))
                             .when(working, |controls| {
                                 controls.child(
                                     ui_button("native-cancel-turn", ButtonKind::Ghost, colors)
@@ -13600,6 +14468,19 @@ impl XdDesktop {
                 }
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, action: &ToggleWorkLog, _, cx| {
+                if !this.expanded_work_logs.insert(action.id) {
+                    this.expanded_work_logs.remove(&action.id);
+                }
+                // Hidden rows change height, so the list measures them again.
+                let rows = action.rows.clone();
+                if rows.end <= this.transcript.item_count() && !rows.is_empty() {
+                    let anchor = this.transcript.logical_scroll_top();
+                    this.transcript.splice(rows.clone(), rows.len());
+                    this.transcript.scroll_to(anchor);
+                }
+                cx.notify();
+            }))
             .on_action(cx.listener(|_, _: &CopyRenderedSelection, _, cx| {
                 if let Some(text) = TextSelection::selected(cx) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -14362,6 +15243,16 @@ fn strip_source_build_controls(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_read_as_plain_text() {
+        assert_eq!(
+            first_line("\n## Found **two** files in `src/`\n- more"),
+            "Found two files in src/"
+        );
+        assert_eq!(first_line("```rust\nfn main() {}"), "fn main() {}");
+        assert_eq!(first_line(""), "");
+    }
     use xd_desktop::model::{ChatSummary, Folder};
 
     #[gpui::test]
@@ -14472,7 +15363,7 @@ mod tests {
                 let message = self.message.clone();
                 let colors = self.colors;
                 list(self.state.clone(), move |index, _, _| {
-                    XdDesktop::render_native_message(colors, &message, None, index, false)
+                    XdDesktop::render_native_message(colors, &message, None, None, index, false)
                 })
                 .size_full()
             }

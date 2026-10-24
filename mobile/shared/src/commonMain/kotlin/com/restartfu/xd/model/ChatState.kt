@@ -16,6 +16,8 @@ public data class TranscriptItem(
     val atMillis: Long? = null,
     val label: String? = null,
     val live: Boolean = false,
+    /** The host's id for the stored row, when a record may rewrite it. */
+    val messageId: Long? = null,
 )
 
 public enum class TodoStatus {
@@ -93,6 +95,12 @@ public data class PendingInteraction(
     val method: String,
     val detail: String,
     val questions: List<PendingQuestion> = emptyList(),
+    /** The agent's tool asking, such as Bash or Edit, when it says. */
+    val tool: String? = null,
+    /** Why it asks, when that is more than the command itself. */
+    val reason: String? = null,
+    /** The edit it wants to make, as a unified patch. */
+    val patch: String? = null,
 )
 public data class PendingQuestion(
     val id: String,

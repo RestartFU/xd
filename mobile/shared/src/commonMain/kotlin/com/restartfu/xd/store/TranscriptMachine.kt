@@ -47,6 +47,15 @@ public sealed interface TranscriptInput {
         val name: String,
         val turnId: Long? = null,
         val turnSequence: Long? = null,
+        val messageId: Long? = null,
+    ) : TranscriptInput
+
+    /** A live record's newest snapshot, replacing the row it first wrote. */
+    public data class Record(
+        val messageId: Long,
+        val text: String,
+        val turnId: Long? = null,
+        val turnSequence: Long? = null,
     ) : TranscriptInput
 
     public data class TurnFinished(
@@ -149,8 +158,24 @@ public object TranscriptMachine {
                         kind = TranscriptKind.TOOL,
                         text = input.name,
                         live = true,
+                        messageId = input.messageId,
                     ),
                     liveSegment = "",
+                ).advancedTo(input.turnId, input.turnSequence),
+            )
+        }
+        is TranscriptInput.Record -> if (
+            state.covers(input.turnId, input.turnSequence)
+        ) {
+            TranscriptTransition(state)
+        } else {
+            fun List<TranscriptItem>.replaced() = map { item ->
+                if (item.messageId == input.messageId) item.copy(text = input.text) else item
+            }
+            TranscriptTransition(
+                state.copy(
+                    messages = state.messages.replaced(),
+                    liveItems = state.liveItems.replaced(),
                 ).advancedTo(input.turnId, input.turnSequence),
             )
         }
@@ -276,6 +301,7 @@ public object TranscriptMachine {
                     kind = if (item.tool) TranscriptKind.TOOL else TranscriptKind.ASSISTANT,
                     text = item.text,
                     live = true,
+                    messageId = item.messageId,
                 )
             }
         } else {
@@ -337,6 +363,7 @@ public object TranscriptMachine {
                     text = message.content,
                     atMillis = message.at * 1000,
                     label = message.label,
+                    messageId = message.id,
                 )
             },
             todos = snapshot ?: todos,

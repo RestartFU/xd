@@ -618,7 +618,7 @@ impl AppModel {
                             return None;
                         }
                         Some(Message::new(
-                            None,
+                            item.get("message_id").and_then(Value::as_i64),
                             if item.get("tool").and_then(Value::as_bool) == Some(true) {
                                 "tool"
                             } else {
@@ -955,7 +955,7 @@ impl AppModel {
                         .push(Message::new(None, "assistant", text, label));
                 }
                 self.live_items.push(Message::new(
-                    None,
+                    body.get("message_id").and_then(Value::as_i64),
                     "tool",
                     body.get("text")
                         .and_then(Value::as_str)
@@ -967,6 +967,45 @@ impl AppModel {
             "turn-finished" if self.event_is_active(body) => self.stop_working(),
             _ => {}
         }
+    }
+
+    /// Replaces a tool record -- a subagent's card, a turn's diff -- with its
+    /// newest snapshot. Returns the transcript row that changed.
+    pub fn apply_record(&mut self, body: &Value) -> Option<usize> {
+        if !self.event_is_active(body) {
+            return None;
+        }
+        let id = body.get("message_id").and_then(Value::as_i64)?;
+        let text = body.get("text").and_then(Value::as_str)?;
+        // Records published during a turn are sequenced with it, so a snapshot
+        // that already includes this update is not rolled back by a late event.
+        if let (Some(turn), Some(sequence)) = (
+            body.get("turn_id").and_then(Value::as_u64),
+            body.get("turn_sequence").and_then(Value::as_u64),
+        ) && body.get("turn_epoch").and_then(Value::as_str) == Some(self.turn_epoch.as_str())
+        {
+            if turn < self.turn_watermark_id
+                || (turn == self.turn_watermark_id && sequence <= self.turn_watermark_sequence)
+            {
+                return None;
+            }
+            self.turn_watermark_id = turn;
+            self.turn_watermark_sequence = sequence;
+        }
+        if let Some(index) = self
+            .messages
+            .iter()
+            .position(|message| message.id == Some(id))
+        {
+            self.messages[index] = Message::new(Some(id), "tool", text, None);
+            return Some(index);
+        }
+        let index = self
+            .live_items
+            .iter()
+            .position(|message| message.id == Some(id))?;
+        self.live_items[index] = Message::new(Some(id), "tool", text, None);
+        Some(self.messages.len() + index)
     }
 
     fn prepare_terminal_activity_version(
@@ -1195,6 +1234,35 @@ mod tests {
         assert!(model.live_items.is_empty());
         assert!(model.live_text.is_empty());
         assert_eq!(model.turn_watermark_id, 1);
+    }
+
+    #[test]
+    fn records_replace_their_row_in_place_whether_live_or_stored() {
+        let mut model = AppModel::default();
+        model.select_chat("chat");
+        model.apply_chat(&json!({"working":true,"turn_epoch":"d","turn_id":2,"turn_sequence":1,"segment":"","items":[{"tool":true,"text":"subagent_run\n{\"status\":\"running\"}","record":"toolu_1","message_id":7}]}));
+        let row = model.apply_record(&json!({"chat":"chat","turn_epoch":"d","turn_id":2,"turn_sequence":2,"message_id":7,"text":"subagent_run\n{\"status\":\"completed\"}"}));
+        assert_eq!(row, Some(model.messages.len()));
+        assert!(model.live_items[0].content.contains("completed"));
+        // A late copy of an older update cannot roll the card back.
+        assert_eq!(
+            model.apply_record(&json!({"chat":"chat","turn_epoch":"d","turn_id":2,"turn_sequence":1,"message_id":7,"text":"old"})),
+            None
+        );
+        assert!(model.live_items[0].content.contains("completed"));
+
+        model.messages = vec![Message::new(Some(3), "tool", "subagent_run\n{}", None)];
+        assert_eq!(
+            model.apply_record(
+                &json!({"chat":"chat","message_id":3,"text":"subagent_run\n{\"summary\":\"done\"}"})
+            ),
+            Some(0)
+        );
+        assert!(model.messages[0].content.contains("done"));
+        assert_eq!(
+            model.apply_record(&json!({"chat":"other","message_id":3,"text":"x"})),
+            None
+        );
     }
 
     #[test]

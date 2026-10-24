@@ -53,6 +53,9 @@ public data class WorktreeReply(
 public data class LiveItemReply(
     val tool: Boolean,
     val text: String,
+    /** The stored row a live record (a subagent, a turn diff) rewrites in place. */
+    @SerialName("message_id")
+    val messageId: Long? = null,
 )
 
 @Serializable
@@ -119,6 +122,7 @@ public data class MessageReply(
     val content: String,
     val at: Long,
     val label: String? = null,
+    val id: Long? = null,
 )
 
 @Serializable
@@ -283,8 +287,15 @@ public fun InteractionReply.toModel(): com.restartfu.xd.model.PendingInteraction
             secret = text(q["isSecret"]) == "true",
         )
     }
+    fun present(key: String): String? =
+        (params[key] as? kotlinx.serialization.json.JsonPrimitive)
+            ?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+    val command = present("command")
     return com.restartfu.xd.model.PendingInteraction(
         requestId = requestId, method = method, questions = questions,
-        detail = text(params["command"]) ?: text(params["reason"]) ?: params["permissions"]?.toString() ?: "The agent requests permission to continue",
+        detail = command ?: present("reason") ?: params["permissions"]?.toString() ?: "The agent requests permission to continue",
+        tool = present("tool"),
+        reason = present("reason")?.takeIf { command != null && it != command },
+        patch = present("patch"),
     )
 }

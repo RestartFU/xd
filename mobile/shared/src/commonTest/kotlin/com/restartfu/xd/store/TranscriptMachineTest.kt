@@ -415,6 +415,36 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun recordsRewriteTheirRowInPlaceLiveOrStored() {
+        val loaded = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat = chat(
+                    working = true,
+                    items = listOf(LiveItemReply(true, "subagent_run\n{\"status\":\"running\"}", 7)),
+                    turnId = 3,
+                    turnSequence = 1,
+                ),
+                messages = messages(MessageReply("tool", "file_change\nold", 12, id = 4)),
+                nowMillis = 0,
+            ),
+        ).state
+
+        val live = reduce(
+            loaded,
+            TranscriptInput.Record(7, "subagent_run\n{\"status\":\"completed\"}", 3, 2),
+        ).state
+        assertEquals(listOf("subagent_run\n{\"status\":\"completed\"}"), live.liveItems.map { it.text })
+
+        // A late copy of an older update cannot roll the card back.
+        val stale = reduce(live, TranscriptInput.Record(7, "old", 3, 1)).state
+        assertEquals(live, stale)
+
+        val stored = reduce(live, TranscriptInput.Record(4, "file_change\nnew")).state
+        assertEquals("file_change\nnew", stored.messages.single().text)
+    }
+
+    @Test
     fun staleTurnFinishedDoesNotEndTheCurrentTurn() {
         val state = ChatState("chat", working = true, turnId = 9, turnSequence = 2)
 

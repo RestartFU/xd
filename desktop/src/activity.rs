@@ -1,4 +1,5 @@
 const SUBAGENT_PREFIX: &str = "subagent\n";
+const SUBAGENT_RUN_PREFIX: &str = "subagent_run\n";
 const WORKFLOW_PREFIX: &str = "workflow_run\n";
 const FILE_CHANGE_PREFIX: &str = "file_change\n";
 const PATCH_MARKER: &str = "diff --git ";
@@ -40,8 +41,166 @@ pub enum ActivityKind {
 /// are collapsed into one summary card so a burst of commands reads as a block.
 pub fn is_plain_activity(content: &str) -> bool {
     !content.starts_with(SUBAGENT_PREFIX)
+        && !content.starts_with(SUBAGENT_RUN_PREFIX)
         && !content.starts_with(WORKFLOW_PREFIX)
         && !content.starts_with(FILE_CHANGE_PREFIX)
+}
+
+/// A delegated agent, as the host's live record describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentView {
+    pub provider: String,
+    pub agent: String,
+    pub model: String,
+    pub description: String,
+    pub prompt: String,
+    pub status: SubagentState,
+    pub background: bool,
+    pub activity: String,
+    pub steps: Vec<SubagentStepView>,
+    pub tool_uses: u64,
+    pub tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub latest: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentStepView {
+    pub tool: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentState {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl SubagentState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Completed => "Done",
+            Self::Failed => "Failed",
+            Self::Stopped => "Stopped",
+        }
+    }
+}
+
+impl SubagentView {
+    pub fn parse(content: &str) -> Option<Self> {
+        let record: serde_json::Value =
+            serde_json::from_str(content.strip_prefix(SUBAGENT_RUN_PREFIX)?).ok()?;
+        let text = |key: &str| {
+            record
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        Some(Self {
+            provider: text("provider"),
+            agent: text("agent"),
+            model: text("model"),
+            description: text("description"),
+            prompt: text("prompt"),
+            status: match record.get("status").and_then(serde_json::Value::as_str) {
+                Some("completed") => SubagentState::Completed,
+                Some("failed") => SubagentState::Failed,
+                Some("stopped") => SubagentState::Stopped,
+                _ => SubagentState::Running,
+            },
+            background: record
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            activity: text("activity"),
+            steps: record
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|step| SubagentStepView {
+                    tool: step
+                        .get("tool")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    text: step
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                })
+                .collect(),
+            tool_uses: record
+                .get("tool_uses")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+            tokens: record.get("tokens").and_then(serde_json::Value::as_u64),
+            duration_ms: record
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_u64),
+            latest: text("latest"),
+            summary: text("summary"),
+        })
+    }
+
+    /// "2 tools · 13.9k tokens · 2.9s", whatever of it is known.
+    pub fn stats(&self) -> String {
+        let mut parts = Vec::new();
+        if self.tool_uses > 0 {
+            parts.push(format!(
+                "{} tool{}",
+                self.tool_uses,
+                if self.tool_uses == 1 { "" } else { "s" }
+            ));
+        }
+        if let Some(tokens) = self.tokens {
+            parts.push(format!("{} tokens", compact_count(tokens)));
+        }
+        if let Some(duration) = self.duration_ms {
+            parts.push(compact_duration(duration));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// 950, 13.9k, 1.2M.
+pub fn compact_count(value: u64) -> String {
+    match value {
+        0..=999 => value.to_string(),
+        1_000..=999_999 => trim_decimal(value as f64 / 1_000.0, "k"),
+        _ => trim_decimal(value as f64 / 1_000_000.0, "M"),
+    }
+}
+
+fn trim_decimal(value: f64, unit: &str) -> String {
+    if value >= 100.0 {
+        format!("{value:.0}{unit}")
+    } else {
+        let text = format!("{value:.1}");
+        format!("{}{unit}", text.trim_end_matches(".0"))
+    }
+}
+
+/// 2.9s, 47s, 3m 05s, 1h 02m.
+pub fn compact_duration(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1_000;
+    if seconds < 10 {
+        return format!("{:.1}s", milliseconds as f64 / 1_000.0);
+    }
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes}m {:02}s", seconds % 60);
+    }
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
 }
 
 impl ActivityCard {
@@ -407,6 +566,34 @@ fn compact(value: &str, limit: usize, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_records_parse_with_their_steps_and_stats() {
+        let view = SubagentView::parse(
+            r#"subagent_run
+{"key":"toolu_1","provider":"Claude","agent":"Explore","description":"List files","status":"running","background":true,"activity":"Reading main.rs","steps":[{"tool":"Bash","text":"$ ls"}],"tool_uses":2,"tokens":13901,"duration_ms":2940}"#,
+        )
+        .unwrap();
+        assert_eq!(view.agent, "Explore");
+        assert_eq!(view.status, SubagentState::Running);
+        assert!(view.background);
+        assert_eq!(view.steps[0].text, "$ ls");
+        assert_eq!(view.stats(), "2 tools · 13.9k tokens · 2.9s");
+        assert!(!is_plain_activity("subagent_run\n{}"));
+        assert!(SubagentView::parse("subagent\nExplore\nRunning · x").is_none());
+    }
+
+    #[test]
+    fn counts_and_durations_read_compactly() {
+        assert_eq!(compact_count(950), "950");
+        assert_eq!(compact_count(16_210), "16.2k");
+        assert_eq!(compact_count(200_000), "200k");
+        assert_eq!(compact_count(1_200_000), "1.2M");
+        assert_eq!(compact_duration(2_940), "2.9s");
+        assert_eq!(compact_duration(47_000), "47s");
+        assert_eq!(compact_duration(185_000), "3m 05s");
+        assert_eq!(compact_duration(3_720_000), "1h 02m");
+    }
 
     #[test]
     fn parses_keyed_and_legacy_subagents_into_the_shared_model() {
