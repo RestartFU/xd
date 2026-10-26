@@ -33,7 +33,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.RowScope
@@ -61,7 +60,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -687,15 +688,12 @@ private fun ProductHeader(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(
-            modifier = Modifier
-                .size(24.dp)
-                .clip(RoundedCornerShape(6.dp))
-                .background(MaterialTheme.colorScheme.primary),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text("x", color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
-        }
+        Icon(
+            painterResource(R.drawable.ic_xd_mark),
+            contentDescription = "xd",
+            tint = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.size(22.dp),
+        )
         Text(
             title,
             modifier = Modifier.weight(1f),
@@ -793,26 +791,26 @@ private fun SessionSignal.color(): Color {
 }
 
 /**
- * A tab in the state's own shape as well as colour: working is solid, waiting
- * is a taller solid flag, done is hollow.
+ * The small status mark at the end of a session row: a dot for work and
+ * unread turns, nothing for a quiet session. Waiting on the user is the one
+ * state that also says so in words.
  */
 @Composable
-private fun SignalTab(signal: SessionSignal, width: Dp, height: Dp, modifier: Modifier = Modifier) {
-    if (signal == SessionSignal.IDLE) return
-    val color = signal.color()
-    val shape = RoundedCornerShape(topStart = 2.dp, topEnd = 2.dp)
-    Box(
-        modifier
-            .size(width = width, height = if (signal == SessionSignal.WAITING) height * 1.4f else height)
-            .clip(shape)
-            .then(
-                if (signal == SessionSignal.DONE) Modifier.border(1.5.dp, color, shape)
-                else Modifier.background(color),
-            ),
-    )
+private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier) {
+    when (signal) {
+        SessionSignal.IDLE -> Unit
+        SessionSignal.WAITING -> StatusPill("Waiting", signal.color(), modifier)
+        SessionSignal.WORKING -> PulseDot(signal.color(), modifier)
+        SessionSignal.DONE -> Box(
+            modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(signal.color()),
+        )
+    }
 }
 
-/** A closed drawer: one line, with a tab for each session that is not idle. */
+/** A collapsed project: one line, with a dot for each session that needs a look. */
 @Composable
 private fun DrawerRow(
     project: MinimalProject,
@@ -824,61 +822,60 @@ private fun DrawerRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(6.dp))
+            .heightIn(min = 44.dp)
+            .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp),
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Icon(
             painterResource(if (selected) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
             contentDescription = null,
             tint = faint,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(14.dp),
         )
-        if (selected) {
-            Text(
-                project.name,
-                modifier = Modifier
-                    .weight(1f, fill = false)
-                    .border(1.5.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(3.dp))
-                    .padding(horizontal = 8.dp, vertical = 2.dp),
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        } else {
-            Text(
-                project.name,
-                modifier = Modifier.weight(1f, fill = false),
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+        Icon(
+            painterResource(R.drawable.ic_folder),
+            contentDescription = null,
+            tint = if (selected) MaterialTheme.colorScheme.onSurfaceVariant else faint,
+            modifier = Modifier.size(15.dp),
+        )
+        Text(
+            project.name,
+            modifier = Modifier.weight(1f, fill = false),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = if (selected) MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
         Text(
             project.sessions.toString(),
-            fontFamily = XdMonoFamily,
             fontSize = 12.sp,
             color = faint,
         )
         Spacer(Modifier.weight(1f))
         if (!selected) {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                signals.filter { it != SessionSignal.IDLE }.take(6).forEach { signal ->
-                    SignalTab(signal, width = 10.dp, height = 5.dp)
+                signals.filter { it != SessionSignal.IDLE }.take(5).forEach { signal ->
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(signal.color()),
+                    )
                 }
             }
         }
     }
 }
 
-/** The current project's drawer, lifted out with its session cards. */
+/** The current project, open, with one row per session beneath it. */
 @Composable
 private fun OpenDrawer(
     project: MinimalProject,
@@ -889,18 +886,14 @@ private fun OpenDrawer(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.background)
-            .padding(6.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {})
         if (sessions.isEmpty()) {
             Text(
                 "No sessions yet. Start one with Codex, Claude, JCode, or Copilot.",
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                modifier = Modifier.padding(start = 30.dp, end = 10.dp, top = 4.dp, bottom = 8.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
             )
@@ -912,111 +905,96 @@ private fun OpenDrawer(
 }
 
 /**
- * A session's index card: title over the red ruled line, then branch and
- * state. The tab clipped to the top edge says what its agent is doing.
+ * One session, on one line: its agent, its title, and a status mark only when
+ * there is something to say. A branch shows when the session has its own.
  */
 @Composable
 private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: () -> Unit) {
     val signals = LocalXdSignals.current
-    Box(Modifier.fillMaxWidth().padding(top = 6.dp)) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(7.dp))
-                .background(MaterialTheme.colorScheme.surfaceContainer)
-                .clickable(onClick = onClick)
-                .padding(horizontal = 14.dp, vertical = 11.dp),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                BackendIcon(session.agent.wire, size = 17.dp)
-                Text(
-                    session.title,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 18.dp),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Box(
-                Modifier
-                    .padding(vertical = 9.dp)
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(signals.rule),
-            )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    session.branch,
-                    modifier = Modifier.weight(1f, fill = false),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    // Branch names are code; the placeholder for none is prose.
-                    fontFamily = if (session.branch == "Project directory") null else XdMonoFamily,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text("·", color = signals.faint, fontSize = 12.sp)
-                if (signal == SessionSignal.WAITING) {
-                    Text(
-                        signal.label.uppercase(),
-                        modifier = Modifier
-                            .border(1.dp, signal.color(), RoundedCornerShape(2.dp))
-                            .padding(horizontal = 5.dp, vertical = 1.dp),
-                        color = signal.color(),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        letterSpacing = 0.6.sp,
-                    )
-                } else {
-                    Text(
-                        signal.label,
-                        color = signal.color(),
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-                if (signal == SessionSignal.WORKING) WorkingDots()
-            }
-        }
-        SignalTab(
-            signal,
-            width = 18.dp,
-            height = 10.dp,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(end = 16.dp)
-                .offset(y = (-4).dp),
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 18.dp)
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        BackendIcon(session.agent.wire, size = 15.dp)
+        Text(
+            session.title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
+        if (signal == SessionSignal.IDLE && session.branch != "Project directory") {
+            Text(
+                session.branch,
+                modifier = Modifier.widthIn(max = 110.dp),
+                color = signals.faint,
+                fontFamily = XdMonoFamily,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        SignalMark(signal)
     }
+}
+
+/** A small status label on a soft tint of its own colour. */
+@Composable
+internal fun StatusPill(label: String, color: Color, modifier: Modifier = Modifier) {
+    Text(
+        label,
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(color.copy(alpha = 0.14f))
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+        color = color,
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.Medium,
+    )
+}
+
+/** A dot that breathes while something works. */
+@Composable
+internal fun PulseDot(color: Color, modifier: Modifier = Modifier, size: Dp = 7.dp) {
+    val transition = androidx.compose.animation.core.rememberInfiniteTransition(label = "pulse")
+    val alpha by transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(800),
+            androidx.compose.animation.core.RepeatMode.Reverse,
+        ),
+        label = "pulse-alpha",
+    )
+    Box(
+        modifier
+            .size(size)
+            .graphicsLayer { this.alpha = alpha }
+            .clip(CircleShape)
+            .background(color),
+    )
 }
 
 @Composable
 private fun AgentPill(agent: DirectAgent) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-            .padding(horizontal = 9.dp, vertical = 6.dp),
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         BackendIcon(agent.wire, size = 15.dp)
         Text(agent.wire, fontFamily = XdMonoFamily, fontSize = 11.sp)
     }
-}
-
-@Composable
-private fun WorkingDots() {
-    Dots(LocalXdSignals.current.working, contentDescription = "Working")
 }
 
 private class NativeChatOwner : ViewModelStoreOwner {
@@ -1029,8 +1007,8 @@ private fun EmptyCard(text: String) {
         text,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(14.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp))
             .padding(20.dp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

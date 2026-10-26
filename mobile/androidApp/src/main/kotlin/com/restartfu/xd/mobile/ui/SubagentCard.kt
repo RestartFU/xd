@@ -1,21 +1,13 @@
 package com.restartfu.xd.mobile.ui
 
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -23,13 +15,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,7 +31,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -72,7 +62,7 @@ internal fun SubagentCard(
         SubagentState.FAILURE -> MaterialTheme.colorScheme.error
         SubagentState.FINISHED -> MaterialTheme.colorScheme.outline
     }
-    val shape = RoundedCornerShape(6.dp)
+    val shape = RoundedCornerShape(14.dp)
     val preview = if (running) {
         run.activity
     } else {
@@ -93,7 +83,6 @@ internal fun SubagentCard(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min)
             .clip(shape)
             .border(
                 1.dp,
@@ -104,56 +93,36 @@ internal fun SubagentCard(
                 },
                 shape,
             )
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .background(MaterialTheme.colorScheme.surfaceContainer)
             .clickable { expanded = !expanded }
             .animateContentSize(),
     ) {
-        Box(
-            Modifier
-                .width(3.dp)
-                .fillMaxHeight()
-                .background(signal),
-        )
         Column(
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                BackendIcon(run.provider.lowercase(), size = 14.dp)
                 Text(
                     run.identity,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = FontWeight.Medium,
                     style = MaterialTheme.typography.bodyMedium,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
                 )
-                if (run.model.isNotBlank()) {
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        run.model,
-                        color = signals.faint,
-                        fontFamily = XdMonoFamily,
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                }
-                Spacer(Modifier.weight(1f))
-                if (run.background) {
-                    Text(
-                        "BACKGROUND",
-                        color = signals.faint,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier
-                            .border(1.dp, signals.faint, RoundedCornerShape(2.dp))
-                            .padding(horizontal = 4.dp, vertical = 1.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                }
-                if (running) PulsingDot(signal)
-                Spacer(Modifier.width(6.dp))
-                Text(run.status, color = signal, style = MaterialTheme.typography.labelMedium)
+                if (run.background) StatusPill("Background", signals.faint)
+                if (running) PulseDot(signal)
+                Text(
+                    run.status,
+                    color = if (running) MaterialTheme.colorScheme.onSurfaceVariant else signal,
+                    style = MaterialTheme.typography.labelMedium,
+                )
             }
             val key = run.key
             if (key != null && (run.canStop || pendingAction != null)) {
@@ -169,13 +138,13 @@ internal fun SubagentCard(
                         )
                     } else {
                         if (run.canBackground) {
-                            TextButton(
+                            OutlinedButton(
                                 onClick = { onAction(key, "background") },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 modifier = Modifier.heightIn(min = 32.dp),
                             ) { Text("Background", style = MaterialTheme.typography.labelMedium) }
                         }
-                        TextButton(
+                        OutlinedButton(
                             onClick = { onAction(key, "stop") },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                             modifier = Modifier.heightIn(min = 32.dp),
@@ -198,25 +167,30 @@ internal fun SubagentCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (preview.isNotBlank() || stats.isNotBlank()) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        preview,
-                        modifier = Modifier.weight(1f),
-                        color = if (running) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (stats.isNotBlank()) {
-                        Spacer(Modifier.width(8.dp))
-                        Text(stats, color = signals.faint, style = MaterialTheme.typography.labelSmall)
-                    }
-                }
+            // A phone has no room to share one line between the latest step
+            // and the numbers, so each gets its own.
+            if (preview.isNotBlank()) {
+                Text(
+                    preview,
+                    color = if (running) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = if (running) 1 else 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            val meta = listOf(run.model, stats).filter { it.isNotBlank() }.joinToString(" · ")
+            if (meta.isNotBlank()) {
+                Text(
+                    meta,
+                    color = signals.faint,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
             if (running && !expanded && run.steps.isNotEmpty()) {
                 run.steps.takeLast(3).forEach { StepLine(it.tool, it.text) }
@@ -239,7 +213,7 @@ internal fun SubagentCard(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(5.dp))
+                            .clip(RoundedCornerShape(10.dp))
                             .background(MaterialTheme.colorScheme.background)
                             .heightIn(max = 240.dp)
                             .verticalScroll(rememberScrollState())
@@ -313,25 +287,11 @@ private fun StepLine(tool: String, text: String) {
     }
 }
 
-@Composable
-private fun PulsingDot(color: Color) {
-    val transition = rememberInfiniteTransition(label = "subagent")
-    val alpha by transition.animateFloat(
-        initialValue = 0.35f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(700), RepeatMode.Reverse),
-        label = "subagent-pulse",
-    )
-    Box(
-        Modifier
-            .size(6.dp)
-            .alpha(alpha)
-            .clip(CircleShape)
-            .background(color),
-    )
-}
-
+/** The first line of some Markdown as plain text: no markers, emphasis, or code ticks. */
 private fun firstLine(text: String): String = text.lineSequence()
     .map { it.trim().trimStart('#', '-', '*', '>', ' ') }
-    .firstOrNull { it.isNotEmpty() }
+    .firstOrNull { it.isNotEmpty() && !it.startsWith("```") }
     .orEmpty()
+    .replace("**", "")
+    .replace("__", "")
+    .replace("`", "")

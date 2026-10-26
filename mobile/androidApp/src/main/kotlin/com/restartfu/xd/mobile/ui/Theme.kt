@@ -141,7 +141,7 @@ public enum class MinimalThemePreset(
     val label: String,
     val preview: Color,
 ) {
-    DARK("dark", "Dark", Color(0xFF1E1F22)),
+    DARK("dark", "Dark", Color(0xFF161618)),
     LIGHT("light", "Light", Color(0xFFFFFFFF)),
     ;
 
@@ -152,8 +152,8 @@ public enum class MinimalThemePreset(
 }
 
 /**
- * Colours Material has no role for: the signal tabs that say what a session's
- * agent is doing, and the red ruled line under a card's title.
+ * Colours Material has no role for: the status signals that say what a
+ * session's agent is doing, links, hints, and diff backgrounds.
  */
 @Immutable
 public data class XdSignals(
@@ -169,120 +169,124 @@ public data class XdSignals(
 
 public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
     MinimalThemePreset.DARK -> XdSignals(
-        working = Color(0xFF72B783),
-        waiting = Color(0xFFEAA93A),
-        done = Color(0xFF86A9E4),
-        rule = Color(0xFFA8493C),
-        link = Color(0xFF93B5E9),
-        faint = Color(0xFF8B8A85),
-        diffAdded = Color(0xFF1B2B20),
-        diffRemoved = Color(0xFF33201E),
+        working = Color(0xFF34D399),
+        waiting = Color(0xFFFBBF24),
+        done = Color(0xFF6AA1FF),
+        rule = Color(0xFF252528),
+        link = Color(0xFF7AA5FF),
+        faint = Color(0xFF76767D),
+        diffAdded = Color(0xFF10261A),
+        diffRemoved = Color(0xFF2C1515),
     )
     MinimalThemePreset.LIGHT -> XdSignals(
-        working = Color(0xFF276B3C),
-        waiting = Color(0xFF8C5100),
-        done = Color(0xFF2B5897),
-        rule = Color(0xFFC2483B),
-        link = Color(0xFF2B5897),
-        faint = Color(0xFF64635D),
-        diffAdded = Color(0xFFE2F0E5),
-        diffRemoved = Color(0xFFF8E4E1),
+        working = Color(0xFF047857),
+        waiting = Color(0xFF92400E),
+        done = Color(0xFF1D4ED8),
+        rule = Color(0xFFE4E4E7),
+        link = Color(0xFF1D4ED8),
+        faint = Color(0xFF6B6B74),
+        diffAdded = Color(0xFFE6F5EB),
+        diffRemoved = Color(0xFFFCEBEB),
     )
 }
 
 public val LocalXdSignals = staticCompositionLocalOf { xdSignals(MinimalThemePreset.DARK) }
 
-/** The desktop palette as complete Material roles, so no default violet leaks in. */
+/**
+ * The desktop palette as complete Material roles, so no default violet leaks
+ * in: a near-black or near-white canvas, hairline borders, and one blue for
+ * the primary action.
+ */
 public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
     MinimalThemePreset.DARK -> darkColorScheme(
-        primary = Color(0xFFE8E5DE),
-        onPrimary = Color(0xFF121314),
-        primaryContainer = Color(0xFF2B2D31),
-        onPrimaryContainer = Color(0xFFECEAE5),
-        secondary = Color(0xFFAAA9A3),
-        onSecondary = Color(0xFF121314),
-        secondaryContainer = Color(0xFF27292C),
-        onSecondaryContainer = Color(0xFFECEAE5),
-        tertiary = Color(0xFF93B5E9),
-        onTertiary = Color(0xFF121314),
-        tertiaryContainer = Color(0xFF1E2A3B),
-        onTertiaryContainer = Color(0xFFD6E3F7),
-        background = Color(0xFF121314),
-        onBackground = Color(0xFFECEAE5),
-        surface = Color(0xFF17181A),
-        onSurface = Color(0xFFECEAE5),
-        surfaceVariant = Color(0xFF27292C),
-        onSurfaceVariant = Color(0xFFAAA9A3),
-        surfaceContainerLowest = Color(0xFF0E0F10),
-        surfaceContainerLow = Color(0xFF17181A),
-        surfaceContainer = Color(0xFF1E1F22),
-        surfaceContainerHigh = Color(0xFF27292C),
-        surfaceContainerHighest = Color(0xFF2B2D31),
-        surfaceBright = Color(0xFF2B2D31),
-        surfaceDim = Color(0xFF121314),
-        inverseSurface = Color(0xFFECEAE5),
-        inverseOnSurface = Color(0xFF121314),
-        inversePrimary = Color(0xFF1B1C1E),
-        outline = Color(0xFF55575C),
-        outlineVariant = Color(0xFF313338),
+        primary = Color(0xFF2F6BF2),
+        onPrimary = Color(0xFFFFFFFF),
+        primaryContainer = Color(0xFF1F1F23),
+        onPrimaryContainer = Color(0xFFF1F3F7),
+        secondary = Color(0xFFA3A3A8),
+        onSecondary = Color(0xFF0B0B0C),
+        secondaryContainer = Color(0xFF1D1D20),
+        onSecondaryContainer = Color(0xFFF1F3F7),
+        tertiary = Color(0xFF7AA5FF),
+        onTertiary = Color(0xFF0B0B0C),
+        tertiaryContainer = Color(0xFF16233D),
+        onTertiaryContainer = Color(0xFFD6E3FF),
+        background = Color(0xFF0B0B0C),
+        onBackground = Color(0xFFF1F3F7),
+        surface = Color(0xFF0B0B0C),
+        onSurface = Color(0xFFF1F3F7),
+        surfaceVariant = Color(0xFF161618),
+        onSurfaceVariant = Color(0xFFA3A3A8),
+        surfaceContainerLowest = Color(0xFF0B0B0C),
+        surfaceContainerLow = Color(0xFF0F0F10),
+        surfaceContainer = Color(0xFF161618),
+        surfaceContainerHigh = Color(0xFF1D1D20),
+        surfaceContainerHighest = Color(0xFF1F1F23),
+        surfaceBright = Color(0xFF1F1F23),
+        surfaceDim = Color(0xFF0B0B0C),
+        inverseSurface = Color(0xFFF1F3F7),
+        inverseOnSurface = Color(0xFF0B0B0C),
+        inversePrimary = Color(0xFF1D4ED8),
+        outline = Color(0xFF3F3F46),
+        outlineVariant = Color(0xFF252528),
         scrim = Color(0xFF000000),
-        error = Color(0xFFEC7064),
-        onError = Color(0xFF121314),
-        errorContainer = Color(0xFF3B201E),
-        onErrorContainer = Color(0xFFF6C3BD),
+        error = Color(0xFFF87171),
+        onError = Color(0xFF0B0B0C),
+        errorContainer = Color(0xFF2A1616),
+        onErrorContainer = Color(0xFFFCC9C9),
     )
     MinimalThemePreset.LIGHT -> lightColorScheme(
-        primary = Color(0xFF1B1C1E),
+        primary = Color(0xFF1D4ED8),
         onPrimary = Color(0xFFFFFFFF),
-        primaryContainer = Color(0xFFE6E5E0),
-        onPrimaryContainer = Color(0xFF1B1C1E),
-        secondary = Color(0xFF56554F),
+        primaryContainer = Color(0xFFE9E9EC),
+        onPrimaryContainer = Color(0xFF18181B),
+        secondary = Color(0xFF52525B),
         onSecondary = Color(0xFFFFFFFF),
-        secondaryContainer = Color(0xFFE9E9E5),
-        onSecondaryContainer = Color(0xFF1B1C1E),
-        tertiary = Color(0xFF2B5897),
+        secondaryContainer = Color(0xFFEFEFF1),
+        onSecondaryContainer = Color(0xFF18181B),
+        tertiary = Color(0xFF1D4ED8),
         onTertiary = Color(0xFFFFFFFF),
-        tertiaryContainer = Color(0xFFDCE6F5),
+        tertiaryContainer = Color(0xFFDCE6FB),
         onTertiaryContainer = Color(0xFF13305A),
-        background = Color(0xFFF7F7F5),
-        onBackground = Color(0xFF1B1C1E),
-        surface = Color(0xFFEEEEEB),
-        onSurface = Color(0xFF1B1C1E),
-        surfaceVariant = Color(0xFFE9E9E5),
-        onSurfaceVariant = Color(0xFF56554F),
+        background = Color(0xFFFCFCFC),
+        onBackground = Color(0xFF18181B),
+        surface = Color(0xFFFCFCFC),
+        onSurface = Color(0xFF18181B),
+        surfaceVariant = Color(0xFFFFFFFF),
+        onSurfaceVariant = Color(0xFF52525B),
         surfaceContainerLowest = Color(0xFFFFFFFF),
-        surfaceContainerLow = Color(0xFFF7F7F5),
+        surfaceContainerLow = Color(0xFFF5F5F6),
         surfaceContainer = Color(0xFFFFFFFF),
-        surfaceContainerHigh = Color(0xFFE9E9E5),
-        surfaceContainerHighest = Color(0xFFE6E5E0),
+        surfaceContainerHigh = Color(0xFFEFEFF1),
+        surfaceContainerHighest = Color(0xFFE9E9EC),
         surfaceBright = Color(0xFFFFFFFF),
-        surfaceDim = Color(0xFFE6E5E0),
-        inverseSurface = Color(0xFF1B1C1E),
-        inverseOnSurface = Color(0xFFF7F7F5),
-        inversePrimary = Color(0xFFE8E5DE),
-        outline = Color(0xFF9A9993),
-        outlineVariant = Color(0xFFD7D6D0),
+        surfaceDim = Color(0xFFE9E9EC),
+        inverseSurface = Color(0xFF18181B),
+        inverseOnSurface = Color(0xFFFCFCFC),
+        inversePrimary = Color(0xFF7AA5FF),
+        outline = Color(0xFFA1A1AA),
+        outlineVariant = Color(0xFFE4E4E7),
         scrim = Color(0xFF000000),
-        error = Color(0xFFB2342A),
+        error = Color(0xFFB91C1C),
         onError = Color(0xFFFFFFFF),
-        errorContainer = Color(0xFFF8E2DF),
+        errorContainer = Color(0xFFFDEEEE),
         onErrorContainer = Color(0xFF5C140E),
     )
 }
 
 @OptIn(ExperimentalTextApi::class)
-private fun franklin(weight: FontWeight) = Font(
-    R.font.libre_franklin,
+private fun inter(weight: FontWeight) = Font(
+    R.font.inter,
     weight = weight,
     variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight)),
 )
 
-/** Libre Franklin, the desktop's face, carried through Material's type scale. */
+/** Inter, the desktop's face, carried through Material's type scale. */
 public val XdFontFamily: FontFamily = FontFamily(
-    franklin(FontWeight.Normal),
-    franklin(FontWeight.Medium),
-    franklin(FontWeight.SemiBold),
-    franklin(FontWeight.Bold),
+    inter(FontWeight.Normal),
+    inter(FontWeight.Medium),
+    inter(FontWeight.SemiBold),
+    inter(FontWeight.Bold),
 )
 
 /** JetBrains Mono, the desktop's code face, for code, branches, and the terminal. */
@@ -306,8 +310,8 @@ public val XdTypography: Typography = Typography().let { base ->
         headlineMedium = base.headlineMedium.copy(fontFamily = XdFontFamily),
         headlineSmall = base.headlineSmall.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
         titleLarge = base.titleLarge.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
-        titleMedium = base.titleMedium.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
-        titleSmall = base.titleSmall.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.SemiBold),
+        titleMedium = base.titleMedium.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.Medium),
+        titleSmall = base.titleSmall.copy(fontFamily = XdFontFamily, fontWeight = FontWeight.Medium),
         bodyLarge = base.bodyLarge.copy(fontFamily = XdFontFamily),
         bodyMedium = base.bodyMedium.copy(fontFamily = XdFontFamily),
         bodySmall = base.bodySmall.copy(fontFamily = XdFontFamily),

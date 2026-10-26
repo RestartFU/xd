@@ -36,16 +36,17 @@ private const val DIM_ALPHA = 0.3f
 @Composable
 internal fun WorkingRow(startedAtMillis: Long?) {
     Row(
-        modifier = Modifier.padding(start = 4.dp),
+        modifier = Modifier.padding(start = 2.dp, top = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        PulseDot(LocalXdSignals.current.working)
         Text(
             TurnTiming.format("Working", elapsedSeconds(startedAtMillis)),
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.outline,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Dots(MaterialTheme.colorScheme.outline)
+        Dots(MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

@@ -4,6 +4,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.graphics.Color
+import androidx.compose.material3.TextFieldDefaults
+import androidx.compose.material3.TextField
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Button
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
@@ -34,8 +44,6 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -67,7 +75,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -215,7 +222,12 @@ internal fun ChatScreen(
                     },
                     actions = {
                         if (pane == Pane.CHAT) {
-                            TextButton(onClick = { choosingModel = true }) {
+                            TextButton(
+                                onClick = { choosingModel = true },
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                ),
+                            ) {
                                 Text(
                                     state.model?.takeIf { it.isNotBlank() } ?: "Model",
                                     maxLines = 1,
@@ -233,12 +245,19 @@ internal fun ChatScreen(
                     },
                 )
                 sessionTabs()
-                TabRow(selectedTabIndex = pane.ordinal) {
+                TabRow(
+                    selectedTabIndex = pane.ordinal,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    divider = { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) },
+                ) {
                     Pane.entries.forEach { candidate ->
                         Tab(
                             selected = pane == candidate,
                             onClick = { pane = candidate },
                             text = { Text(candidate.label) },
+                            selectedContentColor = MaterialTheme.colorScheme.onSurface,
+                            unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -423,7 +442,7 @@ private fun Composer(
             .fillMaxWidth()
             .navigationBarsPadding()
             .imePadding()
-            .padding(12.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         attachmentError?.let { message ->
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -475,8 +494,9 @@ private fun Composer(
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 160.dp),
-                shape = MaterialTheme.shapes.medium,
-                tonalElevation = 2.dp,
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
             ) {
                 Column(
                     modifier = Modifier
@@ -568,70 +588,98 @@ private fun Composer(
                 }
             }
         }
-        Row(verticalAlignment = Alignment.Bottom) {
-            // An icon button rather than a text button: a lone glyph in a
-            // label-sized run of text is a small thing to hit, and this one
-            // gets a square touch target and a glyph big enough to aim at.
-            IconButton(
-                onClick = {
-                    picker.launch(
-                        PickVisualMediaRequest(
-                            ActivityResultContracts.PickVisualMedia.ImageOnly,
-                        ),
-                    )
-                },
-                enabled = attachments.size < Limits.MAX_IMAGES,
-            ) {
-                Text("+", style = MaterialTheme.typography.headlineSmall)
-            }
-            OutlinedTextField(
-                value = composer,
-                onValueChange = model::updateDraft,
-                modifier = Modifier.weight(1f),
-                label = { Text("Message") },
-                minLines = 1,
-                maxLines = 5,
-                // The desktop queues with Enter while a turn runs, since its
-                // button is the stop. The keyboard's own action key is where
-                // that lives here.
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(
-                    onSend = { if (state.working) model.enqueue() else model.send() },
-                ),
-            )
-            Spacer(Modifier.width(8.dp))
-            // One round button that sends and then stops, worded and coloured
-            // the way the desktop words and colours it: an arrow in the accent
-            // while it is yours to send, a stop in the error colour while the
-            // turn is the assistant's to finish.
-            FilledIconButton(
-                onClick = { if (state.working) model.cancel() else model.send() },
-                enabled = if (state.working) {
-                    !cancelling && !steering
-                } else {
-                    // The host accepts text, images, or both.
-                    !sending && (composer.isNotBlank() || attachments.isNotEmpty())
-                },
-                colors = if (state.working) {
-                    IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError,
-                    )
-                } else {
-                    IconButtonDefaults.filledIconButtonColors()
-                },
-            ) {
-                Icon(
-                    painter = painterResource(
-                        if (state.working) R.drawable.ic_stop else R.drawable.ic_send,
+        Spacer(Modifier.height(6.dp))
+        // One rounded box, the way the desktop draws it: the message on top,
+        // attach and send underneath.
+        Surface(
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            Column(Modifier.padding(start = 4.dp, end = 8.dp, top = 2.dp, bottom = 6.dp)) {
+                TextField(
+                    value = composer,
+                    onValueChange = model::updateDraft,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Message", color = LocalXdSignals.current.faint) },
+                    minLines = 1,
+                    maxLines = 6,
+                    colors = TextFieldDefaults.colors(
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        disabledContainerColor = Color.Transparent,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent,
+                        disabledIndicatorColor = Color.Transparent,
                     ),
-                    contentDescription = when {
-                        cancelling -> "Stopping"
-                        state.working -> "Stop"
-                        sending -> "Sending"
-                        else -> "Send"
-                    },
+                    // The desktop queues with Enter while a turn runs, since its
+                    // button is the stop. The keyboard's own action key is where
+                    // that lives here.
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = { if (state.working) model.enqueue() else model.send() },
+                    ),
                 )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // An icon button rather than a text button: a lone glyph in a
+                    // label-sized run of text is a small thing to hit, and this
+                    // one gets a square touch target.
+                    IconButton(
+                        onClick = {
+                            picker.launch(
+                                PickVisualMediaRequest(
+                                    ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                ),
+                            )
+                        },
+                        enabled = attachments.size < Limits.MAX_IMAGES,
+                    ) {
+                        Icon(
+                            painterResource(R.drawable.ic_add),
+                            contentDescription = "Attach images",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    // One round button that sends and then stops, as on the
+                    // desktop: an arrow in the accent while it is yours to send,
+                    // a neutral stop while the turn is the assistant's to finish.
+                    FilledIconButton(
+                        onClick = { if (state.working) model.cancel() else model.send() },
+                        enabled = if (state.working) {
+                            !cancelling && !steering
+                        } else {
+                            // The host accepts text, images, or both.
+                            !sending && (composer.isNotBlank() || attachments.isNotEmpty())
+                        },
+                        modifier = Modifier.size(40.dp),
+                        colors = if (state.working) {
+                            IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
+                            )
+                        } else {
+                            IconButtonDefaults.filledIconButtonColors(
+                                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                disabledContentColor = LocalXdSignals.current.faint,
+                            )
+                        },
+                    ) {
+                        Icon(
+                            painter = painterResource(
+                                if (state.working) R.drawable.ic_stop else R.drawable.ic_send,
+                            ),
+                            contentDescription = when {
+                                cancelling -> "Stopping"
+                                state.working -> "Stop"
+                                sending -> "Sending"
+                                else -> "Send"
+                            },
+                            modifier = Modifier.size(if (state.working) 16.dp else 20.dp),
+                        )
+                    }
+                }
             }
         }
     }
@@ -780,24 +828,25 @@ private fun AnalysisDisclosure(
     var expanded by rememberSaveable(key) { mutableStateOf(false) }
 
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { expanded = !expanded }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (expanded) "▾" else "▸")
-                Spacer(Modifier.width(8.dp))
                 Text(
                     "Analysis",
-                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.weight(1f),
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                Disclosure(expanded)
             }
             if (expanded && section.text.isNotBlank()) {
                 MarkdownText(
@@ -828,32 +877,44 @@ private fun ToolGroupRow(row: TranscriptRow.Tools) {
     var expanded by rememberSaveable(rowKey(row)) { mutableStateOf(false) }
 
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { expanded = !expanded }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (expanded) "▾" else "▸")
-                Spacer(Modifier.width(8.dp))
                 Text(
                     row.label,
-                    color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.weight(1f),
+                    color = LocalXdSignals.current.faint,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                Disclosure(expanded)
             }
             if (expanded) {
                 Spacer(Modifier.height(8.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    row.items.forEach { ToolRow(it) }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    row.items.forEach { ToolRow(it, nested = true) }
                 }
             }
         }
     }
+}
+
+/** The chevron at the end of anything that opens. */
+@Composable
+private fun Disclosure(expanded: Boolean) {
+    Icon(
+        painterResource(if (expanded) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
+        contentDescription = if (expanded) "Collapse" else "Expand",
+        tint = LocalXdSignals.current.faint,
+        modifier = Modifier.size(14.dp),
+    )
 }
 
 /**
@@ -864,34 +925,37 @@ private fun ToolGroupRow(row: TranscriptRow.Tools) {
  * with nothing but its summary gets no disclosure control at all.
  */
 @Composable
-private fun ToolRow(item: TranscriptItem) {
+private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
     val summary = remember(item.text) { ToolText.summary(item.text) }
     val detail = remember(item.text) { ToolText.detail(item.text) }
     val isPatch = remember(item.text) { ToolText.patch(item.text) != null }
     var expanded by rememberSaveable(item.id) { mutableStateOf(false) }
 
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.small,
+        color = if (nested) Color.Transparent else MaterialTheme.colorScheme.surfaceContainer,
+        shape = RoundedCornerShape(if (nested) 8.dp else 14.dp),
+        border = if (nested) null else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .let { if (detail == null) it else it.clickable { expanded = !expanded } }
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = if (nested) 0.dp else 14.dp, vertical = if (nested) 5.dp else 10.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (detail != null) {
-                    Text(if (expanded) "▾" else "▸")
-                    Spacer(Modifier.width(8.dp))
-                }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Text(
                     summary,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    fontFamily = if (isPatch) XdMonoFamily else FontFamily.Default,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = XdMonoFamily,
                 )
+                if (detail != null) Disclosure(expanded)
             }
             if (expanded && detail != null) {
                 Spacer(Modifier.height(8.dp))
@@ -926,36 +990,37 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
         return
     }
     if (item.kind != TranscriptKind.USER) {
-        Column(Modifier.fillMaxWidth()) {
-            item.label?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
+        // A reply is the page itself, without a name over it; only system
+        // text keeps its label, so it cannot be mistaken for the agent.
+        Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+            if (item.kind == TranscriptKind.SYSTEM) {
+                item.label?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = LocalXdSignals.current.faint,
+                    )
+                }
             }
             SelectableMessageBody(item, model)
         }
         return
     }
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.End,
+    Box(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        contentAlignment = Alignment.CenterEnd,
     ) {
-        Card(
-            modifier = Modifier.fillMaxWidth(0.86f),
-            // Tinted rather than the default surface: against plain reply text
-            // the bubble has to carry the distinction on its own.
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            ),
-        ) {
-            Column(Modifier.padding(12.dp)) {
-                item.label?.let {
-                    Text(it, style = MaterialTheme.typography.labelSmall)
+        Box(Modifier.fillMaxWidth(0.86f), contentAlignment = Alignment.CenterEnd) {
+            Surface(
+                // Tinted rather than the page colour: against plain reply text
+                // the bubble has to carry the distinction on its own.
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                shape = RoundedCornerShape(20.dp),
+            ) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    SelectableMessageBody(item, model)
                 }
-                SelectableMessageBody(item, model)
             }
         }
     }
@@ -980,53 +1045,78 @@ private fun approvalTitle(request: com.restartfu.xd.model.PendingInteraction): S
 @Composable
 private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, model: ChatViewModel) {
     var answers by remember(request.requestId) { mutableStateOf(emptyMap<String, String>()) }
-    Card(Modifier.fillMaxWidth().padding(8.dp)) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (request.questions.isEmpty()) {
-                Text(approvalTitle(request), style = MaterialTheme.typography.titleSmall)
-                request.reason?.let {
+    val waiting = LocalXdSignals.current.waiting
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            // Never taller than half the screen, so the answer stays in reach.
+            .heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.5f).dp),
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, waiting.copy(alpha = 0.6f)),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    if (request.questions.isEmpty()) approvalTitle(request) else "Question",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                StatusPill("Waiting on you", waiting)
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (request.questions.isEmpty()) {
+                    request.reason?.let {
+                        Text(
+                            it,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     Text(
-                        it,
+                        request.detail,
                         modifier = Modifier
-                            .heightIn(max = 200.dp)
-                            .verticalScroll(rememberScrollState()),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            .fillMaxWidth()
+                            .heightIn(max = 140.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.background)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        fontFamily = XdMonoFamily,
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    request.patch?.let { patch -> DiffText(patch) }
+                } else {
+                    request.questions.forEach { question ->
+                        Text(question.text)
+                        question.options.forEach { option ->
+                            OutlinedButton(
+                                onClick = { answers = answers + (question.id to option) },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text(option) }
+                        }
+                        OutlinedTextField(value = answers[question.id].orEmpty(), onValueChange = { answers = answers + (question.id to it) }, label = { Text("Answer") },
+                            visualTransformation = if (question.secret) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None)
+                    }
                 }
-                Text(
-                    request.detail,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(MaterialTheme.shapes.small)
-                        .background(MaterialTheme.colorScheme.background)
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                    fontFamily = XdMonoFamily,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                request.patch?.let { patch ->
-                    DiffText(
-                        patch,
-                        Modifier
-                            .heightIn(max = 260.dp)
-                            .verticalScroll(rememberScrollState()),
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { model.approve(request.requestId, "accept") }) { Text("Allow once") }
-                    TextButton(onClick = { model.approve(request.requestId, "acceptForSession") }) { Text("This session") }
-                    TextButton(onClick = { model.approve(request.requestId, "decline") }) { Text("Deny") }
+            }
+            if (request.questions.isEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button(onClick = { model.approve(request.requestId, "accept") }) { Text("Allow once") }
+                    OutlinedButton(onClick = { model.approve(request.requestId, "acceptForSession") }) { Text("This session") }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = { model.approve(request.requestId, "decline") }) {
+                        Text("Deny", color = MaterialTheme.colorScheme.error)
+                    }
                 }
             } else {
-                request.questions.forEach { question ->
-                    Text(question.text)
-                    question.options.forEach { option ->
-                        TextButton(onClick = { answers = answers + (question.id to option) }) { Text(option) }
-                    }
-                    OutlinedTextField(value = answers[question.id].orEmpty(), onValueChange = { answers = answers + (question.id to it) }, label = { Text("Answer") },
-                        visualTransformation = if (question.secret) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None)
-                }
-                TextButton(onClick = { model.answer(request.requestId, answers) }, enabled = request.questions.all { !answers[it.id].isNullOrBlank() }) { Text("Submit answers") }
+                Button(onClick = { model.answer(request.requestId, answers) }, enabled = request.questions.all { !answers[it.id].isNullOrBlank() }) { Text("Submit answers") }
             }
         }
     }

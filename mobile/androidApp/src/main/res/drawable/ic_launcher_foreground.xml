@@ -11,7 +11,7 @@
         android:translateY="20.4">
         <path
             android:fillColor="@android:color/transparent"
-            android:strokeColor="#ff7a55"
+            android:strokeColor="#ffffff"
             android:strokeWidth="2"
             android:strokeLineCap="round"
             android:strokeLineJoin="round"
