@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "xd-host"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -1319,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "xd-transport"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "base64 0.22.1",
  "rustls",
