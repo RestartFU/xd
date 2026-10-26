@@ -26,19 +26,25 @@ permissions:
 
 jobs:
   linux:
-    # The self-hosted runner for our own branches, GitHub's for a fork: this
-    # repository is public, and a pull request runs whatever it contains. A
-    # fork must not get that on the machine the runner lives on.
-    runs-on: >-
-      ${{ github.event.pull_request.head.repo.fork
-      && 'ubuntu-latest'
-      || fromJSON('["self-hosted", "linux", "x64", "xd"]') }}
+    # GitHub's runner for every branch and fork: this repository is public,
+    # and a pull request runs whatever it contains, so it never gets a
+    # machine of ours.
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
 
       # Everything is built in Docker, so the runner needs nothing else. Both
       # builds share layers, which is why the tests are cheap to gate on.

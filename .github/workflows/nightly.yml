@@ -27,12 +27,21 @@ permissions:
 
 jobs:
   linux:
-    runs-on: [self-hosted, linux, x64, xd]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
 
       # Everything is built in Docker, so the runner needs nothing else. Both
       # builds share layers, which is why the tests are cheap to gate on.
@@ -135,12 +144,21 @@ jobs:
       profile: nightly
 
   android:
-    runs-on: [self-hosted, linux, x64, xd]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
 
       - name: Check protected Android signing
         id: android_signing
@@ -214,9 +232,8 @@ jobs:
   publish:
     needs: [linux, macos, windows, android]
     # GitHub's own runner, deliberately: this job downloads every artifact and
-    # uploads it again as a release asset -- about a gigabyte each way. On a
-    # self-hosted runner that gigabyte crosses a home connection twice; here it
-    # never leaves GitHub's network.
+    # uploads it again as a release asset -- about a gigabyte each way, which
+    # here never leaves GitHub's network.
     runs-on: ubuntu-latest
     permissions:
       contents: write

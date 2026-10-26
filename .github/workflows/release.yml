@@ -165,13 +165,22 @@ jobs:
 
   linux:
     needs: prepare
-    runs-on: [self-hosted, linux, x64, xd]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
 
       - name: Run the headless tests
         run: ./scripts/test.sh
@@ -274,13 +283,22 @@ jobs:
 
   android:
     needs: prepare
-    runs-on: [self-hosted, linux, x64, xd]
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.tag }}
           persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
 
       - name: Check Android signing credentials
         id: android_signing
