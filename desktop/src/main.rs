@@ -3662,7 +3662,6 @@ impl XdDesktop {
                     if let Some(path) = xd_desktop::channel::installed_restart_path() {
                         let mut command =
                             xd_desktop::channel::restart_command(&path, std::process::id());
-                        session_runtime::restore_browser_environment(&mut command);
                         match command.spawn() {
                             Ok(_) => cx.quit(),
                             Err(error) => {
