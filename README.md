@@ -24,9 +24,12 @@ A local-first desktop workspace for user-installed Codex, Claude Code, JCode, an
 - Uses your installed CLI tools, authentication, and configuration.
 - Dark and light themes, chosen in Settings.
 
-Each chat remembers its browser tabs and whether the pane is open. Use the
-Browser icon beside Changes, Files, and Terminal in the session header to show it,
-then `+` in its tab bar to open another tab. Hover over an icon to see its label.
+Each chat remembers its browser pages and whether the side pane is open. The
+session header has two layout controls: side pane and bottom terminal. The side
+pane starts with a browser page; use its `+` menu to add another page, Files, or
+Changes. The bottom control opens a shell terminal below the chat. Both panes
+can stay open together, and hiding them keeps their content. Hover over either
+layout icon to see its label.
 
 ## Install
 

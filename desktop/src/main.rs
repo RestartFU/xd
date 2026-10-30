@@ -59,7 +59,7 @@ mod terminal;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 
-use browser::{BrowserEvent, BrowserPane, BrowserSession};
+use browser::{BrowserEvent, BrowserPane, BrowserSession, SideTab};
 use editor::{
     Backspace as EditorBackspace, Copy as EditorCopy, Cut as EditorCut, Delete as EditorDelete,
     DeleteWord as EditorDeleteWord, DeleteWordForward as EditorDeleteWordForward,
@@ -123,6 +123,8 @@ const TRASH_ICON: &str = "icons/trash.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
+const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
+const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
 const BROWSER_ICON: &str = "icons/browser.svg";
 const TERMINAL_ICON: &str = "icons/terminal.svg";
@@ -167,9 +169,9 @@ fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
     )
 }
 
-/// The docked pane beside a native chat keeps the chat at least 460px wide.
-fn native_dock_width(requested: u16, available: f32) -> f32 {
-    f32::from(requested).clamp(320.0, (available - 460.0).clamp(320.0, 900.0))
+/// Keep room for the chat when sizing the bottom terminal.
+fn bottom_terminal_height(requested: u16, available: f32) -> f32 {
+    f32::from(requested).clamp(120.0, (available - 180.0).clamp(120.0, 600.0))
 }
 
 fn working_dot_alphas(frame: usize) -> [u8; 3] {
@@ -679,7 +681,7 @@ struct DiffPanel {
     pr_body: String,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 enum NativePane {
     #[default]
     Chat,
@@ -1506,7 +1508,9 @@ struct XdDesktop {
     minimal_popup_focus_captured: bool,
     minimal_new_session_agent: AgentCli,
     native_pane: NativePane,
-    /// Drag origin and starting width while resizing the native dock.
+    native_panels: HashMap<NativePane, DiffPanel>,
+    bottom_terminal_open: bool,
+    /// Drag origin and starting height while resizing the bottom terminal.
     dock_drag: Option<(f32, u16)>,
     /// Width of the chat's reading column, measured by the workspace layout.
     chat_column_width: f32,
@@ -2034,6 +2038,8 @@ impl XdDesktop {
             minimal_popup_focus_captured: false,
             minimal_new_session_agent: AgentCli::Codex,
             native_pane: NativePane::Chat,
+            native_panels: HashMap::new(),
+            bottom_terminal_open: false,
             dock_drag: None,
             chat_column_width: 780.0,
             native_option_open: None,
@@ -6190,6 +6196,7 @@ impl XdDesktop {
     }
 
     fn open_browser_url(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.native_pane = NativePane::Chat;
         self.set_browser_open(true);
         self.browser_restore_focus = false;
         if let Some(pane) = self.sync_browser_pane(window, cx) {
@@ -6238,16 +6245,48 @@ impl XdDesktop {
                     }
                 }
                 BrowserEvent::Close => this.close_browser(cx),
+                BrowserEvent::AuxiliarySelected(tab) => {
+                    this.select_side_tool(
+                        match tab {
+                            Some(SideTab::Files) => NativePane::Files,
+                            Some(SideTab::Changes) => NativePane::Diff,
+                            None => NativePane::Chat,
+                        },
+                        cx,
+                    );
+                }
             })
             .detach();
             self.browser_panes.insert(key, pane.clone());
             pane
         };
+        let side_tab = match self.native_pane {
+            NativePane::Files => Some(SideTab::Files),
+            NativePane::Diff => Some(SideTab::Changes),
+            _ => None,
+        };
+        let tools_enabled = self.native_session();
         pane.update(cx, |pane, cx| {
+            pane.configure_side_tabs(side_tab, tools_enabled, cx);
             pane.set_colors(colors, cx);
             pane.set_visible(visible);
         });
         Some(pane)
+    }
+
+    fn minimal_workspace_width(&self, window: &Window) -> f32 {
+        let width = f32::from(window.viewport_size().width);
+        width
+            - if self.browser_compacts_sidebar(window) {
+                0.0
+            } else {
+                CATALOG_WIDTH
+            }
+            - if self.browser_is_open() {
+                browser_pane_width(self.settings.browser_width, width) + BROWSER_DIVIDER_WIDTH
+            } else {
+                0.0
+            }
     }
 
     fn browser_compacts_sidebar(&self, window: &Window) -> bool {
@@ -8558,6 +8597,8 @@ impl XdDesktop {
             .is_some_and(|panel| panel.chat_id == chat_id && panel.agent == Some(agent));
         if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
             self.native_pane = NativePane::Chat;
+            self.bottom_terminal_open = false;
+            self.native_panels.clear();
             self.diff_generation = self.diff_generation.saturating_add(1);
             self.diff_panel = None;
             self.interaction_answers.clear();
@@ -8576,7 +8617,9 @@ impl XdDesktop {
             agent,
         };
         if self.native_session() {
-            self.stash_terminal_panel();
+            if !self.bottom_terminal_open {
+                self.stash_terminal_panel();
+            }
             self.sync_terminal_input_mode(cx);
             self.transcript_loading = !self.transcript_loaded;
             self.request_chat(&chat_id);
@@ -9367,8 +9410,8 @@ impl XdDesktop {
                     bar.child(
                         pane_icon_button(
                             "minimal-browser-toggle",
-                            "Browser",
-                            BROWSER_ICON,
+                            "Toggle side pane",
+                            SIDE_LAYOUT_ICON,
                             self.browser_is_open(),
                             colors,
                         )
@@ -9543,49 +9586,42 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap(px(2.0))
-                    .when(self.native_session(), |controls| {
-                        let current = self.native_pane;
-                        controls.children(
-                            [
-                                (1usize, "Changes", CHANGES_ICON, NativePane::Diff),
-                                (2, "Files", FILE_ICON, NativePane::Files),
-                                (3, "Terminal", TERMINAL_ICON, NativePane::Terminal),
-                            ]
-                            .into_iter()
-                            .map(|(index, label, path, pane)| {
-                                let active = current == pane;
-                                pane_icon_button(
-                                    ("native-pane", index),
-                                    label,
-                                    path,
-                                    active,
-                                    colors,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        let next = if this.native_pane == pane {
-                                            NativePane::Chat
-                                        } else {
-                                            pane
-                                        };
-                                        this.show_native_pane(next, cx);
-                                    },
-                                ))
-                            }),
-                        )
-                    })
                     .child(
                         pane_icon_button(
-                            "minimal-browser-toggle",
-                            "Browser",
-                            BROWSER_ICON,
+                            "toggle-side-pane",
+                            "Toggle side pane",
+                            SIDE_LAYOUT_ICON,
                             self.browser_is_open(),
                             colors,
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
-                    ),
+                    )
+                    .when(self.native_session(), |controls| {
+                        controls.child(
+                            pane_icon_button(
+                                "toggle-bottom-pane",
+                                "Toggle bottom terminal",
+                                BOTTOM_LAYOUT_ICON,
+                                self.bottom_terminal_open,
+                                colors,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.bottom_terminal_open = !this.bottom_terminal_open;
+                                    if this.bottom_terminal_open {
+                                        this.show_native_pane(NativePane::Terminal, cx);
+                                        this.terminal_input.read(cx).focus_handle(cx).focus(window);
+                                    } else {
+                                        this.minimal_new_tab_open = false;
+                                        this.composer_input.read(cx).focus_handle(cx).focus(window);
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    }),
             )
-            .when(has_terminal, |toolbar| {
+            .when(has_terminal && !self.native_session(), |toolbar| {
                 toolbar
                     .child(
                         ui_button("minimal-context-terminal", ButtonKind::Secondary, colors)
@@ -12626,13 +12662,63 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    fn select_side_tool(&mut self, pane: NativePane, cx: &mut Context<Self>) {
+        if matches!(pane, NativePane::Files | NativePane::Diff) {
+            let files = pane == NativePane::Files;
+            if self
+                .diff_panel
+                .as_ref()
+                .is_some_and(|panel| panel.files_mode == files)
+            {
+                self.native_pane = pane;
+                cx.notify();
+                return;
+            }
+            if self.diff_panel.as_ref().is_some_and(|panel| {
+                panel.action.is_some()
+                    || panel
+                        .file_preview
+                        .as_ref()
+                        .is_some_and(|preview| preview.saving)
+            }) {
+                self.model.connection_error =
+                    Some("Wait for the current save or Git operation to finish.".into());
+                cx.notify();
+                return;
+            }
+            if let Some(panel) = self.diff_panel.take() {
+                let previous = if panel.files_mode {
+                    NativePane::Files
+                } else {
+                    NativePane::Diff
+                };
+                self.native_panels.insert(previous, panel);
+            }
+            if let Some(panel) = self.native_panels.remove(&pane)
+                && !panel.loading
+                && !panel.file_loading
+            {
+                self.diff_generation = self.diff_generation.saturating_add(1);
+                self.diff_panel = Some(panel);
+                self.native_pane = pane;
+                cx.notify();
+                return;
+            }
+        }
+        self.show_native_pane(pane, cx);
+    }
+
     fn show_native_pane(&mut self, pane: NativePane, cx: &mut Context<Self>) {
-        self.native_pane = pane;
+        if pane != NativePane::Terminal {
+            self.native_pane = pane;
+        }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
         match pane {
             NativePane::Files | NativePane::Diff => {
+                self.set_browser_open(true);
+                let _ = self.settings.save();
                 self.diff_generation = self.diff_generation.saturating_add(1);
                 self.diff_panel = Some(DiffPanel {
                     files_mode: pane == NativePane::Files,
@@ -12652,14 +12738,27 @@ impl XdDesktop {
                 self.refresh_git_status();
             }
             NativePane::Terminal => {
-                let mut panel = Self::new_terminal_panel(chat_id.clone());
-                panel.workdir = self.model.workdir.clone();
-                self.terminal_panel = Some(panel);
-                self.refresh_terminal_sessions(cx);
+                self.bottom_terminal_open = true;
+                if !self
+                    .terminal_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.chat_id == chat_id && panel.agent.is_none())
+                {
+                    self.stash_terminal_panel();
+                    let key = (self.active_endpoint, chat_id.clone());
+                    let mut panel = self
+                        .terminal_panel_cache
+                        .remove(&key)
+                        .unwrap_or_else(|| Self::new_terminal_panel(chat_id.clone()));
+                    panel.agent = None;
+                    panel.allow_agent_tabs = false;
+                    panel.auto_open = !panel.has_requested_session();
+                    panel.workdir = self.model.workdir.clone();
+                    self.terminal_panel = Some(panel);
+                    self.refresh_terminal_sessions(cx);
+                }
             }
-            NativePane::Chat => {
-                self.stash_terminal_panel();
-            }
+            NativePane::Chat => {}
         }
         cx.notify();
     }
@@ -12685,32 +12784,13 @@ impl XdDesktop {
         cx.notify();
     }
 
-    /// A native session is the chat column plus, when the window has room,
-    /// one docked pane beside it: changes, files, or a shell.
-    fn render_native_workspace(
+    fn render_native_side_content(
         &mut self,
         colors: ThemeColors,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let dock_pane = self.native_pane;
-        let available = f32::from(window.viewport_size().width)
-            - if self.browser_compacts_sidebar(window) {
-                0.0
-            } else {
-                CATALOG_WIDTH
-            }
-            - if self.browser_is_open() {
-                browser_pane_width(
-                    self.settings.browser_width,
-                    f32::from(window.viewport_size().width),
-                ) + BROWSER_DIVIDER_WIDTH
-            } else {
-                0.0
-            };
-        let dock_width = native_dock_width(self.settings.diff_width, available);
-        let side_by_side = available - dock_width >= 460.0;
-        let pane_content = match dock_pane {
+        let pane_content = match self.native_pane {
             NativePane::Chat => None,
             NativePane::Terminal => Some(self.render_minimal_terminal(colors, window, cx)),
             NativePane::Files => Some({
@@ -13060,69 +13140,72 @@ impl XdDesktop {
                     .into_any_element()
             }),
         };
-        let chat_width = if dock_pane != NativePane::Chat && side_by_side {
-            available - dock_width - 1.0
-        } else {
-            available
-        };
-        self.chat_column_width = (chat_width - 48.0).clamp(240.0, 780.0);
-        let chat = (dock_pane == NativePane::Chat || side_by_side)
-            .then(|| self.render_native_chat(colors, window, cx));
-        let dragging = self.dock_drag.is_some();
+        pane_content.unwrap_or_else(|| div().into_any_element())
+    }
+
+    fn render_native_workspace(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let available = self.minimal_workspace_width(window);
+        self.chat_column_width = (available - 48.0).clamp(240.0, 780.0);
+        let chat = self.render_native_chat(colors, window, cx);
+        let terminal = self
+            .bottom_terminal_open
+            .then(|| self.render_minimal_terminal(colors, window, cx));
+        let height = bottom_terminal_height(
+            self.settings.terminal_height,
+            f32::from(window.viewport_size().height) - 86.0,
+        );
         div()
             .size_full()
             .min_h_0()
             .flex()
-            .when_some(chat, |row, chat| {
-                row.child(div().flex_1().min_w_0().h_full().child(chat))
-            })
-            .when_some(pane_content, |row, pane| {
-                row.when(side_by_side, |row| {
-                    row.child(
+            .flex_col()
+            .child(div().flex_1().min_h_0().min_w_0().child(chat))
+            .when_some(terminal, |column, terminal| {
+                column
+                    .child(
                         div()
-                            .id("native-dock-divider")
+                            .id("bottom-terminal-divider")
                             .relative()
-                            .w(px(1.0))
-                            .h_full()
+                            .h(px(1.0))
+                            .w_full()
                             .flex_none()
-                            .bg(rgb(if dragging {
-                                colors.selected_border
-                            } else {
-                                colors.border
-                            }))
+                            .bg(rgb(colors.border))
                             .child(
                                 div()
-                                    .id("native-dock-resize")
+                                    .id("bottom-terminal-resize")
                                     .absolute()
-                                    .left(px(-4.0))
-                                    .w(px(9.0))
-                                    .h_full()
-                                    .cursor(CursorStyle::ResizeLeftRight)
+                                    .top(px(-4.0))
+                                    .h(px(9.0))
+                                    .w_full()
+                                    .cursor(CursorStyle::ResizeUpDown)
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                                             cx.stop_propagation();
-                                            this.dock_drag = Some((
-                                                f32::from(event.position.x),
-                                                dock_width as u16,
-                                            ));
+                                            this.dock_drag =
+                                                Some((f32::from(event.position.y), height as u16));
                                             cx.notify();
                                         }),
                                     ),
                             ),
                     )
-                })
-                .child(
-                    div()
-                        .id("native-dock")
-                        .when(side_by_side, |dock| dock.w(px(dock_width)).flex_none())
-                        .when(!side_by_side, |dock| dock.flex_1().min_w_0())
-                        .h_full()
-                        .min_h_0()
-                        .bg(rgb(colors.sidebar))
-                        .when(dock_pane == NativePane::Terminal, |dock| dock.p_2())
-                        .child(pane),
-                )
+                    .child(
+                        div()
+                            .id("bottom-terminal")
+                            .flex()
+                            .flex_col()
+                            .h(px(height))
+                            .w(px(available))
+                            .flex_none()
+                            .min_h_0()
+                            .p_2()
+                            .child(terminal),
+                    )
             })
             .into_any_element()
     }
@@ -13145,7 +13228,9 @@ impl XdDesktop {
         };
 
         div()
-            .size_full()
+            .w(px(self.minimal_workspace_width(window)))
+            .h_full()
+            .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
@@ -13154,6 +13239,8 @@ impl XdDesktop {
             .child(
                 div()
                     .flex_1()
+                    .flex()
+                    .flex_col()
                     .min_w_0()
                     .min_h_0()
                     .when(!native, |content| content.p_3())
@@ -13243,7 +13330,9 @@ impl XdDesktop {
         self.sync_input_colors(colors, cx);
         if self.browser_restore_focus {
             self.browser_restore_focus = false;
-            if self.terminal_panel.is_some() {
+            if self.terminal_panel.is_some()
+                && (!self.native_session() || self.bottom_terminal_open)
+            {
                 let focus = self.terminal_input.read(cx).focus_handle(cx);
                 window.focus(&focus);
             } else {
@@ -13251,6 +13340,9 @@ impl XdDesktop {
             }
         }
         let browser_pane = self.sync_browser_pane(window, cx);
+        let side_content = (browser_pane.is_some()
+            && matches!(self.native_pane, NativePane::Files | NativePane::Diff))
+        .then(|| self.render_native_side_content(colors, window, cx));
         let browser_width = browser_pane_width(
             self.settings.browser_width,
             f32::from(window.viewport_size().width),
@@ -14926,14 +15018,27 @@ impl XdDesktop {
             .key_context("XdDesktop")
             .bg(rgb(colors.background))
             .font_family(UI_FONT)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if let Some(pane) = this.browser_panes.get(&this.browser_scope_key()).cloned() {
+                        pane.update(cx, |pane, cx| {
+                            pane.dismiss_add_menu(cx);
+                        });
+                    }
+                }),
+            )
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
-                    if let Some((start_x, start_width)) = this.dock_drag {
+                    if let Some((start_y, start_height)) = this.dock_drag {
                         if event.dragging() {
-                            this.settings.diff_width =
-                                (f32::from(start_width) + start_x - f32::from(event.position.x))
+                            this.settings.terminal_height = bottom_terminal_height(
+                                (f32::from(start_height) + start_y - f32::from(event.position.y))
                                     .round()
-                                    .clamp(320.0, 900.0) as u16;
+                                    .clamp(0.0, u16::MAX as f32)
+                                    as u16,
+                                f32::from(window.viewport_size().height) - 86.0,
+                            ) as u16;
                             cx.notify();
                         } else {
                             this.finish_dock_resize(cx);
@@ -15012,6 +15117,11 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if let Some(pane) = this.browser_panes.get(&this.browser_scope_key()).cloned()
+                    && pane.update(cx, |pane, cx| pane.dismiss_add_menu(cx))
+                {
+                    return;
+                }
                 if !this.catalog_query.is_empty() {
                     this.catalog_query.clear();
                     this.catalog_find_input
@@ -15114,8 +15224,21 @@ impl XdDesktop {
                                 .h_full()
                                 .min_h_0()
                                 .flex_none()
+                                .flex()
+                                .flex_col()
                                 .overflow_hidden()
-                                .child(pane),
+                                .child(
+                                    div()
+                                        .min_h_0()
+                                        .when(side_content.is_some(), |slot| {
+                                            slot.h(px(32.0)).flex_none()
+                                        })
+                                        .when(side_content.is_none(), |slot| slot.flex_1())
+                                        .child(pane),
+                                )
+                                .when_some(side_content, |dock, content| {
+                                    dock.child(div().flex_1().min_h_0().child(content))
+                                }),
                         )
                     }),
             )
@@ -15440,6 +15563,12 @@ impl AssetSource for EmbeddedIcons {
             CLOSE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/close.svg").as_slice(),
             )),
+            SIDE_LAYOUT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-right.svg").as_slice(),
+            )),
+            BOTTOM_LAYOUT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/panel-bottom.svg").as_slice(),
+            )),
             CHANGES_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/changes.svg").as_slice(),
             )),
@@ -15478,6 +15607,8 @@ impl AssetSource for EmbeddedIcons {
             CHEVRON_RIGHT_ICON.into(),
             CHEVRON_DOWN_ICON.into(),
             CLOSE_ICON.into(),
+            SIDE_LAYOUT_ICON.into(),
+            BOTTOM_LAYOUT_ICON.into(),
             CHANGES_ICON.into(),
             BROWSER_ICON.into(),
             TERMINAL_ICON.into(),
@@ -16363,15 +16494,65 @@ mod tests {
         assert!(cx.opened_url().is_none());
     }
 
+    #[gpui::test]
+    fn bottom_terminal_and_side_tools_keep_independent_state(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("dock-chat".into());
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            assert!(desktop.bottom_terminal_open);
+            assert!(desktop.terminal_panel.as_ref().unwrap().agent.is_none());
+            desktop.terminal_panel.as_mut().unwrap().selected = Some("retained-shell".into());
+            desktop.diff_panel = Some(DiffPanel {
+                files_mode: true,
+                file_preview: Some(FilePreview {
+                    path: "example.txt".into(),
+                    original: "old".into(),
+                    content: "edited".into(),
+                    truncated: false,
+                    saving: false,
+                }),
+                ..Default::default()
+            });
+            desktop
+                .native_panels
+                .insert(NativePane::Diff, DiffPanel::default());
+            desktop.select_side_tool(NativePane::Diff, cx);
+            desktop.select_side_tool(NativePane::Chat, cx);
+            desktop.select_side_tool(NativePane::Files, cx);
+            assert_eq!(
+                desktop
+                    .diff_panel
+                    .as_ref()
+                    .unwrap()
+                    .file_preview
+                    .as_ref()
+                    .unwrap()
+                    .content,
+                "edited"
+            );
+            assert!(desktop.bottom_terminal_open);
+            desktop.bottom_terminal_open = false;
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            assert_eq!(
+                desktop.terminal_panel.as_ref().unwrap().selected.as_deref(),
+                Some("retained-shell")
+            );
+            assert!(desktop.native_pane == NativePane::Files);
+        });
+    }
+
     #[test]
-    fn native_dock_keeps_the_chat_readable() {
-        for requested in [0, 320, 460, u16::MAX] {
-            let width = native_dock_width(requested, 900.0);
-            assert!(width >= 320.0);
-            assert!(900.0 - width >= 440.0);
+    fn bottom_terminal_keeps_the_chat_readable() {
+        for available in [300.0, 500.0, 900.0] {
+            for requested in [0, 320, 460, u16::MAX] {
+                let height = bottom_terminal_height(requested, available);
+                assert!(height >= 120.0);
+                assert!(available - height >= 180.0);
+            }
         }
-        assert_eq!(native_dock_width(460, 1400.0), 460.0);
-        assert_eq!(native_dock_width(u16::MAX, 3000.0), 900.0);
+        assert_eq!(bottom_terminal_height(320, 814.0), 320.0);
+        assert_eq!(bottom_terminal_height(u16::MAX, 3000.0), 600.0);
     }
 
     #[test]

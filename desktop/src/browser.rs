@@ -32,6 +32,22 @@ use crate::input::{ComposerEvent, ComposerInput};
 pub enum BrowserEvent {
     Close,
     SessionChanged(BrowserSession),
+    AuxiliarySelected(Option<SideTab>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SideTab {
+    Files,
+    Changes,
+}
+
+impl SideTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Files => "Files",
+            Self::Changes => "Changes",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -165,6 +181,10 @@ pub struct BrowserPane {
     reveal_after_layout: bool,
     visible: bool,
     colors: ThemeColors,
+    auxiliary: Option<SideTab>,
+    auxiliary_tabs: Vec<SideTab>,
+    tools_enabled: bool,
+    add_menu_open: bool,
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
@@ -205,6 +225,10 @@ impl BrowserPane {
             reveal_after_layout: true,
             visible: true,
             colors,
+            auxiliary: None,
+            auxiliary_tabs: Vec::new(),
+            tools_enabled: false,
+            add_menu_open: false,
         };
         for url in session.tabs {
             pane.insert_tab(url, window, cx);
@@ -215,6 +239,54 @@ impl BrowserPane {
         pane.session.active_tab = pane.session.active_tab.min(pane.tabs.len() - 1);
         pane.update_visibility();
         pane
+    }
+
+    fn active_tab_index(&self) -> usize {
+        self.auxiliary
+            .and_then(|tab| {
+                self.auxiliary_tabs
+                    .iter()
+                    .position(|candidate| *candidate == tab)
+            })
+            .map(|index| self.tabs.len() + index)
+            .unwrap_or(self.session.active_tab)
+    }
+
+    pub fn configure_side_tabs(
+        &mut self,
+        selected: Option<SideTab>,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.tools_enabled = enabled;
+        if let Some(tab) = selected
+            && !self.auxiliary_tabs.contains(&tab)
+        {
+            self.auxiliary_tabs.push(tab);
+        }
+        if self.auxiliary != selected {
+            self.auxiliary = selected;
+            self.reveal_after_layout = true;
+            self.update_visibility();
+            cx.notify();
+        }
+    }
+
+    pub fn dismiss_add_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        let open = self.add_menu_open;
+        if open {
+            self.add_menu_open = false;
+            self.update_visibility();
+            cx.notify();
+        }
+        open
+    }
+
+    fn select_auxiliary(&mut self, selected: Option<SideTab>, cx: &mut Context<Self>) {
+        self.dismiss_add_menu(cx);
+        self.configure_side_tabs(selected, self.tools_enabled, cx);
+        cx.emit(BrowserEvent::AuxiliarySelected(selected));
+        cx.notify();
     }
 
     pub fn session(&self) -> BrowserSession {
@@ -231,8 +303,11 @@ impl BrowserPane {
     }
 
     pub fn set_visible(&mut self, visible: bool) {
+        if !visible {
+            self.add_menu_open = false;
+        }
         if visible && !self.visible {
-            self.tab_scroll.scroll_to_item(self.session.active_tab);
+            self.tab_scroll.scroll_to_item(self.active_tab_index());
         }
         self.visible = visible;
         self.update_visibility();
@@ -327,9 +402,10 @@ impl BrowserPane {
     }
 
     fn add_tab(&mut self, url: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_auxiliary(None, cx);
         self.insert_tab(url, window, cx);
         self.session.active_tab = self.tabs.len() - 1;
-        self.tab_scroll.scroll_to_item(self.session.active_tab);
+        self.tab_scroll.scroll_to_item(self.active_tab_index());
         self.update_visibility();
         self.focus_active_tab(window, cx);
         cx.emit(BrowserEvent::SessionChanged(self.session()));
@@ -337,9 +413,10 @@ impl BrowserPane {
     }
 
     fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if index >= self.tabs.len() || index == self.session.active_tab {
+        if index >= self.tabs.len() {
             return;
         }
+        self.select_auxiliary(None, cx);
         self.session.active_tab = index;
         self.tab_scroll.scroll_to_item(index);
         self.update_visibility();
@@ -364,7 +441,7 @@ impl BrowserPane {
         } else {
             self.session.active_tab = self.session.active_tab.min(self.tabs.len() - 1);
         }
-        self.tab_scroll.scroll_to_item(self.session.active_tab);
+        self.tab_scroll.scroll_to_item(self.active_tab_index());
         self.update_visibility();
         if was_active {
             self.focus_active_tab(window, cx);
@@ -375,13 +452,17 @@ impl BrowserPane {
 
     fn update_visibility(&self) {
         for (index, tab) in self.tabs.iter().enumerate() {
-            tab.display
-                .set_visible(self.visible && index == self.session.active_tab);
+            tab.display.set_visible(
+                self.visible
+                    && self.auxiliary.is_none()
+                    && !self.add_menu_open
+                    && index == self.session.active_tab,
+            );
         }
     }
 
     fn focus_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.visible {
+        if !self.visible || self.auxiliary.is_some() || self.add_menu_open {
             return;
         }
         window.blur();
@@ -412,14 +493,126 @@ impl Render for BrowserPane {
         // restored selection until its bounds exist, then reveal it once.
         if self.reveal_after_layout {
             if self.tab_scroll.bounds().size.width > px(0.) {
-                self.tab_scroll.scroll_to_item(self.session.active_tab);
+                self.tab_scroll.scroll_to_item(self.active_tab_index());
                 self.reveal_after_layout = false;
             } else {
                 window.request_animation_frame();
             }
         }
         let colors = self.colors;
+        let auxiliary_tabs = self
+            .auxiliary_tabs
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, tab)| {
+                div()
+                    .id(("side-tool-tab", index))
+                    .h_full()
+                    .px_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .border_r_1()
+                    .border_color(rgb(colors.border))
+                    .text_size(px(11.0))
+                    .text_color(rgb(if self.auxiliary == Some(tab) {
+                        colors.text
+                    } else {
+                        colors.muted
+                    }))
+                    .when(self.auxiliary == Some(tab), |tab| {
+                        tab.bg(rgb(colors.background))
+                    })
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)),
+                    )
+                    .child(tab.label())
+                    .child(
+                        div()
+                            .id(("close-side-tool", index))
+                            .px_1()
+                            .hover(|s| s.bg(rgb(colors.surface_high)))
+                            .child(crate::icon(crate::CLOSE_ICON, 10.0, colors.muted))
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                cx.stop_propagation();
+                                pane.auxiliary_tabs.retain(|candidate| *candidate != tab);
+                                if pane.auxiliary == Some(tab) {
+                                    pane.select_auxiliary(None, cx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let menu = self.add_menu_open.then(|| {
+            let mut menu = div()
+                .id("side-add-menu")
+                .absolute()
+                .top(px(32.0))
+                .right(px(4.0))
+                .w(px(172.0))
+                .p_1()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .bg(rgb(colors.surface_high))
+                .occlude()
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("side-add-page")
+                        .h(px(30.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(12.0))
+                        .text_color(rgb(colors.text))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(colors.selected_surface)))
+                        .child(crate::icon(crate::BROWSER_ICON, 14.0, colors.muted))
+                        .child("New browser page")
+                        .on_click(
+                            cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
+                        ),
+                );
+            if self.tools_enabled {
+                for (index, tab) in [SideTab::Files, SideTab::Changes].into_iter().enumerate() {
+                    menu = menu.child(
+                        div()
+                            .id(("side-add-tool", index))
+                            .h(px(30.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.text))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(colors.selected_surface)))
+                            .child(crate::icon(
+                                if tab == SideTab::Files {
+                                    crate::FILE_ICON
+                                } else {
+                                    crate::CHANGES_ICON
+                                },
+                                14.0,
+                                colors.muted,
+                            ))
+                            .child(tab.label())
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                pane.select_auxiliary(Some(tab), cx)
+                            })),
+                    );
+                }
+            }
+            gpui::deferred(menu).with_priority(1)
+        });
         div()
+            .relative()
             .size_full()
             .min_w_0()
             .flex()
@@ -456,7 +649,8 @@ impl Render for BrowserPane {
                                 } else {
                                     "New tab".to_owned()
                                 };
-                                let active = index == self.session.active_tab;
+                                let active =
+                                    self.auxiliary.is_none() && index == self.session.active_tab;
                                 div()
                                     .id(("browser-tab", slot.id))
                                     .h_full()
@@ -502,7 +696,8 @@ impl Render for BrowserPane {
                                                 pane.close_tab(index, window, cx);
                                             })),
                                     )
-                            })),
+                            }))
+                            .children(auxiliary_tabs),
                     )
                     .child(
                         div()
@@ -520,18 +715,26 @@ impl Render for BrowserPane {
                                     .bg(rgb(colors.surface_high))
                                     .text_color(rgb(colors.text))
                             })
-                            .child("+")
-                            .on_click(
-                                cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
-                            ),
+                            .child(crate::plus_icon(colors.muted))
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .on_click(cx.listener(|pane, _, _, cx| {
+                                pane.add_menu_open = !pane.add_menu_open;
+                                pane.update_visibility();
+                                cx.notify();
+                            })),
                     ),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.tabs[self.session.active_tab].entity.clone()),
-            )
+            .when(self.auxiliary.is_none(), |pane| {
+                pane.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.tabs[self.session.active_tab].entity.clone()),
+                )
+            })
+            .when_some(menu, |pane, menu| pane.child(menu))
     }
 }
 
@@ -1735,6 +1938,42 @@ mod tests {
     use super::*;
 
     #[gpui::test]
+    fn side_tools_hide_webviews_and_keep_page_drafts(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                None,
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.tabs[0]
+                    .entity
+                    .update(cx, |tab, _| tab.draft = "unfinished.localhost".into());
+                pane.configure_side_tabs(Some(SideTab::Files), true, cx);
+                assert!(!pane.tabs[0].display.visible.get());
+                pane.select_tab(0, window, cx);
+                assert!(pane.auxiliary.is_none());
+                assert!(pane.tabs[0].display.visible.get());
+                assert_eq!(pane.tabs[0].entity.read(cx).draft, "unfinished.localhost");
+                pane.add_menu_open = true;
+                pane.update_visibility();
+                assert!(!pane.tabs[0].display.visible.get());
+                assert!(pane.dismiss_add_menu(cx));
+                assert!(pane.tabs[0].display.visible.get());
+                pane.select_auxiliary(Some(SideTab::Changes), cx);
+                pane.add_tab(None, window, cx);
+                assert!(pane.auxiliary.is_none());
+                assert_eq!(pane.session.active_tab, 1);
+                assert!(pane.tabs[1].display.visible.get());
+                assert_eq!(pane.auxiliary_tabs, vec![SideTab::Files, SideTab::Changes]);
+            })
+        });
+    }
+
+    #[gpui::test]
     fn clicking_the_address_field_focuses_it_and_accepts_text(cx: &mut gpui::TestAppContext) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             BrowserTab::new(
@@ -1771,6 +2010,13 @@ mod tests {
         cx.simulate_input("first.localhost:3000");
         let plus_x = cx.update(|window, _| window.viewport_size().width - px(16.));
         cx.simulate_click(gpui::point(plus_x, px(16.)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(pane.read(cx).add_menu_open));
+        cx.simulate_click(
+            gpui::point(plus_x - px(80.0), px(48.0)),
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
         cx.simulate_input("second.localhost:5173");
         cx.run_until_parked();
         cx.update(|_, cx| {

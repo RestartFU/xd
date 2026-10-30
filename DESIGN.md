@@ -199,7 +199,7 @@ components:
 
 **Creative North Star: "The Card Catalog"**
 
-xd is a library card catalog for agent sessions. Projects are drawers, sessions are index cards, and a small metal signal tab clipped to the top edge of a card says what its agent is doing. One catalog sidebar on the left holds every drawer; only the current project's drawer is pulled out to show its cards, and the rest stay one line tall and show just their tabs. The centre belongs to the session's transcript, and the right dock holds Changes, Files, Terminal and Browser.
+xd is a library card catalog for agent sessions. Projects are drawers, sessions are index cards, and a small metal signal tab clipped to the top edge of a card says what its agent is doing. One catalog sidebar on the left holds every drawer; only the current project's drawer is pulled out to show its cards, and the rest stay one line tall and show just their tabs. The centre belongs to the session's transcript, and the right dock holds Browser, Files and Changes, with Terminal below the chat.
 
 The material is a cool graphite cabinet with bone card-stock ink in Dark, and white card stock with near-black ink in Light. Each card has one thin red ruled line under its title, the only decorative mark in the system. Colour is mostly reserved for state: green, amber and blue live on the signal tabs and the words beside them, and the chrome around them stays neutral so the agent's output stays the content. Density is that of a working tool: 12.5 to 13px UI text, 30px controls, 56px cards.
 
@@ -272,11 +272,11 @@ On Android the Material 3 type scale is kept and set in Libre Franklin. Headline
 
 ## Layout
 
-The desktop window has three regions. At the top is a 38px title bar (drawer graphite, 1px seam below) with the xd mark, a project / session breadcrumb, the connection state and, outside sessions, a Browser icon toggle. On the left is the 288px catalog sidebar (`CATALOG_WIDTH`; the direction contract said 296px, and the build is what this records). The centre is the session. On macOS the title bar is inset 86px for the traffic lights, and on other platforms 16px.
+The desktop window has three regions. At the top is a 38px title bar (drawer graphite, 1px seam below) with the xd mark, a project / session breadcrumb, the connection state and, outside sessions, a side-pane icon toggle. On the left is the 288px catalog sidebar (`CATALOG_WIDTH`; the direction contract said 296px, and the build is what this records). The centre is the session. On macOS the title bar is inset 86px for the traffic lights, and on other platforms 16px.
 
 The catalog stacks a 44px "Projects" header with an add button, then the Find field (32px, 10px side margins), then the drawer list (7px side gutter, 3px between drawers), then a footer with a 1px top seam and 10px vertical padding. The footer holds the primary New session button, a Terminal ghost button and a Settings ghost button. A closed drawer is one 34px row: a chevron, the name, a mono count, and on the right its non-idle signal tabs (at most six) followed by an add button. The open drawer insets its 56px cards by 5px, 3px apart.
 
-In the centre, a 52px session header holds the title, agent and branch chips (24px, 1px seam border), the state stamp, and a compact icon row for Changes / Files / Terminal / Browser, with hover labels and selected backgrounds. The chat column below it is centred and capped at 860px, with the composer at the bottom. The right dock opens beside the chat and can be resized.
+In the centre, a 48px session header holds the title, agent and branch chips (24px, 1px seam border), the state stamp, and two layout icons for the side pane and bottom terminal, with hover labels and selected backgrounds. The chat column below it is centred and capped at 860px, with the composer at the bottom. The right dock opens a browser page by default; its plus menu adds browser pages, Files, or Changes as tabs. The bottom pane opens a shell terminal. Both panes resize independently and can stay open together.
 
 Spacing is small and irregular rather than a strict scale: 3, 5, 7 and 10px for catalog joinery, and 8, 12 and 16px for general padding.
 
