@@ -39,6 +39,8 @@ require_file libexec/openssl
 require_file lib/xd-webkit-paths.so
 require_file libexec/webkit2gtk-4.1/WebKitWebProcess
 require_file libexec/webkit2gtk-4.1/WebKitNetworkProcess
+patchelf --print-needed "$BUNDLE/libexec/webkit2gtk-4.1/WebKitNetworkProcess" \
+  | grep -Fx xd-webkit-paths.so >/dev/null
 require_file libexec/webkit2gtk-4.1/WebKitGPUProcess
 require_file libexec/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so
 require_file lib/gio/modules/libgiognutls.so
