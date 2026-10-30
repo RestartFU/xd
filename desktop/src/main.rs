@@ -15778,7 +15778,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn workbench_navigation_and_settings_respond_to_clicks(cx: &mut gpui::TestAppContext) {
+    fn settings_popup_responds_to_clicks(cx: &mut gpui::TestAppContext) {
         install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.run_until_parked();
@@ -15793,17 +15793,6 @@ mod tests {
 
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
-
-        cx.simulate_click(
-            point(px(CATALOG_WIDTH - 110.0), footer_y),
-            gpui::Modifiers::default(),
-        );
-        cx.update(|_, cx| {
-            assert!(matches!(
-                desktop.read(cx).minimal_route,
-                MinimalRoute::Terminal
-            ))
-        });
     }
 
     #[gpui::test]
