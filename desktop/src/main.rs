@@ -9024,8 +9024,6 @@ impl XdDesktop {
             } else {
                 16.0
             }))
-            .border_b_1()
-            .border_color(rgb(colors.border))
             .bg(rgb(colors.sidebar))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
@@ -9178,8 +9176,6 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .border_b_1()
-            .border_color(rgb(colors.border))
             .bg(rgb(colors.background))
             .child(
                 div()
@@ -9779,8 +9775,6 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .border_t_1()
-                    .border_color(rgb(colors.border))
                     .child(div().flex_1())
                     .child(
                         ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
@@ -12613,7 +12607,6 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let toolbar = self.render_minimal_context_toolbar(colors, cx);
         let content = self.render_native_workspace(colors, window, cx);
 
         div()
@@ -12624,7 +12617,6 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .bg(rgb(colors.background))
-            .child(toolbar)
             .child(
                 div()
                     .flex_1()
@@ -12744,6 +12736,8 @@ impl XdDesktop {
         };
         let catalog = (!self.browser_compacts_sidebar(window))
             .then(|| self.render_catalog(colors, active_chat.as_deref(), cx));
+        let toolbar = matches!(&route, MinimalRoute::Cli { .. })
+            .then(|| self.render_minimal_context_toolbar(colors, cx));
         let content = match route {
             MinimalRoute::Projects { .. } | MinimalRoute::Sessions { .. } => {
                 self.render_minimal_home(colors, window, cx)
@@ -14573,9 +14567,26 @@ impl XdDesktop {
                     .min_h_0()
                     .flex()
                     .when_some(catalog, |row, catalog| row.child(catalog))
-                    .child(div().flex_1().min_w_0().min_h_0().h_full().child(content))
-                    .when_some(browser_pane, |row, pane| {
-                        row.child(
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .when_some(toolbar, |column, toolbar| column.child(toolbar))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .child(
+                                        div().flex_1().min_w_0().min_h_0().h_full().child(content),
+                                    )
+                                    .when_some(browser_pane, |row, pane| {
+                                        row.child(
                             div()
                                 .id("browser-divider")
                                 .relative()
@@ -14638,7 +14649,9 @@ impl XdDesktop {
                                     dock.child(div().flex_1().min_h_0().child(content))
                                 }),
                         )
-                    }),
+                                    }),
+                            ),
+                    ),
             )
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
