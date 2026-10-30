@@ -38,7 +38,7 @@ esac
 
 # Finder launches applications with a small PATH. Keep the original value for
 # terminal sessions, then add common locations for user-installed assistants.
-export XD_HOST_PATH="${PATH-}"
+export XD_HOST_PATH="${XD_HOST_PATH-${PATH-}}"
 export PATH="$HOME/.local/bin:$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 # Use the native macOS data locations. The channel name keeps dev, nightly,

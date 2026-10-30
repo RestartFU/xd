@@ -93,6 +93,36 @@ for cache in pixbuf-loaders gtk-immodules; do
     || fail "GTK module cache bundle path was corrupted"
 done
 
+# A restart enters the launcher with bundle values still in its environment.
+# Keep the original snapshots, including empty values representing unset keys.
+cat > "$home/.local/opt/xd-nightly/bin/xd" <<'EOF'
+#!/bin/sh
+if [ "${XD_TEST_RESTART:-}" = 1 ]; then
+  printf '%s|%s|%s' "$XD_HOST_PATH" "$XD_HOST_GIO_MODULE_DIR" "$XD_HOST_GSETTINGS_SCHEMA_DIR"
+else
+  printf '%s\n' 'xd 0.0.0'
+fi
+EOF
+snapshots=$(HOME="$home" XDG_RUNTIME_DIR="$runtime" XD_TEST_RESTART=1 \
+  PATH="/bundle/bin:/usr/bin:/bin" XD_HOST_PATH="/usr/bin:/bin" \
+  GIO_MODULE_DIR="/bundle/gio" XD_HOST_GIO_MODULE_DIR="/host/gio" \
+  GSETTINGS_SCHEMA_DIR="/bundle/schemas" XD_HOST_GSETTINGS_SCHEMA_DIR= \
+  "$home/.local/bin/xd-nightly")
+[ "$snapshots" = '/usr/bin:/bin|/host/gio|' ] \
+  || fail "restarting Linux launcher overwrote the original environment"
+
+mac_app="$work/xd-nightly.app/Contents"
+mkdir -p "$mac_app/MacOS" "$mac_app/Resources"
+cp installer/macos/xd-rust-launcher.sh "$mac_app/MacOS/xd"
+cat > "$mac_app/MacOS/xd-desktop" <<'EOF'
+#!/bin/sh
+printf '%s' "$XD_HOST_PATH"
+EOF
+chmod +x "$mac_app/MacOS/xd" "$mac_app/MacOS/xd-desktop"
+snapshot=$(HOME="$home" XD_HOST_PATH="/original/mac/path" "$mac_app/MacOS/xd")
+[ "$snapshot" = '/original/mac/path' ] \
+  || fail "restarting macOS launcher overwrote the original PATH"
+
 cat > "$work/bin/apksigner" <<'EOF'
 #!/bin/sh
 printf '%s\n' 'Signer #1 certificate SHA-256 digest: fac77d3eb6b167cd2334a1497f9b5606af120af178e5d90a7e429586e6a7fc20'

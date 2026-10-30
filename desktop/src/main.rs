@@ -3660,9 +3660,23 @@ impl XdDesktop {
                 self.apply_self_update(&value);
                 if action == "restart" && !cfg!(test) {
                     if let Some(path) = xd_desktop::channel::installed_restart_path() {
-                        cx.set_restart_path(path);
+                        let mut command =
+                            xd_desktop::channel::restart_command(&path, std::process::id());
+                        session_runtime::restore_browser_environment(&mut command);
+                        match command.spawn() {
+                            Ok(_) => cx.quit(),
+                            Err(error) => {
+                                if let Some(panel) = &mut self.self_update_panel {
+                                    panel.error = Some(format!(
+                                        "Cannot restart xd: {error}. Quit and reopen the app."
+                                    ));
+                                }
+                            }
+                        }
+                    } else if let Some(panel) = &mut self.self_update_panel {
+                        panel.error =
+                            Some("Cannot locate the app launcher. Quit and reopen xd.".into());
                     }
-                    cx.restart();
                 }
             }
             RequestKind::AgentSecrets { folder_id }
@@ -15770,7 +15784,7 @@ mod tests {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.run_until_parked();
 
-        // The catalog footer holds New session, Terminal, and Settings.
+        // The catalog footer holds Terminal and Settings.
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
         cx.simulate_click(
             point(px(CATALOG_WIDTH - 50.0), footer_y),
@@ -15781,9 +15795,16 @@ mod tests {
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
 
-        // With no projects yet, the primary footer action creates one.
-        cx.simulate_click(point(px(60.0), footer_y), gpui::Modifiers::default());
-        cx.update(|_, cx| assert!(desktop.read(cx).creating_workspace));
+        cx.simulate_click(
+            point(px(CATALOG_WIDTH - 110.0), footer_y),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|_, cx| {
+            assert!(matches!(
+                desktop.read(cx).minimal_route,
+                MinimalRoute::Terminal
+            ))
+        });
     }
 
     #[gpui::test]

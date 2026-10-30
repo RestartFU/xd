@@ -43,6 +43,26 @@ fn restart_path_for_host(host: &Path) -> Option<std::path::PathBuf> {
     }
 }
 
+/// Keep the executable path out of shell source, including paths containing
+/// whitespace or shell metacharacters. The helper outlives the current app.
+pub fn restart_command(launcher: &Path, parent: u32) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args([
+            "-c",
+            "while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; exec \"$2\"",
+            "xd-restart",
+        ])
+        .arg(parent.to_string())
+        .arg(launcher);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
+
 fn host_update_channel(configured: Option<OsString>, nightly_build: bool) -> OsString {
     if configured.as_deref() == Some(OsStr::new("dev")) {
         "dev".into()
@@ -63,6 +83,24 @@ pub fn configure_host(command: &mut Command, _launcher: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_executes_launcher_paths_literally() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let root = env::temp_dir().join(format!("xd-restart-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let launcher = root.join("launcher with spaces; and $shell 'quotes'");
+        fs::write(&launcher, "#!/bin/sh\nprintf ready\n").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+        // An impossible parent PID makes the helper proceed immediately.
+        let output = restart_command(&launcher, i32::MAX as u32)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(output.stdout, b"ready");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn build_profile_selects_the_default_channel_identity() {
