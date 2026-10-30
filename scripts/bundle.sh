@@ -61,6 +61,8 @@ for process in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
 done
 cp -a "$WEBKIT_DIR/injected-bundle" "$OUT/libexec/webkit2gtk-4.1/"
 patchelf --add-needed xd-webkit-paths.so "$OUT/bin/xd"
+# TLS is initialized in the separate network process, not the desktop process.
+patchelf --add-needed xd-webkit-paths.so "$OUT/libexec/webkit2gtk-4.1/WebKitNetworkProcess"
 
 # HTTPS uses GIO's dynamically loaded TLS backend. GTK image/input modules and
 # GStreamer plugins are also absent from ldd's main-executable dependency list.

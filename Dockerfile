@@ -93,9 +93,13 @@ RUN cargo build --locked --release \
 FROM gpui-toolchain AS browser-runtime-paths
 
 COPY scripts/webkit-paths.c /src/webkit-paths.c
+COPY scripts/test-browser-tls.c /src/test-browser-tls.c
 RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
       $(pkg-config --cflags gio-2.0) /src/webkit-paths.c \
-      -o /xd-webkit-paths.so -ldl $(pkg-config --libs gio-2.0)
+      -o /xd-webkit-paths.so -ldl $(pkg-config --libs gio-2.0) \
+ && gcc -O2 -Wall -Wextra -Werror $(pkg-config --cflags gio-2.0) \
+      /src/test-browser-tls.c -o /test-browser-tls \
+      -Wl,--no-as-needed -L/ -l:xd-webkit-paths.so $(pkg-config --libs gio-2.0)
 
 FROM gpui-toolchain AS rust-host-source
 
@@ -184,6 +188,7 @@ WORKDIR /src
 COPY data ./data
 COPY scripts/bundle.sh /usr/local/bin/bundle.sh
 COPY scripts/smoke-bundle.sh /usr/local/bin/smoke-bundle.sh
+COPY scripts/test-browser-tls.sh /usr/local/bin/test-browser-tls.sh
 COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 COPY scripts/install.sh /stage/usr/libexec/install.sh
 COPY scripts/curl.sh /stage/usr/libexec/curl
@@ -194,6 +199,7 @@ RUN install -m0755 /usr/bin/tmux /stage/usr/libexec/tmux \
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
 COPY --from=rust-host-release /src/host/target/release/xd-host /stage/usr/libexec/xd-host
 COPY --from=browser-runtime-paths /xd-webkit-paths.so /stage/usr/lib/xd-webkit-paths.so
+COPY --from=browser-runtime-paths /test-browser-tls /tmp/test-browser-tls
 
 RUN set -eux; \
     test "$PROFILE" = default || test "$PROFILE" = nightly; \
@@ -236,7 +242,9 @@ RUN set -eux; \
     desktop-file-validate "/stage/usr/share/applications/$app_id.desktop"; \
     bash /usr/local/bin/bundle.sh \
       /stage /out /usr/local/share/xd-launcher.sh; \
-    sh /usr/local/bin/smoke-bundle.sh /out
+    sh /usr/local/bin/smoke-bundle.sh /out; \
+    patchelf --set-rpath /out/lib /tmp/test-browser-tls; \
+    sh /usr/local/bin/test-browser-tls.sh /out /tmp/test-browser-tls
 
 # --- export ----------------------------------------------------------------
 FROM scratch AS bundle
