@@ -15382,12 +15382,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn workbench_navigation_and_settings_respond_to_clicks(cx: &mut gpui::TestAppContext) {
+    fn catalog_footer_opens_settings_without_creating_a_workspace(cx: &mut gpui::TestAppContext) {
         install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.run_until_parked();
 
-        // The catalog footer holds New session, Terminal, and Settings.
+        // The catalog footer holds Terminal and Settings.
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
         cx.simulate_click(
             point(px(CATALOG_WIDTH - 50.0), footer_y),
@@ -15398,9 +15398,9 @@ mod tests {
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
 
-        // With no projects yet, the primary footer action creates one.
+        // The removed creation button leaves this part of the footer inactive.
         cx.simulate_click(point(px(60.0), footer_y), gpui::Modifiers::default());
-        cx.update(|_, cx| assert!(desktop.read(cx).creating_workspace));
+        cx.update(|_, cx| assert!(!desktop.read(cx).creating_workspace));
     }
 
     #[gpui::test]
