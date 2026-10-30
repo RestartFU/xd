@@ -52,6 +52,27 @@ Runtime installer helper. Set `XD_WSL_DISTRIBUTION` to select another distro.
 Nightly desktop builds are available from the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly). The Android APK is included when signing credentials are configured.
 The Linux and macOS installers need no root access. Install the assistants you use separately and keep their commands on `PATH`.
 
+## Installed assistants and updates
+
+Install and sign in to your assistant CLI on the machine running the xd host.
+xd discovers tools through your login shell and reuses their existing configuration
+and login state. For remote sessions, the CLI and login belong on the remote
+machine. Settings → **Assistant accounts** refreshes the CLI's current status.
+Agent binaries and separate copies of their credentials are not included in xd.
+
+Installed Linux and macOS builds check their own release channel for app updates
+shortly after startup and every four minutes. Open **Settings → Updates** to check
+manually, install an available update, and restart xd. Restart is blocked while
+chats are running or terminal tabs are open; close the terminal tabs first.
+Stored conversations can resume afterward. Updates always target
+the local app, including while you are viewing a remote workspace. Source builds
+and Windows installations require a manual update. Set `XD_DISABLE_AUTO_UPDATE=1`
+to disable background checks.
+
+The CLI discovery and update behavior adapt portions of
+[T3 Code](https://github.com/pingdotgg/t3code) for xd's Rust backend.
+Its MIT notice is included in `data/licenses/t3code-LICENSE` and packaged builds.
+
 ## Build
 
 ```sh

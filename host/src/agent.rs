@@ -229,7 +229,7 @@ impl CodexParser {
 
 impl AgentCommand<'_> {
     pub(crate) fn build_app_server(&self) -> Command {
-        let mut command = Command::new(resolve_codex());
+        let mut command = crate::background_process::command(resolve_codex());
         command.args(["app-server", "--listen", "stdio://"]);
         if self.fast {
             command.args(["-c", "service_tier=\"priority\""]);
@@ -255,7 +255,7 @@ impl AgentCommand<'_> {
     }
 
     fn build_codex(&self) -> Command {
-        let mut command = Command::new(resolve_codex());
+        let mut command = crate::background_process::command(resolve_codex());
         command.arg("exec");
         append_system_prompt(&mut command, self.system_prompt);
         if self.fast {
@@ -315,7 +315,7 @@ impl AgentCommand<'_> {
     }
 
     fn build_claude(&self) -> Command {
-        let mut command = Command::new(resolve_claude());
+        let mut command = crate::background_process::command(resolve_claude());
         if let Some(session_id) = self.session_id {
             command.args(["--resume", session_id]);
         }
@@ -349,7 +349,7 @@ impl AgentCommand<'_> {
     }
 
     fn build_jcode(&self) -> Command {
-        let mut command = Command::new(resolve_jcode());
+        let mut command = crate::background_process::command(resolve_jcode());
         command.args(["--quiet", "--no-update", "-C", self.workdir]);
         if self.model != "default" {
             command.args(["--model", self.model]);

@@ -17,6 +17,9 @@ const DEV_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/release
 const STABLE_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/latest";
 const MAX_RELEASE_BYTES: u64 = 256 * 1024;
 const INSTALL_OUTPUT_LIMIT: usize = 16 * 1024;
+// Match T3 Code's packaged-app polling cadence.
+const STARTUP_DELAY: Duration = Duration::from_secs(15);
+const POLL_INTERVAL: Duration = Duration::from_secs(4 * 60);
 
 #[derive(Clone)]
 pub(crate) struct SelfUpdate {
@@ -79,7 +82,7 @@ struct UpdateState {
 impl SelfUpdate {
     pub(crate) fn new(events: Arc<EventBus>) -> Self {
         let channel = update_channel();
-        Self {
+        let updater = Self {
             inner: Arc::new(SelfUpdateInner {
                 state: Mutex::new(UpdateState {
                     phase: "idle",
@@ -91,7 +94,27 @@ impl SelfUpdate {
                 channel,
                 current: current_version(channel),
             }),
+        };
+        if updater.inner.install.is_some()
+            && env::var("XD_DISABLE_AUTO_UPDATE").as_deref() != Ok("1")
+        {
+            let weak = Arc::downgrade(&updater.inner);
+            let _ = thread::Builder::new()
+                .name("xd-update-poll".into())
+                .spawn(move || {
+                    thread::sleep(STARTUP_DELAY);
+                    loop {
+                        let Some(inner) = weak.upgrade() else {
+                            break;
+                        };
+                        let updater = Self { inner };
+                        let _ = updater.check();
+                        drop(updater);
+                        thread::sleep(POLL_INTERVAL);
+                    }
+                });
         }
+        updater
     }
 
     pub(crate) fn perform(&self, action: Option<&str>) -> Result<Value, String> {
@@ -181,7 +204,7 @@ impl SelfUpdate {
 
     fn begin(&self, phase: &'static str) -> bool {
         let started = self.inner.state.lock().is_ok_and(|mut state| {
-            if matches!(state.phase, "checking" | "installing") {
+            if matches!(state.phase, "checking" | "installing" | "installed") {
                 return false;
             }
             state.phase = phase;
@@ -243,7 +266,7 @@ fn snapshot_value(
         "channel": channel.as_str(),
         "supported": supported,
         "state": state,
-        "available": latest.is_some_and(|latest| latest != current),
+        "available": latest.is_some_and(|latest| update_available(channel, current, latest)),
     });
     if let Some(latest) = latest {
         value["latest"] = Value::String(latest.into());
@@ -252,6 +275,26 @@ fn snapshot_value(
         value["error"] = Value::String(error.into());
     }
     value
+}
+
+fn update_available(channel: UpdateChannel, current: &str, latest: &str) -> bool {
+    if channel != UpdateChannel::Release {
+        return latest != current;
+    }
+    // Stable release feeds must never offer a downgrade. Rolling channels
+    // compare build identities because their package version stays fixed.
+    let version = |value: &str| -> Option<Vec<u64>> {
+        let parts = value
+            .split('.')
+            .map(str::parse)
+            .collect::<Result<Vec<u64>, _>>()
+            .ok()?;
+        (parts.len() == 3).then_some(parts)
+    };
+    match (version(current), version(latest)) {
+        (Some(current), Some(latest)) => latest > current,
+        _ => false,
+    }
 }
 
 fn update_channel() -> UpdateChannel {
@@ -458,6 +501,30 @@ mod tests {
         assert_eq!(available["available"], true);
         assert_eq!(available["channel"], "nightly");
         assert_eq!(available["latest"], "def");
+    }
+
+    #[test]
+    fn stable_updates_reject_downgrades_and_malformed_versions() {
+        for (current, latest, available) in [
+            ("0.1.9", "0.1.10", true),
+            ("0.2.0", "0.1.99", false),
+            ("1.0.0", "1.0.0", false),
+            ("1.0.0", "master", false),
+        ] {
+            assert_eq!(
+                update_available(UpdateChannel::Release, current, latest),
+                available
+            );
+        }
+    }
+
+    #[test]
+    fn installed_update_state_survives_polling() {
+        let updater = SelfUpdate::new(Arc::new(EventBus::default()));
+        updater.finish("installed", Some("new-build".into()), None);
+        assert!(!updater.begin("checking"));
+        assert!(!updater.begin("installing"));
+        assert_eq!(updater.snapshot()["state"], "installed");
     }
 
     #[test]
