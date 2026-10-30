@@ -37,7 +37,6 @@ mod subagent;
 pub(crate) static AGENT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 mod terminal;
 mod terminal_activity;
-mod terminal_agent;
 mod terminal_query;
 mod terminal_replay;
 mod tool_diff;
@@ -57,7 +56,6 @@ use storage::SendDisposition;
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
-use terminal_agent::{AgentSession, SessionRecorder, TerminalAgent};
 use workflow::WorkflowStatuses;
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
@@ -354,7 +352,6 @@ impl Engine {
             Some("workflow-status") => self.workflow_status(owner, &request),
             Some("terminal-list") => self.terminal_list(&request),
             Some("terminal-open") => self.terminal_open(&request),
-            Some("terminal-open-agent") => self.terminal_open_agent(&request),
             Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
             Some("terminal-materialize-image") => self.terminal_materialize_image(&request),
             Some("terminal-paste-image") => self.terminal_paste_image(&request),
@@ -915,118 +912,6 @@ impl Engine {
         }
     }
 
-    fn terminal_open_agent(&self, request: &Value) -> Value {
-        let agent = match required_string(
-            request,
-            "agent",
-            "terminal-open-agent needs codex, claude, jcode, or copilot.",
-        ) {
-            Ok(agent) => match TerminalAgent::from_wire_name(agent) {
-                Some(agent) => agent,
-                None => {
-                    return error_reply(
-                        "terminal-open-agent needs codex, claude, jcode, or copilot.",
-                    );
-                }
-            },
-            _ => return error_reply("terminal-open-agent needs codex, claude, jcode, or copilot."),
-        };
-        let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
-            Ok(chat_id) => chat_id,
-            Err(error) => return error_reply(error),
-        };
-        let gate = match self.chat_execution_gate(chat_id) {
-            Ok(gate) => gate,
-            Err(error) => return error_reply(error),
-        };
-        let _execution = match gate.try_lock() {
-            Ok(execution) => execution,
-            Err(std::sync::TryLockError::WouldBlock) => {
-                return error_reply(
-                    "Stop the host-managed turn before opening this chat's direct CLI.",
-                );
-            }
-            Err(_) => return error_reply("This session's agent state is unavailable."),
-        };
-        let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust host state storage is not configured.");
-        };
-        match store.chat(chat_id) {
-            Ok(chat) if chat["working"].as_bool() == Some(true) => {
-                return error_reply(
-                    "Stop the host-managed turn before opening this chat's direct CLI.",
-                );
-            }
-            Ok(_) => {}
-            Err(error) => return error_reply(error),
-        }
-        let workdir = match store.terminal_workdir(chat_id) {
-            Ok(workdir) => workdir,
-            Err(error) => return error_reply(error),
-        };
-        let environment = match store
-            .folder_lineage_for_chat(chat_id)
-            .map_err(|error| error.to_string())
-            .and_then(|lineage| self.secrets.effective(&lineage))
-        {
-            Ok(secrets) => secrets.environment,
-            Err(error) => return error_reply(error),
-        };
-        let backend = agent.wire_name();
-        // Direct terminals die with the host, but their CLI conversation is
-        // durable. Reuse its backend id when the client restores this chat.
-        let session_id = match store.session_id(chat_id, backend) {
-            Ok(session_id) => session_id,
-            Err(error) => return error_reply(error),
-        };
-        let new_session_id = if session_id.is_none()
-            && matches!(agent, TerminalAgent::Claude | TerminalAgent::Copilot)
-        {
-            // Claude and Copilot accept a caller-selected UUID for a new
-            // conversation, which lets us persist the association before it
-            // starts.
-            Some(uuid::Uuid::new_v4().to_string())
-        } else {
-            None
-        };
-        if let Some(session_id) = new_session_id.as_deref()
-            && let Err(error) = store.set_session(chat_id, backend, session_id)
-        {
-            return error_reply(error);
-        }
-        let session = match (session_id.as_deref(), new_session_id.as_deref()) {
-            (Some(session_id), _) => Some(AgentSession::Resume(session_id)),
-            (_, Some(session_id)) => Some(AgentSession::New(session_id)),
-            _ => None,
-        };
-        let host_executable = match std::env::current_exe() {
-            Ok(executable) => executable,
-            Err(error) => {
-                return error_reply(format!(
-                    "Cannot locate the host executable for session recording: {error}"
-                ));
-            }
-        };
-        let recorder =
-            SessionRecorder::new(&host_executable, store.database_path(), chat_id, backend);
-        match self.terminals.open_agent(
-            request,
-            &workdir,
-            agent,
-            session,
-            (agent == TerminalAgent::Codex).then_some(&recorder),
-            &environment,
-        ) {
-            Ok(reply) => reply,
-            Err(error) => {
-                if let Some(session_id) = new_session_id.as_deref() {
-                    let _ = store.clear_session_if(chat_id, backend, session_id);
-                }
-                error_reply(error)
-            }
-        }
-    }
-
     fn chat_execution_gate(&self, chat_id: &str) -> Result<Arc<Mutex<()>>, String> {
         let mut chats = self
             .chat_execution
@@ -1133,11 +1018,6 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
         };
-        if self.terminals.has_agent_session(chat_id) {
-            return error_reply(
-                "Close the direct CLI before starting a host-managed turn in this session.",
-            );
-        }
         let mut request = request.clone();
         if request.get("worktree_name").is_none() {
             match store.prepare_worktree_name(&request) {
@@ -1934,87 +1814,11 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_managed_agent_starts_share_one_cross_client_gate() {
-        let engine = Arc::new(Engine::transport_only());
-        let gate = engine.chat_execution_gate("missing").unwrap();
-        let gate = gate.lock().unwrap();
-        let direct = engine.dispatch(json!({
-            "op": "terminal-open-agent",
-            "chat": "missing",
-            "agent": "codex",
+    fn terminal_agent_chats_are_no_longer_supported() {
+        let reply = dispatch(json!({
+            "op": "terminal-open-agent", "chat": "legacy", "agent": "codex"
         }));
-        assert_eq!(direct["ok"], false);
-        assert!(direct["error"].as_str().unwrap().contains("Stop"));
-
-        let (finished, reply) = std::sync::mpsc::channel();
-        let worker = engine.clone();
-        thread::spawn(move || {
-            finished
-                .send(worker.dispatch(json!({
-                    "op": "send",
-                    "chat": "missing",
-                    "text": "hello",
-                })))
-                .unwrap();
-        });
-
-        assert!(matches!(
-            reply.recv_timeout(std::time::Duration::from_millis(50)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-        ));
-        drop(gate);
-        assert_eq!(
-            reply
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .unwrap()["ok"],
-            false
-        );
-    }
-
-    #[test]
-    fn a_session_can_open_either_supported_direct_cli() {
-        let root = test_directory();
-        let workspaces = root.join("Workspaces");
-        let store = StateStore::open(root.join("chats.db"), workspaces.clone()).unwrap();
-        let engine = Engine::with_store(store);
-        let folder = engine.dispatch(json!({
-            "op": "new-folder",
-            "name": "Project",
-        }))["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let chat = engine.dispatch(json!({
-            "op": "new-chat",
-            "folder": folder,
-            "backend": "codex",
-        }))["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-
-        fs::remove_dir_all(workspaces.join("Project")).unwrap();
-        let reply = engine.dispatch(json!({
-            "op": "terminal-open-agent",
-            "chat": chat,
-            "agent": "claude",
-            "columns": 80,
-            "rows": 24,
-            "reuse": false,
-        }));
-
-        assert_ne!(
-            reply["error"],
-            "The requested CLI does not match this session's assistant."
-        );
-        assert!(
-            reply["error"]
-                .as_str()
-                .unwrap()
-                .contains("working directory does not exist")
-        );
-        drop(engine);
-        fs::remove_dir_all(root).ok();
+        assert_eq!(reply["ok"], false);
     }
 
     #[test]

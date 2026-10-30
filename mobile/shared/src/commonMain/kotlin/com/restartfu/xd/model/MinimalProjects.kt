@@ -7,7 +7,6 @@ public enum class DirectAgent(
     CODEX("codex", "Codex"),
     CLAUDE("claude", "Claude"),
     JCODE("jcode", "JCode"),
-    COPILOT("copilot", "Copilot"),
     ;
 
     public companion object {

@@ -14,7 +14,7 @@ public data class ChatSummary(
     val working: Boolean,
     val branch: String? = null,
     val terminalWorking: Boolean = false,
-    val sessionMode: String = "terminal",
+    val sessionMode: String = "chat",
 )
 
 public data class TreeSnapshot(

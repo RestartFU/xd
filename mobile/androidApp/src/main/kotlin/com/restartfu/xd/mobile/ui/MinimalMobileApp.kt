@@ -108,13 +108,16 @@ private val SessionTabsSaver = listSaver<List<SessionDestination>, String>(
         }
     },
     restore = { saved ->
-        saved.chunked(5).map { fields ->
+        saved.chunked(5).mapNotNull { fields ->
+            if (fields.size != 5) return@mapNotNull null
+            val agent = DirectAgent.entries.firstOrNull { it.name == fields[4] }
+                ?: return@mapNotNull null
             SessionDestination(
                 projectId = fields[0],
                 projectName = fields[1],
                 chatId = fields[2],
                 title = fields[3],
-                agent = DirectAgent.valueOf(fields[4]),
+                agent = agent,
             )
         }
     },
@@ -149,9 +152,13 @@ internal fun MinimalMobileApp(
         }
     }
 
-    LaunchedEffect(knownDestinations) {
-        val current = knownDestinations.associateBy(SessionDestination::chatId)
-        tabs = tabs.map { current[it.chatId] ?: it }
+    LaunchedEffect(knownDestinations, tree.loading, tree.error) {
+        // Wait for the host's workspace snapshot before pruning restored tabs.
+        if (!tree.loading && tree.error == null && tree.folders.isNotEmpty()) {
+            val current = knownDestinations.associateBy(SessionDestination::chatId)
+            tabs = tabs.mapNotNull { current[it.chatId] }
+            if (tabs.none { it.chatId == activeChatId }) activeChatId = tabs.firstOrNull()?.chatId
+        }
     }
 
     LaunchedEffect(created, projects) {
@@ -209,30 +216,13 @@ internal fun MinimalMobileApp(
 
         mobileDestination == MobileDestination.SESSIONS && active != null -> {
             key(active.chatId) {
-                if (tree.chats.firstOrNull { it.id == active.chatId }?.sessionMode == "chat") {
-                    val owner = remember(active.chatId) { DirectTerminalOwner() }
-                    DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
-                    val chat: ChatViewModel = viewModel(key = "chat-${active.chatId}", viewModelStoreOwner = owner, factory = ChatViewModel.Factory(model.client, active.chatId))
-                    ChatScreen(model = chat, settings = settings, goBack = showProjects,
-                        productHeader = {},
-                        sessionTabs = { SessionTabStrip(tabs = tabs, selectedChatId = active.chatId, selectTab = { activeChatId = it }, closeTab = closeTab, addTab = { createTabFor = active.projectId to active.projectName }) },
-                    )
-                } else {
-                MinimalDirectSession(
-                    model = model,
-                    settings = settings,
-                    link = link,
-                    destination = active,
-                    tabs = tabs,
-                    selectTab = { activeChatId = it },
-                    closeTab = closeTab,
-                    addTab = {
-                        createTabFor = active.projectId to active.projectName
-                    },
-                    onProjects = showProjects,
-                    onTerminal = showTerminal,
+                val owner = remember(active.chatId) { SessionViewModelOwner() }
+                DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
+                val chat: ChatViewModel = viewModel(key = "chat-${active.chatId}", viewModelStoreOwner = owner, factory = ChatViewModel.Factory(model.client, active.chatId))
+                ChatScreen(model = chat, settings = settings, goBack = showProjects,
+                    productHeader = {},
+                    sessionTabs = { SessionTabStrip(tabs = tabs, selectedChatId = active.chatId, selectTab = { activeChatId = it }, closeTab = closeTab, addTab = { createTabFor = active.projectId to active.projectName }) },
                 )
-                }
             }
         }
 
@@ -356,7 +346,7 @@ private fun MinimalProjectsHome(
                 }
                 if (projects.isEmpty()) {
                     item("empty-projects") {
-                        EmptyCard("Create a workspace, then start a Codex, Claude, JCode, or Copilot session.")
+                        EmptyCard("Create a workspace, then start a Codex, Claude, or JCode session.")
                     }
                 } else {
                     items(projects, key = MinimalProject::id) { project ->
@@ -426,113 +416,6 @@ private fun MinimalProjectsHome(
 }
 
 @Composable
-private fun MinimalDirectSession(
-    model: MainViewModel,
-    settings: MobileSettings,
-    link: Link,
-    destination: SessionDestination,
-    tabs: List<SessionDestination>,
-    selectTab: (String) -> Unit,
-    closeTab: (String) -> Unit,
-    addTab: () -> Unit,
-    onProjects: () -> Unit,
-    onTerminal: () -> Unit,
-) {
-    val allowAllPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
-    val terminalOwner = remember(
-        destination.chatId,
-        destination.agent,
-        allowAllPermissions,
-    ) { DirectTerminalOwner() }
-    DisposableEffect(terminalOwner) {
-        onDispose { terminalOwner.viewModelStore.clear() }
-    }
-    val terminal: TerminalViewModel = viewModel(
-        key = "direct-${destination.chatId}-${destination.agent.wire}-$allowAllPermissions",
-        viewModelStoreOwner = terminalOwner,
-        factory = TerminalViewModel.DirectFactory(
-            client = model.client,
-            chatId = destination.chatId,
-            agent = destination.agent,
-            allowAllPermissions = allowAllPermissions,
-        ),
-    )
-    LaunchedEffect(terminal) {
-        model.client.terminalEvents.collect(terminal::onEvent)
-    }
-
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .navigationBarsPadding(),
-    ) {
-        ProductHeader(link = link, title = destination.projectName, onSettings = { settingsOpen = true })
-        SessionTabStrip(
-            tabs = tabs,
-            selectedChatId = destination.chatId,
-            selectTab = selectTab,
-            closeTab = closeTab,
-            addTab = addTab,
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(54.dp)
-                .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            TextButton(onClick = onProjects, contentPadding = PaddingValues(4.dp)) {
-                Text("←", fontSize = 22.sp)
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    destination.projectName,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    destination.title,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            AgentPill(destination.agent)
-            TextButton(onClick = terminal::kill) {
-                Text("Stop", color = MaterialTheme.colorScheme.error)
-            }
-        }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(10.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(14.dp)),
-        ) {
-            TerminalPaneContent(terminal, showSessionBar = false)
-        }
-    }
-
-    if (settingsOpen) {
-        MinimalSettingsDialog(
-            settings = settings,
-            onDismiss = { settingsOpen = false },
-            onDisconnect = {
-                settingsOpen = false
-                model.forget()
-            },
-        )
-    }
-}
-
-@Composable
 private fun MinimalGlobalTerminal(
     model: MainViewModel,
     settings: MobileSettings,
@@ -541,7 +424,7 @@ private fun MinimalGlobalTerminal(
     onSessions: () -> Unit,
 ) {
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
-    val terminalOwner = remember { DirectTerminalOwner() }
+    val terminalOwner = remember { SessionViewModelOwner() }
     DisposableEffect(terminalOwner) {
         onDispose { terminalOwner.viewModelStore.clear() }
     }
@@ -892,7 +775,7 @@ private fun OpenDrawer(
         DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {})
         if (sessions.isEmpty()) {
             Text(
-                "No sessions yet. Start one with Codex, Claude, JCode, or Copilot.",
+                "No sessions yet. Start one with Codex, Claude, or JCode.",
                 modifier = Modifier.padding(start = 30.dp, end = 10.dp, top = 4.dp, bottom = 8.dp),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodyMedium,
@@ -1163,6 +1046,6 @@ private fun MinimalSettingsDialog(
     )
 }
 
-private class DirectTerminalOwner : ViewModelStoreOwner {
+private class SessionViewModelOwner : ViewModelStoreOwner {
     override val viewModelStore: ViewModelStore = ViewModelStore()
 }

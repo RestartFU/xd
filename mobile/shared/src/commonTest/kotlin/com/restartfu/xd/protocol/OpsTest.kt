@@ -89,34 +89,6 @@ class OpsTest {
     }
 
     @Test
-    fun minimalSessionsCreateAndOpenTheSelectedDirectAgent() {
-        val create = Ops.newChat("folder", "Fix parser", backend = "claude")
-        assertEquals("claude", create.getValue("backend").jsonPrimitive.content)
-
-        val open = Ops.terminalOpenAgent(
-            chatId = "chat",
-            columns = 42,
-            rows = 18,
-            reuse = true,
-            agent = "claude",
-            allowAllPermissions = true,
-        )
-        assertEquals("terminal-open-agent", open.getValue("op").jsonPrimitive.content)
-        assertEquals("claude", open.getValue("agent").jsonPrimitive.content)
-        assertTrue(open.getValue("allow_all_permissions").jsonPrimitive.content.toBoolean())
-
-        val copilot = Ops.terminalOpenAgent(
-            chatId = "chat",
-            columns = 42,
-            rows = 18,
-            reuse = true,
-            agent = "copilot",
-            allowAllPermissions = false,
-        )
-        assertEquals("copilot", copilot.getValue("agent").jsonPrimitive.content)
-    }
-
-    @Test
     fun newFolderDistinguishesAWorkspaceFromANestedFolder() {
         val workspace = Ops.newFolder("Mobile")
         val nested = Ops.newFolder("App", "workspace")
