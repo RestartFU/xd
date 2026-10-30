@@ -412,9 +412,9 @@ impl HostHandle {
         let (update_tx, update_rx) = async_channel::bounded(1024);
         let pending = Arc::new(Mutex::new(HashMap::new()));
 
+        let _ = update_tx.try_send(HostUpdate::Connected { path: identity });
         spawn_writer(writer, command_rx, update_tx.clone(), pending.clone());
         spawn_reader(reader, update_tx.clone(), pending, process_errors);
-        let _ = update_tx.try_send(HostUpdate::Connected { path: identity });
 
         (
             Self {
