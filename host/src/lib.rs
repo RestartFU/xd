@@ -40,6 +40,7 @@ mod terminal_activity;
 mod terminal_query;
 mod terminal_replay;
 mod tool_diff;
+mod user_environment;
 mod workflow;
 mod worktree_name;
 
@@ -267,17 +268,32 @@ impl Engine {
                     (_, None) => error_reply("set-agent-secrets needs an entries array."),
                 }
             }
-            Some("agent-auth") => self.auth.snapshots(),
+            Some("agent-auth") => {
+                self.auth.refresh_all();
+                self.auth.snapshots()
+            }
             Some("agent-clis") => self.cli_versions.snapshots(),
             Some("host-update") => {
                 let action = request.get("action").and_then(Value::as_str);
-                let reply = self.self_update.perform(action).unwrap_or_else(error_reply);
-                if action == Some("restart") && reply["ok"] == true {
-                    if let Some(runtime) = &self.runtime {
-                        runtime.shutdown();
+                if action == Some("restart")
+                    && (self
+                        .runtime
+                        .as_ref()
+                        .is_some_and(TurnRuntime::has_active_turns)
+                        || self.terminals.has_sessions())
+                {
+                    error_reply(
+                        "Close terminal tabs and wait for active chats to finish before restarting for an update.",
+                    )
+                } else {
+                    let reply = self.self_update.perform(action).unwrap_or_else(error_reply);
+                    if action == Some("restart") && reply["ok"] == true {
+                        if let Some(runtime) = &self.runtime {
+                            runtime.shutdown();
+                        }
                     }
+                    reply
                 }
-                reply
             }
             Some("agent-auth-start") => {
                 self.auth_mutation(&request, |auth, provider, _| auth.login(provider))

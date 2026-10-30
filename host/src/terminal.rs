@@ -310,6 +310,12 @@ impl TerminalManager {
         }
     }
 
+    pub(crate) fn has_sessions(&self) -> bool {
+        self.sessions
+            .lock()
+            .map_or(true, |sessions| !sessions.is_empty())
+    }
+
     #[cfg(test)]
     pub fn working_chats(&self) -> HashSet<String> {
         self.activity_snapshot().working_chats
@@ -385,6 +391,18 @@ impl TerminalSession {
         let term_value = c"xterm-256color";
         let colorterm = c"COLORTERM";
         let colorterm_value = c"truecolor";
+        let environment = crate::user_environment::values()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_encoded_bytes()))
+            .map(|(name, value)| {
+                Ok((
+                    CString::new(name.as_bytes())
+                        .map_err(|_| "A terminal environment name is invalid.".to_string())?,
+                    CString::new(value)
+                        .map_err(|_| "A terminal environment value is invalid.".to_string())?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let size = WinSize {
             rows,
             columns,
@@ -409,6 +427,9 @@ impl TerminalSession {
                 }
                 setenv(term.as_ptr(), term_value.as_ptr(), 1);
                 setenv(colorterm.as_ptr(), colorterm_value.as_ptr(), 1);
+                for (name, value) in &environment {
+                    setenv(name.as_ptr(), value.as_ptr(), 1);
+                }
                 execvp(executable.as_ptr(), argument_pointers.as_ptr());
                 _exit(127);
             }
