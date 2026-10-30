@@ -1,0 +1,9 @@
+dist/
+.build-cache/
+build/
+.payload-cache/
+.git/
+mobile/
+
+**/target/
+**/target-docker/

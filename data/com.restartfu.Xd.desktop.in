@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=@APP_NAME@
+Comment=Workspace-organized AI conversations
+Exec=xd
+Icon=@APP_ID@
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupNotify=true

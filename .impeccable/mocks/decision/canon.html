@@ -1,0 +1,36 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0}
+body{width:1440px;height:900px;overflow:hidden;background:#1e1e1e;color:#cccccc;font:13px/1.45 system-ui,sans-serif}
+.mono{font-family:ui-monospace,monospace;font-size:12px}
+.top{height:32px;background:#2c2c2c;display:flex;align-items:center;padding:0 12px;gap:12px;font-size:12px}
+.app{display:flex;height:846px}
+.act{width:48px;background:#2c2c2c;display:flex;flex-direction:column;align-items:center;gap:20px;padding-top:12px;color:#858585}
+.side{width:260px;background:#252526}
+.h{height:34px;display:flex;align-items:center;padding:0 16px;font-size:11px;letter-spacing:.06em;color:#bbb}
+.r{height:24px;display:flex;align-items:center;padding:0 16px 0 24px}
+.r.on{background:#37373d}
+.ed{flex:1;display:flex;flex-direction:column}
+.tabs{height:35px;background:#252526;display:flex}
+.tab{padding:0 14px;display:flex;align-items:center;background:#2d2d2d;border-right:1px solid #1e1e1e}
+.tab.on{background:#1e1e1e;border-top:1px solid #3794ff}
+.body{padding:16px 22px;flex:1}
+.ask{border:1px solid #3794ff;padding:10px;margin-top:10px;border-radius:4px}
+.btn{display:inline-block;padding:4px 12px;background:#0e639c;color:#fff;border-radius:2px;margin-right:6px}
+.btn.s{background:#3a3d41}
+.comp{margin:0 22px 16px;height:80px;border:1px solid #3c3c3c;background:#252526;padding:10px;color:#888}
+.pane{width:400px;background:#252526;border-left:1px solid #3c3c3c}
+.status{height:22px;background:#007acc;color:#fff;font-size:12px;display:flex;align-items:center;padding:0 10px;gap:14px}
+</style></head><body>
+<div class="top"><b>xd</b><span>xd — Fix idle status on multi-tab</span></div>
+<div class="app"><div class="act"><span>▤</span><span>☰</span><span>⌥</span><span>⚙</span></div>
+<div class="side"><div class="h">PROJECTS</div><div class="r">› Lunar</div><div class="r">⌄ xd</div><div class="r on">Fix idle status on multi-tab</div><div class="r">Pairing code expiry</div><div class="r">Windows WSL host deploy</div><div class="r">Release v0.1.21</div><div class="r">› decryptmypack</div><div class="r">› VPS</div><div class="r">› PotLounge</div></div>
+<div class="ed"><div class="tabs"><div class="tab on">Fix idle status on multi-tab</div><div class="tab">Pairing code expiry</div></div>
+<div class="body"><p style="background:#2d2d2d;padding:10px;margin-bottom:12px">The session card says Idle while a Claude tab is still working. Find why and fix it.</p>
+<p style="margin-bottom:10px">The card's state comes from the first tab only. I'll aggregate activity across every terminal tab.</p>
+<div class="mono" style="color:#9cdcfe">✓ read desktop/src/model.rs<br>✓ edit session_activity()<br>✓ cargo test · 14 passed</div>
+<div class="ask">Allow Claude Code to run git push?<br><br><span class="btn">Allow once</span><span class="btn s">This session</span><span class="btn s">Deny</span></div></div>
+<div class="comp">Message Claude Code…</div></div>
+<div class="pane"><div class="h">CHANGES</div><div class="r mono">model.rs <span style="margin-left:auto;color:#73c991">M</span></div><div class="r mono">main.rs <span style="margin-left:auto;color:#73c991">M</span></div><div class="r mono">activity.rs <span style="margin-left:auto;color:#73c991">A</span></div></div></div>
+<div class="status"><span>⎇ xd/fix-idle</span><span>● Local</span><span style="margin-left:auto">Claude Code · opus</span></div>
+</body></html>

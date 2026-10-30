@@ -1,0 +1,131 @@
+# Every commit pushed to a pull request, built and tested.
+#
+# Nothing is published. A branch is tried by building it: the nightly's own
+# build button fetches it, builds the bundle the same way this does and
+# installs the result over itself, so there is no rolling release to keep
+# moving and no third kind of build that can break on its own.
+#
+# Built from the pull request's head commit rather than the merge commit GitHub
+# hands to `pull_request` runs: what is checked is the code that was pushed.
+
+name: pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+# One at a time per pull request, newest wins: an older push is not worth a
+# runner once a newer one exists.
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    # GitHub's runner for every branch and fork: this repository is public,
+    # and a pull request runs whatever it contains, so it never gets a
+    # machine of ours.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      # Everything is built in Docker, so the runner needs nothing else. Both
+      # builds share layers, which is why the tests are cheap to gate on.
+      - name: Run the headless tests
+        run: ./scripts/test.sh
+
+      - name: Build the bundle
+        run: ./scripts/build.sh --build-arg PROFILE=nightly
+
+  windows:
+    uses: ./.github/workflows/windows.yml
+    with:
+      profile: nightly
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  macos:
+    # Apple desktop code must be compiled on Apple hardware because GPUI links
+    # native frameworks. This gate covers the Rust app, local helpers, and the
+    # complete ad-hoc-signed bundle.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Limit build parallelism
+        run: |
+          jobs=$(./scripts/runner-jobs.sh --jobs)
+          echo "CARGO_BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
+
+      # The dependency compile is most of this job, and a hosted runner keeps
+      # nothing between runs. Keyed on the lockfiles, so unchanged dependencies
+      # come back already built and cargo works out the rest.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            host/target
+            terminal-core/target
+          key: >-
+            cargo-${{ runner.os }}-arm64-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'host/Cargo.lock', 'terminal-core/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-arm64-1.95.0-
+
+      # Native packaging inputs are pinned by the scripts that put them here.
+      - uses: actions/cache@v4
+        with:
+          path: .build-cache
+          key: >-
+            payload-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-macos.sh') }}
+          restore-keys: payload-${{ runner.os }}-arm64-
+
+      - name: Test the native Rust targets
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          cargo fmt --check --manifest-path terminal-core/Cargo.toml
+          cargo test --locked --manifest-path terminal-core/Cargo.toml
+          cargo fmt --check --manifest-path desktop/Cargo.toml
+          cargo test --locked --manifest-path desktop/Cargo.toml
+          cargo fmt --check --manifest-path host/Cargo.toml
+          cargo test --locked --manifest-path host/Cargo.toml
+
+      - name: Build and smoke-test the native app bundle
+        env:
+          PROFILE: nightly
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          brew install librsvg
+          ./scripts/build-macos.sh
+          ./scripts/smoke-macos.sh dist/macos/xd-nightly.app

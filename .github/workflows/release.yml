@@ -1,0 +1,475 @@
+# A release, cut by hand.
+#
+# The same bundle the nightly publishes, built from the default profile -- so
+# it installs as "xd", keeps its data in ~/.local/share/xd, and a nightly
+# sitting beside it stays out of its way.
+#
+# Run this workflow and choose what to release:
+#
+#   current   release the version the source already states
+#   patch     0.0.1, for a fix
+#   minor     0.1.0, for something new
+#   major     1.0.0, for something that breaks
+#
+# A bump writes the new version into every file that states one, commits it,
+# and tags it. Pushing a v* tag by hand still works and builds that tag as it
+# stands.
+#
+# If a build fails after the tag is pushed, run it again with "current": a tag
+# on this commit with no release behind it is picked up and finished rather
+# than tagged twice.
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: >-
+          Release the current version, or increment patch 0.0.1,
+          minor 0.1.0, major 1.0.0
+        required: true
+        default: current
+        type: choice
+        options:
+          - current
+          - patch
+          - minor
+          - major
+
+# One release at a time, and never cancelled: a half-published release is
+# worse than a slow one.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # What is being released, decided once, before anything is built. On a bump
+  # this is also what writes the version, commits it and tags it -- and pushes
+  # both, because the build jobs check that tag out.
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: >-
+            ${{ github.event_name == 'workflow_dispatch'
+            && 'master' || github.ref }}
+
+      - name: Work out the version and tag
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BUMP: ${{ inputs.bump }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          source_version () {
+            ./scripts/bump-version.sh --current
+          }
+
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            current=$(source_version)
+            recovery_tag="v$current"
+
+            if [[ "$BUMP" == current ]]; then
+              version="$current"
+              tag="$recovery_tag"
+              if gh release view "$tag" >/dev/null 2>&1; then
+                echo "::error::Release $tag already exists."
+                exit 1
+              fi
+              if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+                if ! git tag --points-at HEAD | grep -Fxq "$tag"; then
+                  echo "::error::Tag $tag is on another commit."
+                  exit 1
+                fi
+                echo "Finishing the unpublished $tag release."
+              else
+                git config user.name "github-actions[bot]"
+                git config user.email \
+                  "41898282+github-actions[bot]@users.noreply.github.com"
+                git tag -a "$tag" -m "xd $tag"
+              fi
+            elif git tag --points-at HEAD | grep -Fxq "$recovery_tag" \
+              && ! gh release view "$recovery_tag" >/dev/null 2>&1; then
+              # This commit is already tagged and was never published, so
+              # bumping again would leave that tag behind unreleased.
+              version="$current"
+              tag="$recovery_tag"
+              echo "Finishing the unpublished $tag release."
+            else
+              version=$(./scripts/bump-version.sh "$BUMP")
+              tag="v$version"
+
+              if git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
+                echo "::error::Tag $tag already exists."
+                exit 1
+              fi
+
+              git config user.name "github-actions[bot]"
+              git config user.email \
+                "41898282+github-actions[bot]@users.noreply.github.com"
+              git add \
+                desktop/Cargo.toml \
+                desktop/Cargo.lock \
+                host/Cargo.toml \
+                host/Cargo.lock \
+                transport-core/Cargo.toml \
+                transport-core/Cargo.lock \
+                mobile/androidApp/build.gradle.kts
+              git commit -m "chore: release $tag"
+              git tag -a "$tag" -m "xd $tag"
+            fi
+          else
+            tag="$GITHUB_REF_NAME"
+            version="${tag#v}"
+
+            if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::A release tag has to look like v1.2.3."
+              exit 1
+            fi
+            if [[ "$version" != "$(source_version)" ]]; then
+              echo "::error::$tag does not match the source version $(source_version)."
+              exit 1
+            fi
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Pushed before the builds because they check the tag out. A build that
+      # fails leaves this tag unpublished, which is what "current" finishes.
+      - name: Push the release commit and tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        # Atomic: master refusing a push must not leave the tag behind on its
+        # own, pointing at a commit nothing else has.
+        run: git push --atomic origin HEAD:master "$TAG"
+
+  linux:
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      - name: Run the headless tests
+        run: ./scripts/test.sh
+
+      - name: Build the bundle
+        run: ./scripts/build.sh
+
+      - name: Pack it
+        run: |
+          set -euo pipefail
+          mv dist xd
+          tar -czf xd-linux-x86_64.tar.gz xd
+          sha256sum xd-linux-x86_64.tar.gz > xd-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            xd-linux-x86_64.tar.gz
+            xd-linux-x86_64.tar.gz.sha256
+
+  macos:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Limit build parallelism
+        run: |
+          jobs=$(./scripts/runner-jobs.sh --jobs)
+          echo "CARGO_BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
+
+      # The dependency compile is most of this job, and a hosted runner keeps
+      # nothing between runs. Keyed on the lockfiles, so unchanged dependencies
+      # come back already built and cargo works out the rest.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            host/target
+            terminal-core/target
+          key: >-
+            cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'host/Cargo.lock', 'terminal-core/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-
+
+      # Native packaging inputs are pinned by the scripts that put them here.
+      - uses: actions/cache@v4
+        with:
+          path: .build-cache
+          key: >-
+            payload-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('scripts/build-macos.sh') }}
+          restore-keys: payload-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Build and smoke-test the native app bundle
+        env:
+          PROFILE: release
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          brew install librsvg
+          ./scripts/build-macos.sh
+          ./scripts/smoke-macos.sh dist/macos/xd.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos/xd-macos-${{ matrix.arch }}.zip
+            dist/macos/xd-macos-${{ matrix.arch }}.zip.sha256
+
+  windows:
+    needs: prepare
+    uses: ./.github/workflows/windows.yml
+    with:
+      profile: release
+      ref: ${{ needs.prepare.outputs.tag }}
+
+  android:
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      - name: Check Android signing credentials
+        id: android_signing
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          credentials=(
+            "$ANDROID_RELEASE_KEYSTORE_BASE64"
+            "$XD_ANDROID_STORE_PASSWORD"
+            "$XD_ANDROID_KEY_ALIAS"
+            "$XD_ANDROID_KEY_PASSWORD"
+          )
+          present=0
+          for credential in "${credentials[@]}"; do
+            if [[ -n "$credential" ]]; then
+              ((present += 1))
+            fi
+          done
+          if (( present == 0 )); then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Android signing secrets are absent; omitting the Android artifact."
+          elif (( present != ${#credentials[@]} )); then
+            echo "::error::Android signing secrets are only partially configured."
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the Android APK
+        if: steps.android_signing.outputs.available == 'true'
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          XD_MOBILE_RELEASE: 1
+          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_RELEASE_KEYSTORE_BASE64:?ANDROID release keystore secret is required}"
+          : "${XD_ANDROID_STORE_PASSWORD:?Android store password secret is required}"
+          : "${XD_ANDROID_KEY_ALIAS:?Android key alias secret is required}"
+          : "${XD_ANDROID_KEY_PASSWORD:?Android key password secret is required}"
+          keystore="$RUNNER_TEMP/xd-android-release.p12"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          ./scripts/mobile-build.sh \
+            --secret "id=android_keystore,src=$keystore" \
+            --secret id=android_store_password,env=XD_ANDROID_STORE_PASSWORD \
+            --secret id=android_key_alias,env=XD_ANDROID_KEY_ALIAS \
+            --secret id=android_key_password,env=XD_ANDROID_KEY_PASSWORD
+
+      - name: Name it for the release
+        if: steps.android_signing.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          mv dist/mobile/xd-mobile-release.apk xd-android.apk
+          sha256sum xd-android.apk > xd-android.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: steps.android_signing.outputs.available == 'true'
+        with:
+          name: android
+          path: |
+            xd-android.apk
+            xd-android.apk.sha256
+
+  publish:
+    needs: [prepare, linux, macos, windows, android]
+    # GitHub's own runner: this job moves every artifact through itself, and
+    # that gigabyte should not cross a home connection twice. See nightly.yml.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: .
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          tag="${{ needs.prepare.outputs.tag }}"
+
+          assets=(
+            xd-linux-x86_64.tar.gz
+            xd-linux-x86_64.tar.gz.sha256
+            xd-macos-*.zip
+            xd-macos-*.zip.sha256
+            xd-windows-x86_64.zip
+            xd-windows-x86_64.zip.sha256
+            scripts/install.sh
+            scripts/install-macos.sh
+          )
+          if [[ -f xd-android.apk ]]; then
+            assets+=(xd-android.apk xd-android.apk.sha256)
+            android_notes=$(cat <<'EOF'
+          Android:
+
+          Download `xd-android.apk` from this release. Android connects
+          directly to the xd daemon using a pairing invite and pinned TLS.
+          The host must be reachable over LAN, Tailscale, or a server address.
+          EOF
+            )
+          else
+            android_notes=$(cat <<'EOF'
+          Android:
+
+          No Android APK is published because protected signing credentials are
+          not configured for this repository.
+          EOF
+            )
+          fi
+
+          notes=$(cat <<EOF
+          Native chat UI with streaming responses, approvals, assistant settings,
+          files, changes, and shell tools. One xd daemon owns local and remote
+          sessions; desktop and Android connect using pairing invites and pinned TLS.
+
+          Linux:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh | sh -s -- --release
+          \`\`\`
+
+          macOS:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install-macos.sh | sh -s -- --release
+          \`\`\`
+
+          Windows x86_64:
+
+          Extract \`xd-windows-x86_64.zip\` and run \`xd.exe\`.
+          Local sessions require WSL with git and tmux installed. The included
+          README covers setup; the browser uses Microsoft's WebView2 Runtime.
+
+          $android_notes
+
+          Linux and macOS are self-contained.
+          EOF
+          )
+
+          # A tag is published once. Re-running against one that already has a
+          # release replaces its files rather than making a second release of
+          # the same thing.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            for legacy in \
+              xd-windows-x86_64.msi xd-windows-x86_64.msi.sha256 \
+              xd1.cab xd1.cab.sha256 \
+              xd-windows-x86_64-setup.exe xd-windows-x86_64-setup.exe.sha256 \
+              xd-windows-x86_64-msi.payload xd-windows-x86_64-cab.payload; do
+              gh release delete-asset "$tag" "$legacy" --yes || true
+            done
+            gh release upload "$tag" --clobber "${assets[@]}"
+          else
+            gh release create "$tag" \
+              --verify-tag \
+              --title "$tag" \
+              --notes "$notes" \
+              "${assets[@]}"
+          fi

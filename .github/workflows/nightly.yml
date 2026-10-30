@@ -1,0 +1,402 @@
+# A runnable Rust/GPUI xd for every commit on master, published for Linux and
+# both Mac architectures and Windows, with the Android client under one rolling
+# nightly tag.
+#
+# Built as the nightly profile, which gives it its own application id, settings,
+# data directory and workspaces -- so installing it does not disturb a release
+# on the same machine, and neither one edits the other's chats.
+#
+# The headless suite runs first and the release only happens if it passes: a
+# nightly that does not work is worse than no nightly.
+
+name: nightly
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# One at a time. Publishing is intentionally never cancelled, because an
+# interrupted rolling-release update can otherwise leave an incomplete release.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      # Everything is built in Docker, so the runner needs nothing else. Both
+      # builds share layers, which is why the tests are cheap to gate on.
+      - name: Run the headless tests
+        run: ./scripts/test.sh
+
+      - name: Build the bundle
+        run: ./scripts/build.sh --build-arg PROFILE=nightly
+
+      - name: Pack it
+        run: |
+          set -euo pipefail
+          # Named so it unpacks into a directory rather than over the one it
+          # was unpacked in, and named for the build so it cannot be mistaken
+          # for a release.
+          mv dist xd-nightly
+          tar -czf xd-nightly-linux-x86_64.tar.gz xd-nightly
+          sha256sum xd-nightly-linux-x86_64.tar.gz > xd-nightly-linux-x86_64.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            xd-nightly-linux-x86_64.tar.gz
+            xd-nightly-linux-x86_64.tar.gz.sha256
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0
+          --profile minimal
+          --component rustfmt
+          --no-self-update
+
+      - name: Limit build parallelism
+        run: |
+          jobs=$(./scripts/runner-jobs.sh --jobs)
+          echo "CARGO_BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
+
+      # The dependency compile is most of this job, and a hosted runner keeps
+      # nothing between runs. Keyed on the lockfiles, so unchanged dependencies
+      # come back already built and cargo works out the rest.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+            host/target
+            terminal-core/target
+          key: >-
+            cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-${{
+            hashFiles('desktop/Cargo.lock', 'host/Cargo.lock', 'terminal-core/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ matrix.arch }}-1.95.0-
+
+      # Native packaging inputs are pinned by the scripts that put them here.
+      - uses: actions/cache@v4
+        with:
+          path: .build-cache
+          key: >-
+            payload-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('scripts/build-macos.sh') }}
+          restore-keys: payload-${{ runner.os }}-${{ matrix.arch }}-
+
+      - name: Build and smoke-test the native app bundle
+        env:
+          PROFILE: nightly
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          brew install librsvg
+          ./scripts/build-macos.sh
+          ./scripts/smoke-macos.sh dist/macos/xd-nightly.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip
+            dist/macos/xd-nightly-macos-${{ matrix.arch }}.zip.sha256
+
+  windows:
+    uses: ./.github/workflows/windows.yml
+    with:
+      profile: nightly
+
+  android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      - name: Check protected Android signing
+        id: android_signing
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          credentials=(
+            "$ANDROID_RELEASE_KEYSTORE_BASE64"
+            "$XD_ANDROID_STORE_PASSWORD"
+            "$XD_ANDROID_KEY_ALIAS"
+            "$XD_ANDROID_KEY_PASSWORD"
+          )
+          present=0
+          for credential in "${credentials[@]}"; do
+            if [[ -n "$credential" ]]; then
+              ((present += 1))
+            fi
+          done
+          if (( present == 0 )); then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Android signing secrets are absent; omitting the Android artifact."
+          elif (( present != ${#credentials[@]} )); then
+            echo "::error::Android signing secrets are only partially configured."
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the Android APK
+        if: steps.android_signing.outputs.available == 'true'
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          XD_MOBILE_RELEASE: 1
+          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_RELEASE_KEYSTORE_BASE64:?Android release keystore secret is required}"
+          : "${XD_ANDROID_STORE_PASSWORD:?Android store password secret is required}"
+          : "${XD_ANDROID_KEY_ALIAS:?Android key alias secret is required}"
+          : "${XD_ANDROID_KEY_PASSWORD:?Android key password secret is required}"
+          keystore="$RUNNER_TEMP/xd-android-release.p12"
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          chmod 600 "$keystore"
+          XD_MOBILE_CHANNEL=nightly ./scripts/mobile-build.sh \
+            --secret "id=android_keystore,src=$keystore" \
+            --secret id=android_store_password,env=XD_ANDROID_STORE_PASSWORD \
+            --secret id=android_key_alias,env=XD_ANDROID_KEY_ALIAS \
+            --secret id=android_key_password,env=XD_ANDROID_KEY_PASSWORD
+
+      - name: Name it for the release
+        if: steps.android_signing.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          mv dist/mobile/xd-mobile-release.apk xd-nightly-android.apk
+          sha256sum xd-nightly-android.apk > xd-nightly-android.apk.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: steps.android_signing.outputs.available == 'true'
+        with:
+          name: android
+          path: |
+            xd-nightly-android.apk
+            xd-nightly-android.apk.sha256
+
+  publish:
+    needs: [linux, macos, windows, android]
+    # GitHub's own runner, deliberately: this job downloads every artifact and
+    # uploads it again as a release asset -- about a gigabyte each way, which
+    # here never leaves GitHub's network.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: .
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          subject=$(git log -1 --format=%s)
+          assets=(
+            xd-nightly-linux-x86_64.tar.gz
+            xd-nightly-linux-x86_64.tar.gz.sha256
+            xd-nightly-macos-*.zip
+            xd-nightly-macos-*.zip.sha256
+            xd-nightly-windows-x86_64.zip
+            xd-nightly-windows-x86_64.zip.sha256
+            scripts/install.sh
+            scripts/install-macos.sh
+          )
+          if [[ -f xd-nightly-android.apk ]]; then
+            assets+=(xd-nightly-android.apk xd-nightly-android.apk.sha256)
+            android_notes=$(cat <<'EOF'
+          Android connects directly to the xd daemon using a pairing invite
+          and pinned TLS. The host must be reachable over LAN, Tailscale,
+          or a server address and have the xd nightly host installed.
+          EOF
+            )
+          else
+            android_notes=$(cat <<'EOF'
+          No Android APK is published because protected signing credentials are
+          not configured for this repository.
+          EOF
+            )
+          fi
+          notes=$(cat <<EOF
+          Built from \`${GITHUB_SHA:0:7}\` — $subject
+
+          Linux:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install.sh | sh
+          \`\`\`
+
+          macOS:
+
+          \`\`\`
+          curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly/install-macos.sh | sh
+          \`\`\`
+
+          Windows x86_64:
+
+          Extract \`xd-nightly-windows-x86_64.zip\` and run \`xd.exe\`.
+          Local sessions require WSL with git and tmux installed. The included
+          README covers setup; the browser uses Microsoft's WebView2 Runtime.
+
+          Or unpack it yourself:
+
+          \`\`\`
+          tar -xzf xd-nightly-linux-x86_64.tar.gz
+          ./xd-nightly/xd.sh
+          \`\`\`
+
+          $android_notes
+
+          Linux and macOS are self-contained.
+          EOF
+          )
+
+          # Stage every asset on a private draft first. `release upload
+          # --clobber` deletes public assets before their replacements finish
+          # uploading, which can leave a mixed or incomplete nightly.
+          candidate="nightly-candidate-${GITHUB_SHA}"
+          gh release delete "$candidate" --yes >/dev/null 2>&1 || true
+          gh api --method DELETE \
+            "repos/$GITHUB_REPOSITORY/git/refs/tags/$candidate" \
+            >/dev/null 2>&1 || true
+          gh release create "$candidate" --draft \
+            --target "$GITHUB_SHA" \
+            --title "Nightly candidate" \
+            --notes "$notes" \
+            "${assets[@]}"
+
+          # Archive the previous release as a draft without creating a tag
+          # on its historical commit. GITHUB_TOKEN cannot write refs pointing
+          # at older workflow versions. Keep nightly's existing ref until the
+          # final operation, so rollback only needs to restore release metadata.
+          candidate_id=$(gh release view "$candidate" --json databaseId --jq .databaseId)
+          previous_id=$(gh release view nightly --json databaseId --jq .databaseId \
+            2>/dev/null || true)
+          previous="nightly-previous-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          promoted=false
+          cleanup_nightly() {
+            if [ -n "$previous_id" ]; then
+              gh api --method DELETE \
+                "repos/$GITHUB_REPOSITORY/releases/$previous_id" >/dev/null \
+                || echo "::warning::Could not remove archived nightly draft $previous_id."
+            fi
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/git/refs/tags/$candidate" \
+              >/dev/null 2>&1 || true
+          }
+          rollback_nightly() {
+            status=$?
+            trap - ERR
+            if [ "$promoted" = true ]; then
+              current_sha=$(gh api \
+                "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" \
+                --jq .object.sha 2>/dev/null || true)
+              candidate_live=$(gh api \
+                "repos/$GITHUB_REPOSITORY/releases/$candidate_id" \
+                --jq '.tag_name == "nightly" and .draft == false' 2>/dev/null || true)
+              if [ "$current_sha" = "$GITHUB_SHA" ] && [ "$candidate_live" = true ]; then
+                echo "::warning::The publication response failed, but the complete nightly and its tag are verified."
+                cleanup_nightly
+                exit 0
+              fi
+            fi
+            # IDs remain valid if a PATCH changed the release's tag before
+            # returning an error. Retire the candidate before restoring nightly.
+            if ! gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/releases/$candidate_id" \
+                -F draft=true -f tag_name="$candidate" \
+                -f target_commitish="$GITHUB_SHA" >/dev/null; then
+              echo "::error::Could not retire the candidate; the previous release is retained as draft $previous_id."
+              return "$status"
+            fi
+            if [ -n "$previous_id" ]; then
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/releases/$previous_id" \
+                -f tag_name=nightly -F draft=false \
+                -f target_commitish="$GITHUB_SHA" >/dev/null \
+                || echo "::error::Could not restore the previous release $previous_id."
+            fi
+            return "$status"
+          }
+          trap rollback_nightly ERR
+          if [ -n "$previous_id" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$previous_id" \
+              -F draft=true -f tag_name="$previous" \
+              -f target_commitish="$GITHUB_SHA" >/dev/null
+          fi
+          gh release edit "$candidate" \
+            --tag nightly \
+            --draft=false \
+            --prerelease \
+            --title "Nightly $(date -u +%Y-%m-%d)" \
+            --notes "$notes"
+          promoted=true
+          gh api --method PATCH \
+            "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
+            -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          trap - ERR
+          cleanup_nightly

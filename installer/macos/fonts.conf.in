@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>@BUNDLE@/share/fonts</dir>
+  <dir>/System/Library/Fonts</dir>
+  <dir>/Library/Fonts</dir>
+  <dir prefix="home">Library/Fonts</dir>
+  <cachedir prefix="xdg">xd/fontconfig</cachedir>
+  <include ignore_missing="yes">@BUNDLE@/etc/fonts/conf.d</include>
+</fontconfig>

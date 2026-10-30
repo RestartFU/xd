@@ -1,0 +1,110 @@
+package com.restartfu.xd.model
+
+import com.restartfu.xd.protocol.PngAttachment
+
+public enum class TranscriptKind {
+    USER,
+    ASSISTANT,
+    TOOL,
+    SYSTEM,
+}
+
+public data class TranscriptItem(
+    val id: String,
+    val kind: TranscriptKind,
+    val text: String,
+    val atMillis: Long? = null,
+    val label: String? = null,
+    val live: Boolean = false,
+    /** The host's id for the stored row, when a record may rewrite it. */
+    val messageId: Long? = null,
+)
+
+public enum class TodoStatus {
+    PENDING,
+    IN_PROGRESS,
+    COMPLETED,
+}
+
+public data class TodoItem(
+    val id: String,
+    val text: String,
+    val status: TodoStatus,
+)
+
+public data class ChatState(
+    val chatId: String,
+    val title: String = "",
+    val backend: String = "",
+    /** Absent until the chat is loaded; the host then reports the selection. */
+    val model: String? = null,
+    val effort: String? = null,
+    /** `read-only`, `edit` or `full`. Ignored by the host while [plan] is on. */
+    val access: String? = null,
+    val newWorktree: Boolean = false,
+    /** True when this chat is in Git and has not locked its checkout yet. */
+    val canCreateWorktree: Boolean = false,
+    val commands: List<String> = emptyList(),
+    val shortcuts: List<String> = emptyList(),
+    val plan: Boolean = false,
+    val fast: Boolean = false,
+    val queue: List<String> = emptyList(),
+    val draft: String = "",
+    val draftRevision: Long = 0,
+    val draftAttachments: List<PngAttachment> = emptyList(),
+    val working: Boolean = false,
+    val label: String? = null,
+    /** Live turn this state reflects, and how far into it we have applied. */
+    val turnEpoch: String = "",
+    val turnId: Long? = null,
+    val turnSequence: Long = 0,
+    val startedAtMillis: Long? = null,
+    val messages: List<TranscriptItem> = emptyList(),
+    val liveItems: List<TranscriptItem> = emptyList(),
+    val liveSegment: String = "",
+    val todos: List<TodoItem> = emptyList(),
+    val interactions: List<PendingInteraction> = emptyList(),
+    val interactionRevision: Long = 0,
+    val interactionEpoch: String = "",
+    val pendingUser: TranscriptItem? = null,
+    val loading: Boolean = false,
+    val loadingOlder: Boolean = false,
+    val hasOlderMessages: Boolean = false,
+    val error: String? = null,
+) {
+    public val visibleItems: List<TranscriptItem>
+        get() = buildList {
+            addAll(messages)
+            pendingUser?.let(::add)
+            addAll(liveItems)
+            if (liveSegment.isNotEmpty()) {
+                add(
+                    TranscriptItem(
+                        id = "live-segment",
+                        kind = TranscriptKind.ASSISTANT,
+                        text = liveSegment,
+                        live = true,
+                    ),
+                )
+            }
+        }
+}
+
+public data class PendingInteraction(
+    val requestId: String,
+    val method: String,
+    val detail: String,
+    val questions: List<PendingQuestion> = emptyList(),
+    /** The agent's tool asking, such as Bash or Edit, when it says. */
+    val tool: String? = null,
+    /** Why it asks, when that is more than the command itself. */
+    val reason: String? = null,
+    /** The edit it wants to make, as a unified patch. */
+    val patch: String? = null,
+)
+public data class PendingQuestion(
+    val id: String,
+    val text: String,
+    val options: List<String>,
+    val secret: Boolean = false,
+)

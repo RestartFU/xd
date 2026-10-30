@@ -1,0 +1,75 @@
+name: mobile
+
+on:
+  pull_request:
+    paths:
+      - 'mobile/**'
+      - 'host/**'
+      - 'terminal-core/**'
+      - 'desktop/src/protocol.rs'
+      - 'docs/protocol.md'
+      - 'scripts/mobile-*.sh'
+      - 'Makefile'
+      - '.github/workflows/mobile.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    # GitHub's runner, for the reason given in pr.yml.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # GitHub's runner starts with about 14 GB free; the Docker builds need
+      # more, so drop the preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+
+      - name: Test shared code and build Android app
+        run: >-
+          ./scripts/runner-docker-build.sh
+          --target verify
+          --progress plain
+          --file mobile/Dockerfile
+          mobile
+
+  ios:
+    # Apple targets cannot be compiled on Linux, so the Docker job above never
+    # builds iosMain. Without this job the iOS source set would rot silently.
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Limit build parallelism
+        run: |
+          jobs=$(./scripts/runner-jobs.sh --jobs)
+          echo "GRADLE_OPTS=-Dorg.gradle.workers.max=$jobs" >> "$GITHUB_ENV"
+
+      - name: Compile iOS targets and run the shared suite on the simulator
+        working-directory: mobile
+        run: >-
+          ./gradlew --no-daemon
+          :shared:compileKotlinIosArm64
+          :shared:iosSimulatorArm64Test
