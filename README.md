@@ -1,6 +1,6 @@
 # xd
 
-A local-first desktop workspace for user-installed Codex, Claude Code, JCode, and GitHub Copilot CLI.
+A local-first desktop workspace for user-installed Codex, Claude Code, and JCode.
 
 ![xd sessions](docs/assets/xd-sessions.png)
 

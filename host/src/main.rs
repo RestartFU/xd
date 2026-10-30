@@ -1,6 +1,5 @@
 use std::{env, path::PathBuf, process::ExitCode};
 
-use xd_host::StateStore;
 mod daemon;
 
 #[derive(Clone)]
@@ -14,12 +13,6 @@ enum CliCommand {
     Daemon(HostOptions),
     DaemonStatus(HostOptions),
     DaemonStop(HostOptions),
-    RecordAgentSession {
-        database: PathBuf,
-        chat: String,
-        backend: String,
-        notification: String,
-    },
     Version,
     Help,
 }
@@ -38,15 +31,6 @@ fn main() -> ExitCode {
         Ok(CliCommand::Daemon(options)) => finish(daemon::run(options)),
         Ok(CliCommand::DaemonStatus(options)) => finish(daemon::control(options, "daemon-info")),
         Ok(CliCommand::DaemonStop(options)) => finish(daemon::control(options, "daemon-stop")),
-        Ok(CliCommand::RecordAgentSession {
-            database,
-            chat,
-            backend,
-            notification,
-        }) => finish(
-            StateStore::record_agent_notification(&database, &chat, &backend, &notification)
-                .map_err(|error| format!("cannot record agent session: {error}")),
-        ),
         Err(error) => {
             eprintln!("xd-host: {error}");
             eprintln!("{}", usage());
@@ -72,7 +56,6 @@ fn arguments(arguments: impl IntoIterator<Item = String>) -> Result<CliCommand, 
         Some("daemon") => host_arguments(arguments).map(CliCommand::Daemon),
         Some("daemon-status") => host_arguments(arguments).map(CliCommand::DaemonStatus),
         Some("daemon-stop") => host_arguments(arguments).map(CliCommand::DaemonStop),
-        Some("record-agent-session") => record_agent_session_arguments(arguments),
         Some("--version" | "-v") if arguments.next().is_none() => Ok(CliCommand::Version),
         Some("--help" | "-h") if arguments.next().is_none() => Ok(CliCommand::Help),
         Some("serve" | "pair" | "broker") => {
@@ -139,47 +122,6 @@ fn host_arguments(mut arguments: impl Iterator<Item = String>) -> Result<HostOpt
     })
 }
 
-fn record_agent_session_arguments(
-    mut arguments: impl Iterator<Item = String>,
-) -> Result<CliCommand, String> {
-    let mut database = None;
-    let mut chat = None;
-    let mut backend = None;
-    let mut notification = None;
-    while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--database" => {
-                database = Some(PathBuf::from(
-                    arguments.next().ok_or("--database needs a path")?,
-                ));
-            }
-            _ if argument.starts_with("--database=") => {
-                database = Some(PathBuf::from(&argument["--database=".len()..]));
-            }
-            "--chat" => chat = Some(arguments.next().ok_or("--chat needs an id")?),
-            _ if argument.starts_with("--chat=") => {
-                chat = Some(argument["--chat=".len()..].to_owned());
-            }
-            "--backend" => backend = Some(arguments.next().ok_or("--backend needs a name")?),
-            _ if argument.starts_with("--backend=") => {
-                backend = Some(argument["--backend=".len()..].to_owned());
-            }
-            _ if notification.is_none() => notification = Some(argument),
-            _ => return Err("record-agent-session received extra arguments".into()),
-        }
-    }
-    Ok(CliCommand::RecordAgentSession {
-        database: database.ok_or("record-agent-session needs --database")?,
-        chat: chat
-            .filter(|chat| !chat.is_empty())
-            .ok_or("record-agent-session needs --chat")?,
-        backend: backend
-            .filter(|backend| !backend.is_empty())
-            .ok_or("record-agent-session needs --backend")?,
-        notification: notification.ok_or("record-agent-session needs a notification")?,
-    })
-}
-
 fn version_string() -> String {
     option_env!("XD_COMMIT")
         .filter(|commit| !commit.is_empty() && *commit != "development")
@@ -233,21 +175,5 @@ mod tests {
         assert!(arguments(["serve".into(), "--socket=/tmp/xd.sock".into()]).is_err());
         assert!(arguments(["pair".into(), "--port=4444".into()]).is_err());
         assert!(arguments(["broker".into(), "--data=/state/xd".into()]).is_err());
-    }
-
-    #[test]
-    fn parses_the_internal_agent_session_recorder_command() {
-        let CliCommand::RecordAgentSession { chat, backend, .. } = arguments([
-            "record-agent-session".into(),
-            "--database=/state/chats.db".into(),
-            "--chat=chat-1".into(),
-            "--backend=codex".into(),
-            r#"{"type":"agent-turn-complete"}"#.into(),
-        ])
-        .unwrap() else {
-            panic!("expected recorder command");
-        };
-        assert_eq!(chat, "chat-1");
-        assert_eq!(backend, "codex");
     }
 }

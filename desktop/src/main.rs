@@ -39,7 +39,7 @@ use xd_desktop::{
     markdown,
     model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, ToolView, Worktree},
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
-    session_host::{AgentCommand, SessionHost, SshCommand, TMUX_CONFIGURATION},
+    session_host::{SessionHost, SshCommand, TMUX_CONFIGURATION},
     session_runtime::{
         SessionEndpoint, SessionEvent, SessionEventKind, SessionEventReceiver, SessionRuntime,
     },
@@ -459,7 +459,6 @@ fn agent_icon(agent: AgentCli) -> &'static str {
         AgentCli::Codex => CODEX_ICON,
         AgentCli::Claude => CLAUDE_ICON,
         AgentCli::Jcode => JCODE_ICON,
-        AgentCli::Copilot => COPILOT_ICON,
     }
 }
 
@@ -760,56 +759,6 @@ impl TerminalPanel {
 #[allow(dead_code)]
 fn terminal_tab_title(agent: Option<AgentCli>) -> String {
     agent.map(AgentCli::label).unwrap_or("Terminal").to_owned()
-}
-
-fn stable_agent_session_id(terminal_id: &str) -> String {
-    fn hash(seed: u64, value: &str) -> u64 {
-        value.as_bytes().iter().fold(seed, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        })
-    }
-
-    let high = hash(0xcbf29ce484222325, terminal_id);
-    let low = hash(0x84222325cbf29ce4, terminal_id);
-    let mut bytes = ((u128::from(high) << 64) | u128::from(low)).to_be_bytes();
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
-}
-
-#[allow(dead_code)]
-fn terminal_session_id(
-    chat_id: &str,
-    agent: Option<AgentCli>,
-    reuse: bool,
-    unique: u128,
-) -> String {
-    if agent.is_some() || reuse {
-        format!(
-            "{chat_id}:{}",
-            agent.map(AgentCli::protocol_name).unwrap_or("terminal")
-        )
-    } else {
-        format!("{chat_id}:terminal:{unique}")
-    }
 }
 
 fn jcode_terminal_screen_working(screen: &str) -> Option<bool> {
@@ -4749,21 +4698,13 @@ impl XdDesktop {
                 .as_ref()
                 .is_some_and(|panel| panel.selected.as_deref() == terminal_id)
             && terminal_scroll_is_at_bottom(&self.terminal_scroll);
-        let agent = self
-            .endpoint_model(endpoint)
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .and_then(|chat| AgentCli::from_backend(&chat.backend));
         let key = (endpoint, chat_id.clone());
         let needs_hydration = !active && !self.terminal_panel_cache.contains_key(&key);
         let panel = if active {
             self.terminal_panel.as_mut().expect("active panel checked")
         } else {
             self.terminal_panel_cache.entry(key).or_insert_with(|| {
-                let mut panel = agent
-                    .map(|agent| Self::new_agent_terminal_panel(chat_id.clone(), agent))
-                    .unwrap_or_else(|| Self::new_terminal_panel(chat_id.clone()));
+                let mut panel = Self::new_terminal_panel(chat_id.clone());
                 panel.auto_open = false;
                 panel
             })
@@ -5928,34 +5869,12 @@ impl XdDesktop {
         }
     }
 
-    fn new_agent_terminal_panel(chat_id: String, agent: AgentCli) -> TerminalPanel {
-        TerminalPanel {
-            agent: Some(agent),
-            allow_agent_tabs: true,
-            ..Self::new_terminal_panel(chat_id)
-        }
-    }
-
     fn stash_terminal_panel(&mut self) {
         let Some(panel) = self.terminal_panel.take() else {
             return;
         };
         self.terminal_panel_cache
             .insert((self.active_endpoint, panel.chat_id.clone()), panel);
-    }
-
-    fn restore_terminal_panel(&mut self, chat_id: &str, agent: AgentCli) -> bool {
-        let Some(mut panel) = self
-            .terminal_panel_cache
-            .remove(&(self.active_endpoint, chat_id.to_owned()))
-        else {
-            return false;
-        };
-        panel.agent = Some(agent);
-        panel.allow_agent_tabs = true;
-        panel.auto_open = !panel.has_requested_session();
-        self.terminal_panel = Some(panel);
-        true
     }
 
     fn stop_terminal_sessions_for_chats(
@@ -5998,7 +5917,7 @@ impl XdDesktop {
                 *activity_endpoint != endpoint || (!refresh_all && live_chats.contains(chat_id))
             });
 
-        for (chat_id, agent) in chats {
+        for (chat_id, _agent) in chats {
             let active = endpoint == self.active_endpoint
                 && self
                     .terminal_panel
@@ -6014,7 +5933,7 @@ impl XdDesktop {
             let key = (endpoint, chat_id.clone());
             let missing = !self.terminal_panel_cache.contains_key(&key);
             if missing {
-                let mut panel = Self::new_agent_terminal_panel(chat_id.clone(), agent);
+                let mut panel = Self::new_terminal_panel(chat_id.clone());
                 panel.auto_open = false;
                 panel.loading = false;
                 self.terminal_panel_cache.insert(key.clone(), panel);
@@ -6356,88 +6275,6 @@ impl XdDesktop {
         }
     }
 
-    #[allow(dead_code)]
-    fn terminal_agent_command(&self, agent: Option<AgentCli>, terminal_id: &str) -> AgentCommand {
-        let remote = self.active_endpoint == ChatEndpoint::Remote;
-        match agent {
-            Some(AgentCli::Codex) => {
-                let program = if remote {
-                    "codex".into()
-                } else {
-                    env::var("XD_CODEX_EXECUTABLE").unwrap_or_else(|_| "codex".into())
-                };
-                let mut arguments = vec![
-                    "--no-alt-screen".to_owned(),
-                    "-c".to_owned(),
-                    "tui.terminal_title=[\"run-state\"]".to_owned(),
-                    "-c".to_owned(),
-                    "tui.terminal_resize_reflow_max_rows=5000".to_owned(),
-                ];
-                if self.settings.allow_all_permissions {
-                    arguments.push("--dangerously-bypass-approvals-and-sandbox".into());
-                }
-                let mut resume_arguments = vec!["resume".to_owned(), "--last".to_owned()];
-                resume_arguments.extend(arguments.clone());
-                AgentCommand::new(program, arguments)
-                    .resume_with(resume_arguments)
-                    .record_codex_session()
-                    .discover_in_user_shell("Codex")
-            }
-            Some(AgentCli::Claude) => {
-                let executable = if remote {
-                    "claude".into()
-                } else {
-                    env::var("XD_CLAUDE_EXECUTABLE").unwrap_or_else(|_| "claude".into())
-                };
-                let session_id = stable_agent_session_id(terminal_id);
-                let mut common_arguments = Vec::new();
-                if self.settings.allow_all_permissions {
-                    common_arguments.push("--dangerously-skip-permissions".into());
-                }
-                let mut arguments = vec!["--session-id".to_owned(), session_id.clone()];
-                arguments.extend(common_arguments.clone());
-                let mut resume_arguments = vec!["--resume".to_owned(), session_id];
-                resume_arguments.extend(common_arguments);
-                AgentCommand::new(executable, arguments)
-                    .resume_with(resume_arguments)
-                    .unset_environment("TMUX")
-                    .discover_in_user_shell("Claude Code")
-            }
-            Some(AgentCli::Jcode) => AgentCommand::new(
-                if remote {
-                    "jcode".into()
-                } else {
-                    env::var("XD_JCODE_EXECUTABLE").unwrap_or_else(|_| "jcode".into())
-                },
-                ["--no-update"],
-            )
-            .resume_with(["--no-update", "--resume"])
-            .discover_in_user_shell("JCode"),
-            Some(AgentCli::Copilot) => {
-                let executable = if remote {
-                    "copilot".into()
-                } else {
-                    env::var("XD_COPILOT_EXECUTABLE").unwrap_or_else(|_| "copilot".into())
-                };
-                let session_id = stable_agent_session_id(terminal_id);
-                let mut arguments = vec![
-                    "--no-auto-update".to_owned(),
-                    "--no-banner".to_owned(),
-                    "--no-mouse".to_owned(),
-                    "--session-id".to_owned(),
-                    session_id,
-                ];
-                if self.settings.allow_all_permissions {
-                    arguments.push("--allow-all".into());
-                }
-                AgentCommand::new(executable, arguments.clone())
-                    .resume_with(arguments)
-                    .discover_in_user_shell("GitHub Copilot CLI")
-            }
-            None => AgentCommand::user_shell(),
-        }
-    }
-
     fn resize_terminal_viewport(&mut self, columns: usize, rows: usize, cx: &mut Context<Self>) {
         let Some(panel) = &mut self.terminal_panel else {
             return;
@@ -6611,7 +6448,7 @@ impl XdDesktop {
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
-        if panel.opening || !panel.accepts_agent(agent) {
+        if agent.is_some() || panel.opening || !panel.accepts_agent(agent) {
             return;
         }
         let (columns, rows) = panel.viewport.unwrap_or((120, 32));
@@ -6623,25 +6460,15 @@ impl XdDesktop {
         let result = self
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|host| match agent {
-                Some(agent) => host.terminal_open_agent(
-                    &chat_id,
-                    columns,
-                    rows,
-                    reuse,
-                    agent.protocol_name(),
-                    self.settings.allow_all_permissions,
-                    colors.text,
-                    colors.background,
-                ),
-                None => host.terminal_open(
+            .and_then(|host| {
+                host.terminal_open(
                     &chat_id,
                     columns,
                     rows,
                     reuse,
                     colors.text,
                     colors.background,
-                ),
+                )
             });
         match result {
             Err(error) => {
@@ -8476,11 +8303,7 @@ impl XdDesktop {
     }
 
     fn native_session(&self) -> bool {
-        self.model
-            .selected_chat
-            .as_ref()
-            .and_then(|id| self.model.session_modes.get(id))
-            .is_some_and(|mode| mode == "chat")
+        self.model.selected_chat.is_some()
     }
 
     fn open_minimal_session(
@@ -8492,11 +8315,7 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         self.select_minimal_session(project_id, chat_id, agent, cx);
-        let focus = if self.native_session() {
-            self.composer_input.read(cx).focus_handle(cx)
-        } else {
-            self.terminal_input.read(cx).focus_handle(cx)
-        };
+        let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
         cx.notify();
     }
@@ -8509,10 +8328,6 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) {
         self.minimal_new_tab_open = false;
-        let same_panel = self
-            .terminal_panel
-            .as_ref()
-            .is_some_and(|panel| panel.chat_id == chat_id && panel.agent == Some(agent));
         if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
             self.native_pane = NativePane::Chat;
             self.diff_generation = self.diff_generation.saturating_add(1);
@@ -8532,34 +8347,15 @@ impl XdDesktop {
             chat_id: chat_id.clone(),
             agent,
         };
-        if self.native_session() {
-            self.stash_terminal_panel();
-            self.sync_terminal_input_mode(cx);
-            self.transcript_loading = !self.transcript_loaded;
-            self.request_chat(&chat_id);
-            self.request_messages(&chat_id);
-            self.list_tree_directory(String::new(), cx);
-            if let Some(host) = self.active_host() {
-                let _ = host.git_state(&chat_id);
-            }
-            cx.notify();
-            return;
+        self.stash_terminal_panel();
+        self.sync_terminal_input_mode(cx);
+        self.transcript_loading = !self.transcript_loaded;
+        self.request_chat(&chat_id);
+        self.request_messages(&chat_id);
+        self.list_tree_directory(String::new(), cx);
+        if let Some(host) = self.active_host() {
+            let _ = host.git_state(&chat_id);
         }
-        if !same_panel {
-            self.stash_terminal_panel();
-            let restored = self.restore_terminal_panel(&chat_id, agent);
-            if !restored {
-                self.terminal_panel = Some(Self::new_agent_terminal_panel(chat_id, agent));
-            }
-            self.sync_terminal_input_mode(cx);
-            self.terminal_scroll.scroll_to_bottom();
-        }
-        // Tree hydration pre-creates empty cached panels, so both a new panel
-        // and a restored panel need the selected chat snapshot before their
-        // terminal can use its working directory. Re-running this for an
-        // already selected panel also makes clicking a loading card retry the
-        // request instead of leaving it stuck forever.
-        self.refresh_terminal_sessions(cx);
         cx.notify();
     }
 
@@ -8688,7 +8484,7 @@ impl XdDesktop {
                 .justify_center()
                 .text_sm()
                 .text_color(rgb(colors.muted))
-                .child("Choose a session to start its CLI.")
+                .child("Open a terminal to start a shell.")
                 .into_any_element();
         };
 
@@ -8696,7 +8492,6 @@ impl XdDesktop {
         let panel_loading = panel.loading;
         let panel_is_empty = panel.sessions.is_empty();
         let panel_error = panel.error.clone();
-        let allow_agent_tabs = panel.allow_agent_tabs;
         let output = panel
             .selected()
             .map(|session| session.screen.rendered_with_cursor());
@@ -9030,125 +8825,7 @@ impl XdDesktop {
                                 }))
                                 .child(icon(TERMINAL_ICON, 15.0, colors.text))
                                 .child("Terminal"),
-                        )
-                        .when(allow_agent_tabs, |menu| {
-                            menu.child(
-                                div()
-                                    .id("minimal-new-codex-tab")
-                                    .w_full()
-                                    .px_3()
-                                    .h(px(32.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .rounded(px(5.0))
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(colors.text))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_minimal_terminal_tab(
-                                            Some(AgentCli::Codex),
-                                            window,
-                                            cx,
-                                        )
-                                    }))
-                                    .child(
-                                        svg()
-                                            .path(CODEX_ICON)
-                                            .size(px(15.0))
-                                            .text_color(rgb(colors.text)),
-                                    )
-                                    .child("Codex"),
-                            )
-                            .child(
-                                div()
-                                    .id("minimal-new-claude-tab")
-                                    .w_full()
-                                    .px_3()
-                                    .h(px(32.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .rounded(px(5.0))
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(colors.text))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_minimal_terminal_tab(
-                                            Some(AgentCli::Claude),
-                                            window,
-                                            cx,
-                                        )
-                                    }))
-                                    .child(
-                                        svg()
-                                            .path(CLAUDE_ICON)
-                                            .size(px(15.0))
-                                            .text_color(rgb(colors.text)),
-                                    )
-                                    .child("Claude Code"),
-                            )
-                            .child(
-                                div()
-                                    .id("minimal-new-jcode-tab")
-                                    .w_full()
-                                    .px_3()
-                                    .h(px(32.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .rounded(px(5.0))
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(colors.text))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_minimal_terminal_tab(
-                                            Some(AgentCli::Jcode),
-                                            window,
-                                            cx,
-                                        )
-                                    }))
-                                    .child(
-                                        svg()
-                                            .path(JCODE_ICON)
-                                            .size(px(15.0))
-                                            .text_color(rgb(colors.text)),
-                                    )
-                                    .child("JCode"),
-                            )
-                            .child(
-                                div()
-                                    .id("minimal-new-copilot-tab")
-                                    .w_full()
-                                    .px_3()
-                                    .h(px(32.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .rounded(px(5.0))
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(colors.text))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_minimal_terminal_tab(
-                                            Some(AgentCli::Copilot),
-                                            window,
-                                            cx,
-                                        )
-                                    }))
-                                    .child(
-                                        svg()
-                                            .path(COPILOT_ICON)
-                                            .size(px(15.0))
-                                            .text_color(rgb(colors.text)),
-                                    )
-                                    .child("GitHub Copilot"),
-                            )
-                        }),
+                        ),
                 )
             })
             .into_any_element()
@@ -10334,7 +10011,7 @@ impl XdDesktop {
                                     .line_height(px(21.0))
                                     .text_color(rgb(colors.muted))
                                     .child(
-                                        "Create a workspace, then start a Codex, Claude, JCode, or Copilot session in it. Sessions keep running when you close the window.",
+                                        "Create a workspace, then start a Codex, Claude, or JCode session in it. Sessions keep running when you close the window.",
                                     ),
                             )
                             .child(
@@ -10418,7 +10095,7 @@ impl XdDesktop {
                                             .text_size(px(13.0))
                                             .text_color(rgb(colors.muted))
                                             .child(
-                                                "No sessions yet. Start one with Codex, Claude, JCode, or Copilot.",
+                                                "No sessions yet. Start one with Codex, Claude, or JCode.",
                                             ),
                                     )
                                 },
@@ -13075,12 +12752,7 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let toolbar = self.render_minimal_context_toolbar(colors, cx);
-        let native = self.native_session();
-        let content = if native {
-            self.render_native_workspace(colors, window, cx)
-        } else {
-            self.render_minimal_terminal(colors, window, cx)
-        };
+        let content = self.render_native_workspace(colors, window, cx);
 
         div()
             .size_full()
@@ -13094,7 +12766,6 @@ impl XdDesktop {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
-                    .when(!native, |content| content.p_3())
                     .bg(rgb(colors.background))
                     .child(content),
             )
@@ -14478,7 +14149,6 @@ impl XdDesktop {
                                     AgentCli::Codex,
                                     AgentCli::Claude,
                                     AgentCli::Jcode,
-                                    AgentCli::Copilot,
                                 ]
                                 .into_iter()
                                 .enumerate()
@@ -14519,7 +14189,6 @@ impl XdDesktop {
                                                     AgentCli::Codex => CODEX_ICON,
                                                     AgentCli::Claude => CLAUDE_ICON,
                                                     AgentCli::Jcode => JCODE_ICON,
-                                                    AgentCli::Copilot => COPILOT_ICON,
                                                 })
                                                 .size(px(18.0))
                                                 .text_color(rgb(colors.text)),
@@ -14532,7 +14201,7 @@ impl XdDesktop {
                             div()
                                 .text_xs()
                                 .text_color(rgb(colors.muted))
-                                .child("The selected CLI opens directly in this project."),
+                                .child("Start a chat with the selected assistant."),
                         )
                         .child(
                             div()
@@ -15705,6 +15374,16 @@ fn strip_source_build_controls(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    impl XdDesktop {
+        fn new_agent_terminal_panel(chat_id: String, agent: AgentCli) -> TerminalPanel {
+            TerminalPanel {
+                agent: Some(agent),
+                allow_agent_tabs: true,
+                ..Self::new_terminal_panel(chat_id)
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -15906,32 +15585,6 @@ mod tests {
             "wrapped text was painted into a card only {}px tall",
             f32::from(bounds.size.height)
         );
-    }
-
-    #[test]
-    fn agent_tabs_keep_one_stable_identity_per_backend() {
-        assert_eq!(
-            terminal_session_id("chat-1", Some(AgentCli::Claude), false, 1),
-            terminal_session_id("chat-1", Some(AgentCli::Claude), false, 2)
-        );
-        assert_ne!(
-            terminal_session_id("chat-1", Some(AgentCli::Claude), false, 1),
-            terminal_session_id("chat-1", Some(AgentCli::Codex), false, 1)
-        );
-        assert_ne!(
-            terminal_session_id("chat-1", None, false, 1),
-            terminal_session_id("chat-1", None, false, 2)
-        );
-    }
-
-    #[test]
-    fn claude_session_identity_is_stable_and_uuid_shaped() {
-        let first = stable_agent_session_id("chat-1:claude");
-        let second = stable_agent_session_id("chat-1:claude");
-        assert_eq!(first, second);
-        assert_eq!(first.len(), 36);
-        assert_eq!(&first[14..15], "4");
-        assert!(matches!(&first[19..20], "8" | "9" | "a" | "b"));
     }
 
     #[test]
@@ -16526,7 +16179,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn switching_sessions_reuses_the_hydrated_terminal_panel(cx: &mut gpui::TestAppContext) {
+    fn switching_sessions_uses_native_chat_and_stashes_shell_panes(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![
@@ -16574,11 +16227,10 @@ mod tests {
             desktop.select_minimal_session("project".into(), "chat-b".into(), AgentCli::Claude, cx);
             desktop.select_minimal_session("project".into(), "chat-a".into(), AgentCli::Codex, cx);
 
-            let panel = desktop.terminal_panel.as_ref().expect("restored panel");
-            assert_eq!(panel.chat_id, "chat-a");
-            assert!(panel.loading); // Cached output remains visible while the daemon refreshes it.
-            assert_eq!(panel.selected.as_deref(), Some("terminal-a"));
-            assert_eq!(panel.sessions[0].sequence, Some(7));
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat-a"));
+            assert!(desktop.native_session());
+            assert!(desktop.terminal_panel.is_none());
+            let panel = &desktop.terminal_panel_cache[&(ChatEndpoint::Local, "chat-a".into())];
             assert_eq!(panel.sessions[0].screen.rendered().text, "cached output");
             desktop.terminal_panel = None;
             desktop.terminal_panel_cache.clear();
@@ -16696,7 +16348,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn session_click_focuses_the_agent_terminal(cx: &mut gpui::TestAppContext) {
+    fn session_click_focuses_the_native_composer(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.model.chats = vec![ChatSummary {
@@ -16719,8 +16371,8 @@ mod tests {
 
             let composer_focus = desktop.composer_input.read(cx).focus_handle(cx);
             let terminal_focus = desktop.terminal_input.read(cx).focus_handle(cx);
-            assert!(!composer_focus.is_focused(window));
-            assert!(terminal_focus.is_focused(window));
+            assert!(composer_focus.is_focused(window));
+            assert!(!terminal_focus.is_focused(window));
             desktop.terminal_panel = None;
             desktop.terminal_panel_cache.clear();
         });
@@ -16819,7 +16471,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn new_chat_waits_for_tree_session_mode(cx: &mut gpui::TestAppContext) {
+    fn new_chat_waits_for_tree_before_opening_native_chat(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             for mode in ["chat", "terminal"] {
@@ -16860,23 +16512,21 @@ mod tests {
                 );
                 assert_eq!(desktop.pending_minimal_session, None);
                 assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat"));
-                assert_eq!(desktop.native_session(), mode == "chat");
-                assert_eq!(desktop.terminal_panel.is_none(), mode == "chat");
-                if mode == "chat" {
-                    desktop.handle_reply(
-                        RequestKind::Messages {
-                            chat_id: "chat".into(),
-                            cursor: MessageCursor::Tail,
-                        },
-                        serde_json::json!({"ok": true, "messages": []})
-                            .as_object()
-                            .unwrap()
-                            .clone(),
-                        None,
-                        cx,
-                    );
-                    assert!(desktop.transcript_loaded);
-                }
+                assert!(desktop.native_session());
+                assert!(desktop.terminal_panel.is_none());
+                desktop.handle_reply(
+                    RequestKind::Messages {
+                        chat_id: "chat".into(),
+                        cursor: MessageCursor::Tail,
+                    },
+                    serde_json::json!({"ok": true, "messages": []})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                assert!(desktop.transcript_loaded);
                 desktop.terminal_panel = None;
                 desktop.terminal_panel_cache.clear();
             }
@@ -16884,7 +16534,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn selecting_a_tree_primed_session_waits_for_its_workdir(cx: &mut gpui::TestAppContext) {
+    fn selecting_a_tree_primed_session_opens_native_chat(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![ChatSummary {
@@ -16910,20 +16560,10 @@ mod tests {
 
             desktop.select_minimal_session("project".into(), "chat".into(), AgentCli::Codex, cx);
 
-            let panel = desktop.terminal_panel.as_mut().unwrap();
-            assert!(panel.loading);
-            assert_eq!(panel.error, None);
-            assert!(panel.sessions.is_empty());
-
-            // Clicking the same card retries hydration and clears the stale
-            // error produced by older builds instead of preserving it.
-            panel.loading = false;
-            panel.error = Some("The session working directory is still loading.".into());
-            desktop.select_minimal_session("project".into(), "chat".into(), AgentCli::Codex, cx);
-            let panel = desktop.terminal_panel.as_ref().unwrap();
-            assert!(panel.loading);
-            assert_eq!(panel.error, None);
-            desktop.terminal_panel = None;
+            assert!(desktop.terminal_panel.is_none());
+            assert!(desktop.native_session());
+            assert!(matches!(desktop.native_pane, NativePane::Chat));
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat"));
             desktop.terminal_panel_cache.clear();
         });
     }
@@ -17772,47 +17412,6 @@ mod tests {
     }
 
     #[test]
-    fn minimal_cli_panel_accepts_shell_and_agent_tabs() {
-        let mut panel = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Codex);
-
-        for (terminal, agent) in [
-            ("shell", None),
-            ("codex", Some("codex")),
-            ("claude", Some("claude")),
-            ("jcode", Some("jcode")),
-            ("copilot", Some("copilot")),
-        ] {
-            let mut opened = serde_json::json!({
-                "chat": "chat",
-                "terminal": terminal,
-                "title": terminal,
-                "columns": 80,
-                "rows": 24,
-                "sequence": 0,
-            });
-            if let Some(agent) = agent {
-                opened["agent"] = serde_json::Value::String(agent.into());
-            }
-            assert!(XdDesktop::apply_terminal_opened_event(&mut panel, &opened));
-        }
-
-        assert_eq!(
-            panel
-                .sessions
-                .iter()
-                .map(|session| session.agent)
-                .collect::<Vec<_>>(),
-            [
-                None,
-                Some(AgentCli::Codex),
-                Some(AgentCli::Claude),
-                Some(AgentCli::Jcode),
-                Some(AgentCli::Copilot),
-            ]
-        );
-    }
-
-    #[test]
     fn unrelated_tabs_do_not_suppress_the_route_agent_auto_open() {
         let mut panel = XdDesktop::new_agent_terminal_panel("chat".into(), AgentCli::Codex);
         panel.opening = true;
@@ -17937,37 +17536,6 @@ mod tests {
                 .as_deref(),
             Some("shell")
         );
-    }
-
-    #[test]
-    fn minimal_terminal_plus_opens_an_agent_tab_menu() {
-        let source = include_str!("main.rs");
-        let terminal = source
-            .split_once("fn render_minimal_terminal(")
-            .expect("minimal terminal renderer")
-            .1
-            .split_once("fn render_minimal_titlebar")
-            .expect("end of minimal terminal renderer")
-            .0;
-
-        assert!(terminal.contains("minimal-new-tab-menu"));
-        for (id, label) in [
-            ("minimal-new-shell-tab", "Terminal"),
-            ("minimal-new-codex-tab", "Codex"),
-            ("minimal-new-claude-tab", "Claude Code"),
-            ("minimal-new-jcode-tab", "JCode"),
-            ("minimal-new-copilot-tab", "GitHub Copilot"),
-        ] {
-            assert!(terminal.contains(id), "missing {label} tab choice");
-            assert!(terminal.contains(&format!(".child(\"{label}\")")));
-        }
-        assert!(terminal.contains("this.toggle_minimal_new_tab_menu(window, cx)"));
-        assert!(terminal.contains("this.open_minimal_terminal_tab(None, window, cx)"));
-        assert!(terminal.contains("Some(AgentCli::Codex)"));
-        assert!(terminal.contains("Some(AgentCli::Claude)"));
-        assert!(terminal.contains("Some(AgentCli::Jcode)"));
-        assert!(terminal.contains("Some(AgentCli::Copilot)"));
-        assert!(terminal.contains(".absolute()"));
     }
 
     #[test]
@@ -18571,22 +18139,6 @@ mod tests {
             .0;
         assert!(!interrupt.contains("TextSelection::selected"));
         assert!(interrupt.contains("self.terminal_bytes(vec![3], cx)"));
-    }
-
-    #[test]
-    fn plain_terminal_tabs_delegate_startup_to_the_users_shell() {
-        let production = include_str!("main.rs");
-        let command = production
-            .split_once("fn terminal_agent_command(")
-            .expect("terminal command builder")
-            .1
-            .split_once("fn resize_terminal_viewport(")
-            .expect("end of terminal command builder")
-            .0;
-
-        assert!(command.contains("None => AgentCommand::user_shell()"));
-        assert!(!command.contains("\"sh\".into()"));
-        assert!(!command.contains("[\"-l\"]"));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 This directory contains xd's production Rust/GPUI desktop client for Linux,
 macOS, and Windows.
 
-The application presents workspace-organized Codex, Claude Code, JCode, GitHub
-Copilot, and terminal sessions. It owns navigation, cached UI state, terminal emulation, chat input,
+The application presents workspace-organized Codex, Claude Code, and JCode
+chats with optional shell panes. It owns navigation, cached UI state, terminal emulation, chat input,
 themes, diffs, and the desktop window. Terminal escape processing is backed by
 the in-process `alacritty_terminal` crate. Persistent chat/workspace
 state and agent orchestration are provided by the bundled `xd-host` process.
@@ -20,8 +20,9 @@ and leaves work running.
 - Remote desktop and Android connect directly to the daemon's TLS listener.
   Settings → **Pair a device** starts the listener, creates a one-use code,
   and copies an invitation containing the endpoint and certificate fingerprint.
-- New Codex, Claude Code, and JCode sessions open in native chat. Existing
-  terminal sessions and GitHub Copilot retain their CLI interface.
+- Codex, Claude Code, and JCode sessions open in native chat. Legacy terminal
+  chats and their saved history are deleted automatically when the database opens.
+  Their worktrees are retained.
 - Codex chat uses app-server for streaming, conversation resume, approvals,
   and questions. Optional shells are owned by the daemon too.
 
@@ -72,7 +73,7 @@ Every push to `master` replaces the rolling Linux, macOS, and Windows nightly. T
 releases use the stable application id and install beside the nightly.
 
 The bundle includes the GPUI desktop, `xd-host`, and tmux. Install Codex,
-Claude Code, JCode, and/or GitHub Copilot CLI separately and make the commands
+Claude Code, and/or JCode separately and make the commands
 available on `PATH`.
 Stable and nightly installation commands are in the main
 [README](../README.md#install).

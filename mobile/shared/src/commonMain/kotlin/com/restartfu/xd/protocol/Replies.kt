@@ -22,7 +22,7 @@ public data class ChatSummaryReply(
     @SerialName("terminal_working")
     val terminalWorking: Boolean = false,
     @SerialName("session_mode")
-    val sessionMode: String = "terminal",
+    val sessionMode: String = "chat",
 )
 
 @Serializable

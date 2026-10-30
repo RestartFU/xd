@@ -68,7 +68,6 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
     ("claude-opus-4-8", "Claude Opus 4.8", 0),
 ];
 const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
-const COPILOT_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 #[derive(Debug, Error)]
@@ -95,7 +94,6 @@ pub enum StorageError {
 
 pub struct StateStore {
     database: Mutex<Connection>,
-    database_path: PathBuf,
     workspace_root: PathBuf,
     paste_root: PathBuf,
 }
@@ -354,7 +352,6 @@ impl StateStore {
         }
         Ok(Self {
             database: Mutex::new(database),
-            database_path: database_path.to_owned(),
             workspace_root: workspace_root.into(),
             paste_root: database_path
                 .parent()
@@ -1146,15 +1143,6 @@ impl StateStore {
                 }).collect::<Vec<_>>(),
                 "efforts": [],
             }),
-            json!({
-                "id": "copilot",
-                "name": "GitHub Copilot",
-                "default_model": "default",
-                "models": COPILOT_MODELS.iter().map(|(id, name, context_window)| {
-                    json!({"id": id, "name": name, "context_window": context_window})
-                }).collect::<Vec<_>>(),
-                "efforts": [],
-            }),
         ];
         Ok(json!({"ok": true, "backends": backends}))
     }
@@ -1577,86 +1565,6 @@ impl StateStore {
         session_id: &str,
     ) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        database.execute(
-            "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
-             ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
-            params![chat_id, backend, session_id],
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn database_path(&self) -> &Path {
-        &self.database_path
-    }
-
-    pub(crate) fn session_id(
-        &self,
-        chat_id: &str,
-        backend: &str,
-    ) -> Result<Option<String>, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        database
-            .query_row(
-                "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = ?",
-                params![chat_id, backend],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .map(Option::flatten)
-            .map_err(StorageError::from)
-    }
-
-    pub(crate) fn clear_session_if(
-        &self,
-        chat_id: &str,
-        backend: &str,
-        session_id: &str,
-    ) -> Result<(), StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        database.execute(
-            "DELETE FROM chat_sessions WHERE chat_id = ? AND backend = ? AND session_id = ?",
-            params![chat_id, backend, session_id],
-        )?;
-        Ok(())
-    }
-
-    pub fn record_agent_notification(
-        database_path: &Path,
-        chat_id: &str,
-        backend: &str,
-        notification: &str,
-    ) -> Result<(), StorageError> {
-        if backend != "codex" {
-            return Err(StorageError::InvalidRequest(
-                "Only Codex completion notifications contain a generated session id.".into(),
-            ));
-        }
-        let notification: Value = serde_json::from_str(notification).map_err(|_| {
-            StorageError::InvalidRequest("The agent session notification is invalid.".into())
-        })?;
-        if notification.get("type").and_then(Value::as_str) != Some("agent-turn-complete") {
-            return Err(StorageError::InvalidRequest(
-                "The agent session notification has an unsupported type.".into(),
-            ));
-        }
-        let session_id = notification
-            .get("thread-id")
-            .and_then(Value::as_str)
-            .filter(|session_id| !session_id.is_empty() && session_id.len() <= 256)
-            .ok_or_else(|| {
-                StorageError::InvalidRequest(
-                    "The agent session notification has no valid thread id.".into(),
-                )
-            })?;
-        let database =
-            Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(
-                |source| StorageError::Open {
-                    path: database_path.to_owned(),
-                    source,
-                },
-            )?;
-        database.busy_timeout(Duration::from_secs(5))?;
-        database.pragma_update(None, "foreign_keys", true)?;
         database.execute(
             "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
              ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
@@ -2979,6 +2887,7 @@ impl StateStore {
             .map(str::to_owned)
             .or(folder_values.backend)
             .unwrap_or(defaults.0);
+        validate_backend(&backend)?;
         let model = if backend_override.is_some() {
             Some(default_model(&backend).to_owned())
         } else {
@@ -3092,7 +3001,7 @@ impl StateStore {
                 now,
                 now,
                 now * 1_000_000,
-                if backend == "copilot" { "terminal" } else { "chat" },
+                "chat",
             ],
         )?;
         transaction.commit()?;
@@ -3487,6 +3396,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_chat_sort_order(database)?;
             ensure_shared_events_table(database)?;
             disable_claude_mode(database)?;
+            remove_terminal_chats(database)?;
             return Ok(());
         }
     }
@@ -3506,7 +3416,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            claude_mode INTEGER NOT NULL DEFAULT 0, queued TEXT, new_worktree INTEGER NOT NULL DEFAULT 0, \
            terminal_open INTEGER NOT NULL DEFAULT 0, diff_open INTEGER NOT NULL DEFAULT 0, \
            resume_after_restart INTEGER NOT NULL DEFAULT 0, original_workdir TEXT, \
-           session_mode TEXT NOT NULL DEFAULT 'terminal', \
+           session_mode TEXT NOT NULL DEFAULT 'chat', \
            host_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
            partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, \
@@ -3577,6 +3487,24 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_chat_sort_order(database)?;
     ensure_shared_events_table(database)?;
     disable_claude_mode(database)?;
+    remove_terminal_chats(database)?;
+    Ok(())
+}
+
+fn remove_terminal_chats(database: &Connection) -> Result<(), StorageError> {
+    let transaction = database.unchecked_transaction()?;
+    // Cascading foreign keys also remove messages and backend session records.
+    // Worktrees belong to the user and are retained independently of chat history.
+    transaction.execute("DELETE FROM chats WHERE session_mode = 'terminal'", [])?;
+    transaction.execute(
+        "UPDATE workspace_folders SET backend = NULL, model = NULL WHERE backend = 'copilot'",
+        [],
+    )?;
+    transaction.execute(
+        "UPDATE agent_defaults SET backend = 'codex', model = 'gpt-5.6-sol' WHERE backend = 'copilot'",
+        [],
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -4242,7 +4170,7 @@ fn catalog_backend(
 }
 
 fn validate_backend(backend: &str) -> Result<(), StorageError> {
-    if matches!(backend, "codex" | "claude" | "jcode" | "copilot") {
+    if matches!(backend, "codex" | "claude" | "jcode") {
         Ok(())
     } else {
         Err(StorageError::InvalidRequest("No such assistant.".into()))
@@ -4252,7 +4180,7 @@ fn validate_backend(backend: &str) -> Result<(), StorageError> {
 fn default_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
-        "jcode" | "copilot" => "default",
+        "jcode" => "default",
         _ => "gpt-5.6-sol",
     }
 }
@@ -4271,7 +4199,6 @@ fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)]
         "codex" => CODEX_MODELS,
         "claude" => CLAUDE_MODELS,
         "jcode" => JCODE_MODELS,
-        "copilot" => COPILOT_MODELS,
         _ => &[],
     }
 }
@@ -5969,6 +5896,109 @@ mod tests {
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
 
     #[test]
+    fn opening_database_deletes_only_terminal_chats_and_their_history() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let native = store
+            .new_chat(&json!({"folder": folder, "backend": "codex"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let legacy = store
+            .new_chat(&json!({"folder": folder, "backend": "claude"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let worktree = fixture.workspaces.join("retained-worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        {
+            let db = store.database.lock().unwrap();
+            db.execute(
+                "UPDATE chats SET session_mode = 'terminal', workdir = ? WHERE id = ?",
+                params![worktree.to_str().unwrap(), legacy],
+            )
+            .unwrap();
+            for id in [&native, &legacy] {
+                db.execute("INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'user', 'searchable history', 1)", [id]).unwrap();
+                db.execute("INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, 'codex', 'session')", [id]).unwrap();
+            }
+            db.execute(
+                "UPDATE agent_defaults SET backend = 'copilot', model = 'default'",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE workspace_folders SET backend = 'copilot', model = 'default'",
+                [],
+            )
+            .unwrap();
+        }
+        drop(store);
+        for _ in 0..2 {
+            let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+            assert!(matches!(store.chat(&legacy), Err(StorageError::NoChat(_))));
+            assert_eq!(store.chat(&native).unwrap()["session_mode"], "chat");
+            assert!(worktree.is_dir());
+            let db = store.database.lock().unwrap();
+            for table in ["chats", "messages", "chat_sessions"] {
+                let count: i64 = db
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(count, 1, "{table}");
+            }
+            let indexed: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'searchable'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(indexed, 1);
+            db.execute_batch(
+                "INSERT INTO messages_fts(messages_fts, rank) VALUES ('integrity-check', 1)",
+            )
+            .unwrap();
+            drop(db);
+            let chat = store.new_chat(&json!({"folder": folder})).unwrap();
+            assert_eq!(chat["backend"], "codex");
+            store.delete_chat(&json!({"chat": chat["id"]})).unwrap();
+            assert!(
+                store
+                    .new_chat(&json!({"folder": folder, "backend": "copilot"}))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn databases_without_session_mode_are_cleaned_up_as_terminal_chats() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Project"})).unwrap()["id"].clone();
+        store.new_chat(&json!({"folder": folder})).unwrap();
+        store
+            .database
+            .lock()
+            .unwrap()
+            .execute("ALTER TABLE chats DROP COLUMN session_mode", [])
+            .unwrap();
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.tree().unwrap()["chats"].as_array().unwrap().len(), 0);
+        let chat = store.new_chat(&json!({"folder": folder})).unwrap();
+        assert_eq!(
+            store.chat(chat["id"].as_str().unwrap()).unwrap()["session_mode"],
+            "chat"
+        );
+    }
+
+    #[test]
     fn remote_listener_uses_the_compatible_persisted_shape() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
@@ -6513,44 +6543,6 @@ mod tests {
         assert_eq!(turn.access, "edit");
         assert_eq!(turn.session_id.as_deref(), Some("claude-session"));
         assert_eq!(turn.label, "Claude Opus 5 · Extra high");
-    }
-
-    #[test]
-    fn records_and_reads_a_direct_codex_session_from_its_notification() {
-        let fixture = Fixture::new();
-        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        let folder = store.new_folder(&json!({"name": "Direct"})).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let chat = store.new_chat(&json!({"folder": folder})).unwrap()["id"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-
-        StateStore::record_agent_notification(
-            &fixture.database,
-            &chat,
-            "codex",
-            r#"{"type":"agent-turn-complete","thread-id":"thread-direct"}"#,
-        )
-        .unwrap();
-
-        drop(store);
-        let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
-        assert_eq!(
-            reopened.session_id(&chat, "codex").unwrap().as_deref(),
-            Some("thread-direct")
-        );
-        assert!(
-            StateStore::record_agent_notification(
-                &fixture.database,
-                &chat,
-                "codex",
-                r#"{"type":"approval-requested","thread-id":"wrong"}"#,
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -8744,7 +8736,7 @@ mod tests {
                        new_worktree INTEGER NOT NULL DEFAULT 0, host_working INTEGER NOT NULL DEFAULT 0, \
                        draft TEXT NOT NULL DEFAULT '', draft_attachments TEXT NOT NULL DEFAULT '[]', \
                        draft_revision INTEGER NOT NULL DEFAULT 0, last_user_message_at INTEGER NOT NULL DEFAULT 0, \
-                       original_workdir TEXT, \
+                       original_workdir TEXT, session_mode TEXT NOT NULL DEFAULT 'chat', \
                        created_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, \
                        FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
                      CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT NOT NULL, \
