@@ -350,6 +350,15 @@ mod tests {
     }
 
     #[test]
+    fn provider_retries_preserve_the_live_turn_and_final_text_is_not_duplicated() {
+        let mut parser = parser_on("thread");
+        assert!(parser.feed(r#"{"method":"error","params":{"threadId":"thread","willRetry":true,"error":{"message":"Reconnecting"}}}"#).is_empty());
+        assert_eq!(parser.feed(r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread","itemId":"m","delta":"Recovered"}}"#), vec![AgentEvent::TextDelta("Recovered".into())]);
+        assert!(parser.feed(r#"{"method":"item/completed","params":{"threadId":"thread","item":{"type":"agentMessage","id":"m","text":"Recovered"}}}"#).is_empty());
+        assert_eq!(parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"status":"completed"}}}"#), vec![AgentEvent::Completed]);
+    }
+
+    #[test]
     fn spawned_agents_become_live_records_fed_by_their_own_threads() {
         let mut parser = parser_on("parent");
         let spawned = parser.feed(r#"{"method":"item/started","params":{"threadId":"parent","item":{"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child-1"],"prompt":"Review the diff\nCarefully","model":"gpt-5.6-sol","agentsStates":{"child-1":{"status":"pendingInit"}}}}}"#);

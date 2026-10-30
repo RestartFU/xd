@@ -19,13 +19,22 @@ struct Daemon {
 }
 impl Daemon {
     fn start() -> Self {
+        Self::start_with_discovery(false)
+    }
+    fn start_with_discovery(discover: bool) -> Self {
         let root = std::env::temp_dir().join(format!("xd-daemon-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let fake = root.join("codex");
         fs::write(&fake, r#"#!/usr/bin/env python3
-import sys, json, time
+import sys, json, time, pathlib, os
+if sys.argv[1:] == ['login', 'status']:
+    signed_in = pathlib.Path(os.environ.get('CODEX_HOME', '/nonexistent'), 'signed-in').exists()
+    print('Logged in using existing CLI login' if signed_in else 'Not logged in')
+    sys.exit(0 if signed_in else 1)
 for line in sys.stdin:
     frame = json.loads(line)
+    with pathlib.Path(__file__).with_suffix('.requests').open('a') as log:
+        log.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv, 'home': os.environ.get('CODEX_HOME'), 'frame': frame}) + '\n')
     method = frame.get('method')
     if method == 'initialize': print(json.dumps({'id':1,'result':{}}), flush=True)
     elif method in ('thread/start','thread/resume'): print(json.dumps({'id':2,'result':{'thread':{'id':'thread-test'}}}), flush=True)
@@ -55,12 +64,26 @@ for line in sys.stdin:
         print(json.dumps({'method':'turn/completed','params':{'threadId':'thread-test','turn':{'status':'completed'}}}), flush=True)
 "#).unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_xd-host"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xd-host"));
+        command
             .args(["daemon", "--data"])
             .arg(&root)
-            .env("XD_CODEX_EXECUTABLE", &fake)
             .env("HOME", &root)
-            .env("SHELL", "/bin/sh")
+            .env("SHELL", "/bin/sh");
+        if discover {
+            let shell = root.join("login-shell");
+            fs::create_dir(root.join("cli-config")).unwrap();
+            fs::write(root.join("cli-config/signed-in"), "fixture").unwrap();
+            fs::write(&shell, format!("#!/bin/sh\nexport PATH='{}':\"$PATH\"\nexport CODEX_HOME='{}/cli-config'\nexec /bin/sh -c \"$2\"\n", root.display(), root.display())).unwrap();
+            fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+            command
+                .env_remove("XD_CODEX_EXECUTABLE")
+                .env_remove("CODEX_HOME")
+                .env("SHELL", shell);
+        } else {
+            command.env("XD_CODEX_EXECUTABLE", &fake);
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -243,6 +266,118 @@ fn one_daemon_shares_local_and_paired_sessions_and_revokes_immediately() {
     );
     let mut line = String::new();
     assert_eq!(resumed.reader.read_line(&mut line).unwrap(), 0);
+}
+
+#[test]
+fn update_restart_protects_open_shells() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let chat = daemon.chat(&mut client);
+    let opened = client
+        .call(json!({"op":"terminal-open", "chat":chat, "columns":80, "rows":24, "reuse":false}));
+    assert_eq!(opened["ok"], true, "{opened}");
+    let reply = client.call(json!({"op":"host-update", "action":"restart"}));
+    assert_eq!(reply["ok"], false);
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap()
+            .contains("Close terminal tabs")
+    );
+    assert_eq!(
+        client.call(json!({"op":"terminal-kill", "terminal":opened["id"]}))["ok"],
+        true
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn installed_cli_reuses_sessions_and_resumes_after_process_loss() {
+    let daemon = Daemon::start_with_discovery(true);
+    let mut client = daemon.client();
+    let chat = daemon.chat(&mut client);
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["auth_state"] == "signed-in"
+    });
+    let send = |client: &mut Client<UnixStream, UnixStream>| {
+        assert_eq!(
+            client.call(json!({"op":"send", "chat":chat, "text":"hello"}))["ok"],
+            true
+        );
+        client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+            reply["working"] == false
+        });
+    };
+    let requests = || -> Vec<Value> {
+        fs::read_to_string(daemon.root.join("codex.requests"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    send(&mut client);
+    send(&mut client);
+    let frames = requests();
+    assert_eq!(
+        frames[0]["home"],
+        daemon.root.join("cli-config").to_str().unwrap()
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame["frame"]["method"] == "initialize")
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| frame["frame"]["method"] == "turn/start")
+            .count(),
+        2
+    );
+    let pid = frames[0]["pid"].as_i64().unwrap() as i32;
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| !stat.contains(") Z")) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+    send(&mut client);
+    let frames = requests();
+    let resumed = frames
+        .iter()
+        .find(|frame| frame["frame"]["method"] == "thread/resume")
+        .unwrap();
+    assert_eq!(resumed["frame"]["params"]["threadId"], "thread-test");
+    assert_ne!(resumed["pid"], pid);
+    assert_eq!(
+        client.call(json!({"op":"set-option", "chat":chat, "option":"fast", "value":"true"}))["ok"],
+        true
+    );
+    send(&mut client);
+    let frames = requests();
+    let launches = frames
+        .iter()
+        .filter(|frame| frame["frame"]["method"] == "initialize")
+        .collect::<Vec<_>>();
+    assert_eq!(launches.len(), 3);
+    assert!(
+        launches.last().unwrap()["argv"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "service_tier=\"priority\"")
+    );
+    let opened = client.call(json!({"op":"terminal-open-agent", "chat":chat,
+        "agent":"codex", "columns":80, "rows":24, "reuse":false}));
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(
+        client.call(json!({"op":"terminal-kill", "terminal":opened["id"]}))["ok"],
+        true
+    );
 }
 
 #[test]

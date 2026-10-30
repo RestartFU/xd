@@ -61,6 +61,8 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'installer/windows/install-web
 Copy-Item -LiteralPath (Join-Path $repositoryRoot `
     'data/licenses/alacritty-terminal-LICENSE-APACHE') `
     -Destination (Join-Path $payload 'licenses/alacritty-terminal-LICENSE-APACHE')
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'data/licenses/t3code-LICENSE') `
+    -Destination (Join-Path $payload 'licenses/t3code-LICENSE')
 
 $asset = "$name-windows-x86_64.zip"
 $archive = Join-Path $outputPath $asset

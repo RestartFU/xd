@@ -106,6 +106,9 @@ done
 install -m0644 data/licenses/alacritty-terminal-LICENSE-APACHE \
   "$APP/Contents/Resources/licenses/alacritty-terminal-LICENSE-APACHE"
 
+install -m0644 data/licenses/t3code-LICENSE \
+  "$APP/Contents/Resources/licenses/t3code-LICENSE"
+
 sed \
   -e "s|@BUNDLE_NAME@|$BUNDLE_NAME|g" \
   -e "s|@DISPLAY_NAME@|$DISPLAY_NAME|g" \

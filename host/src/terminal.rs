@@ -377,6 +377,12 @@ impl TerminalManager {
             .unwrap_or(false)
     }
 
+    pub(crate) fn has_sessions(&self) -> bool {
+        self.sessions
+            .lock()
+            .map_or(true, |sessions| !sessions.is_empty())
+    }
+
     #[cfg(test)]
     pub fn working_chats(&self) -> HashSet<String> {
         self.activity_snapshot().working_chats
@@ -481,13 +487,19 @@ impl TerminalSession {
         let term_value = c"xterm-256color";
         let colorterm = c"COLORTERM";
         let colorterm_value = c"truecolor";
-        let environment = environment
+        let environment = crate::user_environment::values()
             .iter()
+            .map(|(name, value)| (name.as_str(), value.as_encoded_bytes()))
+            .chain(
+                environment
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_bytes())),
+            )
             .map(|(name, value)| {
                 Ok((
                     CString::new(name.as_bytes())
                         .map_err(|_| "A terminal environment name is invalid.".to_string())?,
-                    CString::new(value.as_bytes())
+                    CString::new(value)
                         .map_err(|_| "A terminal environment value is invalid.".to_string())?,
                 ))
             })
@@ -670,7 +682,10 @@ fn executable_available(executable: &Path) -> bool {
     if executable.is_absolute() || executable.components().count() > 1 {
         return is_executable_file(executable);
     }
-    env::var_os("PATH")
+    crate::user_environment::values()
+        .get("PATH")
+        .cloned()
+        .or_else(|| env::var_os("PATH"))
         .into_iter()
         .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
         .any(|directory| is_executable_file(&directory.join(executable)))

@@ -335,6 +335,13 @@ impl TurnRuntime {
         }
     }
 
+    pub(crate) fn has_active_turns(&self) -> bool {
+        self.inner
+            .active
+            .lock()
+            .map_or(true, |active| !active.is_empty())
+    }
+
     pub(crate) fn shutdown(&self) {
         if let Ok(active) = self.inner.active.lock() {
             for process in active.values() {
@@ -561,9 +568,10 @@ impl TurnRuntime {
         // Everything baked into argv when a process starts. A turn that wants
         // any of it different cannot be answered by the process already up.
         let fingerprint = format!(
-            "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{:?}",
+            "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{}\x01{:?}",
             turn.access,
             turn.workdir,
+            turn.fast,
             turn.system_prompt.as_deref().unwrap_or_default(),
             turn.environment,
         );
@@ -2226,7 +2234,7 @@ read third
                 .any(|(_, content)| content == "The helper found two files.")
         });
         wait_for("the background turn to end", || {
-            runtime.live_turn(&chat).is_none()
+            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
         });
 
         send("second");

@@ -84,6 +84,14 @@ impl AuthManager {
 
     pub(crate) fn refresh(&self, provider: &str) -> bool {
         let provider = provider.to_owned();
+        if self
+            .inner
+            .sessions
+            .lock()
+            .is_ok_and(|sessions| sessions.contains_key(&provider))
+        {
+            return true;
+        }
         {
             let Ok(mut states) = self.inner.states.lock() else {
                 return false;

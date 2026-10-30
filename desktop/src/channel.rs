@@ -26,6 +26,23 @@ pub fn app_id() -> String {
     })
 }
 
+pub fn installed_restart_path() -> Option<std::path::PathBuf> {
+    restart_path_for_host(Path::new(&env::var_os("XD_HOST_EXECUTABLE")?))
+}
+
+fn restart_path_for_host(host: &Path) -> Option<std::path::PathBuf> {
+    let libexec = host.parent()?;
+    if libexec.file_name()? != "libexec" {
+        return None;
+    }
+    let root = libexec.parent()?;
+    if cfg!(target_os = "macos") {
+        Some(root.parent()?.join("MacOS/xd"))
+    } else {
+        Some(root.join("xd.sh"))
+    }
+}
+
 fn host_update_channel(configured: Option<OsString>, nightly_build: bool) -> OsString {
     if configured.as_deref() == Some(OsStr::new("dev")) {
         "dev".into()

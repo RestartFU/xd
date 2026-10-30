@@ -526,6 +526,16 @@ struct CliVersion {
 struct SelfUpdateStatus {
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    latest: Option<String>,
+    #[serde(default)]
+    available: bool,
+    #[serde(default)]
+    supported: bool,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -1996,7 +2006,7 @@ impl XdDesktop {
             share_panel: None,
             shortcut_panel: None,
             remote_panel: None,
-            self_update_panel: None,
+            self_update_panel: Some(SelfUpdatePanel::default()),
             auth_providers: Vec::new(),
             cli_versions: Vec::new(),
             cli_versions_loading: false,
@@ -2138,9 +2148,9 @@ impl XdDesktop {
         // View fixtures supply their own host state. Real connections belong
         // in integration tests and must not depend on installed user tools.
         if !cfg!(test) {
-            match desktop.active_endpoint {
-                ChatEndpoint::Local => desktop.schedule_connect(Duration::ZERO, cx),
-                ChatEndpoint::Remote => desktop.schedule_remote_connect(Duration::ZERO, cx),
+            desktop.schedule_connect(Duration::ZERO, cx);
+            if desktop.active_endpoint == ChatEndpoint::Remote {
+                desktop.schedule_remote_connect(Duration::ZERO, cx);
             }
         }
         desktop.listen_for_terminal_runtime(terminal_updates, cx);
@@ -2456,10 +2466,7 @@ impl XdDesktop {
     }
 
     fn schedule_connect(&mut self, delay: Duration, cx: &mut Context<Self>) {
-        if self.active_endpoint != ChatEndpoint::Local
-            || self.connecting
-            || self.endpoint_model(ChatEndpoint::Local).connected
-        {
+        if self.connecting || self.endpoint_model(ChatEndpoint::Local).connected {
             return;
         }
         self.connecting = true;
@@ -2856,6 +2863,7 @@ impl XdDesktop {
                     if let Some(host) = &self.host {
                         let _ = host.tree();
                         let _ = host.agent_catalog();
+                        let _ = host.host_update("status");
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
                             let _ = host.git_state(chat_id);
                         }
@@ -2869,6 +2877,11 @@ impl XdDesktop {
                     self.host = None;
                     self.inactive_model.connected = false;
                     self.inactive_model.connection_error = Some(format!("{message} Reconnecting…"));
+                    if let Some(panel) = &mut self.self_update_panel {
+                        panel.busy = false;
+                        panel.error =
+                            Some("The local update service disconnected. Reconnecting…".into());
+                    }
                     self.connecting = false;
                     self.connection_in_flight = false;
                     self.schedule_reconnect(cx);
@@ -2947,6 +2960,9 @@ impl XdDesktop {
                 self.model.connection_error = None;
                 self.request_tree();
                 self.request_agent_catalog();
+                if let Some(host) = &self.host {
+                    let _ = host.host_update("status");
+                }
                 self.refresh_selected_chat_after_connect(cx);
             }
             HostUpdate::Disconnected { message } => {
@@ -3640,8 +3656,14 @@ impl XdDesktop {
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
             RequestKind::AgentClis => self.apply_cli_versions(&value),
-            RequestKind::HostUpdate { action: _ } => {
+            RequestKind::HostUpdate { action } => {
                 self.apply_self_update(&value);
+                if action == "restart" && !cfg!(test) {
+                    if let Some(path) = xd_desktop::channel::installed_restart_path() {
+                        cx.set_restart_path(path);
+                    }
+                    cx.restart();
+                }
             }
             RequestKind::AgentSecrets { folder_id }
                 if self
@@ -4232,17 +4254,11 @@ impl XdDesktop {
                 {
                     self.cancel_chat_create(cx);
                 }
+                // The tree supplies session_mode. Opening from the creation
+                // reply alone can route a native chat through terminal setup
+                // and leave its transcript unrequested when the tree arrives.
+                self.pending_minimal_session = Some((folder_id, chat_id.to_owned()));
                 self.request_tree();
-                let chat_id = chat_id.to_owned();
-                if let Some(agent) = value
-                    .get("backend")
-                    .and_then(Value::as_str)
-                    .and_then(AgentCli::from_backend)
-                {
-                    self.select_minimal_session(folder_id, chat_id, agent, cx);
-                } else {
-                    self.pending_minimal_session = Some((folder_id, chat_id));
-                }
             }
             RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder { .. } => self.request_tree(),
@@ -5185,7 +5201,7 @@ impl XdDesktop {
         match serde_json::from_value::<SelfUpdateStatus>(value.clone()) {
             Ok(status) => {
                 panel.busy = matches!(status.state.as_str(), "checking" | "installing");
-                panel.error = None;
+                panel.error = status.error.clone();
                 panel.status = Some(status);
             }
             Err(error) => {
@@ -5193,6 +5209,20 @@ impl XdDesktop {
                 panel.error = Some(format!("Invalid host update response: {error}"));
             }
         }
+    }
+
+    fn request_app_update(&mut self, action: &str, cx: &mut Context<Self>) {
+        let result = self
+            .host
+            .as_ref()
+            .ok_or_else(|| {
+                "The local update service is reconnecting. Try again shortly.".to_owned()
+            })
+            .and_then(|host| host.host_update(action));
+        let panel = self.self_update_panel.get_or_insert_with(Default::default);
+        panel.busy = result.is_ok();
+        panel.error = result.err();
+        cx.notify();
     }
 
     fn start_source_build(&mut self, cx: &mut Context<Self>) {
@@ -8492,7 +8522,7 @@ impl XdDesktop {
         if self.native_session() {
             self.stash_terminal_panel();
             self.sync_terminal_input_mode(cx);
-            self.transcript_loading = true;
+            self.transcript_loading = !self.transcript_loaded;
             self.request_chat(&chat_id);
             self.request_messages(&chat_id);
             self.list_tree_directory(String::new(), cx);
@@ -13374,6 +13404,38 @@ impl XdDesktop {
                                     cx.notify();
                                 })))
                         })
+                        .child(group_label("Updates"))
+                        .child(div().px_3().py_1().text_size(px(12.0)).text_color(rgb(colors.muted))
+                            .child(self.self_update_panel.as_ref().map(|panel| {
+                                if let Some(error) = &panel.error { return error.clone(); }
+                                match panel.status.as_ref() {
+                                    Some(status) if status.state == "installed" => "Installed. Restart xd to finish updating.".into(),
+                                    Some(status) if status.state == "installing" => "Installing update…".into(),
+                                    Some(status) if status.state == "checking" => "Checking for updates…".into(),
+                                    Some(status) if !status.supported => "This installation requires a manual update.".into(),
+                                    Some(status) if status.available => format!("Update available: {}", status.latest.as_deref().unwrap_or("new version")),
+                                    Some(status) if status.latest.is_none() => format!("xd {} · Check for updates", status.version),
+                                    Some(status) => format!("xd {} · Up to date", status.version),
+                                    None => "Connecting to the local update service…".into(),
+                                }
+                            }).unwrap_or_default()))
+                        .when(!self.self_update_panel.as_ref().is_some_and(|panel| panel.busy || panel.status.as_ref().is_some_and(|status| status.state == "installed")), |card| {
+                            card.child(menu_row("check-app-update", "Check for updates").on_click(cx.listener(|this, _, _, cx| {
+                                this.request_app_update("check", cx);
+                            })))
+                        })
+                        .when(self.self_update_panel.as_ref().is_some_and(|panel| !panel.busy && panel.status.as_ref().is_some_and(|status| status.supported && status.available && status.state != "installed")), |card| {
+                            card.child(menu_row("install-app-update", "Install update").on_click(cx.listener(|this, _, _, cx| {
+                                this.request_app_update("install", cx);
+                            })))
+                        })
+                        .when(self.self_update_panel.as_ref().is_some_and(|panel| !panel.busy && panel.status.as_ref().is_some_and(|status| status.state == "installed")), |card| {
+                            card.child(menu_row("restart-app-update", "Restart to update").on_click(cx.listener(|this, _, _, cx| {
+                                if this.flush_draft_before_navigation() {
+                                    this.request_app_update("restart", cx);
+                                }
+                            })))
+                        })
                         .child(group_label("Assistants"))
                         .child(menu_row("assistant-accounts", "Assistant accounts").on_click(cx.listener(|this, _, window, cx| {
                             this.minimal_theme_open = false; this.auth_open = true;
@@ -16689,6 +16751,126 @@ mod tests {
                 None
             );
             desktop.terminal_panel = None;
+        });
+    }
+
+    #[gpui::test]
+    fn app_update_status_is_local_while_a_remote_chat_is_open(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.model.selected_chat = Some("remote-chat".into());
+            desktop.handle_host_update(
+                HostUpdate::Reply {
+                    kind: RequestKind::HostUpdate {
+                        action: "status".into(),
+                    },
+                    body: serde_json::json!({"ok":true, "state":"installed", "supported":true,
+                    "version":"0.1.0", "latest":"0.2.0", "available":true})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                    attachments: None,
+                },
+                desktop.connection_generation,
+                cx,
+            );
+            let panel = desktop.self_update_panel.as_ref().unwrap();
+            assert_eq!(panel.status.as_ref().unwrap().state, "installed");
+            assert!(!panel.busy);
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("remote-chat"));
+            desktop.handle_host_update(
+                HostUpdate::Event {
+                    name: "host-update".into(),
+                    body: serde_json::json!({"state":"failed", "error":"Download failed"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    attachments: None,
+                },
+                desktop.connection_generation,
+                cx,
+            );
+            assert_eq!(
+                desktop.self_update_panel.as_ref().unwrap().error.as_deref(),
+                Some("Download failed")
+            );
+            desktop.self_update_panel.as_mut().unwrap().busy = true;
+            desktop.handle_host_update(
+                HostUpdate::Disconnected {
+                    message: "Lost connection".into(),
+                },
+                desktop.connection_generation,
+                cx,
+            );
+            let panel = desktop.self_update_panel.as_ref().unwrap();
+            assert!(!panel.busy);
+            assert!(panel.error.as_deref().unwrap().contains("Reconnecting"));
+        });
+    }
+
+    #[gpui::test]
+    fn new_chat_waits_for_tree_session_mode(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            for mode in ["chat", "terminal"] {
+                desktop.model = AppModel::default();
+                desktop.minimal_route = MinimalRoute::default();
+                desktop.handle_reply(
+                    RequestKind::NewChat {
+                        folder_id: "project".into(),
+                        title: "New Chat".into(),
+                        workdir: None,
+                    },
+                    serde_json::json!({"ok": true, "id": "chat", "backend": "codex"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                assert_eq!(desktop.model.selected_chat, None);
+                assert_eq!(
+                    desktop.pending_minimal_session,
+                    Some(("project".into(), "chat".into()))
+                );
+
+                desktop.handle_reply(
+                    RequestKind::Tree,
+                    serde_json::json!({
+                        "ok": true,
+                        "folders": [{"id": "project", "name": "Project"}],
+                        "chats": [{"id": "chat", "folder": "project",
+                            "backend": "codex", "session_mode": mode}]
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                    None,
+                    cx,
+                );
+                assert_eq!(desktop.pending_minimal_session, None);
+                assert_eq!(desktop.model.selected_chat.as_deref(), Some("chat"));
+                assert_eq!(desktop.native_session(), mode == "chat");
+                assert_eq!(desktop.terminal_panel.is_none(), mode == "chat");
+                if mode == "chat" {
+                    desktop.handle_reply(
+                        RequestKind::Messages {
+                            chat_id: "chat".into(),
+                            cursor: MessageCursor::Tail,
+                        },
+                        serde_json::json!({"ok": true, "messages": []})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                        None,
+                        cx,
+                    );
+                    assert!(desktop.transcript_loaded);
+                }
+                desktop.terminal_panel = None;
+                desktop.terminal_panel_cache.clear();
+            }
         });
     }
 
