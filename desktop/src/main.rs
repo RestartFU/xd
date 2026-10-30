@@ -123,6 +123,8 @@ const TRASH_ICON: &str = "icons/trash.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
+const CHANGES_ICON: &str = "icons/changes.svg";
+const BROWSER_ICON: &str = "icons/browser.svg";
 const TERMINAL_ICON: &str = "icons/terminal.svg";
 const SEARCH_ICON: &str = "icons/search.svg";
 const MINIMIZE_ICON: &str = "icons/minimize.svg";
@@ -452,6 +454,47 @@ fn icon(path: &'static str, size: f32, color: u32) -> gpui::AnyElement {
         .flex_none()
         .text_color(rgb(color))
         .into_any_element()
+}
+
+struct PaneTooltip {
+    label: &'static str,
+    colors: ThemeColors,
+}
+
+impl Render for PaneTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(rgb(self.colors.border))
+            .bg(rgb(self.colors.surface_high))
+            .text_size(px(12.0))
+            .text_color(rgb(self.colors.text))
+            .child(self.label)
+    }
+}
+
+fn pane_icon_button(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    path: &'static str,
+    active: bool,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    ui_button(id, ButtonKind::Ghost, colors)
+        .w(px(28.0))
+        .h(px(28.0))
+        .px_0()
+        .rounded(px(6.0))
+        .when(active, |button| button.bg(rgb(colors.selected_surface)))
+        .tooltip(move |_, cx| cx.new(|_| PaneTooltip { label, colors }).into())
+        .child(icon(
+            path,
+            16.0,
+            if active { colors.text } else { colors.muted },
+        ))
 }
 
 fn agent_icon(agent: AgentCli) -> &'static str {
@@ -9318,18 +9361,21 @@ impl XdDesktop {
                     })
                     .child(context),
             )
-            .child(
-                ui_button("minimal-browser-toggle", ButtonKind::Ghost, colors)
-                    .h(px(26.0))
-                    .px_2()
-                    .when(self.browser_is_open(), |button| {
-                        button
-                            .bg(rgb(colors.selected_surface))
-                            .text_color(rgb(colors.text))
-                    })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx)))
-                    .child("Browser"),
+            .when(
+                !matches!(self.minimal_route, MinimalRoute::Cli { .. }),
+                |bar| {
+                    bar.child(
+                        pane_icon_button(
+                            "minimal-browser-toggle",
+                            "Browser",
+                            BROWSER_ICON,
+                            self.browser_is_open(),
+                            colors,
+                        )
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
+                    )
+                },
             )
             .child(
                 div()
@@ -9490,39 +9536,55 @@ impl XdDesktop {
             .when(signal != SessionSignal::Idle, |toolbar| {
                 toolbar.child(stamp(signal.label(), signal.color(colors)))
             })
-            .when(self.native_session(), |toolbar| {
-                let current = self.native_pane;
-                toolbar.child(
-                    div().ml_2().flex().items_center().gap(px(2.0)).children(
-                        [
-                            (1usize, "Changes", NativePane::Diff),
-                            (2, "Files", NativePane::Files),
-                            (3, "Terminal", NativePane::Terminal),
-                        ]
-                        .into_iter()
-                        .map(|(index, label, pane)| {
-                            let active = current == pane;
-                            ui_button(("native-pane", index), ButtonKind::Ghost, colors)
-                                .h(px(28.0))
-                                .px(px(10.0))
-                                .when(active, |button| {
-                                    button
-                                        .bg(rgb(colors.selected_surface))
-                                        .text_color(rgb(colors.text))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let next = if this.native_pane == pane {
-                                        NativePane::Chat
-                                    } else {
-                                        pane
-                                    };
-                                    this.show_native_pane(next, cx);
-                                }))
-                                .child(label)
-                        }),
+            .child(
+                div()
+                    .ml_2()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.0))
+                    .when(self.native_session(), |controls| {
+                        let current = self.native_pane;
+                        controls.children(
+                            [
+                                (1usize, "Changes", CHANGES_ICON, NativePane::Diff),
+                                (2, "Files", FILE_ICON, NativePane::Files),
+                                (3, "Terminal", TERMINAL_ICON, NativePane::Terminal),
+                            ]
+                            .into_iter()
+                            .map(|(index, label, path, pane)| {
+                                let active = current == pane;
+                                pane_icon_button(
+                                    ("native-pane", index),
+                                    label,
+                                    path,
+                                    active,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        let next = if this.native_pane == pane {
+                                            NativePane::Chat
+                                        } else {
+                                            pane
+                                        };
+                                        this.show_native_pane(next, cx);
+                                    },
+                                ))
+                            }),
+                        )
+                    })
+                    .child(
+                        pane_icon_button(
+                            "minimal-browser-toggle",
+                            "Browser",
+                            BROWSER_ICON,
+                            self.browser_is_open(),
+                            colors,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_browser(cx))),
                     ),
-                )
-            })
+            )
             .when(has_terminal, |toolbar| {
                 toolbar
                     .child(
@@ -15378,6 +15440,12 @@ impl AssetSource for EmbeddedIcons {
             CLOSE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/close.svg").as_slice(),
             )),
+            CHANGES_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/changes.svg").as_slice(),
+            )),
+            BROWSER_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/browser.svg").as_slice(),
+            )),
             TERMINAL_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/terminal.svg").as_slice(),
             )),
@@ -15410,6 +15478,8 @@ impl AssetSource for EmbeddedIcons {
             CHEVRON_RIGHT_ICON.into(),
             CHEVRON_DOWN_ICON.into(),
             CLOSE_ICON.into(),
+            CHANGES_ICON.into(),
+            BROWSER_ICON.into(),
             TERMINAL_ICON.into(),
             SEARCH_ICON.into(),
             MINIMIZE_ICON.into(),

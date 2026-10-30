@@ -272,11 +272,11 @@ On Android the Material 3 type scale is kept and set in Libre Franklin. Headline
 
 ## Layout
 
-The desktop window has three regions. At the top is a 38px title bar (drawer graphite, 1px seam below) with the xd mark, a project / session breadcrumb, a Browser toggle and the connection state. On the left is the 288px catalog sidebar (`CATALOG_WIDTH`; the direction contract said 296px, and the build is what this records). The centre is the session. On macOS the title bar is inset 86px for the traffic lights, and on other platforms 16px.
+The desktop window has three regions. At the top is a 38px title bar (drawer graphite, 1px seam below) with the xd mark, a project / session breadcrumb, the connection state and, outside sessions, a Browser icon toggle. On the left is the 288px catalog sidebar (`CATALOG_WIDTH`; the direction contract said 296px, and the build is what this records). The centre is the session. On macOS the title bar is inset 86px for the traffic lights, and on other platforms 16px.
 
 The catalog stacks a 44px "Projects" header with an add button, then the Find field (32px, 10px side margins), then the drawer list (7px side gutter, 3px between drawers), then a footer with a 1px top seam and 10px vertical padding. The footer holds the primary New session button, a Terminal ghost button and a Settings ghost button. A closed drawer is one 34px row: a chevron, the name, a mono count, and on the right its non-idle signal tabs (at most six) followed by an add button. The open drawer insets its 56px cards by 5px, 3px apart.
 
-In the centre, a 52px session header holds the title, agent and branch chips (24px, 1px seam border), the state stamp, and a segmented control for Changes / Files / Terminal. The chat column below it is centred and capped at 860px, with the composer at the bottom. The right dock opens beside the chat and can be resized.
+In the centre, a 52px session header holds the title, agent and branch chips (24px, 1px seam border), the state stamp, and a compact icon row for Changes / Files / Terminal / Browser, with hover labels and selected backgrounds. The chat column below it is centred and capped at 860px, with the composer at the bottom. The right dock opens beside the chat and can be resized.
 
 Spacing is small and irregular rather than a strict scale: 3, 5, 7 and 10px for catalog joinery, and 8, 12 and 16px for general padding.
 

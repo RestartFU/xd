@@ -25,7 +25,8 @@ A local-first desktop workspace for user-installed Codex, Claude Code, JCode, an
 - Dark and light themes, chosen in Settings.
 
 Each chat remembers its browser tabs and whether the pane is open. Use the
-Browser button to show it, then `+` in its tab bar to open another tab.
+Browser icon beside Changes, Files, and Terminal in the session header to show it,
+then `+` in its tab bar to open another tab. Hover over an icon to see its label.
 
 ## Install
 
