@@ -169,6 +169,8 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
         clients.retain(|client| !client.is_finished());
         match listener.accept() {
             Ok((stream, _)) if clients.len() < MAX_CLIENTS => {
+                // Accepted sockets inherit nonblocking mode on macOS.
+                stream.set_nonblocking(false)?;
                 stream.set_write_timeout(Some(Duration::from_secs(15)))?;
                 let engine = engine.clone();
                 clients.push(thread::spawn(move || {
