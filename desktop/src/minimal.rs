@@ -5,7 +5,6 @@ pub(crate) enum AgentCli {
     Codex,
     Claude,
     Jcode,
-    Copilot,
 }
 
 impl AgentCli {
@@ -16,8 +15,6 @@ impl AgentCli {
             Some(Self::Claude)
         } else if backend.eq_ignore_ascii_case("jcode") {
             Some(Self::Jcode)
-        } else if backend.eq_ignore_ascii_case("copilot") {
-            Some(Self::Copilot)
         } else {
             None
         }
@@ -28,7 +25,6 @@ impl AgentCli {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
             Self::Jcode => "JCode",
-            Self::Copilot => "Copilot",
         }
     }
 
@@ -37,7 +33,6 @@ impl AgentCli {
             Self::Codex => "codex",
             Self::Claude => "claude",
             Self::Jcode => "jcode",
-            Self::Copilot => "copilot",
         }
     }
 
@@ -46,7 +41,6 @@ impl AgentCli {
             "codex" => Some(Self::Codex),
             "claude" => Some(Self::Claude),
             "jcode" => Some(Self::Jcode),
-            "copilot" => Some(Self::Copilot),
             _ => None,
         }
     }
@@ -214,17 +208,6 @@ mod tests {
     use xd_desktop::model::{ChatSummary, Folder};
 
     use super::*;
-
-    #[test]
-    fn copilot_is_a_supported_agent_cli() {
-        assert_eq!(AgentCli::from_backend("copilot"), Some(AgentCli::Copilot));
-        assert_eq!(AgentCli::Copilot.label(), "Copilot");
-        assert_eq!(AgentCli::Copilot.protocol_name(), "copilot");
-        assert_eq!(
-            AgentCli::from_protocol_name("copilot"),
-            Some(AgentCli::Copilot)
-        );
-    }
 
     fn folder(id: &str, name: &str) -> Folder {
         Folder {

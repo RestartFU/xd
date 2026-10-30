@@ -404,27 +404,6 @@ public object Ops {
         put("reuse", reuse)
     }
 
-    public fun terminalOpenAgent(
-        chatId: String,
-        columns: Int,
-        rows: Int,
-        reuse: Boolean,
-        agent: String,
-        allowAllPermissions: Boolean,
-    ): JsonObject = buildJsonObject {
-        require(columns > 0 && rows > 0) { "A terminal needs a positive size" }
-        require(agent == "codex" || agent == "claude" || agent == "jcode" || agent == "copilot") {
-            "A direct terminal needs codex, claude, jcode, or copilot"
-        }
-        put("op", "terminal-open-agent")
-        put("chat", chatId)
-        put("columns", columns)
-        put("rows", rows)
-        put("reuse", reuse)
-        put("agent", agent)
-        put("allow_all_permissions", allowAllPermissions)
-    }
-
     /** [data] is base64: the pty takes bytes, not text. */
     public fun terminalInput(terminalId: String, data: String): JsonObject = buildJsonObject {
         put("op", "terminal-input")

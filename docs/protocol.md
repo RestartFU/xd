@@ -192,8 +192,10 @@ and must be dropped; a higher one must be applied. An event carrying a lower
 `turn_id` is stale. Given the ordering caveat above, this is the only correct
 way to reconcile a snapshot against concurrent live output.
 
-`session_mode` is `chat` for new Codex/Claude/JCode sessions and `terminal` for
-legacy CLI sessions and Copilot. Tree chat summaries include the same member.
+`session_mode` is `chat` for Codex/Claude/JCode sessions. Tree chat summaries
+include the same member. The host deletes legacy `terminal` chats and their
+history when opening the database, retaining their worktrees. `terminal-open`
+continues to open shell panes; `terminal-open-agent` is no longer supported.
 
 Snapshots also include `interactions`, `interaction_revision`, and
 `interaction_epoch`. Each interaction is `{request_id, method, params}` from

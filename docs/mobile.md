@@ -22,10 +22,10 @@ used by the new transport: pair again after upgrading.
 
 The shared Kotlin module owns JSON Lines framing, request matching, reconnect
 policy, tree/chat stores, terminal events, and transcript state. Android supplies
-pinned TLS transport and encrypted credential storage. New supported sessions
+pinned TLS transport and encrypted credential storage. Supported sessions
 open native chat with model/settings controls, activity, questions, approvals,
-and diff/files/shell tabs. Existing terminal sessions and Copilot keep their
-CLI view.
+and diff/files/shell tabs. The host automatically deletes legacy terminal chats
+and their saved history when opening the database; their worktrees are retained.
 
 Leaving the app closes its connection; returning reconnects and takes fresh
 snapshots. Work and pending approvals continue in the host daemon. There is no
