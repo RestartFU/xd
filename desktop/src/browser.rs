@@ -33,6 +33,7 @@ pub enum BrowserEvent {
     Close,
     SessionChanged(BrowserSession),
     AuxiliarySelected(Option<SideTab>),
+    AuxiliaryClosed(SideTab),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,6 +290,15 @@ impl BrowserPane {
         cx.notify();
     }
 
+    fn close_auxiliary(&mut self, tab: SideTab, cx: &mut Context<Self>) {
+        self.auxiliary_tabs.retain(|candidate| *candidate != tab);
+        cx.emit(BrowserEvent::AuxiliaryClosed(tab));
+        if self.auxiliary == Some(tab) {
+            self.select_auxiliary(None, cx);
+        }
+        cx.notify();
+    }
+
     pub fn session(&self) -> BrowserSession {
         self.session.clone()
     }
@@ -538,11 +548,7 @@ impl Render for BrowserPane {
                             .child(crate::icon(crate::CLOSE_ICON, 10.0, colors.muted))
                             .on_click(cx.listener(move |pane, _, _, cx| {
                                 cx.stop_propagation();
-                                pane.auxiliary_tabs.retain(|candidate| *candidate != tab);
-                                if pane.auxiliary == Some(tab) {
-                                    pane.select_auxiliary(None, cx);
-                                }
-                                cx.notify();
+                                pane.close_auxiliary(tab, cx);
                             })),
                     )
             })

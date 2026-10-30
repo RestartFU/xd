@@ -6245,6 +6245,13 @@ impl XdDesktop {
                     }
                 }
                 BrowserEvent::Close => this.close_browser(cx),
+                BrowserEvent::AuxiliaryClosed(tab) => this.close_side_tool(
+                    match tab {
+                        SideTab::Files => NativePane::Files,
+                        SideTab::Changes => NativePane::Diff,
+                    },
+                    cx,
+                ),
                 BrowserEvent::AuxiliarySelected(tab) => {
                     this.select_side_tool(
                         match tab {
@@ -12662,6 +12669,22 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    fn close_side_tool(&mut self, pane: NativePane, cx: &mut Context<Self>) {
+        self.native_panels.remove(&pane);
+        if self
+            .diff_panel
+            .as_ref()
+            .is_some_and(|panel| panel.files_mode == (pane == NativePane::Files))
+        {
+            self.diff_panel = None;
+            self.diff_generation = self.diff_generation.saturating_add(1);
+        }
+        if self.native_pane == pane {
+            self.native_pane = NativePane::Chat;
+        }
+        cx.notify();
+    }
+
     fn select_side_tool(&mut self, pane: NativePane, cx: &mut Context<Self>) {
         if matches!(pane, NativePane::Files | NativePane::Diff) {
             let files = pane == NativePane::Files;
@@ -12755,6 +12778,12 @@ impl XdDesktop {
                     panel.auto_open = !panel.has_requested_session();
                     panel.workdir = self.model.workdir.clone();
                     self.terminal_panel = Some(panel);
+                    self.refresh_terminal_sessions(cx);
+                } else if let Some(panel) = &mut self.terminal_panel
+                    && !panel.has_requested_session()
+                    && !panel.opening
+                {
+                    panel.auto_open = true;
                     self.refresh_terminal_sessions(cx);
                 }
             }
@@ -16502,6 +16531,15 @@ mod tests {
             desktop.show_native_pane(NativePane::Terminal, cx);
             assert!(desktop.bottom_terminal_open);
             assert!(desktop.terminal_panel.as_ref().unwrap().agent.is_none());
+            let shell =
+                XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": "retained-shell"}))
+                    .unwrap();
+            desktop
+                .terminal_panel
+                .as_mut()
+                .unwrap()
+                .sessions
+                .push(shell);
             desktop.terminal_panel.as_mut().unwrap().selected = Some("retained-shell".into());
             desktop.diff_panel = Some(DiffPanel {
                 files_mode: true,
@@ -16539,6 +16577,48 @@ mod tests {
                 Some("retained-shell")
             );
             assert!(desktop.native_pane == NativePane::Files);
+        });
+    }
+
+    #[gpui::test]
+    fn reopening_bottom_after_last_shell_closed_starts_a_shell(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("dock-chat".into());
+            let mut panel = XdDesktop::new_terminal_panel("dock-chat".into());
+            panel.auto_open = false;
+            panel.loading = false;
+            desktop.terminal_panel = Some(panel);
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            let panel = desktop.terminal_panel.as_ref().unwrap();
+            assert!(panel.auto_open);
+            assert!(panel.loading);
+            assert!(panel.agent.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn closing_and_readding_files_requests_a_new_listing(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("dock-chat".into());
+            desktop.native_pane = NativePane::Files;
+            desktop.diff_panel = Some(DiffPanel {
+                files_mode: true,
+                browse_entries: vec![BrowseEntry {
+                    name: "old.txt".into(),
+                    directory: false,
+                }],
+                ..Default::default()
+            });
+            desktop.close_side_tool(NativePane::Files, cx);
+            assert!(desktop.diff_panel.is_none());
+            let generation = desktop.diff_generation;
+            desktop.select_side_tool(NativePane::Files, cx);
+            assert!(desktop.diff_generation > generation);
+            let panel = desktop.diff_panel.as_ref().unwrap();
+            assert!(panel.files_mode && panel.loading);
+            assert!(panel.browse_entries.is_empty());
         });
     }
 
