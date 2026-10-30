@@ -61,6 +61,8 @@ Copy-Item -LiteralPath (Join-Path $repositoryRoot 'installer/windows/install-web
 Copy-Item -LiteralPath (Join-Path $repositoryRoot `
     'data/licenses/alacritty-terminal-LICENSE-APACHE') `
     -Destination (Join-Path $payload 'licenses/alacritty-terminal-LICENSE-APACHE')
+Copy-Item -LiteralPath (Join-Path $repositoryRoot 'data/fonts/jetbrains-mono/OFL.txt') `
+    -Destination (Join-Path $payload 'licenses/JetBrainsMono-OFL.txt')
 Copy-Item -LiteralPath (Join-Path $repositoryRoot 'data/licenses/t3code-LICENSE') `
     -Destination (Join-Path $payload 'licenses/t3code-LICENSE')
 

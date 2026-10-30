@@ -160,6 +160,7 @@ mod tests {
         for (path, content) in [
             (bin.join("wslpath"), "#!/bin/sh\nprintf '%s\\n' \"$2\"\n"),
             (bin.join("tmux"), "#!/bin/sh\nexit 0\n"),
+            (bin.join("uname"), "#!/bin/sh\nprintf '%s\\n' x86_64\n"),
             (
                 payload.clone(),
                 "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$XD_DATA_NAME\" \"$XD_UPDATE_CHANNEL\" \"$@\"\ncat\n",

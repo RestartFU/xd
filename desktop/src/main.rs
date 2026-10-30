@@ -98,16 +98,16 @@ use terminal::TerminalScreen;
 pub(crate) const UI_FONT: &str = "Inter";
 /// Static instances: GPUI renders only the default instance of a variable
 /// font, so each weight the shell uses ships as its own face.
-const EMBEDDED_UI_FONTS: [&[u8]; 5] = [
+const EMBEDDED_UI_FONTS: [&[u8]; 7] = [
     include_bytes!("../../data/fonts/Inter-Regular.ttf"),
     include_bytes!("../../data/fonts/Inter-Medium.ttf"),
     include_bytes!("../../data/fonts/Inter-SemiBold.ttf"),
     include_bytes!("../../data/fonts/Inter-Bold.ttf"),
     include_bytes!("../../data/fonts/Inter-Italic.ttf"),
+    include_bytes!("../../data/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
+    include_bytes!("../../data/fonts/jetbrains-mono/JetBrainsMono-Bold.ttf"),
 ];
-// The bundle ships this face and points fontconfig at itself. The generic
-// `monospace` alias resolves through the host's fontconfig instead, which lands
-// on DejaVu Sans Mono and reads nothing like the rest of the shell.
+// Embedded faces keep terminal measurement and rendering consistent on every host.
 pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
@@ -1451,7 +1451,6 @@ struct XdDesktop {
     active_endpoint: ChatEndpoint,
     minimal_route: MinimalRoute,
     minimal_theme_open: bool,
-    minimal_new_tab_open: bool,
     minimal_popup_focus: FocusHandle,
     minimal_popup_previous_focus: Option<WeakFocusHandle>,
     minimal_popup_focus_captured: bool,
@@ -1530,6 +1529,8 @@ struct XdDesktop {
     tab_editor: Entity<FileEditor>,
     terminal_input: Entity<ComposerInput>,
     terminal_scroll: ScrollHandle,
+    terminal_tabs_scroll: ScrollHandle,
+    terminal_tabs_selected: Option<String>,
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
@@ -1981,7 +1982,6 @@ impl XdDesktop {
             active_endpoint,
             minimal_route: MinimalRoute::default(),
             minimal_theme_open: false,
-            minimal_new_tab_open: false,
             minimal_popup_focus,
             minimal_popup_previous_focus: None,
             minimal_popup_focus_captured: false,
@@ -2053,6 +2053,8 @@ impl XdDesktop {
             tab_editor,
             terminal_input,
             terminal_scroll: ScrollHandle::new(),
+            terminal_tabs_scroll: ScrollHandle::new(),
+            terminal_tabs_selected: None,
             auth_input,
             secret_name_input,
             secret_value_input,
@@ -5345,8 +5347,7 @@ impl XdDesktop {
     }
 
     fn browser_occluded_by_popup(&self) -> bool {
-        self.minimal_new_tab_open
-            || self.auth_open
+        self.auth_open
             || self.native_option_open.is_some()
             || self.share_panel.is_some()
             || self.devices_panel.is_some()
@@ -6421,7 +6422,9 @@ impl XdDesktop {
         if should_auto_open {
             self.start_terminal_session(true, cx);
         }
-        cx.notify();
+        if geometry_changed {
+            cx.notify();
+        }
     }
 
     fn send_terminal_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -6530,24 +6533,12 @@ impl XdDesktop {
         self.start_terminal_session_as(reuse, agent, cx);
     }
 
-    fn toggle_minimal_new_tab_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.minimal_new_tab_open = !self.minimal_new_tab_open;
-        if self.minimal_new_tab_open {
-            self.minimal_theme_open = false;
-            self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
-        } else {
-            self.restore_minimal_popup_focus(window);
-        }
-        cx.notify();
-    }
-
     fn open_minimal_terminal_tab(
         &mut self,
         agent: Option<AgentCli>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.minimal_new_tab_open = false;
         self.restore_minimal_popup_focus(window);
         self.start_terminal_session_as(false, agent, cx);
         let focus = self.terminal_input.read(cx).focus_handle(cx);
@@ -6650,7 +6641,6 @@ impl XdDesktop {
     }
 
     fn select_terminal(&mut self, terminal_id: String, cx: &mut Context<Self>) {
-        self.minimal_new_tab_open = false;
         let Some(panel) = &mut self.terminal_panel else {
             return;
         };
@@ -8370,7 +8360,6 @@ impl XdDesktop {
             return;
         }
         self.minimal_route = MinimalRoute::Projects { project_id };
-        self.minimal_new_tab_open = false;
         self.stash_terminal_panel();
         self.model.selected_chat = None;
         self.sync_terminal_input_mode(cx);
@@ -8389,7 +8378,6 @@ impl XdDesktop {
             return;
         }
         self.minimal_route = MinimalRoute::Terminal;
-        self.minimal_new_tab_open = false;
         self.model.selected_chat = None;
         if !same_panel {
             self.stash_terminal_panel();
@@ -8443,7 +8431,6 @@ impl XdDesktop {
         agent: AgentCli,
         cx: &mut Context<Self>,
     ) {
-        self.minimal_new_tab_open = false;
         if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
             self.native_pane = NativePane::Chat;
             self.bottom_terminal_open = false;
@@ -8508,7 +8495,6 @@ impl XdDesktop {
             } => self.select_minimal_session(project_id, chat_id, agent, cx),
             MinimalRoute::Sessions { .. } => {
                 self.minimal_route = next;
-                self.minimal_new_tab_open = false;
                 self.stash_terminal_panel();
                 self.model.selected_chat = None;
                 self.sync_terminal_input_mode(cx);
@@ -8516,7 +8502,6 @@ impl XdDesktop {
             }
             MinimalRoute::Projects { .. } => {
                 self.minimal_route = next;
-                self.minimal_new_tab_open = false;
                 self.stash_terminal_panel();
                 self.model.selected_chat = None;
                 cx.notify();
@@ -8564,7 +8549,6 @@ impl XdDesktop {
     fn toggle_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.minimal_theme_open = !self.minimal_theme_open;
         if self.minimal_theme_open {
-            self.minimal_new_tab_open = false;
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.restore_minimal_popup_focus(window);
@@ -8594,7 +8578,6 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let terminal_input = self.terminal_input.clone();
         let terminal_focus = self.terminal_input.read(cx).focus_handle(cx);
-        let minimal_popup_focus = self.minimal_popup_focus.clone();
         let desktop = cx.entity();
         let Some(panel) = self.terminal_panel.as_ref() else {
             return div()
@@ -8609,6 +8592,20 @@ impl XdDesktop {
         };
 
         let selected_id = panel.selected.clone();
+        if self.terminal_tabs_selected != selected_id
+            && self.terminal_tabs_scroll.bounds().size.width > px(0.0)
+        {
+            if let Some(index) = panel
+                .sessions
+                .iter()
+                .position(|session| Some(&session.id) == selected_id.as_ref())
+            {
+                self.terminal_tabs_scroll.scroll_to_item(index);
+            }
+            self.terminal_tabs_selected = selected_id.clone();
+        } else if self.terminal_tabs_selected != selected_id {
+            window.request_animation_frame();
+        }
         let panel_loading = panel.loading;
         let panel_is_empty = panel.sessions.is_empty();
         let panel_error = panel.error.clone();
@@ -8720,6 +8717,7 @@ impl XdDesktop {
                 div()
                     .id(("minimal-terminal-tab", index))
                     .h_full()
+                    .flex_shrink_0()
                     .px_3()
                     .flex()
                     .items_center()
@@ -8839,9 +8837,6 @@ impl XdDesktop {
             .relative()
             .flex()
             .flex_col()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(rgb(colors.border))
             .bg(rgb(colors.background))
             .overflow_hidden()
             .child(
@@ -8853,12 +8848,22 @@ impl XdDesktop {
                     .border_b_1()
                     .border_color(rgb(colors.border))
                     .bg(rgb(colors.sidebar))
-                    .children(tabs)
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("minimal-terminal-tabs")
+                            .h_full()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.terminal_tabs_scroll)
+                            .children(tabs),
+                    )
                     .child(
                         div()
                             .id("minimal-new-terminal")
                             .size(px(26.0))
+                            .flex_shrink_0()
                             .mr_2()
                             .flex()
                             .items_center()
@@ -8867,7 +8872,7 @@ impl XdDesktop {
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(colors.surface_high)))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_minimal_new_tab_menu(window, cx)
+                                this.open_minimal_terminal_tab(None, window, cx)
                             }))
                             .child(plus_icon(colors.text)),
                     ),
@@ -8896,58 +8901,6 @@ impl XdDesktop {
                 )
             })
             .child(viewport)
-            .when(self.minimal_new_tab_open, |pane| {
-                pane.child(
-                    div()
-                        .id("minimal-new-tab-shield")
-                        .occlude()
-                        .absolute()
-                        .inset_0()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.minimal_new_tab_open = false;
-                            this.restore_minimal_popup_focus(window);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    div()
-                        .id("minimal-new-tab-menu")
-                        .occlude()
-                        .absolute()
-                        .top(px(34.0))
-                        .right(px(8.0))
-                        .w(px(180.0))
-                        .p_1()
-                        .rounded(px(7.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .shadow_lg()
-                        .flex()
-                        .flex_col()
-                        .track_focus(&minimal_popup_focus)
-                        .child(
-                            div()
-                                .id("minimal-new-shell-tab")
-                                .w_full()
-                                .px_3()
-                                .h(px(32.0))
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .rounded(px(5.0))
-                                .text_size(px(13.0))
-                                .text_color(rgb(colors.text))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_minimal_terminal_tab(None, window, cx)
-                                }))
-                                .child(icon(TERMINAL_ICON, 15.0, colors.text))
-                                .child("Terminal"),
-                        ),
-                )
-            })
             .into_any_element()
     }
 
@@ -9323,7 +9276,6 @@ impl XdDesktop {
                                         this.show_native_pane(NativePane::Terminal, cx);
                                         this.terminal_input.read(cx).focus_handle(cx).focus(window);
                                     } else {
-                                        this.minimal_new_tab_open = false;
                                         this.composer_input.read(cx).focus_handle(cx).focus(window);
                                     }
                                     cx.notify();
@@ -12646,7 +12598,6 @@ impl XdDesktop {
                             .w(px(available))
                             .flex_none()
                             .min_h_0()
-                            .p_2()
                             .child(terminal),
                     )
             })
@@ -12714,7 +12665,7 @@ impl XdDesktop {
                     .text_color(rgb(colors.text))
                     .child("Terminal"),
             )
-            .child(div().flex_1().min_h_0().p_3().child(terminal))
+            .child(div().flex_1().min_h_0().child(terminal))
             .into_any_element()
     }
 
@@ -14604,9 +14555,6 @@ impl XdDesktop {
                     this.cancel_workspace_create(cx);
                 } else if this.creating_chat_folder.is_some() {
                     this.cancel_chat_create(cx);
-                } else if this.minimal_new_tab_open {
-                    this.minimal_new_tab_open = false;
-                    cx.notify();
                 } else if this.minimal_theme_open {
                     this.minimal_theme_open = false;
                     cx.notify();
@@ -17680,6 +17628,54 @@ mod tests {
                 .as_deref(),
             Some("shell")
         );
+    }
+
+    #[gpui::test]
+    fn selected_terminal_tab_scrolls_into_view(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            let mut panel = XdDesktop::new_terminal_panel("tabs-test".into());
+            panel.auto_open = false;
+            panel.sessions = (0..40)
+                .map(|index| {
+                    XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({
+                        "id": format!("tab-{index}"),
+                        "columns": 80,
+                        "rows": 24,
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            panel.selected = Some("tab-39".into());
+            desktop.terminal_panel = Some(panel);
+            desktop.minimal_route = MinimalRoute::Terminal;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        desktop.update(cx, |desktop, cx| {
+            let scroll = &desktop.terminal_tabs_scroll;
+            assert!(scroll.offset().x < px(0.0));
+            let tab = scroll.bounds_for_item(39).unwrap();
+            assert!(tab.left() + scroll.offset().x >= scroll.bounds().left());
+            assert!(tab.right() + scroll.offset().x <= scroll.bounds().right());
+            desktop.select_terminal("tab-0".into(), cx);
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(desktop.terminal_tabs_scroll.offset().x, px(0.0));
+        });
     }
 
     #[test]

@@ -219,6 +219,7 @@ RUN set -eux; \
     install -m0644 \
       data/licenses/alacritty-terminal-LICENSE-APACHE \
       /stage/usr/share/licenses/xd/alacritty-terminal-LICENSE-APACHE; \
+    install -m0644 data/fonts/jetbrains-mono/OFL.txt /stage/usr/share/licenses/xd/JetBrainsMono-OFL.txt; \
     install -m0644 data/licenses/t3code-LICENSE /stage/usr/share/licenses/xd/t3code-LICENSE; \
     sed \
       -e "s|@APP_ID@|$app_id|g" \
