@@ -106,6 +106,8 @@ done
 install -m0644 data/licenses/alacritty-terminal-LICENSE-APACHE \
   "$APP/Contents/Resources/licenses/alacritty-terminal-LICENSE-APACHE"
 
+install -m0644 data/fonts/jetbrains-mono/OFL.txt \
+  "$APP/Contents/Resources/licenses/JetBrainsMono-OFL.txt"
 install -m0644 data/licenses/t3code-LICENSE \
   "$APP/Contents/Resources/licenses/t3code-LICENSE"
 
