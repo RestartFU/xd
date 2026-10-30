@@ -180,7 +180,7 @@ components:
   session-header:
     backgroundColor: "{colors.cabinet-graphite}"
     typography: "{typography.headline}"
-    height: "52px"
+    height: "48px"
   pane-tab-active:
     backgroundColor: "{colors.pulled-card}"
     textColor: "{colors.bone-ink}"
@@ -199,7 +199,7 @@ components:
 
 **Creative North Star: "The Card Catalog"**
 
-xd is a library card catalog for agent sessions. Projects are drawers, sessions are index cards, and a small metal signal tab clipped to the top edge of a card says what its agent is doing. One catalog sidebar on the left holds every drawer; only the current project's drawer is pulled out to show its cards, and the rest stay one line tall and show just their tabs. The centre belongs to the session's transcript, and the right dock holds Changes, Files, Terminal and Browser.
+xd is a library card catalog for agent sessions. Projects are drawers, sessions are index cards, and a small metal signal tab clipped to the top edge of a card says what its agent is doing. One catalog sidebar on the left holds every drawer; only the current project's drawer is pulled out to show its cards, and the rest stay one line tall and show just their tabs. The centre belongs to the session's transcript, and the right dock holds Browser, Files and Changes, with Terminal below the chat.
 
 The material is a cool graphite cabinet with bone card-stock ink in Dark, and white card stock with near-black ink in Light. Each card has one thin red ruled line under its title, the only decorative mark in the system. Colour is mostly reserved for state: green, amber and blue live on the signal tabs and the words beside them, and the chrome around them stays neutral so the agent's output stays the content. Density is that of a working tool: 12.5 to 13px UI text, 30px controls, 56px cards.
 
@@ -257,7 +257,7 @@ A neutral graphite and bone palette with one red ruled line, ink-blue links, and
 
 ### Hierarchy
 - **Display** (600, 22px): the project name on the project home, set inside its label frame. Markdown H1 in the transcript is 22px Bold, H2 is 19px and H3 is 16px.
-- **Headline** (600, 15px): the session title in the 52px session header.
+- **Headline** (600, 15px): the session title in the 48px session header.
 - **Title** (500 to 600, 13px): card titles (500), drawer names (500 when closed, 600 when current), the "Projects" header and popover row labels.
 - **Body** (400, 14px / 23px): agent and user messages in the chat column. The column is capped at 860px, assistant messages at 820px and user messages at 720px.
 - **Body UI** (400 to 500, 12.5px / 19px): buttons (500), the Find field, empty states and hints.
@@ -272,11 +272,11 @@ On Android the Material 3 type scale is kept and set in Libre Franklin. Headline
 
 ## Layout
 
-The desktop window has three regions. At the top is a 38px title bar (drawer graphite, 1px seam below) with the xd mark, a project / session breadcrumb, a Browser toggle and the connection state. On the left is the 288px catalog sidebar (`CATALOG_WIDTH`; the direction contract said 296px, and the build is what this records). The centre is the session. On macOS the title bar is inset 86px for the traffic lights, and on other platforms 16px.
+The desktop window has three regions. At the top is a 38px title bar (drawer graphite, 1px seam below) with the xd mark, a project / session breadcrumb, the connection state and, outside sessions, a side-pane icon toggle. On the left is the 288px catalog sidebar (`CATALOG_WIDTH`; the direction contract said 296px, and the build is what this records). The centre is the session. On macOS the title bar is inset 86px for the traffic lights, and on other platforms 16px.
 
 The catalog stacks a 44px "Projects" header with an add button, then the Find field (32px, 10px side margins), then the drawer list (7px side gutter, 3px between drawers), then a footer with a 1px top seam and 10px vertical padding. The footer holds the primary New session button, a Terminal ghost button and a Settings ghost button. A closed drawer is one 34px row: a chevron, the name, a mono count, and on the right its non-idle signal tabs (at most six) followed by an add button. The open drawer insets its 56px cards by 5px, 3px apart.
 
-In the centre, a 52px session header holds the title, agent and branch chips (24px, 1px seam border), the state stamp, and a segmented control for Changes / Files / Terminal. The chat column below it is centred and capped at 860px, with the composer at the bottom. The right dock opens beside the chat and can be resized.
+In the centre, a 48px session header holds the title, agent and branch chips (24px, 1px seam border), the state stamp, and two layout icons for the side pane and bottom terminal, with hover labels and selected backgrounds. The chat column below it is centred and capped at 860px, with the composer at the bottom. The right dock opens a browser page by default; its plus menu adds browser pages, Files, or Changes as tabs. The bottom pane opens a shell terminal. Both panes resize independently and can stay open together.
 
 Spacing is small and irregular rather than a strict scale: 3, 5, 7 and 10px for catalog joinery, and 8, 12 and 16px for general padding.
 
@@ -295,7 +295,7 @@ Surfaces are flat and depth is tonal. The cabinet ground sits lowest, the drawer
 
 ## Shapes
 
-Corners are small and practical, like card stock and steel. Signal tabs and stamps round only by 2px, and signal tabs round only their top corners so they look clipped to the card's edge. The label frame is 3px with a 1.5px outline in the primary colour. Cards are 5px. Buttons, the Find field and pane tabs are 6px. The segmented control is 7px. Panels, the open drawer, popovers and message cards are 8px. Borders are 1px cabinet seam by default. A 1.5px border marks the label frame, the hollow Done tab and the amber interaction card.
+Corners are small and practical, like card stock and steel. Signal tabs and stamps round only by 2px, and signal tabs round only their top corners so they look clipped to the card's edge. The label frame is 3px with a 1.5px outline in the primary colour. Cards are 5px. Buttons, the Find field and pane tabs are 6px. Layout toggles use 6px corners. Panels, the open drawer, popovers and message cards are 8px. Borders are 1px cabinet seam by default. A 1.5px border marks the label frame, the hollow Done tab and the amber interaction card.
 
 Android scales the same shapes for touch: cards 7dp, the open drawer 10dp, theme choices and chat panels 8dp, the label frame 3dp. Material components keep their own shapes.
 
@@ -338,7 +338,7 @@ A rubber-stamp status in small uppercase: a 1px border in the state's colour, 2p
 - **Composer:** pinned to the foot of the chat column, inside the same 860px measure.
 
 ### Navigation
-- **Desktop:** the catalog is the primary navigation (project, then session). The pane switch in the session header is a segmented control (2px inset, 7px radius, 1px seam) of 24px ghost buttons. The active segment takes the pulled-card fill and primary text. Selecting the active pane again returns to Chat.
+- **Desktop:** the catalog is the primary navigation (project, then session). The 48px session header has two 28px ghost icon buttons for the side pane and bottom terminal. An open pane gives its button the pulled-card fill and primary text. Selecting an active button hides its pane while preserving its content.
 - **Android:** a Material `NavigationBar` on the surface colour, with a `secondaryContainer` indicator, for Projects, Sessions and Terminal, using drawn stroke icons.
 
 ### Cards / Containers (transcript)
