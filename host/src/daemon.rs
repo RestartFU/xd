@@ -419,6 +419,7 @@ impl PeerServer {
                         };
                         clients.push(thread::spawn(move || {
                             let result = (|| -> io::Result<()> {
+                                socket.set_nonblocking(false)?;
                                 let tls = rustls::ServerConnection::new(config)
                                     .map_err(io::Error::other)?;
                                 let (mut input, mut output, session) =
