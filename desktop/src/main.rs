@@ -9024,8 +9024,6 @@ impl XdDesktop {
             } else {
                 16.0
             }))
-            .border_b_1()
-            .border_color(rgb(colors.border))
             .bg(rgb(colors.sidebar))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
@@ -9178,8 +9176,6 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .border_b_1()
-            .border_color(rgb(colors.border))
             .bg(rgb(colors.background))
             .child(
                 div()
@@ -9779,8 +9775,6 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .border_t_1()
-                    .border_color(rgb(colors.border))
                     .child(div().flex_1())
                     .child(
                         ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
