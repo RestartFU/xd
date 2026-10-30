@@ -14126,7 +14126,7 @@ impl XdDesktop {
                             div()
                                 .text_xs()
                                 .text_color(rgb(colors.muted))
-                                .child("The selected CLI opens directly in this project."),
+                                .child("Start a chat with the selected assistant."),
                         )
                         .child(
                             div()
