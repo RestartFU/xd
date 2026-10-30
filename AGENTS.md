@@ -26,3 +26,13 @@ when creating or amending commits, preparing PR messages, or merging, squashing,
 or rebasing a PR. Inspect the final commit message, including any message generated
 by GitHub, and remove AI co-author trailers before committing or merging. Use the
 user's configured Git identity and preserve required license notices and attribution.
+
+## UI screenshot proof
+
+Every UI change must include before-and-after screenshot proof in the PR
+description. Capture the affected UI before editing and again after the change,
+using the same viewport, theme, and comparable application state so the difference
+is clear. Label both screenshots and cover each affected surface or layout.
+Use actual application captures and keep private or sensitive content out of the
+images. Do not mark a UI change ready for review or merge until both screenshots
+are included; report any capture blockers and incomplete validation explicitly.
