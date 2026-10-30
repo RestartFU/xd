@@ -371,13 +371,6 @@ fn installed_cli_reuses_sessions_and_resumes_after_process_loss() {
             .iter()
             .any(|arg| arg == "service_tier=\"priority\"")
     );
-    let opened = client.call(json!({"op":"terminal-open-agent", "chat":chat,
-        "agent":"codex", "columns":80, "rows":24, "reuse":false}));
-    assert_eq!(opened["ok"], true, "{opened}");
-    assert_eq!(
-        client.call(json!({"op":"terminal-kill", "terminal":opened["id"]}))["ok"],
-        true
-    );
 }
 
 #[test]

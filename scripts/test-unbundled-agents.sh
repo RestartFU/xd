@@ -62,4 +62,4 @@ test ! -e data/icons/hicolor/symbolic/apps/xd-backend-codex-symbolic.svg
 test ! -e data/icons/hicolor/symbolic/apps/xd-download-symbolic.svg
 test ! -e tls-proxy-rs
 
-grep -Fq 'user-installed Codex, Claude Code, JCode, and GitHub Copilot' README.md
+grep -Fq 'user-installed Codex, Claude Code, and JCode' README.md

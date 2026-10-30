@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus,
-    agent::{resolve_claude, resolve_codex, resolve_copilot, resolve_jcode},
+    agent::{resolve_claude, resolve_codex, resolve_jcode},
     background_process::command as background_command,
 };
 
@@ -43,7 +43,6 @@ impl CliVersions {
             ("codex", "Codex"),
             ("claude", "Claude Code"),
             ("jcode", "JCode"),
-            ("copilot", "GitHub Copilot"),
         ]
         .into_iter()
         .map(|(provider, display_name)| {
@@ -73,7 +72,7 @@ impl CliVersions {
             .states
             .lock()
             .map(|states| {
-                ["codex", "claude", "jcode", "copilot"]
+                ["codex", "claude", "jcode"]
                     .into_iter()
                     .filter_map(|provider| {
                         states
@@ -87,7 +86,7 @@ impl CliVersions {
     }
 
     fn refresh_all(&self) {
-        for provider in ["codex", "claude", "jcode", "copilot"] {
+        for provider in ["codex", "claude", "jcode"] {
             self.refresh(provider);
         }
     }
@@ -116,7 +115,6 @@ impl CliVersions {
                 let result = match checked_provider.as_str() {
                     "claude" => read_version(&resolve_claude(), CHECK_TIMEOUT),
                     "jcode" => read_version(&resolve_jcode(), CHECK_TIMEOUT),
-                    "copilot" => read_version(&resolve_copilot(), CHECK_TIMEOUT),
                     _ => read_version(&resolve_codex(), CHECK_TIMEOUT),
                 };
                 if let Ok(mut states) = versions.inner.states.lock()

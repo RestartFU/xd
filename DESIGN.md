@@ -180,7 +180,7 @@ components:
   session-header:
     backgroundColor: "{colors.cabinet-graphite}"
     typography: "{typography.headline}"
-    height: "52px"
+    height: "48px"
   pane-tab-active:
     backgroundColor: "{colors.pulled-card}"
     textColor: "{colors.bone-ink}"
@@ -257,7 +257,7 @@ A neutral graphite and bone palette with one red ruled line, ink-blue links, and
 
 ### Hierarchy
 - **Display** (600, 22px): the project name on the project home, set inside its label frame. Markdown H1 in the transcript is 22px Bold, H2 is 19px and H3 is 16px.
-- **Headline** (600, 15px): the session title in the 52px session header.
+- **Headline** (600, 15px): the session title in the 48px session header.
 - **Title** (500 to 600, 13px): card titles (500), drawer names (500 when closed, 600 when current), the "Projects" header and popover row labels.
 - **Body** (400, 14px / 23px): agent and user messages in the chat column. The column is capped at 860px, assistant messages at 820px and user messages at 720px.
 - **Body UI** (400 to 500, 12.5px / 19px): buttons (500), the Find field, empty states and hints.
@@ -295,7 +295,7 @@ Surfaces are flat and depth is tonal. The cabinet ground sits lowest, the drawer
 
 ## Shapes
 
-Corners are small and practical, like card stock and steel. Signal tabs and stamps round only by 2px, and signal tabs round only their top corners so they look clipped to the card's edge. The label frame is 3px with a 1.5px outline in the primary colour. Cards are 5px. Buttons, the Find field and pane tabs are 6px. The segmented control is 7px. Panels, the open drawer, popovers and message cards are 8px. Borders are 1px cabinet seam by default. A 1.5px border marks the label frame, the hollow Done tab and the amber interaction card.
+Corners are small and practical, like card stock and steel. Signal tabs and stamps round only by 2px, and signal tabs round only their top corners so they look clipped to the card's edge. The label frame is 3px with a 1.5px outline in the primary colour. Cards are 5px. Buttons, the Find field and pane tabs are 6px. Layout toggles use 6px corners. Panels, the open drawer, popovers and message cards are 8px. Borders are 1px cabinet seam by default. A 1.5px border marks the label frame, the hollow Done tab and the amber interaction card.
 
 Android scales the same shapes for touch: cards 7dp, the open drawer 10dp, theme choices and chat panels 8dp, the label frame 3dp. Material components keep their own shapes.
 
@@ -338,7 +338,7 @@ A rubber-stamp status in small uppercase: a 1px border in the state's colour, 2p
 - **Composer:** pinned to the foot of the chat column, inside the same 860px measure.
 
 ### Navigation
-- **Desktop:** the catalog is the primary navigation (project, then session). The pane switch in the session header is a segmented control (2px inset, 7px radius, 1px seam) of 24px ghost buttons. The active segment takes the pulled-card fill and primary text. Selecting the active pane again returns to Chat.
+- **Desktop:** the catalog is the primary navigation (project, then session). The 48px session header has two 28px ghost icon buttons for the side pane and bottom terminal. An open pane gives its button the pulled-card fill and primary text. Selecting an active button hides its pane while preserving its content.
 - **Android:** a Material `NavigationBar` on the surface colour, with a `secondaryContainer` indicator, for Projects, Sessions and Terminal, using drawn stroke icons.
 
 ### Cards / Containers (transcript)

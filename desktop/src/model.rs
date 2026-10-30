@@ -288,7 +288,6 @@ pub struct AgentBackend {
 pub struct AppModel {
     pub folders: Vec<Folder>,
     pub chats: Vec<ChatSummary>,
-    pub session_modes: HashMap<String, String>,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -394,21 +393,6 @@ impl AppModel {
 
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
         let mut snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
-        self.session_modes = body
-            .get("chats")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|chat| {
-                Some((
-                    chat.get("id")?.as_str()?.to_owned(),
-                    chat.get("session_mode")
-                        .and_then(Value::as_str)
-                        .unwrap_or("terminal")
-                        .to_owned(),
-                ))
-            })
-            .collect();
         let terminal_activity_revision = self.prepare_terminal_activity_version(
             snapshot.terminal_activity_epoch.as_deref(),
             snapshot.terminal_activity_revision,
@@ -1206,7 +1190,6 @@ impl AppModel {
                     terminal_working: false,
                 },
             ],
-            session_modes: HashMap::new(),
             terminal_activity_epoch: None,
             terminal_activity_by_chat: HashMap::new(),
             selected_chat: Some("chat-gpui".into()),
