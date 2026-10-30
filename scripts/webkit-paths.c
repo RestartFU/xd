@@ -8,6 +8,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+// GnuTLS's system trust path belongs to the build distribution, whereas the
+// bundle's CA file is relocatable. SSL_CERT_FILE only configures OpenSSL.
+// Initialize GIO before WebKit creates its network sessions; setting the backend
+// database also covers calls made internally by GIO's TLS connections.
+__attribute__((constructor))
+static void configure_bundle_tls(void)
+{
+    const char *root = g_getenv("XD_BROWSER_BUNDLE_ROOT");
+    if (!root || !*root)
+        return;
+    gchar *path = g_build_filename(root, "etc", "ssl", "certs",
+                                  "ca-certificates.crt", NULL);
+    GError *error = NULL;
+    GTlsDatabase *database = g_tls_file_database_new(path, &error);
+    if (!database)
+        g_error("Cannot load browser certificate authorities: %s",
+                error ? error->message : "unknown error");
+    g_tls_backend_set_default_database(g_tls_backend_get_default(), database);
+    g_object_unref(database);
+    g_free(path);
+}
+
 static const char *webkit_helper(const char *path)
 {
     const char *prefix = "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/";
