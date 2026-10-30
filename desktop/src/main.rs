@@ -9857,7 +9857,6 @@ impl XdDesktop {
         }
 
         let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
-        let create_session_for = current_project.clone();
         let settings_open = self.minimal_theme_open;
 
         div()
@@ -9974,22 +9973,6 @@ impl XdDesktop {
                     .gap_2()
                     .border_t_1()
                     .border_color(rgb(colors.border))
-                    .child(
-                        ui_button("minimal-global-create", ButtonKind::Secondary, colors)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if let Some(project_id) = create_session_for.clone() {
-                                    this.begin_chat_create(project_id, window, cx);
-                                } else {
-                                    this.begin_workspace_create(window, cx);
-                                }
-                            }))
-                            .child(plus_icon(colors.muted))
-                            .child(if current_project.is_some() {
-                                "New session"
-                            } else {
-                                "New project"
-                            }),
-                    )
                     .child(div().flex_1())
                     .child(
                         ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
