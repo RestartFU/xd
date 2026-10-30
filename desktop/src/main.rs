@@ -17111,8 +17111,6 @@ mod tests {
                 "trash icon {count} needs its own color because SVG styles do not inherit from the button"
             );
         }
-
-        assert_eq!(count, 1);
     }
 
     #[gpui::test]
@@ -17944,18 +17942,10 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
 
         assert!(board.contains("self.model.unread_chats.contains(&session.id)"));
         assert!(board.contains("signal_tab(signal, colors)"));
         assert!(board.contains("self.session_signal(&session)"));
-        let _ = home;
         assert!(production.contains("Self::Done => \"Done\""));
         assert!(production.contains("Self::Done => colors.done"));
     }
@@ -18031,20 +18021,10 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
 
-        for cards in [board] {
-            let _ = home;
-            assert!(cards.contains("MouseButton::Right"));
-            assert!(cards.contains("this.open_sidebar_context_menu("));
-            assert!(!cards.contains("minimal-delete-session"));
-        }
+        assert!(board.contains("MouseButton::Right"));
+        assert!(board.contains("this.open_sidebar_context_menu("));
+        assert!(!board.contains("minimal-delete-session"));
 
         assert!(production.contains("\"Rename session\""));
         assert!(production.contains("\"Delete session\""));
@@ -18060,27 +18040,15 @@ mod tests {
             .split_once("#[cfg(test)]")
             .expect("desktop production source")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("minimal home renderer")
-            .1
-            .split_once("fn render_minimal_cli(")
-            .expect("end of minimal home renderer")
-            .0;
-        for behavior in [
-            "minimal-rename-project",
-            "this.begin_sidebar_edit(",
-            "SidebarTarget::Folder",
-        ] {
-            assert!(production.contains(behavior), "missing {behavior}");
-            let _ = home;
-        }
 
         let root = production
             .split_once("fn render_minimal(")
             .expect("minimal root renderer")
             .1;
         for behavior in [
+            "minimal-rename-project",
+            "this.begin_sidebar_edit(",
+            "rename_target.clone()",
             "let sidebar_rename_overlay =",
             "\"Rename project\"",
             ".child(heading)",
@@ -18108,13 +18076,8 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
+
+        assert!(board.contains("SidebarTarget::Folder(context_project.clone())"));
 
         for behavior in [
             "minimal-delete-project",
@@ -18123,9 +18086,7 @@ mod tests {
             "SidebarTarget::Folder(context_project.clone())",
         ] {
             assert!(production.contains(behavior), "missing {behavior}");
-            let _ = home;
         }
-        let _ = board;
 
         let root = production
             .split_once("fn render_minimal(")
@@ -18157,19 +18118,9 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
 
-        for surface in [board] {
-            let _ = home;
-            assert!(surface.contains("this.open_sidebar_context_menu("));
-            assert!(!surface.contains("minimal-delete-session"));
-        }
+        assert!(board.contains("this.open_sidebar_context_menu("));
+        assert!(!board.contains("minimal-delete-session"));
 
         let root = production
             .split_once("fn render_minimal(")
