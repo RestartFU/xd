@@ -6206,6 +6206,12 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn native_side_tools_enabled(&self) -> bool {
+        matches!(&self.minimal_route, MinimalRoute::Cli { chat_id, .. }
+            if self.model.selected_chat.as_deref() == Some(chat_id.as_str()))
+            && self.native_session()
+    }
+
     fn sync_browser_pane(
         &mut self,
         window: &mut Window,
@@ -6245,14 +6251,23 @@ impl XdDesktop {
                     }
                 }
                 BrowserEvent::Close => this.close_browser(cx),
-                BrowserEvent::AuxiliaryClosed(tab) => this.close_side_tool(
-                    match tab {
-                        SideTab::Files => NativePane::Files,
-                        SideTab::Changes => NativePane::Diff,
-                    },
-                    cx,
-                ),
+                BrowserEvent::AuxiliaryClosed(tab) => {
+                    if scope == this.browser_scope_key() && this.native_side_tools_enabled() {
+                        this.close_side_tool(
+                            match tab {
+                                SideTab::Files => NativePane::Files,
+                                SideTab::Changes => NativePane::Diff,
+                            },
+                            cx,
+                        );
+                    }
+                }
                 BrowserEvent::AuxiliarySelected(tab) => {
+                    if scope != this.browser_scope_key()
+                        || (tab.is_some() && !this.native_side_tools_enabled())
+                    {
+                        return;
+                    }
                     this.select_side_tool(
                         match tab {
                             Some(SideTab::Files) => NativePane::Files,
@@ -6272,7 +6287,7 @@ impl XdDesktop {
             NativePane::Diff => Some(SideTab::Changes),
             _ => None,
         };
-        let tools_enabled = self.native_session();
+        let tools_enabled = self.native_side_tools_enabled();
         pane.update(cx, |pane, cx| {
             pane.configure_side_tabs(side_tab, tools_enabled, cx);
             pane.set_colors(colors, cx);
@@ -13369,8 +13384,10 @@ impl XdDesktop {
             }
         }
         let browser_pane = self.sync_browser_pane(window, cx);
-        let side_content = (browser_pane.is_some()
-            && matches!(self.native_pane, NativePane::Files | NativePane::Diff))
+        let side_content = (self.native_side_tools_enabled()
+            && browser_pane
+                .as_ref()
+                .is_some_and(|pane| pane.read(cx).active_side_tab().is_some()))
         .then(|| self.render_native_side_content(colors, window, cx));
         let browser_width = browser_pane_width(
             self.settings.browser_width,
@@ -16577,6 +16594,39 @@ mod tests {
                 Some("retained-shell")
             );
             assert!(desktop.native_pane == NativePane::Files);
+        });
+    }
+
+    #[gpui::test]
+    fn global_side_pane_ignores_the_previous_chats_tools(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.model.selected_chat = Some("tool-chat".into());
+                desktop
+                    .model
+                    .session_modes
+                    .insert("tool-chat".into(), "chat".into());
+                desktop.minimal_route = MinimalRoute::Cli {
+                    project_id: "tool-project".into(),
+                    chat_id: "tool-chat".into(),
+                    agent: AgentCli::Codex,
+                };
+                desktop.native_pane = NativePane::Files;
+                desktop.set_browser_open(true);
+                let chat_pane = desktop.sync_browser_pane(window, cx).unwrap();
+                assert_eq!(chat_pane.read(cx).active_side_tab(), Some(SideTab::Files));
+                desktop.show_minimal_projects(cx);
+                desktop.set_browser_open(true);
+                let global_pane = desktop.sync_browser_pane(window, cx).unwrap();
+                assert!(!desktop.native_side_tools_enabled());
+                assert!(global_pane.read(cx).active_side_tab().is_none());
+                assert_ne!(chat_pane.entity_id(), global_pane.entity_id());
+                desktop.minimal_route = MinimalRoute::Terminal;
+                desktop.native_pane = NativePane::Diff;
+                let global_pane = desktop.sync_browser_pane(window, cx).unwrap();
+                assert!(global_pane.read(cx).active_side_tab().is_none());
+            })
         });
     }
 

@@ -253,6 +253,10 @@ impl BrowserPane {
             .unwrap_or(self.session.active_tab)
     }
 
+    pub fn active_side_tab(&self) -> Option<SideTab> {
+        self.auxiliary
+    }
+
     pub fn configure_side_tabs(
         &mut self,
         selected: Option<SideTab>,
@@ -260,6 +264,11 @@ impl BrowserPane {
         cx: &mut Context<Self>,
     ) {
         self.tools_enabled = enabled;
+        let selected = if enabled { selected } else { None };
+        if !enabled && !self.auxiliary_tabs.is_empty() {
+            self.auxiliary_tabs.clear();
+            cx.notify();
+        }
         if let Some(tab) = selected
             && !self.auxiliary_tabs.contains(&tab)
         {
@@ -1942,6 +1951,28 @@ fn normalize_url(address: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn disabling_tools_restores_the_browser_and_removes_tool_tabs(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                None,
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|_, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.configure_side_tabs(Some(SideTab::Files), true, cx);
+                assert_eq!(pane.active_side_tab(), Some(SideTab::Files));
+                pane.configure_side_tabs(Some(SideTab::Files), false, cx);
+                assert!(pane.active_side_tab().is_none());
+                assert!(pane.auxiliary_tabs.is_empty());
+                assert!(pane.tabs[0].display.visible.get());
+            })
+        });
+    }
 
     #[gpui::test]
     fn side_tools_hide_webviews_and_keep_page_drafts(cx: &mut gpui::TestAppContext) {
