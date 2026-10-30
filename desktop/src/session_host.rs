@@ -1089,7 +1089,7 @@ mod tests {
     #[test]
     fn closing_a_terminal_kills_its_persistent_tmux_session() {
         let directory = std::env::temp_dir().join(format!(
-            "xd-terminal-close-test-{}-{}",
+            "xd-close-{:x}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1146,7 +1146,7 @@ mod tests {
     #[test]
     fn recreating_a_dead_agent_terminal_resumes_its_backend_session() {
         let directory = std::env::temp_dir().join(format!(
-            "xd-terminal-resume-test-{}-{}",
+            "xd-resume-{:x}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1194,7 +1194,7 @@ mod tests {
     #[test]
     fn reattaching_a_legacy_terminal_marks_it_for_future_resume() {
         let directory = std::env::temp_dir().join(format!(
-            "xd-terminal-legacy-resume-test-{}-{}",
+            "xd-legacy-{:x}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
