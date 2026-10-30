@@ -1296,8 +1296,8 @@ struct SidebarEdit {
 }
 
 #[derive(Clone)]
-struct SessionContextMenu {
-    chat_id: String,
+struct SidebarContextMenu {
+    target: SidebarTarget,
     title: String,
     position: Point<Pixels>,
 }
@@ -1542,7 +1542,7 @@ struct XdDesktop {
     composer: String,
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
-    session_context_menu: Option<SessionContextMenu>,
+    sidebar_context_menu: Option<SidebarContextMenu>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -2065,7 +2065,7 @@ impl XdDesktop {
             composer: String::new(),
             queue_edit: None,
             sidebar_edit: None,
-            session_context_menu: None,
+            sidebar_context_menu: None,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -2434,7 +2434,7 @@ impl XdDesktop {
         self.diff_panel = None;
         self.sync_terminal_input_mode(cx);
         self.sidebar_edit = None;
-        self.session_context_menu = None;
+        self.sidebar_context_menu = None;
         self.pending_sidebar_delete = None;
         self.sidebar_move = None;
         self.creating_workspace = false;
@@ -5353,7 +5353,7 @@ impl XdDesktop {
             || self.remote_panel.is_some()
             || self.creating_workspace
             || self.sidebar_edit.is_some()
-            || self.session_context_menu.is_some()
+            || self.sidebar_context_menu.is_some()
             || self.pending_sidebar_delete.is_some()
             || self.creating_chat_folder.is_some()
     }
@@ -7292,7 +7292,7 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session_context_menu = None;
+        self.sidebar_context_menu = None;
         self.pending_sidebar_delete = None;
         self.sidebar_delete_submitting = false;
         self.sidebar_move = None;
@@ -7317,7 +7317,7 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session_context_menu = None;
+        self.sidebar_context_menu = None;
         self.sidebar_edit = None;
         self.sidebar_move = None;
         self.sidebar_move_submitting = false;
@@ -7328,9 +7328,9 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn open_session_context_menu(
+    fn open_sidebar_context_menu(
         &mut self,
-        chat_id: String,
+        target: SidebarTarget,
         title: String,
         position: Point<Pixels>,
         window: &mut Window,
@@ -7339,8 +7339,8 @@ impl XdDesktop {
         let viewport = window.bounds().size;
         let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 196.0).max(8.0));
         let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 112.0).max(8.0));
-        self.session_context_menu = Some(SessionContextMenu {
-            chat_id,
+        self.sidebar_context_menu = Some(SidebarContextMenu {
+            target,
             title,
             position: point(px(x), px(y)),
         });
@@ -7376,8 +7376,8 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn close_session_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.session_context_menu = None;
+    fn close_sidebar_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_context_menu = None;
         self.restore_minimal_popup_focus(window);
         cx.notify();
     }
@@ -9432,8 +9432,8 @@ impl XdDesktop {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
-                    this.open_session_context_menu(
-                        context_chat_id.clone(),
+                    this.open_sidebar_context_menu(
+                        SidebarTarget::Chat(context_chat_id.clone()),
                         context_title.clone(),
                         event.position,
                         window,
@@ -9582,7 +9582,8 @@ impl XdDesktop {
             session_instance += project.sessions.saturating_sub(signals.len());
 
             let toggle_project = project.id.clone();
-            let select_project = project.id.clone();
+            let context_project = project.id.clone();
+            let context_name = project.name.clone();
             let create_project = project.id.clone();
             let name = div()
                 .min_w_0()
@@ -9606,14 +9607,21 @@ impl XdDesktop {
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.opened_drawers.remove(&select_project);
-                    this.collapsed_folders.remove(&select_project);
-                    this.persist_collapsed_folders();
-                    this.minimal_route = MinimalRoute::Projects {
-                        project_id: Some(select_project.clone()),
-                    };
-                    cx.notify();
+                    this.toggle_drawer(toggle_project.clone(), current, cx);
                 }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_sidebar_context_menu(
+                            SidebarTarget::Folder(context_project.clone()),
+                            context_name.clone(),
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
                 .child(
                     div()
                         .id(("catalog-drawer-toggle", project_index))
@@ -9626,10 +9634,6 @@ impl XdDesktop {
                         .text_sm()
                         .text_color(rgb(colors.faint))
                         .hover(|style| style.bg(rgb(colors.border)).text_color(rgb(colors.text)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.toggle_drawer(toggle_project.clone(), current, cx);
-                        }))
                         .child(icon(
                             if open {
                                 CHEVRON_DOWN_ICON
@@ -9862,26 +9866,13 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    /// The project's front: its name, its actions, and every session card at
-    /// reading size. This is where "project, then session" starts.
+    /// The landing surface; projects and sessions are browsed in the sidebar.
     fn render_minimal_home(
         &mut self,
         colors: ThemeColors,
         _window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let projects = project_cards(&self.model.folders, &self.model.chats);
-        let selected_project_id = self.selected_minimal_project_id();
-        let selected_project = selected_project_id
-            .as_deref()
-            .and_then(|selected| projects.iter().find(|project| project.id == selected));
-        let selected_project_rename =
-            selected_project.map(|project| (project.id.clone(), project.name.clone()));
-        let selected_project_delete = selected_project.map(|project| project.id.clone());
-        let sessions = selected_project_id
-            .as_deref()
-            .map(|project_id| project_sessions(project_id, &self.model.chats))
-            .unwrap_or_default();
         let resume = resumable_session(self.cached_last_chat().as_deref(), &self.model.chats)
             .and_then(|(project_id, chat_id, agent)| {
                 let title = project_sessions(&project_id, &self.model.chats)
@@ -9890,145 +9881,6 @@ impl XdDesktop {
                     .title;
                 Some((project_id, chat_id, agent, title))
             });
-        let working = sessions.iter().filter(|session| session.working).count();
-        let waiting = sessions
-            .iter()
-            .filter(|session| self.model.is_waiting(&session.id))
-            .count();
-
-        let session_rows = sessions
-            .iter()
-            .enumerate()
-            .map(|(index, session)| {
-                let project_id = selected_project_id.clone().unwrap_or_default();
-                let chat_id = session.id.clone();
-                let context_chat_id = session.id.clone();
-                let context_title = session.title.clone();
-                let agent = session.agent;
-                let signal = self.session_signal(session);
-                let status_color = signal.color(colors);
-                div()
-                    .id(("minimal-session", index))
-                    .relative()
-                    .w_full()
-                    .h(px(54.0))
-                    .px(px(14.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .when(index > 0, |row| {
-                        row.border_t_1().border_color(rgb(colors.border))
-                    })
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_minimal_session(
-                            project_id.clone(),
-                            chat_id.clone(),
-                            agent,
-                            window,
-                            cx,
-                        );
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                            cx.stop_propagation();
-                            this.open_session_context_menu(
-                                context_chat_id.clone(),
-                                context_title.clone(),
-                                event.position,
-                                window,
-                                cx,
-                            );
-                        }),
-                    )
-                    .child(
-                        div()
-                            .size(px(28.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(8.0))
-                            .bg(rgb(colors.surface_high))
-                            .child(
-                                svg()
-                                    .path(agent_icon(agent))
-                                    .size(px(15.0))
-                                    .text_color(rgb(colors.muted)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(colors.text))
-                                    .child(session.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(2.0))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(colors.faint))
-                                    .child(agent.label())
-                                    .child(div().child("·"))
-                                    .child(
-                                        svg()
-                                            .path(GIT_BRANCH_ICON)
-                                            .size(px(12.0))
-                                            .flex_none()
-                                            .text_color(rgb(colors.faint)),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .when(session.branch != "Project directory", |branch| {
-                                                branch.font_family(MONO).text_size(px(11.5))
-                                            })
-                                            .child(session.branch.clone()),
-                                    ),
-                            ),
-                    )
-                    .child(if signal == SessionSignal::Idle {
-                        div()
-                            .flex_none()
-                            .text_size(px(12.0))
-                            .text_color(rgb(colors.faint))
-                            .child("Idle")
-                            .into_any_element()
-                    } else {
-                        stamp(signal.label(), status_color)
-                    })
-            })
-            .collect::<Vec<_>>();
-
-        let summary = if selected_project.is_none() {
-            String::new()
-        } else {
-            let mut parts = vec![format!(
-                "{} session{}",
-                sessions.len(),
-                if sessions.len() == 1 { "" } else { "s" }
-            )];
-            if working > 0 {
-                parts.push(format!("{working} working"));
-            }
-            if waiting > 0 {
-                parts.push(format!("{waiting} waiting on you"));
-            }
-            parts.join(" · ")
-        };
-
         div()
             .id("minimal-project-content")
             .size_full()
@@ -10044,119 +9896,34 @@ impl XdDesktop {
                     .px(px(32.0))
                     .pt(px(44.0))
                     .pb_8()
-                    .when_some(selected_project, |front, project| {
-                        front
+                    .child(
+                        div()
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.text))
+                            .child("Welcome to xd"),
+                    )
+                    .child(
+                        div()
+                            .mt(px(10.0))
+                            .max_w(px(460.0))
+                            .text_size(px(13.5))
+                            .line_height(px(21.0))
+                            .text_color(rgb(colors.muted))
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(20.0))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(colors.text))
-                                            .child(project.name.clone()),
-                                    )
-                                    .child(div().flex_1())
-                                    .when_some(
-                                        selected_project_rename.clone(),
-                                        |heading, (folder_id, project_name)| {
-                                            heading.child(
-                                                ui_button(
-                                                    "minimal-rename-project",
-                                                    ButtonKind::Ghost,
-                                                    colors,
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.begin_sidebar_edit(
-                                                            SidebarTarget::Folder(
-                                                                folder_id.clone(),
-                                                            ),
-                                                            project_name.clone(),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
-                                                .child("Rename"),
-                                            )
-                                        },
-                                    )
-                                    .when_some(
-                                        selected_project_delete.clone(),
-                                        |heading, folder_id| {
-                                            heading.child(
-                                                ui_button(
-                                                    "minimal-delete-project",
-                                                    ButtonKind::Ghost,
-                                                    colors,
-                                                )
-                                                .text_color(rgb(colors.danger))
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.begin_sidebar_delete(
-                                                            SidebarTarget::Folder(
-                                                                folder_id.clone(),
-                                                            ),
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
-                                                .child(
-                                                    svg()
-                                                        .path(TRASH_ICON)
-                                                        .size(px(14.0))
-                                                        .text_color(rgb(colors.danger)),
-                                                )
-                                                .child("Delete"),
-                                            )
-                                        },
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(4.0))
-                                    .text_size(px(13.0))
-                                    .text_color(rgb(colors.faint))
-                                    .child(summary.clone()),
-                            )
-                    })
-                    .when(selected_project.is_none(), |front| {
-                        front
-                            .child(
-                                div()
-                                    .text_size(px(22.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child("Welcome to xd"),
-                            )
-                            .child(
-                                div()
-                                    .mt(px(10.0))
-                                    .max_w(px(460.0))
-                                    .text_size(px(13.5))
-                                    .line_height(px(21.0))
-                                    .text_color(rgb(colors.muted))
-                                    .child(
-                                        "Create a workspace, then start a Codex, Claude, or JCode session in it. Sessions keep running when you close the window.",
-                                    ),
-                            )
-                            .child(
-                                div().mt_5().flex().child(
-                                    ui_button("minimal-welcome-project", ButtonKind::Primary, colors)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.begin_workspace_create(window, cx)
-                                        }))
-                                        .child(plus_icon(colors.accent_text))
-                                        .child("New project"),
-                                ),
-                            )
-                    })
+                                "Create a workspace, then start a Codex, Claude, or JCode session in it. Sessions keep running when you close the window.",
+                            ),
+                    )
+                    .child(
+                        div().mt_5().flex().child(
+                            ui_button("minimal-welcome-project", ButtonKind::Primary, colors)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.begin_workspace_create(window, cx)
+                                }))
+                                .child(plus_icon(colors.accent_text))
+                                .child("New project"),
+                        ),
+                    )
                     .when_some(resume, |front, (project_id, chat_id, agent, title)| {
                         front.child(
                             div().mt(px(18.0)).flex().child(
@@ -10175,64 +9942,7 @@ impl XdDesktop {
                                     .child(div().min_w_0().truncate().child(title)),
                             ),
                         )
-                    })
-                    .when_some(selected_project_id.clone(), |front, folder_id| {
-                        front.child(
-                            div()
-                                .mt(px(32.0))
-                                .mb(px(10.0))
-                                .flex()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_size(px(12.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(rgb(colors.muted))
-                                        .child("Sessions"),
-                                )
-                                .child(
-                                    ui_button("minimal-new-session", ButtonKind::Primary, colors)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.begin_chat_create(folder_id.clone(), window, cx);
-                                        }))
-                                        .child(plus_icon(colors.accent_text))
-                                        .child("New session"),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .when(!session_rows.is_empty(), |list| {
-                                list.rounded(px(12.0))
-                                    .border_1()
-                                    .border_color(rgb(colors.border))
-                                    .bg(rgb(colors.surface))
-                                    .overflow_hidden()
-                            })
-                            .children(session_rows)
-                            .when(
-                                selected_project_id.is_some() && sessions.is_empty(),
-                                |list| {
-                                    list.child(
-                                        div()
-                                            .w_full()
-                                            .p_5()
-                                            .rounded(px(12.0))
-                                            .border_1()
-                                            .border_color(rgb(colors.border))
-                                            .text_size(px(13.0))
-                                            .text_color(rgb(colors.muted))
-                                            .child(
-                                                "No sessions yet. Start one with Codex, Claude, or JCode.",
-                                            ),
-                                    )
-                                },
-                            ),
-                    ),
+                    }),
             )
             .into_any_element()
     }
@@ -13095,10 +12805,11 @@ impl XdDesktop {
             } => self.render_minimal_cli(colors, project_id, chat_id, agent, window, cx),
         };
         let titlebar = self.render_minimal_titlebar(colors, custom_titlebar, cx);
-        let session_context_overlay = self.session_context_menu.clone().map(|menu| {
-            let rename_chat_id = menu.chat_id.clone();
+        let session_context_overlay = self.sidebar_context_menu.clone().map(|menu| {
+            let rename_target = menu.target.clone();
             let rename_title = menu.title.clone();
-            let delete_chat_id = menu.chat_id.clone();
+            let delete_target = menu.target.clone();
+            let project = matches!(menu.target, SidebarTarget::Folder(_));
             div()
                 .occlude()
                 .absolute()
@@ -13106,11 +12817,11 @@ impl XdDesktop {
                 .track_focus(&minimal_popup_focus)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, window, cx| this.close_session_context_menu(window, cx)),
+                    cx.listener(|this, _, window, cx| this.close_sidebar_context_menu(window, cx)),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(|this, _, window, cx| this.close_session_context_menu(window, cx)),
+                    cx.listener(|this, _, window, cx| this.close_sidebar_context_menu(window, cx)),
                 )
                 .child(
                     div()
@@ -13129,7 +12840,11 @@ impl XdDesktop {
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
-                                .id("minimal-rename-session")
+                                .id(if project {
+                                    "minimal-rename-project"
+                                } else {
+                                    "minimal-rename-session"
+                                })
                                 .w_full()
                                 .px_3()
                                 .py_2()
@@ -13140,17 +12855,25 @@ impl XdDesktop {
                                 .hover(|style| style.bg(rgb(colors.surface_high)))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.begin_sidebar_edit(
-                                        SidebarTarget::Chat(rename_chat_id.clone()),
+                                        rename_target.clone(),
                                         rename_title.clone(),
                                         window,
                                         cx,
                                     );
                                 }))
-                                .child("Rename session"),
+                                .child(if project {
+                                    "Rename project"
+                                } else {
+                                    "Rename session"
+                                }),
                         )
                         .child(
                             div()
-                                .id("minimal-delete-session")
+                                .id(if project {
+                                    "minimal-delete-project"
+                                } else {
+                                    "minimal-delete-session"
+                                })
                                 .w_full()
                                 .px_3()
                                 .py_2()
@@ -13160,13 +12883,13 @@ impl XdDesktop {
                                 .cursor_pointer()
                                 .hover(|style| style.bg(rgb(colors.danger_surface)))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.begin_sidebar_delete(
-                                        SidebarTarget::Chat(delete_chat_id.clone()),
-                                        window,
-                                        cx,
-                                    );
+                                    this.begin_sidebar_delete(delete_target.clone(), window, cx);
                                 }))
-                                .child("Delete session"),
+                                .child(if project {
+                                    "Delete project"
+                                } else {
+                                    "Delete session"
+                                }),
                         ),
                 )
                 .into_any_element()
@@ -14871,8 +14594,8 @@ impl XdDesktop {
                 }
                 if this.remote_panel.is_some() {
                     this.close_remote(cx);
-                } else if this.session_context_menu.is_some() {
-                    this.close_session_context_menu(window, cx);
+                } else if this.sidebar_context_menu.is_some() {
+                    this.close_sidebar_context_menu(window, cx);
                 } else if this.pending_sidebar_delete.is_some() {
                     this.cancel_sidebar_delete(cx);
                 } else if this.sidebar_edit.is_some() {
@@ -16082,8 +15805,8 @@ mod tests {
             ("fn begin_chat_create(", "fn chat_create_changed("),
             ("fn begin_sidebar_delete(", "fn cancel_sidebar_delete("),
             (
-                "fn open_session_context_menu(",
-                "fn close_session_context_menu(",
+                "fn open_sidebar_context_menu(",
+                "fn close_sidebar_context_menu(",
             ),
             ("fn open_remote(", "fn close_remote("),
         ] {
@@ -17388,8 +17111,6 @@ mod tests {
                 "trash icon {count} needs its own color because SVG styles do not inherit from the button"
             );
         }
-
-        assert_eq!(count, 1);
     }
 
     #[gpui::test]
@@ -18185,9 +17906,11 @@ mod tests {
         ] {
             assert!(board.contains(behavior), "missing {behavior}");
         }
-        assert!(home.contains("project_cards(&self.model.folders, &self.model.chats)"));
+        assert!(!home.contains("minimal-new-session"));
+        assert!(!board.contains("this.minimal_route ="));
+        assert!(board.contains("this.toggle_drawer(toggle_project.clone(), current, cx)"));
         assert!(home.contains("minimal-project-content"));
-        assert!(home.contains("minimal-new-session"));
+        assert!(home.contains("Welcome to xd"));
         assert!(!home.contains("self.render_catalog("));
 
         let root = production
@@ -18219,17 +17942,10 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
 
         assert!(board.contains("self.model.unread_chats.contains(&session.id)"));
         assert!(board.contains("signal_tab(signal, colors)"));
-        assert!(home.contains("self.session_signal(session)"));
+        assert!(board.contains("self.session_signal(&session)"));
         assert!(production.contains("Self::Done => \"Done\""));
         assert!(production.contains("Self::Done => colors.done"));
     }
@@ -18305,22 +18021,13 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
 
-        for cards in [board, home] {
-            assert!(cards.contains("MouseButton::Right"));
-            assert!(cards.contains("this.open_session_context_menu("));
-            assert!(!cards.contains("minimal-delete-session"));
-        }
+        assert!(board.contains("MouseButton::Right"));
+        assert!(board.contains("this.open_sidebar_context_menu("));
+        assert!(!board.contains("minimal-delete-session"));
 
-        assert!(production.contains(".child(\"Rename session\")"));
-        assert!(production.contains(".child(\"Delete session\")"));
+        assert!(production.contains("\"Rename session\""));
+        assert!(production.contains("\"Delete session\""));
         assert!(production.contains("SidebarTarget::Chat"));
         assert!(production.contains("this.begin_sidebar_edit("));
         assert!(production.contains("this.begin_sidebar_delete("));
@@ -18333,26 +18040,15 @@ mod tests {
             .split_once("#[cfg(test)]")
             .expect("desktop production source")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("minimal home renderer")
-            .1
-            .split_once("fn render_minimal_cli(")
-            .expect("end of minimal home renderer")
-            .0;
-        for behavior in [
-            "minimal-rename-project",
-            "this.begin_sidebar_edit(",
-            "SidebarTarget::Folder",
-        ] {
-            assert!(home.contains(behavior), "missing {behavior}");
-        }
 
         let root = production
             .split_once("fn render_minimal(")
             .expect("minimal root renderer")
             .1;
         for behavior in [
+            "minimal-rename-project",
+            "this.begin_sidebar_edit(",
+            "rename_target.clone()",
             "let sidebar_rename_overlay =",
             "\"Rename project\"",
             ".child(heading)",
@@ -18380,24 +18076,17 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
+
+        assert!(board.contains("SidebarTarget::Folder(context_project.clone())"));
 
         for behavior in [
             "minimal-delete-project",
             "this.begin_sidebar_delete(",
             "SidebarTarget::Folder",
-            ".path(TRASH_ICON)",
-            ".text_color(rgb(colors.danger))",
+            "SidebarTarget::Folder(context_project.clone())",
         ] {
-            assert!(home.contains(behavior), "missing {behavior}");
+            assert!(production.contains(behavior), "missing {behavior}");
         }
-        let _ = board;
 
         let root = production
             .split_once("fn render_minimal(")
@@ -18429,18 +18118,9 @@ mod tests {
             .split_once("fn render_minimal_home(")
             .expect("end of catalog renderer")
             .0;
-        let home = production
-            .split_once("fn render_minimal_home(")
-            .expect("project front renderer")
-            .1
-            .split_once("fn render_native_inline(")
-            .expect("end of project front renderer")
-            .0;
 
-        for surface in [board, home] {
-            assert!(surface.contains("this.open_session_context_menu("));
-            assert!(!surface.contains("minimal-delete-session"));
-        }
+        assert!(board.contains("this.open_sidebar_context_menu("));
+        assert!(!board.contains("minimal-delete-session"));
 
         let root = production
             .split_once("fn render_minimal(")
@@ -18449,9 +18129,9 @@ mod tests {
         for behavior in [
             "let chat_delete_overlay =",
             "let session_context_overlay =",
-            ".child(\"Delete session\")",
+            "\"Delete session\"",
             "this.begin_sidebar_delete(",
-            "SidebarTarget::Chat",
+            "delete_target.clone()",
             ".child(\"Delete session?\")",
             "minimal-cancel-session-delete",
             "minimal-confirm-session-delete",
