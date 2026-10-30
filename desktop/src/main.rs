@@ -1529,6 +1529,8 @@ struct XdDesktop {
     tab_editor: Entity<FileEditor>,
     terminal_input: Entity<ComposerInput>,
     terminal_scroll: ScrollHandle,
+    terminal_tabs_scroll: ScrollHandle,
+    terminal_tabs_selected: Option<String>,
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
@@ -2051,6 +2053,8 @@ impl XdDesktop {
             tab_editor,
             terminal_input,
             terminal_scroll: ScrollHandle::new(),
+            terminal_tabs_scroll: ScrollHandle::new(),
+            terminal_tabs_selected: None,
             auth_input,
             secret_name_input,
             secret_value_input,
@@ -6418,7 +6422,9 @@ impl XdDesktop {
         if should_auto_open {
             self.start_terminal_session(true, cx);
         }
-        cx.notify();
+        if geometry_changed {
+            cx.notify();
+        }
     }
 
     fn send_terminal_input(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -8586,6 +8592,20 @@ impl XdDesktop {
         };
 
         let selected_id = panel.selected.clone();
+        if self.terminal_tabs_selected != selected_id
+            && self.terminal_tabs_scroll.bounds().size.width > px(0.0)
+        {
+            if let Some(index) = panel
+                .sessions
+                .iter()
+                .position(|session| Some(&session.id) == selected_id.as_ref())
+            {
+                self.terminal_tabs_scroll.scroll_to_item(index);
+            }
+            self.terminal_tabs_selected = selected_id.clone();
+        } else if self.terminal_tabs_selected != selected_id {
+            window.request_animation_frame();
+        }
         let panel_loading = panel.loading;
         let panel_is_empty = panel.sessions.is_empty();
         let panel_error = panel.error.clone();
@@ -8836,6 +8856,7 @@ impl XdDesktop {
                             .min_w_0()
                             .flex()
                             .overflow_x_scroll()
+                            .track_scroll(&self.terminal_tabs_scroll)
                             .children(tabs),
                     )
                     .child(
@@ -17886,6 +17907,54 @@ mod tests {
                 .as_deref(),
             Some("shell")
         );
+    }
+
+    #[gpui::test]
+    fn selected_terminal_tab_scrolls_into_view(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            let mut panel = XdDesktop::new_terminal_panel("tabs-test".into());
+            panel.auto_open = false;
+            panel.sessions = (0..40)
+                .map(|index| {
+                    XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({
+                        "id": format!("tab-{index}"),
+                        "columns": 80,
+                        "rows": 24,
+                    }))
+                    .unwrap()
+                })
+                .collect();
+            panel.selected = Some("tab-39".into());
+            desktop.terminal_panel = Some(panel);
+            desktop.minimal_route = MinimalRoute::Terminal;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        desktop.update(cx, |desktop, cx| {
+            let scroll = &desktop.terminal_tabs_scroll;
+            assert!(scroll.offset().x < px(0.0));
+            let tab = scroll.bounds_for_item(39).unwrap();
+            assert!(tab.left() + scroll.offset().x >= scroll.bounds().left());
+            assert!(tab.right() + scroll.offset().x <= scroll.bounds().right());
+            desktop.select_terminal("tab-0".into(), cx);
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(desktop.terminal_tabs_scroll.offset().x, px(0.0));
+        });
     }
 
     #[test]

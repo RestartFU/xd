@@ -110,6 +110,9 @@ jobs:
             payload-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-macos.sh') }}
           restore-keys: payload-${{ runner.os }}-arm64-
 
+      - name: Install native test dependencies
+        run: brew install tmux
+
       - name: Test the native Rust targets
         env:
           RUSTUP_TOOLCHAIN: 1.95.0
