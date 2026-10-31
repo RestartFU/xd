@@ -921,10 +921,19 @@ impl AppModel {
         let model = self.model.as_deref()?;
         self.agent_backends
             .iter()
+            .find(|backend| backend.id == self.backend)
+            .into_iter()
             .flat_map(|backend| &backend.models)
             .find(|candidate| candidate.id == model)
             .map(|candidate| candidate.name.as_str())
             .or(Some(model))
+    }
+
+    pub fn selected_model_label(&self) -> String {
+        crate::presentation::model_name(
+            self.model.as_deref().unwrap_or_default(),
+            self.selected_model_name(),
+        )
     }
 
     pub fn apply_shortcuts(&mut self, body: &Value) {
@@ -2340,6 +2349,21 @@ mod tests {
         }));
         assert!(!model.new_worktree);
         assert!(model.has_messages);
+    }
+
+    #[test]
+    fn catalog_names_are_scoped_to_the_current_assistant() {
+        let mut model = AppModel::default();
+        model.backend = "codex".into();
+        model.model = Some("shared-id".into());
+        model.apply_agent_catalog(&json!({"backends":[
+            {"id":"claude","name":"Claude Code","default_model":"shared-id","models":[{"id":"shared-id","name":"Other assistant model"}],"efforts":[]},
+            {"id":"codex","name":"Codex","default_model":"shared-id","models":[{"id":"shared-id","name":"My team model"}],"efforts":["high"]}
+        ]})).unwrap();
+        assert_eq!(model.selected_model_label(), "My team model");
+        model.model = Some("gpt-5.3-codex".into());
+        assert_eq!(model.selected_model_label(), "GPT-5.3 Codex");
+        assert_eq!(model.model.as_deref(), Some("gpt-5.3-codex"));
     }
 
     #[test]

@@ -834,7 +834,7 @@
       "chatTabs": "43px",
       "chatMeasure": "736px",
       "emptyComposerMeasure": "660px",
-      "desktopMinimum": "760×560px",
+      "desktopMinimum": "760\u00d7560px",
       "androidMinTouch": "48dp"
     },
     "nativeGlass": {
@@ -880,7 +880,7 @@
       "kind": "input",
       "refersTo": "composer",
       "description": "A clear editing surface with stable text contrast.",
-      "html": "<label class=\"ds-composer\"><textarea placeholder=\"Ask anything, or describe a task…\"></textarea></label>",
+      "html": "<label class=\"ds-composer\"><textarea placeholder=\"Ask anything, or describe a task\u2026\"></textarea></label>",
       "css": ".ds-composer{display:block;padding:12px;border:1px solid #383838;border-radius:16px;background:#303030e8}.ds-composer textarea{width:100%;min-height:64px;resize:vertical;border:0;background:transparent;color:#f1f1f1;font:400 14px Inter,sans-serif}.ds-composer textarea::placeholder{color:#b1b1b1}.ds-composer:focus-within{border-color:#858585}.ds-composer textarea:focus{outline:0}"
     },
     {
@@ -910,6 +910,7 @@
     ],
     "rules": [],
     "dos": [
+      "Do use catalog display names for models and readable labels for known settings; preserve custom identifiers when no display name is available.",
       "Do use semantic ThemeColors or Material color roles in both themes.",
       "Do center the empty-state context and heading over the composer, allowing natural text height.",
       "Do preserve independent chat histories, drafts and agent settings when switching tabs.",

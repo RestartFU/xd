@@ -39,6 +39,7 @@ use xd_desktop::{
     markdown,
     model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, ToolView, Worktree},
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
+    presentation,
     session_host::{SessionHost, SshCommand, TMUX_CONFIGURATION},
     session_runtime::{
         SessionEndpoint, SessionEvent, SessionEventKind, SessionEventReceiver, SessionRuntime,
@@ -124,6 +125,7 @@ const TRASH_ICON: &str = "icons/trash.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
+const CHECK_ICON: &str = "icons/check.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
 const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
@@ -9759,7 +9761,7 @@ impl XdDesktop {
                                 .size(px(13.0))
                                 .text_color(rgb(colors.muted)),
                         )
-                        .child(agent.protocol_name()),
+                        .child(presentation::provider_name(agent.protocol_name())),
                 )
             })
             .when_some(branch, |toolbar, branch| {
@@ -11334,7 +11336,7 @@ impl XdDesktop {
                             .flex_none()
                             .text_size(px(11.5))
                             .text_color(rgb(colors.faint))
-                            .child(view.model.clone()),
+                            .child(presentation::model_name(&view.model, None)),
                     )
                 })
                 .when(!stats.is_empty(), |row| {
@@ -12133,6 +12135,8 @@ impl XdDesktop {
                     .into_any_element()
             })
             .with_sizing_behavior(gpui::ListSizingBehavior::Infer)
+            .flex_initial()
+            .min_h_0()
             .w_full()
             .max_h_full()
             .into_any_element()
@@ -12299,22 +12303,35 @@ impl XdDesktop {
         let interaction = self.render_interaction(colors, cx);
         let agents_tray =
             Self::render_agents_tray(colors, &self.transcript_snapshot.running_agents);
+        let supports_effort = self
+            .model
+            .agent_backends
+            .iter()
+            .find(|backend| backend.id == self.model.backend)
+            .map(|backend| !backend.efforts.is_empty())
+            .unwrap_or(self.model.backend != "jcode");
         let options = [
+            ("model", self.model.selected_model_label()),
             (
-                "model",
-                self.model
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "Default model".to_owned()),
+                "effort",
+                format!("{} effort", presentation::effort_name(&self.model.effort)),
             ),
-            ("effort", format!("{} effort", self.model.effort)),
-            ("access", self.model.access.clone()),
+            (
+                "access",
+                presentation::access_name(if self.model.plan {
+                    "read-only"
+                } else {
+                    &self.model.access
+                })
+                .to_owned(),
+            ),
             (
                 "plan",
                 if self.model.plan { "Plan" } else { "Build" }.to_owned(),
             ),
         ]
         .into_iter()
+        .filter(|(option, _)| *option != "effort" || supports_effort)
         .enumerate()
         .map(|(index, (option, label))| {
             ui_button(("native-option", index), ButtonKind::Ghost, colors)
@@ -12322,16 +12339,21 @@ impl XdDesktop {
                 .px(px(8.0))
                 .gap(px(5.0))
                 .text_size(px(12.0))
+                .max_w(px(if option == "model" { 240.0 } else { 170.0 }))
+                .min_w_0()
+                .debug_selector(move || format!("native-option-{option}").into())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.native_option_open = Some(option);
                     this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                    this.minimal_popup_previous_focus =
+                        Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
                     cx.notify();
                 }))
                 .when(option == "model", |chip| {
                     chip.children(agent.map(|agent| icon(agent_icon(agent), 13.0, colors.muted)))
                 })
-                .child(label)
+                .child(div().min_w_0().truncate().child(label))
                 .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
         })
         .collect::<Vec<_>>();
@@ -12347,6 +12369,9 @@ impl XdDesktop {
                 div()
                     .id("native-transcript")
                     .relative()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
                     .flex_1()
                     .when(empty_ready, |pane| {
                         pane.flex_none()
@@ -12573,6 +12598,7 @@ impl XdDesktop {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_1()
                             .children(options)
@@ -13381,6 +13407,7 @@ impl XdDesktop {
             let rename_title = menu.title.clone();
             let delete_target = menu.target.clone();
             let project = matches!(menu.target, SidebarTarget::Folder(_));
+            let chat = matches!(menu.target, SidebarTarget::Chat(_));
             div()
                 .occlude()
                 .absolute()
@@ -13434,6 +13461,8 @@ impl XdDesktop {
                                 }))
                                 .child(if project {
                                     "Rename project"
+                                } else if chat {
+                                    "Rename chat"
                                 } else {
                                     "Rename session"
                                 }),
@@ -13458,6 +13487,8 @@ impl XdDesktop {
                                 }))
                                 .child(if project {
                                     "Delete project"
+                                } else if chat {
+                                    "Delete chat"
                                 } else {
                                     "Delete session"
                                 }),
@@ -13585,13 +13616,40 @@ impl XdDesktop {
                 .agent_backends
                 .iter()
                 .find(|backend| backend.id == self.model.backend);
+            let title = match option {
+                "model" => "Choose model",
+                "effort" => "Reasoning effort",
+                "access" => "Workspace access",
+                _ => "Chat mode",
+            };
+            let current = match option {
+                "model" => self
+                    .model
+                    .model
+                    .clone()
+                    .or_else(|| catalog.map(|backend| backend.default_model.clone()))
+                    .unwrap_or_default(),
+                "effort" => self.model.effort.clone(),
+                "access" => presentation::canonical_access(if self.model.plan {
+                    "read-only"
+                } else {
+                    &self.model.access
+                })
+                .to_owned(),
+                _ => self.model.plan.to_string(),
+            };
             let choices = match option {
                 "model" => catalog
                     .map(|backend| {
                         backend
                             .models
                             .iter()
-                            .map(|model| (model.id.clone(), model.name.clone()))
+                            .map(|model| {
+                                (
+                                    model.id.clone(),
+                                    presentation::model_name(&model.id, Some(&model.name)),
+                                )
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
@@ -13600,35 +13658,72 @@ impl XdDesktop {
                         backend
                             .efforts
                             .iter()
-                            .map(|effort| (effort.clone(), effort.clone()))
+                            .map(|effort| {
+                                (effort.clone(), presentation::effort_name(effort).to_owned())
+                            })
                             .collect()
                     })
                     .unwrap_or_default(),
-                "access" => vec![
-                    ("read-only".into(), "Read only".into()),
-                    ("edit".into(), "Edit workspace".into()),
-                    ("full".into(), "Full access".into()),
-                ],
+                "access" => ["read-only", "edit", "full"]
+                    .into_iter()
+                    .map(|value| {
+                        (
+                            value.to_owned(),
+                            presentation::access_name(value).to_owned(),
+                        )
+                    })
+                    .collect(),
                 _ => vec![
-                    ("false".into(), "Act".into()),
+                    ("false".into(), "Build".into()),
                     ("true".into(), "Plan".into()),
                 ],
+            };
+            let empty = choices.is_empty();
+            let disabled = option == "access" && self.model.plan;
+            let current_label = match option {
+                "model" => self.model.selected_model_label(),
+                "effort" => presentation::effort_name(&current).to_owned(),
+                "access" => presentation::access_name(&current).to_owned(),
+                _ => if self.model.plan { "Plan" } else { "Build" }.to_owned(),
             };
             let rows = choices
                 .into_iter()
                 .enumerate()
                 .map(|(index, (value, label))| {
+                    let selected = current == value;
                     div()
                         .id(("native-setting-choice", index))
+                        .w_full()
+                        .min_h(px(36.0))
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(colors.surface_high)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_native_option(option, value.clone(), cx)
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+                        .when(disabled, |row| row.opacity(0.6))
+                        .when(!disabled, |row| {
+                            row.cursor_pointer()
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if !disabled {
+                                if selected {
+                                    this.native_option_open = None;
+                                } else {
+                                    this.set_native_option(option, value.clone(), cx);
+                                }
+                                if this.native_option_open.is_none() {
+                                    this.restore_minimal_popup_focus(window);
+                                }
+                                cx.notify();
+                            }
                         }))
-                        .child(label)
+                        .child(div().min_w_0().flex_1().child(label))
+                        .child(div().size(px(16.0)).flex_none().when(selected, |mark| {
+                            mark.child(icon(CHECK_ICON, 16.0, colors.text))
+                        }))
                 })
                 .collect::<Vec<_>>();
             div()
@@ -13640,6 +13735,14 @@ impl XdDesktop {
                 .items_center()
                 .justify_center()
                 .bg(rgba(colors.backdrop))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.native_option_open = None;
+                        this.restore_minimal_popup_focus(window);
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .w(px(420.0))
@@ -13651,20 +13754,63 @@ impl XdDesktop {
                         .rounded_xl()
                         .bg(rgb(colors.surface))
                         .text_color(rgb(colors.text))
-                        .child(div().text_size(px(16.0)).child(format!("Choose {option}")))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
-                                .id("native-setting-choices")
-                                .overflow_y_scroll()
-                                .children(rows),
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title),
                         )
                         .child(
                             div()
-                                .id("close-native-setting")
-                                .py_2()
-                                .cursor_pointer()
+                                .text_size(px(12.0))
+                                .text_color(rgb(colors.muted))
+                                .child(if disabled {
+                                    "Planning uses read-only access. Switch to Build to change it."
+                                        .to_owned()
+                                } else {
+                                    format!("Current: {current_label}")
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("native-setting-choices")
+                                .min_h_0()
+                                .max_h(px(352.0))
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
+                        .when(empty, |card| {
+                            card.child(
+                                div()
+                                    .py_3()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(colors.muted))
+                                    .child(if option == "model" {
+                                        "No models are available for this assistant."
+                                    } else {
+                                        "No reasoning options are available for this assistant."
+                                    }),
+                            )
+                            .child(
+                                ui_button(
+                                    "retry-native-setting-catalog",
+                                    ButtonKind::Secondary,
+                                    colors,
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
+                                    this.request_agent_catalog();
+                                    cx.notify();
+                                }))
+                                .child("Reload options"),
+                            )
+                        })
+                        .child(
+                            ui_button("close-native-setting", ButtonKind::Ghost, colors)
+                                .debug_selector(|| "native-option-cancel".into())
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.native_option_open = None;
+                                    this.restore_minimal_popup_focus(window);
                                     cx.notify();
                                 }))
                                 .child("Cancel"),
@@ -13687,7 +13833,11 @@ impl XdDesktop {
                         .flex_col()
                         .gap_2()
                         .py_2()
-                        .child(format!("{} · {}", provider.provider, provider.state))
+                        .child(format!(
+                            "{} · {}",
+                            presentation::provider_name(&provider.provider),
+                            presentation::auth_state_name(&provider.state)
+                        ))
                         .when_some(provider.detail, |row, detail| {
                             row.child(div().text_xs().text_color(rgb(colors.muted)).child(detail))
                         })
@@ -14326,9 +14476,11 @@ impl XdDesktop {
                                 div()
                                     .text_sm()
                                     .text_color(rgb(colors.muted))
-                                    .child(format!(
-                                        "This permanently removes {session_name} and its saved conversations from xd. Project files are not deleted."
-                                    )),
+                                    .child(if deleting_group {
+                                        format!("This permanently removes {session_name} and all its chats from xd. Project files are kept.")
+                                    } else {
+                                        format!("This permanently removes {session_name} and its conversation from xd. Project files are kept.")
+                                    }),
                             )
                             .child(
                                 div()
@@ -14795,6 +14947,8 @@ impl XdDesktop {
                                         }))
                                         .child(if self.chat_create_submitting {
                                             "Creating…"
+                                        } else if self.creating_chat_session.is_some() {
+                                            "Create chat"
                                         } else {
                                             "Create session"
                                         }),
@@ -15393,6 +15547,9 @@ impl AssetSource for EmbeddedIcons {
             )),
             CLOSE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/close.svg").as_slice(),
+            )),
+            CHECK_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/check.svg").as_slice(),
             )),
             SIDE_LAYOUT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/panel-right.svg").as_slice(),
@@ -16108,6 +16265,109 @@ mod tests {
                 .text;
             assert!(text.contains("before upgrade"));
             assert!(text.contains("after upgrade"));
+        });
+    }
+
+    #[gpui::test]
+    fn compact_transcript_keeps_its_scroll_viewport_above_the_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(), chat_id: "implementation".into(), agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages = Arc::new((0..12).map(|index| Message::new(
+                Some(index), "assistant",
+                format!("Message {index}. {}", "A paragraph that wraps at a narrow viewport and remains readable while scrolling. ".repeat(8)),
+                None,
+            )).collect());
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        cx.run_until_parked();
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        desktop.update(cx, |desktop, _| {
+            let viewport = desktop.transcript.viewport_bounds();
+            assert!(viewport.size.height > px(0.0));
+            assert!(
+                viewport.bottom() <= composer.top(),
+                "transcript must not paint under the composer"
+            );
+            assert!(
+                desktop.transcript_pinned(),
+                "the loaded transcript follows its newest message"
+            );
+            assert!(
+                desktop.transcript.max_offset_for_scrollbar().height > px(0.0),
+                "overflow remains scrollable"
+            );
+            desktop.transcript.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        desktop.update(cx, |desktop, _| {
+            let first = desktop
+                .transcript
+                .bounds_for_item(0)
+                .expect("first message is reachable");
+            assert!(first.top() >= desktop.transcript.viewport_bounds().top() - px(1.0));
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_a_composer_option_restores_the_editor(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.model.agent_backends = vec![xd_desktop::model::AgentBackend {
+                id: "codex".into(),
+                name: "Codex".into(),
+                default_model: "gpt-5.3-codex".into(),
+                models: vec![],
+                efforts: vec!["low".into(), "high".into()],
+            }];
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.set_composer_text(String::new(), cx);
+            window.blur();
+        });
+        cx.run_until_parked();
+        let option = cx.debug_bounds("native-option-effort").unwrap();
+        cx.simulate_click(option.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let cancel = cx.debug_bounds("native-option-cancel").unwrap();
+        cx.simulate_click(cancel.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(desktop.native_option_open.is_none());
+            assert!(
+                desktop
+                    .composer_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
         });
     }
 
@@ -17749,8 +18009,14 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_mark_is_embedded_and_drawable() {
-        for path in [CLAUDE_ICON, CODEX_ICON, JCODE_ICON, COPILOT_ICON] {
+    fn agent_marks_and_selection_icon_are_embedded_and_drawable() {
+        for path in [
+            CLAUDE_ICON,
+            CODEX_ICON,
+            JCODE_ICON,
+            COPILOT_ICON,
+            CHECK_ICON,
+        ] {
             let bytes = EmbeddedIcons
                 .load(path)
                 .expect("embedded marks load")

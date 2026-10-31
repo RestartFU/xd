@@ -111,7 +111,7 @@ internal fun TerminalPaneContent(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                if (state.closed) "Session closed" else "Shared session",
+                if (state.closed) "Terminal closed" else "Shared terminal",
                 modifier = Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
@@ -119,7 +119,7 @@ internal fun TerminalPaneContent(
             if (state.closed || state.error != null) {
                 TextButton(onClick = model::open) { Text("Reopen") }
             } else {
-                TextButton(onClick = model::kill) { Text("Kill") }
+                TextButton(onClick = model::kill) { Text("Stop") }
             }
         }
 
@@ -220,7 +220,7 @@ internal fun TerminalPaneContent(
             FilterChip(
                 selected = control,
                 onClick = { control = !control },
-                label = { Text("ctrl") },
+                label = { Text("Ctrl") },
                 enabled = state.id != null && !state.closed,
             )
             KEY_BAR.forEach { (label, key) ->

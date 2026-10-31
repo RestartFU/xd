@@ -184,6 +184,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 ### Do:
 
+- Do use catalog display names for models and readable labels for known settings; preserve custom identifiers when no display name is available.
 - Do use semantic ThemeColors or Material color roles in both themes.
 - Do center the empty-state context and heading over the composer, allowing natural text height.
 - Do preserve independent chat histories, drafts and agent settings when switching tabs.

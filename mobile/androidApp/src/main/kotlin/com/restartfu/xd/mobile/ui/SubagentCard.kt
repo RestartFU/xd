@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.model.SubagentRun
+import com.restartfu.xd.model.DisplayLabels
 import com.restartfu.xd.model.SubagentState
 import kotlinx.coroutines.delay
 
@@ -182,7 +183,8 @@ internal fun SubagentCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            val meta = listOf(run.model, stats).filter { it.isNotBlank() }.joinToString(" · ")
+            val modelName = run.model.takeIf { it.isNotBlank() }?.let { DisplayLabels.model(it, run.provider) }
+            val meta = listOfNotNull(modelName, stats.takeIf { it.isNotBlank() }).joinToString(" · ")
             if (meta.isNotBlank()) {
                 Text(
                     meta,

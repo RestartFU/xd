@@ -19,6 +19,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -106,6 +108,7 @@ import com.restartfu.xd.model.MessagePart
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.model.TranscriptRow
 import com.restartfu.xd.model.TodoStatus
+import com.restartfu.xd.model.DisplayLabels
 import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.syntax.CodeBlocks
 import com.restartfu.xd.voice.SpeakTagVisibility
@@ -143,6 +146,7 @@ internal fun ChatScreen(
     val steering by model.steering.collectAsStateWithLifecycle()
     val subagentActions by model.subagentActions.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
+    val catalog by model.catalog.collectAsStateWithLifecycle()
     val speechEnabled by settings.speechEnabled.collectAsStateWithLifecycle()
 
     SpeechOutput(model, speechEnabled)
@@ -254,7 +258,7 @@ internal fun ChatScreen(
                                 ),
                             ) {
                                 Text(
-                                    state.model?.takeIf { it.isNotBlank() } ?: "Model",
+                                    DisplayLabels.model(state.model, state.backend, catalog),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.widthIn(max = 110.dp),
@@ -461,6 +465,7 @@ private fun Composer(
 ) {
     val context = LocalContext.current
     val attachments by model.attachments.collectAsStateWithLifecycle()
+    val catalog by model.catalog.collectAsStateWithLifecycle()
     val attachmentError by model.attachmentError.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<Pair<Int, String>?>(null) }
 
@@ -689,7 +694,7 @@ private fun Composer(
                         )
                     }
                     Text(
-                        state.backend.ifBlank { "Agent" },
+                        DisplayLabels.backend(state.backend, catalog),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -1095,6 +1100,7 @@ private fun approvalTitle(request: com.restartfu.xd.model.PendingInteraction): S
     }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, model: ChatViewModel) {
     var answers by remember(request.requestId) { mutableStateOf(emptyMap<String, String>()) }
     val waiting = LocalXdSignals.current.waiting
@@ -1159,10 +1165,13 @@ private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, 
                 }
             }
             if (request.questions.isEmpty()) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     Button(onClick = { model.approve(request.requestId, "accept") }) { Text("Allow once") }
-                    OutlinedButton(onClick = { model.approve(request.requestId, "acceptForSession") }) { Text("This session") }
-                    Spacer(Modifier.weight(1f))
+                    OutlinedButton(onClick = { model.approve(request.requestId, "acceptForSession") }) { Text("Allow for session") }
                     TextButton(onClick = { model.approve(request.requestId, "decline") }) {
                         Text("Deny", color = MaterialTheme.colorScheme.error)
                     }

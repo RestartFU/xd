@@ -6,9 +6,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -1047,7 +1049,10 @@ private fun NewSessionDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (chatTab) "New chat" else "New session") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 Text(projectName, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(
                     value = title,
@@ -1056,7 +1061,10 @@ private fun NewSessionDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
                     DirectAgent.entries.forEach { candidate ->
                         FilterChip(
                             selected = agent == candidate,
@@ -1069,7 +1077,9 @@ private fun NewSessionDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onCreate(title.trim(), agent) }) { Text("Create") }
+            Button(onClick = { onCreate(title.trim(), agent) }) {
+                Text(if (chatTab) "Create chat" else "Create session")
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -1107,7 +1117,7 @@ private fun NewProjectDialog(
             Button(
                 onClick = { onCreate(name.trim(), repository.trim().ifBlank { null }) },
                 enabled = name.isNotBlank(),
-            ) { Text("Create") }
+            ) { Text("Create project") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
