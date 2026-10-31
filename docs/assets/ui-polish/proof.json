@@ -1,0 +1,171 @@
+{
+  "before_base": "40df370",
+  "captures": [
+    {
+      "surface": "Desktop conversation controls",
+      "theme": "dark",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "before_base": "6c1e585",
+      "before_state": "Prior desktop build; affected controls retain the same labels and layout in 40df370.",
+      "before": "desktop-chat-dark-before.png",
+      "after": "desktop-chat-dark-after.png"
+    },
+    {
+      "surface": "Desktop model picker",
+      "theme": "dark",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "before_base": "6c1e585",
+      "before_state": "Prior desktop build; affected controls retain the same labels and layout in 40df370.",
+      "before": "desktop-model-picker-dark-before.png",
+      "after": "desktop-model-picker-dark-after.png"
+    },
+    {
+      "surface": "Desktop effort picker",
+      "theme": "dark",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "before_base": "6c1e585",
+      "before_state": "Prior desktop build; affected controls retain the same labels and layout in 40df370.",
+      "before": "desktop-effort-picker-dark-before.png",
+      "after": "desktop-effort-picker-dark-after.png"
+    },
+    {
+      "surface": "Desktop access picker",
+      "theme": "dark",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "before_base": "6c1e585",
+      "before_state": "Prior desktop build; affected controls retain the same labels and layout in 40df370.",
+      "before": "desktop-access-picker-dark-before.png",
+      "after": "desktop-access-picker-dark-after.png"
+    },
+    {
+      "surface": "Desktop chat menu",
+      "theme": "dark",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "before_base": "6c1e585",
+      "before_state": "Prior desktop build; affected controls retain the same labels and layout in 40df370.",
+      "before": "desktop-chat-menu-dark-before.png",
+      "after": "desktop-chat-menu-dark-after.png"
+    },
+    {
+      "surface": "Desktop new chat",
+      "theme": "dark",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "before_base": "6c1e585",
+      "before_state": "Prior desktop build; affected controls retain the same labels and layout in 40df370.",
+      "before": "desktop-new-chat-dark-before.png",
+      "after": "desktop-new-chat-dark-after.png"
+    },
+    {
+      "surface": "Desktop assistant accounts",
+      "theme": "dark",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "before_base": "6c1e585",
+      "before_state": "Prior desktop build; affected controls retain the same labels and layout in 40df370.",
+      "before": "desktop-accounts-dark-before.png",
+      "after": "desktop-accounts-dark-after.png"
+    },
+    {
+      "surface": "Android phone conversation controls",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before": "android-chat-dark-before.png",
+      "after": "android-chat-dark-after.png"
+    },
+    {
+      "surface": "Android phone model picker",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before": "android-model-picker-dark-before.png",
+      "after": "android-model-picker-dark-after.png"
+    },
+    {
+      "surface": "Android phone options",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before": "android-options-dark-before.png",
+      "after": "android-options-dark-after.png"
+    },
+    {
+      "surface": "Android phone new chat",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before": "android-new-chat-dark-before.png",
+      "after": "android-new-chat-dark-after.png"
+    },
+    {
+      "surface": "Android phone terminal",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before": "android-terminal-dark-before.png",
+      "after": "android-terminal-dark-after.png"
+    },
+    {
+      "surface": "Android phone command approval",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before": "android-approval-dark-before.png",
+      "after": "android-approval-dark-after.png"
+    },
+    {
+      "surface": "Android phone new project",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before": "android-new-project-dark-before.png",
+      "after": "android-new-project-dark-after.png"
+    },
+    {
+      "surface": "Desktop compact conversation",
+      "theme": "dark",
+      "viewport": [
+        760,
+        560
+      ],
+      "before_base": null,
+      "before_state": "Desktop polish before compact transcript sizing correction.",
+      "before": "desktop-compact-chat-dark-before.png",
+      "after": "desktop-compact-chat-dark-after.png"
+    }
+  ]
+}

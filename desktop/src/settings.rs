@@ -91,6 +91,9 @@ pub struct AppSettings {
     pub window_height: u16,
     pub window_maximized: bool,
     pub pane_states: HashMap<String, u8>,
+    /// Active and hidden chat tabs within each connection's shared sessions.
+    pub session_chats: HashMap<String, String>,
+    pub hidden_chat_tabs: HashMap<String, Vec<String>>,
     #[serde(skip)]
     load_error: Option<String>,
 }
@@ -127,6 +130,8 @@ impl Default for AppSettings {
             window_height: 780,
             window_maximized: false,
             pane_states: HashMap::new(),
+            session_chats: HashMap::new(),
+            hidden_chat_tabs: HashMap::new(),
             load_error: None,
         }
     }
@@ -282,6 +287,11 @@ mod tests {
         ));
         let path = directory.join("settings.json");
         let settings = AppSettings {
+            session_chats: HashMap::from([("local/session/workspace".into(), "review".into())]),
+            hidden_chat_tabs: HashMap::from([(
+                "local/session/workspace".into(),
+                vec!["implementation".into()],
+            )]),
             theme: ThemePreset::Light,
             accent: AccentPreset::Purple,
             notifications: false,

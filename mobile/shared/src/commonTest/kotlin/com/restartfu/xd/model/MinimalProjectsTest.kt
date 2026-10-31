@@ -66,6 +66,40 @@ class MinimalProjectsTest {
         )
     }
 
+    @Test
+    fun siblingChatsShareOneSessionWithoutSharingAgentIdentity() {
+        val snapshot = TreeSnapshot(
+            folders = listOf(Folder("project", "Compiler", null)),
+            chats = listOf(
+                chat("first", "project", "Implement", "codex").copy(sessionId = "session"),
+                chat("second", "project", "Review", "claude", working = true).copy(sessionId = "session"),
+            ),
+            sessions = listOf(WorkspaceSession("session", "project", "Parser work", listOf("second", "first"), branch = "fix/parser")),
+        )
+        val session = snapshot.minimalSessions("project").single()
+        assertEquals("session", session.id)
+        assertEquals("Parser work", session.title)
+        assertEquals(listOf("second", "first"), session.chatIds)
+        assertEquals("session:session", session.terminalChatId)
+        assertEquals("fix/parser", session.branch)
+        assertEquals(true, session.working)
+        assertEquals(MinimalProject("project", "Compiler", 1, 1), snapshot.minimalProjects().single())
+        assertEquals(listOf("codex", "claude"), snapshot.chats.map { it.backend })
+    }
+
+    @Test
+    fun deletingOriginalChatKeepsSessionAndSharedTerminalIdentity() {
+        val snapshot = TreeSnapshot(
+            chats = listOf(chat("sibling", "project", "Review", "claude").copy(sessionId = "session")),
+            sessions = listOf(WorkspaceSession("session", "project", "Parser work", listOf("sibling"))),
+        )
+        val session = snapshot.minimalSessions("project").single()
+        assertEquals("session", session.id)
+        assertEquals("Parser work", session.title)
+        assertEquals(listOf("sibling"), session.chatIds)
+        assertEquals("session:session", session.terminalChatId)
+    }
+
     private fun chat(
         id: String,
         folder: String,

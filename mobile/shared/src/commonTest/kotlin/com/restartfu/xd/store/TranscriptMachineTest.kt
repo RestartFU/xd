@@ -18,6 +18,31 @@ import kotlin.test.assertTrue
 
 class TranscriptMachineTest {
     @Test
+    fun emptyUntitledTranscriptIsLoadedOnlyAfterTheFirstSnapshot() {
+        val initial = ChatState("chat")
+        assertFalse(initial.transcriptLoaded)
+        val loaded = reduce(
+            initial,
+            TranscriptInput.Loaded(chat().copy(title = ""), messages(), nowMillis = 0),
+        ).state
+        assertTrue(loaded.transcriptLoaded)
+        assertTrue(loaded.visibleItems.isEmpty())
+        assertEquals("", loaded.title)
+
+        val withOlder = reduce(
+            initial,
+            TranscriptInput.Loaded(
+                chat().copy(title = ""),
+                messagesWithTotal(2, MessageReply("duration", "7", 14)),
+                nowMillis = 0,
+            ),
+        ).state
+        assertTrue(withOlder.transcriptLoaded)
+        assertTrue(withOlder.visibleItems.isEmpty())
+        assertTrue(withOlder.hasOlderMessages)
+    }
+
+    @Test
     fun turnStartMarksWorkingClearsPendingAndRefetchesMessages() {
         val state = reduce(
             ChatState("chat").let {

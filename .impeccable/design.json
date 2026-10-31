@@ -1,907 +1,928 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-23T23:53:28+00:00",
+  "generatedAt": "2026-10-31T02:35:33.335631+00:00",
   "title": "Design System: xd",
   "extensions": {
     "colorMeta": {
-      "cabinet-graphite": {
+      "dark-background": {
         "role": "neutral",
-        "displayName": "Cabinet Graphite",
-        "canonical": "#121314",
+        "displayName": "Dark Background",
         "theme": "dark",
         "tonalRamp": [
-          "#0a0b0c",
-          "#242526",
-          "#414243",
-          "#606163",
-          "#818284",
-          "#a4a5a6",
-          "#c8c9cb",
-          "#edeff0"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "drawer-graphite": {
+      "dark-sidebar": {
         "role": "neutral",
-        "displayName": "Drawer Graphite",
-        "canonical": "#17181a",
+        "displayName": "Dark Sidebar",
         "theme": "dark",
         "tonalRamp": [
-          "#0a0b0d",
-          "#242527",
-          "#414244",
-          "#606164",
-          "#818285",
-          "#a4a5a8",
-          "#c8c9cc",
-          "#edeef1"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "card-stock-dark": {
+      "dark-surface": {
         "role": "neutral",
-        "displayName": "Card Stock",
-        "canonical": "#1e1f22",
+        "displayName": "Dark Surface",
         "theme": "dark",
         "tonalRamp": [
-          "#0a0b0e",
-          "#242528",
-          "#414245",
-          "#606165",
-          "#818286",
-          "#a3a5a9",
-          "#c8c9cd",
-          "#edeef3"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "card-stock-raised": {
+      "dark-surface-high": {
         "role": "neutral",
-        "displayName": "Raised Card Stock",
-        "canonical": "#27292c",
+        "displayName": "Dark Surface High",
         "theme": "dark",
         "tonalRamp": [
-          "#0a0b0e",
-          "#232528",
-          "#404245",
-          "#5f6165",
-          "#808286",
-          "#a3a5a9",
-          "#c7c9cd",
-          "#eceff3"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "cabinet-seam": {
+      "dark-border": {
         "role": "neutral",
-        "displayName": "Cabinet Seam",
-        "canonical": "#313338",
+        "displayName": "Dark Border",
         "theme": "dark",
         "tonalRamp": [
-          "#090b0f",
-          "#23252a",
-          "#404247",
-          "#5f6167",
-          "#808288",
-          "#a2a5ab",
-          "#c6c9cf",
-          "#eceef5"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "pulled-card": {
+      "dark-selected-surface": {
         "role": "neutral",
-        "displayName": "Pulled Card",
-        "canonical": "#2b2d31",
+        "displayName": "Dark Selected Surface",
         "theme": "dark",
         "tonalRamp": [
-          "#090b0f",
-          "#232529",
-          "#404246",
-          "#5f6166",
-          "#808287",
-          "#a2a5aa",
-          "#c6c9ce",
-          "#eceef4"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "bone": {
+      "dark-selected-border": {
+        "role": "neutral",
+        "displayName": "Dark Selected Border",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "dark-text": {
+        "role": "neutral",
+        "displayName": "Dark Text",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "dark-muted": {
+        "role": "neutral",
+        "displayName": "Dark Muted",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "dark-faint": {
+        "role": "neutral",
+        "displayName": "Dark Faint",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "dark-accent": {
         "role": "primary",
-        "displayName": "Bone",
-        "canonical": "#e8e5de",
+        "displayName": "Dark Accent",
         "theme": "dark",
         "tonalRamp": [
-          "#0d0b07",
-          "#272520",
-          "#44423c",
-          "#64615b",
-          "#85827c",
-          "#a8a59e",
-          "#ccc9c2",
-          "#f1eee7"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "bone-ink": {
+      "dark-accent-ink": {
+        "role": "semantic",
+        "displayName": "Dark Accent Ink",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "dark-accent-hover": {
+        "role": "semantic",
+        "displayName": "Dark Accent Hover",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "dark-accent-text": {
         "role": "neutral",
-        "displayName": "Bone Ink",
-        "canonical": "#eceae5",
+        "displayName": "Dark Accent Text",
         "theme": "dark",
         "tonalRamp": [
-          "#0c0b08",
-          "#262521",
-          "#43423e",
-          "#63615d",
-          "#84827e",
-          "#a7a5a0",
-          "#cbc9c4",
-          "#f0eee9"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "pencil-gray": {
+      "dark-rule": {
         "role": "neutral",
-        "displayName": "Pencil Gray",
-        "canonical": "#aaa9a3",
+        "displayName": "Dark Rule",
         "theme": "dark",
         "tonalRamp": [
-          "#0c0b07",
-          "#262520",
-          "#43423d",
-          "#62615c",
-          "#83827d",
-          "#a6a59f",
-          "#cac9c3",
-          "#f0efe8"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "faint-gray": {
+      "dark-working": {
+        "role": "semantic",
+        "displayName": "Dark Working",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.07901 164.10)",
+          "oklch(26.43% 0.07901 164.10)",
+          "oklch(37.86% 0.07901 164.10)",
+          "oklch(49.29% 0.07901 164.10)",
+          "oklch(60.71% 0.07901 164.10)",
+          "oklch(72.14% 0.07901 164.10)",
+          "oklch(83.57% 0.07901 164.10)",
+          "oklch(95.00% 0.07901 164.10)"
+        ]
+      },
+      "dark-waiting": {
+        "role": "semantic",
+        "displayName": "Dark Waiting",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.07802 79.91)",
+          "oklch(26.43% 0.07802 79.91)",
+          "oklch(37.86% 0.07802 79.91)",
+          "oklch(49.29% 0.07802 79.91)",
+          "oklch(60.71% 0.07802 79.91)",
+          "oklch(72.14% 0.07802 79.91)",
+          "oklch(83.57% 0.07802 79.91)",
+          "oklch(95.00% 0.07802 79.91)"
+        ]
+      },
+      "dark-done": {
+        "role": "semantic",
+        "displayName": "Dark Done",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "dark-danger": {
+        "role": "semantic",
+        "displayName": "Dark Danger",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.08545 13.67)",
+          "oklch(26.43% 0.08545 13.67)",
+          "oklch(37.86% 0.08545 13.67)",
+          "oklch(49.29% 0.08545 13.67)",
+          "oklch(60.71% 0.08545 13.67)",
+          "oklch(72.14% 0.08545 13.67)",
+          "oklch(83.57% 0.08545 13.67)",
+          "oklch(95.00% 0.08545 13.67)"
+        ]
+      },
+      "dark-danger-surface": {
         "role": "neutral",
-        "displayName": "Faint Gray",
-        "canonical": "#8b8a85",
+        "displayName": "Dark Danger Surface",
         "theme": "dark",
         "tonalRamp": [
-          "#0c0b08",
-          "#262521",
-          "#43423e",
-          "#62615d",
-          "#83827d",
-          "#a6a5a0",
-          "#cac9c4",
-          "#f0efe9"
+          "oklch(15.00% 0.03273 19.91)",
+          "oklch(26.43% 0.03273 19.91)",
+          "oklch(37.86% 0.03273 19.91)",
+          "oklch(49.29% 0.03273 19.91)",
+          "oklch(60.71% 0.03273 19.91)",
+          "oklch(72.14% 0.03273 19.91)",
+          "oklch(83.57% 0.03273 19.91)",
+          "oklch(95.00% 0.03273 19.91)"
         ]
       },
-      "bone-hover": {
+      "dark-diff-added": {
+        "role": "semantic",
+        "displayName": "Dark Diff Added",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.03318 161.02)",
+          "oklch(26.43% 0.03318 161.02)",
+          "oklch(37.86% 0.03318 161.02)",
+          "oklch(49.29% 0.03318 161.02)",
+          "oklch(60.71% 0.03318 161.02)",
+          "oklch(72.14% 0.03318 161.02)",
+          "oklch(83.57% 0.03318 161.02)",
+          "oklch(95.00% 0.03318 161.02)"
+        ]
+      },
+      "dark-diff-removed": {
+        "role": "semantic",
+        "displayName": "Dark Diff Removed",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.03896 9.36)",
+          "oklch(26.43% 0.03896 9.36)",
+          "oklch(37.86% 0.03896 9.36)",
+          "oklch(49.29% 0.03896 9.36)",
+          "oklch(60.71% 0.03896 9.36)",
+          "oklch(72.14% 0.03896 9.36)",
+          "oklch(83.57% 0.03896 9.36)",
+          "oklch(95.00% 0.03896 9.36)"
+        ]
+      },
+      "dark-selection": {
+        "role": "semantic",
+        "displayName": "Dark Selection",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00 / 0.208)",
+          "oklch(26.43% 0.00000 0.00 / 0.208)",
+          "oklch(37.86% 0.00000 0.00 / 0.208)",
+          "oklch(49.29% 0.00000 0.00 / 0.208)",
+          "oklch(60.71% 0.00000 0.00 / 0.208)",
+          "oklch(72.14% 0.00000 0.00 / 0.208)",
+          "oklch(83.57% 0.00000 0.00 / 0.208)",
+          "oklch(95.00% 0.00000 0.00 / 0.208)"
+        ]
+      },
+      "dark-backdrop": {
+        "role": "semantic",
+        "displayName": "Dark Backdrop",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00 / 0.702)",
+          "oklch(26.43% 0.00000 0.00 / 0.702)",
+          "oklch(37.86% 0.00000 0.00 / 0.702)",
+          "oklch(49.29% 0.00000 0.00 / 0.702)",
+          "oklch(60.71% 0.00000 0.00 / 0.702)",
+          "oklch(72.14% 0.00000 0.00 / 0.702)",
+          "oklch(83.57% 0.00000 0.00 / 0.702)",
+          "oklch(95.00% 0.00000 0.00 / 0.702)"
+        ]
+      },
+      "dark-chrome-glass": {
+        "role": "neutral",
+        "displayName": "Dark Chrome Glass",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00 / 0.851)",
+          "oklch(26.43% 0.00000 0.00 / 0.851)",
+          "oklch(37.86% 0.00000 0.00 / 0.851)",
+          "oklch(49.29% 0.00000 0.00 / 0.851)",
+          "oklch(60.71% 0.00000 0.00 / 0.851)",
+          "oklch(72.14% 0.00000 0.00 / 0.851)",
+          "oklch(83.57% 0.00000 0.00 / 0.851)",
+          "oklch(95.00% 0.00000 0.00 / 0.851)"
+        ]
+      },
+      "dark-sidebar-glass": {
+        "role": "neutral",
+        "displayName": "Dark Sidebar Glass",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00 / 0.875)",
+          "oklch(26.43% 0.00000 0.00 / 0.875)",
+          "oklch(37.86% 0.00000 0.00 / 0.875)",
+          "oklch(49.29% 0.00000 0.00 / 0.875)",
+          "oklch(60.71% 0.00000 0.00 / 0.875)",
+          "oklch(72.14% 0.00000 0.00 / 0.875)",
+          "oklch(83.57% 0.00000 0.00 / 0.875)",
+          "oklch(95.00% 0.00000 0.00 / 0.875)"
+        ]
+      },
+      "dark-composer-glass": {
+        "role": "neutral",
+        "displayName": "Dark Composer Glass",
+        "theme": "dark",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00 / 0.910)",
+          "oklch(26.43% 0.00000 0.00 / 0.910)",
+          "oklch(37.86% 0.00000 0.00 / 0.910)",
+          "oklch(49.29% 0.00000 0.00 / 0.910)",
+          "oklch(60.71% 0.00000 0.00 / 0.910)",
+          "oklch(72.14% 0.00000 0.00 / 0.910)",
+          "oklch(83.57% 0.00000 0.00 / 0.910)",
+          "oklch(95.00% 0.00000 0.00 / 0.910)"
+        ]
+      },
+      "light-background": {
+        "role": "neutral",
+        "displayName": "Light Background",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-sidebar": {
+        "role": "neutral",
+        "displayName": "Light Sidebar",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-surface": {
+        "role": "neutral",
+        "displayName": "Light Surface",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-surface-high": {
+        "role": "neutral",
+        "displayName": "Light Surface High",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-border": {
+        "role": "neutral",
+        "displayName": "Light Border",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-selected-surface": {
+        "role": "neutral",
+        "displayName": "Light Selected Surface",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-selected-border": {
+        "role": "neutral",
+        "displayName": "Light Selected Border",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-text": {
+        "role": "neutral",
+        "displayName": "Light Text",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-muted": {
+        "role": "neutral",
+        "displayName": "Light Muted",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-faint": {
+        "role": "neutral",
+        "displayName": "Light Faint",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-accent": {
         "role": "primary",
-        "displayName": "Bone Hover",
-        "canonical": "#ffffff",
-        "theme": "dark",
+        "displayName": "Light Accent",
+        "theme": "light",
         "tonalRamp": [
-          "#0b0b0b",
-          "#252525",
-          "#424242",
-          "#616161",
-          "#828282",
-          "#a5a5a5",
-          "#c9c9c9",
-          "#eeeeee"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "ink-blue-dark": {
-        "role": "primary",
-        "displayName": "Ink Blue",
-        "canonical": "#93b5e9",
-        "theme": "dark",
+      "light-accent-ink": {
+        "role": "semantic",
+        "displayName": "Light Accent Ink",
+        "theme": "light",
         "tonalRamp": [
-          "#00062d",
-          "#07234d",
-          "#25426e",
-          "#436291",
-          "#6383b5",
-          "#85a7da",
-          "#a8cbff",
-          "#cdf1ff"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "ruled-red-dark": {
-        "role": "secondary",
-        "displayName": "Ruled Red",
-        "canonical": "#a8493c",
-        "theme": "dark",
+      "light-accent-hover": {
+        "role": "semantic",
+        "displayName": "Light Accent Hover",
+        "theme": "light",
         "tonalRamp": [
-          "#2d0000",
-          "#510000",
-          "#752017",
-          "#9a4236",
-          "#bf6456",
-          "#e68778",
-          "#ffab9b",
-          "#ffd0bf"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "signal-green-dark": {
-        "role": "tertiary",
-        "displayName": "Signal Green",
-        "canonical": "#72b783",
-        "theme": "dark",
-        "tonalRamp": [
-          "#001400",
-          "#003104",
-          "#005123",
-          "#2c7142",
-          "#509462",
-          "#73b884",
-          "#96dda7",
-          "#bbffcb"
-        ]
-      },
-      "signal-amber-dark": {
-        "role": "tertiary",
-        "displayName": "Signal Amber",
-        "canonical": "#eaa93a",
-        "theme": "dark",
-        "tonalRamp": [
-          "#240000",
-          "#431600",
-          "#643500",
-          "#875500",
-          "#aa7718",
-          "#cf9a44",
-          "#f5be6a",
-          "#ffe48f"
-        ]
-      },
-      "signal-blue-dark": {
-        "role": "tertiary",
-        "displayName": "Signal Blue",
-        "canonical": "#86a9e4",
-        "theme": "dark",
-        "tonalRamp": [
-          "#000332",
-          "#062252",
-          "#234074",
-          "#416197",
-          "#6183bb",
-          "#83a6e1",
-          "#a6caff",
-          "#caf0ff"
-        ]
-      },
-      "danger-dark": {
-        "role": "error",
-        "displayName": "Danger",
-        "canonical": "#ec7064",
-        "theme": "dark",
-        "tonalRamp": [
-          "#2d0000",
-          "#510000",
-          "#751f1b",
-          "#9a423a",
-          "#c0635a",
-          "#e7867b",
-          "#ffaa9e",
-          "#ffcfc2"
-        ]
-      },
-      "danger-surface-dark": {
-        "role": "error",
-        "displayName": "Danger Surface",
-        "canonical": "#3b201e",
-        "theme": "dark",
-        "tonalRamp": [
-          "#1a0404",
-          "#371c1b",
-          "#573937",
-          "#785855",
-          "#9a7976",
-          "#be9b98",
-          "#e4bfbc",
-          "#ffe4e0"
-        ]
-      },
-      "diff-added-dark": {
+      "light-accent-text": {
         "role": "neutral",
-        "displayName": "Diff Added",
-        "canonical": "#1b2b20",
-        "theme": "dark",
+        "displayName": "Light Accent Text",
+        "theme": "light",
         "tonalRamp": [
-          "#020f06",
-          "#19291e",
-          "#36473b",
-          "#55665a",
-          "#75887a",
-          "#97ab9d",
-          "#bbcfc0",
-          "#e0f5e6"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "diff-removed-dark": {
+      "light-rule": {
         "role": "neutral",
-        "displayName": "Diff Removed",
-        "canonical": "#33201e",
-        "theme": "dark",
+        "displayName": "Light Rule",
+        "theme": "light",
         "tonalRamp": [
-          "#160605",
-          "#321f1d",
-          "#513c3a",
-          "#725b58",
-          "#947c79",
-          "#b79e9b",
-          "#dcc2bf",
-          "#ffe7e4"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "selection-dark": {
-        "role": "primary",
-        "displayName": "Selection",
-        "canonical": "#93b5e955",
-        "theme": "dark",
+      "light-working": {
+        "role": "semantic",
+        "displayName": "Light Working",
+        "theme": "light",
         "tonalRamp": [
-          "#00062d",
-          "#07234d",
-          "#25426e",
-          "#436291",
-          "#6383b5",
-          "#85a7da",
-          "#a8cbff",
-          "#cdf1ff"
+          "oklch(15.00% 0.08088 161.72)",
+          "oklch(26.43% 0.08088 161.72)",
+          "oklch(37.86% 0.08088 161.72)",
+          "oklch(49.29% 0.08088 161.72)",
+          "oklch(60.71% 0.08088 161.72)",
+          "oklch(72.14% 0.08088 161.72)",
+          "oklch(83.57% 0.08088 161.72)",
+          "oklch(95.00% 0.08088 161.72)"
         ]
       },
-      "backdrop-dark": {
+      "light-waiting": {
+        "role": "semantic",
+        "displayName": "Light Waiting",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.08475 77.50)",
+          "oklch(26.43% 0.08475 77.50)",
+          "oklch(37.86% 0.08475 77.50)",
+          "oklch(49.29% 0.08475 77.50)",
+          "oklch(60.71% 0.08475 77.50)",
+          "oklch(72.14% 0.08475 77.50)",
+          "oklch(83.57% 0.08475 77.50)",
+          "oklch(95.00% 0.08475 77.50)"
+        ]
+      },
+      "light-done": {
+        "role": "semantic",
+        "displayName": "Light Done",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
+        ]
+      },
+      "light-danger": {
+        "role": "semantic",
+        "displayName": "Light Danger",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.14575 16.17)",
+          "oklch(26.43% 0.14575 16.17)",
+          "oklch(37.86% 0.14575 16.17)",
+          "oklch(49.29% 0.14575 16.17)",
+          "oklch(60.71% 0.14575 16.17)",
+          "oklch(72.14% 0.14575 16.17)",
+          "oklch(83.57% 0.14575 16.17)",
+          "oklch(95.00% 0.14575 16.17)"
+        ]
+      },
+      "light-danger-surface": {
         "role": "neutral",
-        "displayName": "Backdrop",
-        "canonical": "#000000a6",
-        "theme": "dark",
+        "displayName": "Light Danger Surface",
+        "theme": "light",
         "tonalRamp": [
-          "#0b0b0b",
-          "#252525",
-          "#424242",
-          "#616161",
-          "#828282",
-          "#a5a5a5",
-          "#c9c9c9",
-          "#eeeeee"
+          "oklch(15.00% 0.01627 17.44)",
+          "oklch(26.43% 0.01627 17.44)",
+          "oklch(37.86% 0.01627 17.44)",
+          "oklch(49.29% 0.01627 17.44)",
+          "oklch(60.71% 0.01627 17.44)",
+          "oklch(72.14% 0.01627 17.44)",
+          "oklch(83.57% 0.01627 17.44)",
+          "oklch(95.00% 0.01627 17.44)"
         ]
       },
-      "reading-room-white": {
+      "light-diff-added": {
+        "role": "semantic",
+        "displayName": "Light Diff Added",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.02063 156.82)",
+          "oklch(26.43% 0.02063 156.82)",
+          "oklch(37.86% 0.02063 156.82)",
+          "oklch(49.29% 0.02063 156.82)",
+          "oklch(60.71% 0.02063 156.82)",
+          "oklch(72.14% 0.02063 156.82)",
+          "oklch(83.57% 0.02063 156.82)",
+          "oklch(95.00% 0.02063 156.82)"
+        ]
+      },
+      "light-diff-removed": {
+        "role": "semantic",
+        "displayName": "Light Diff Removed",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.01850 17.48)",
+          "oklch(26.43% 0.01850 17.48)",
+          "oklch(37.86% 0.01850 17.48)",
+          "oklch(49.29% 0.01850 17.48)",
+          "oklch(60.71% 0.01850 17.48)",
+          "oklch(72.14% 0.01850 17.48)",
+          "oklch(83.57% 0.01850 17.48)",
+          "oklch(95.00% 0.01850 17.48)"
+        ]
+      },
+      "light-selection": {
+        "role": "semantic",
+        "displayName": "Light Selection",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00000 0.00 / 0.188)",
+          "oklch(26.43% 0.00000 0.00 / 0.188)",
+          "oklch(37.86% 0.00000 0.00 / 0.188)",
+          "oklch(49.29% 0.00000 0.00 / 0.188)",
+          "oklch(60.71% 0.00000 0.00 / 0.188)",
+          "oklch(72.14% 0.00000 0.00 / 0.188)",
+          "oklch(83.57% 0.00000 0.00 / 0.188)",
+          "oklch(95.00% 0.00000 0.00 / 0.188)"
+        ]
+      },
+      "light-backdrop": {
+        "role": "semantic",
+        "displayName": "Light Backdrop",
+        "theme": "light",
+        "tonalRamp": [
+          "oklch(15.00% 0.00586 285.89 / 0.400)",
+          "oklch(26.43% 0.00586 285.89 / 0.400)",
+          "oklch(37.86% 0.00586 285.89 / 0.400)",
+          "oklch(49.29% 0.00586 285.89 / 0.400)",
+          "oklch(60.71% 0.00586 285.89 / 0.400)",
+          "oklch(72.14% 0.00586 285.89 / 0.400)",
+          "oklch(83.57% 0.00586 285.89 / 0.400)",
+          "oklch(95.00% 0.00586 285.89 / 0.400)"
+        ]
+      },
+      "light-chrome-glass": {
         "role": "neutral",
-        "displayName": "Reading-Room White",
-        "canonical": "#f7f7f5",
+        "displayName": "Light Chrome Glass",
         "theme": "light",
         "tonalRamp": [
-          "#0b0b0a",
-          "#252524",
-          "#424240",
-          "#616160",
-          "#828281",
-          "#a5a5a3",
-          "#c9c9c7",
-          "#eeeeec"
+          "oklch(15.00% 0.00000 0.00 / 0.863)",
+          "oklch(26.43% 0.00000 0.00 / 0.863)",
+          "oklch(37.86% 0.00000 0.00 / 0.863)",
+          "oklch(49.29% 0.00000 0.00 / 0.863)",
+          "oklch(60.71% 0.00000 0.00 / 0.863)",
+          "oklch(72.14% 0.00000 0.00 / 0.863)",
+          "oklch(83.57% 0.00000 0.00 / 0.863)",
+          "oklch(95.00% 0.00000 0.00 / 0.863)"
         ]
       },
-      "drawer-white": {
+      "light-sidebar-glass": {
         "role": "neutral",
-        "displayName": "Drawer White",
-        "canonical": "#eeeeeb",
+        "displayName": "Light Sidebar Glass",
         "theme": "light",
         "tonalRamp": [
-          "#0b0b09",
-          "#252523",
-          "#424240",
-          "#61615f",
-          "#828280",
-          "#a5a5a2",
-          "#c9c9c6",
-          "#efefec"
+          "oklch(15.00% 0.00000 0.00 / 0.863)",
+          "oklch(26.43% 0.00000 0.00 / 0.863)",
+          "oklch(37.86% 0.00000 0.00 / 0.863)",
+          "oklch(49.29% 0.00000 0.00 / 0.863)",
+          "oklch(60.71% 0.00000 0.00 / 0.863)",
+          "oklch(72.14% 0.00000 0.00 / 0.863)",
+          "oklch(83.57% 0.00000 0.00 / 0.863)",
+          "oklch(95.00% 0.00000 0.00 / 0.863)"
         ]
       },
-      "card-stock-white": {
+      "light-composer-glass": {
         "role": "neutral",
-        "displayName": "Card Stock White",
-        "canonical": "#ffffff",
+        "displayName": "Light Composer Glass",
         "theme": "light",
         "tonalRamp": [
-          "#0b0b0b",
-          "#252525",
-          "#424242",
-          "#616161",
-          "#828282",
-          "#a5a5a5",
-          "#c9c9c9",
-          "#eeeeee"
-        ]
-      },
-      "card-stock-white-raised": {
-        "role": "neutral",
-        "displayName": "Raised Card Stock (Light)",
-        "canonical": "#e9e9e5",
-        "theme": "light",
-        "tonalRamp": [
-          "#0b0b09",
-          "#252522",
-          "#42423f",
-          "#61615e",
-          "#82827f",
-          "#a5a5a1",
-          "#c9c9c5",
-          "#efefeb"
-        ]
-      },
-      "cabinet-seam-light": {
-        "role": "neutral",
-        "displayName": "Cabinet Seam (Light)",
-        "canonical": "#d7d6d0",
-        "theme": "light",
-        "tonalRamp": [
-          "#0c0b08",
-          "#262521",
-          "#43423d",
-          "#62615c",
-          "#83827d",
-          "#a6a59f",
-          "#cac9c3",
-          "#f0efe8"
-        ]
-      },
-      "pulled-card-light": {
-        "role": "neutral",
-        "displayName": "Pulled Card (Light)",
-        "canonical": "#e6e5e0",
-        "theme": "light",
-        "tonalRamp": [
-          "#0c0b08",
-          "#262521",
-          "#43423e",
-          "#62615d",
-          "#83827e",
-          "#a6a5a0",
-          "#cac9c4",
-          "#f0eee9"
-        ]
-      },
-      "catalog-ink": {
-        "role": "primary",
-        "displayName": "Catalog Ink",
-        "canonical": "#1b1c1e",
-        "theme": "light",
-        "tonalRamp": [
-          "#0a0b0d",
-          "#242527",
-          "#414244",
-          "#606164",
-          "#818285",
-          "#a4a5a8",
-          "#c8c9cc",
-          "#edeef1"
-        ]
-      },
-      "pencil-gray-light": {
-        "role": "neutral",
-        "displayName": "Pencil Gray (Light)",
-        "canonical": "#56554f",
-        "theme": "light",
-        "tonalRamp": [
-          "#0c0b07",
-          "#262520",
-          "#43423c",
-          "#62615b",
-          "#84827c",
-          "#a6a59e",
-          "#cac9c2",
-          "#f0efe7"
-        ]
-      },
-      "faint-gray-light": {
-        "role": "neutral",
-        "displayName": "Faint Gray (Light)",
-        "canonical": "#64635d",
-        "theme": "light",
-        "tonalRamp": [
-          "#0c0b07",
-          "#262520",
-          "#43423d",
-          "#62615b",
-          "#84827c",
-          "#a6a59f",
-          "#cac9c2",
-          "#f0efe8"
-        ]
-      },
-      "ink-hover": {
-        "role": "primary",
-        "displayName": "Ink Hover",
-        "canonical": "#3a3c40",
-        "theme": "light",
-        "tonalRamp": [
-          "#0a0b0e",
-          "#232529",
-          "#404246",
-          "#5f6166",
-          "#808287",
-          "#a3a5aa",
-          "#c7c9ce",
-          "#eceef4"
-        ]
-      },
-      "ink-blue-light": {
-        "role": "primary",
-        "displayName": "Ink Blue (Light)",
-        "canonical": "#2b5897",
-        "theme": "light",
-        "tonalRamp": [
-          "#000039",
-          "#00205b",
-          "#13407d",
-          "#3461a1",
-          "#5483c6",
-          "#76a7ec",
-          "#99ccff",
-          "#bef1ff"
-        ]
-      },
-      "ruled-red-light": {
-        "role": "secondary",
-        "displayName": "Ruled Red (Light)",
-        "canonical": "#c2483b",
-        "theme": "light",
-        "tonalRamp": [
-          "#2d0000",
-          "#510000",
-          "#752018",
-          "#9a4237",
-          "#c06457",
-          "#e68779",
-          "#ffab9c",
-          "#ffd0c0"
-        ]
-      },
-      "signal-green-light": {
-        "role": "tertiary",
-        "displayName": "Signal Green (Light)",
-        "canonical": "#276b3c",
-        "theme": "light",
-        "tonalRamp": [
-          "#001400",
-          "#003104",
-          "#015023",
-          "#2e7142",
-          "#519462",
-          "#74b784",
-          "#98dca7",
-          "#bcffcb"
-        ]
-      },
-      "signal-amber-light": {
-        "role": "tertiary",
-        "displayName": "Signal Amber (Light)",
-        "canonical": "#8c5100",
-        "theme": "light",
-        "tonalRamp": [
-          "#260000",
-          "#471000",
-          "#693100",
-          "#8c5100",
-          "#b07232",
-          "#d69556",
-          "#fcba7a",
-          "#ffdf9e"
-        ]
-      },
-      "danger-light": {
-        "role": "error",
-        "displayName": "Danger (Light)",
-        "canonical": "#b2342a",
-        "theme": "light",
-        "tonalRamp": [
-          "#2d0000",
-          "#510000",
-          "#752019",
-          "#9a4238",
-          "#c06458",
-          "#e68779",
-          "#ffab9c",
-          "#ffd0c0"
-        ]
-      },
-      "danger-surface-light": {
-        "role": "error",
-        "displayName": "Danger Surface (Light)",
-        "canonical": "#f8e2df",
-        "theme": "light",
-        "tonalRamp": [
-          "#140706",
-          "#30211f",
-          "#4e3d3b",
-          "#6f5c5a",
-          "#917d7a",
-          "#b4a09d",
-          "#d9c3c1",
-          "#ffe9e6"
-        ]
-      },
-      "diff-added-light": {
-        "role": "neutral",
-        "displayName": "Diff Added (Light)",
-        "canonical": "#e2f0e5",
-        "theme": "light",
-        "tonalRamp": [
-          "#050e07",
-          "#1e2820",
-          "#3a453d",
-          "#59655b",
-          "#7a867c",
-          "#9ca99f",
-          "#c0cdc3",
-          "#e5f3e8"
-        ]
-      },
-      "diff-removed-light": {
-        "role": "neutral",
-        "displayName": "Diff Removed (Light)",
-        "canonical": "#f8e4e1",
-        "theme": "light",
-        "tonalRamp": [
-          "#130806",
-          "#2f211f",
-          "#4d3e3b",
-          "#6e5d5a",
-          "#8f7e7b",
-          "#b3a09d",
-          "#d7c4c1",
-          "#fde9e6"
-        ]
-      },
-      "selection-light": {
-        "role": "primary",
-        "displayName": "Selection (Light)",
-        "canonical": "#2b589740",
-        "theme": "light",
-        "tonalRamp": [
-          "#000039",
-          "#00205b",
-          "#13407d",
-          "#3461a1",
-          "#5483c6",
-          "#76a7ec",
-          "#99ccff",
-          "#bef1ff"
-        ]
-      },
-      "backdrop-light": {
-        "role": "neutral",
-        "displayName": "Backdrop (Light)",
-        "canonical": "#1b1c1e66",
-        "theme": "light",
-        "tonalRamp": [
-          "#0a0b0d",
-          "#242527",
-          "#414244",
-          "#606164",
-          "#818285",
-          "#a4a5a8",
-          "#c8c9cc",
-          "#edeef1"
+          "oklch(15.00% 0.00000 0.00 / 0.851)",
+          "oklch(26.43% 0.00000 0.00 / 0.851)",
+          "oklch(37.86% 0.00000 0.00 / 0.851)",
+          "oklch(49.29% 0.00000 0.00 / 0.851)",
+          "oklch(60.71% 0.00000 0.00 / 0.851)",
+          "oklch(72.14% 0.00000 0.00 / 0.851)",
+          "oklch(83.57% 0.00000 0.00 / 0.851)",
+          "oklch(95.00% 0.00000 0.00 / 0.851)"
         ]
       }
     },
     "typographyMeta": {
       "display": {
-        "displayName": "Display",
-        "purpose": "Project name on the project home, inside its label frame. Markdown H1 is 22px Bold, H2 19px, H3 16px."
-      },
-      "headline": {
-        "displayName": "Headline",
-        "purpose": "Session title in the 52px session header."
-      },
-      "title": {
-        "displayName": "Title",
-        "purpose": "Card titles (500), drawer names (500 closed, 600 current), catalog header, popover rows."
-      },
-      "body": {
-        "displayName": "Body",
-        "purpose": "Chat transcript messages; column capped at 860px."
-      },
-      "body-ui": {
-        "displayName": "Body UI",
-        "purpose": "Buttons (500), Find, empty states, hints."
-      },
-      "label": {
-        "displayName": "Label",
-        "purpose": "Card metadata, message role labels and settings group labels (600, faint, sentence case)."
-      },
-      "stamp": {
-        "displayName": "Stamp",
-        "purpose": "Uppercase rubber-stamp status frame; never a section heading."
+        "purpose": "Empty-chat heading."
       },
       "mono": {
-        "displayName": "Mono",
-        "purpose": "Code, tool output, terminal, branch names in lists, counts (11px). Never prose or chrome."
+        "purpose": "Code, terminal and machine-readable text."
       }
     },
-    "shadows": [
+    "breakpoints": [
       {
-        "name": "floating-layer",
-        "value": "0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1)",
-        "purpose": "GPUI shadow_lg; popovers, menus and pickers only. In-flow surfaces are flat."
+        "name": "android-navigation-rail",
+        "value": "600dp"
       }
     ],
-    "motion": [
-      {
-        "name": "working-dots",
-        "value": "1600ms repeat, 4 discrete frames",
-        "purpose": "The only standing animation: three dots after a Working label, dim to three lit."
-      }
-    ],
-    "breakpoints": [],
     "layout": {
-      "titleBar": "38px",
-      "catalogWidth": "288px",
-      "catalogHeader": "44px",
-      "closedDrawerRow": "34px",
-      "cardHeight": "56px",
-      "sessionHeader": "52px",
-      "chatMeasure": "860px",
-      "androidProductHeader": "56dp",
-      "androidContextBar": "52dp",
+      "catalogWidth": "256px",
+      "chatTabs": "43px",
+      "chatMeasure": "736px",
+      "emptyComposerMeasure": "660px",
+      "desktopMinimum": "760\u00d7560px",
       "androidMinTouch": "48dp"
     },
-    "lightThemeMap": {
-      "cabinet-graphite": "reading-room-white",
-      "drawer-graphite": "drawer-white",
-      "card-stock-dark": "card-stock-white",
-      "card-stock-raised": "card-stock-white-raised",
-      "cabinet-seam": "cabinet-seam-light",
-      "pulled-card": "pulled-card-light",
-      "bone": "catalog-ink",
-      "bone-ink": "catalog-ink",
-      "pencil-gray": "pencil-gray-light",
-      "faint-gray": "faint-gray-light",
-      "bone-hover": "ink-hover",
-      "ink-blue-dark": "ink-blue-light",
-      "ruled-red-dark": "ruled-red-light",
-      "signal-green-dark": "signal-green-light",
-      "signal-amber-dark": "signal-amber-light",
-      "signal-blue-dark": "ink-blue-light",
-      "danger-dark": "danger-light",
-      "danger-surface-dark": "danger-surface-light",
-      "diff-added-dark": "diff-added-light",
-      "diff-removed-dark": "diff-removed-light",
-      "selection-dark": "selection-light",
-      "backdrop-dark": "backdrop-light"
+    "nativeGlass": {
+      "desktop": "Compositor blur request with semantic RGBA chrome; opaque reading surfaces.",
+      "android": "Opaque layered Material surfaces and restrained outlines; no compositor blur."
     }
   },
   "components": [
     {
-      "name": "Primary Button",
+      "name": "Primary button",
       "kind": "button",
       "refersTo": "button-primary",
-      "description": "Bone fill with ink text; one per region, e.g. New session.",
-      "html": "<button class=\"ds-btn-primary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"><path d=\"M12 5v14M5 12h14\"/></svg>New session</button>",
-      "css": ".ds-btn-primary{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px;border:none;border-radius:6px;background:#e8e5de;color:#121314;font:500 12.5px 'Libre Franklin',sans-serif;cursor:pointer}.ds-btn-primary:hover{background:#ffffff}.ds-btn-primary:focus-visible{outline:2px solid #93b5e9;outline-offset:2px}"
+      "description": "Neutral filled action.",
+      "html": "<button class=\"ds-primary\">New session</button>",
+      "css": ".ds-primary{font:500 12px Inter,sans-serif;cursor:pointer;height:30px;padding:0 12px;border:0;border-radius:6px;background:#dedede;color:#1b1b1b}.ds-primary:hover{background:#f2f2f2}.ds-primary:focus-visible{outline:2px solid #858585;outline-offset:2px}"
     },
     {
-      "name": "Secondary Button",
+      "name": "Secondary button",
       "kind": "button",
       "refersTo": "button-secondary",
-      "description": "Card stock with a seam border.",
-      "html": "<button class=\"ds-btn-secondary\">Continue</button>",
-      "css": ".ds-btn-secondary{height:30px;padding:0 12px;border:1px solid #313338;border-radius:6px;background:#1e1f22;color:#eceae5;font:500 12.5px 'Libre Franklin',sans-serif;cursor:pointer}.ds-btn-secondary:hover{background:#27292c}.ds-btn-secondary:focus-visible{outline:2px solid #93b5e9;outline-offset:2px}"
+      "description": "Tonal secondary action.",
+      "html": "<button class=\"ds-secondary\">Continue</button>",
+      "css": ".ds-secondary{font:500 12px Inter,sans-serif;cursor:pointer;height:30px;padding:0 12px;border:1px solid #383838;border-radius:6px;background:#292929;color:#f1f1f1}.ds-secondary:hover{background:#333333}.ds-secondary:focus-visible{outline:2px solid #858585;outline-offset:2px}"
     },
     {
-      "name": "Ghost Button",
+      "name": "Ghost button",
       "kind": "button",
       "refersTo": "button-ghost",
-      "description": "Quiet footer and toolbar action; pulled-card fill while its panel is open.",
-      "html": "<button class=\"ds-btn-ghost\">Settings</button><button class=\"ds-btn-ghost is-active\">Settings</button>",
-      "css": ".ds-btn-ghost{height:30px;padding:0 12px;border:none;border-radius:6px;background:transparent;color:#aaa9a3;font:500 12.5px 'Libre Franklin',sans-serif;cursor:pointer;margin-right:6px}.ds-btn-ghost:hover{background:#27292c;color:#eceae5}.ds-btn-ghost.is-active{background:#2b2d31;color:#eceae5}.ds-btn-ghost:focus-visible{outline:2px solid #93b5e9;outline-offset:2px}"
+      "description": "Quiet chrome control.",
+      "html": "<button class=\"ds-ghost\">Settings</button>",
+      "css": ".ds-ghost{font:500 12px Inter,sans-serif;cursor:pointer;height:30px;padding:0 12px;border:0;border-radius:6px;background:transparent;color:#b1b1b1}.ds-ghost:hover{background:#333333;color:#f1f1f1}.ds-ghost:focus-visible{outline:2px solid #858585}"
     },
     {
-      "name": "Danger Button",
-      "kind": "button",
-      "refersTo": "button-danger",
-      "description": "Destructive action outlined in danger red.",
-      "html": "<button class=\"ds-btn-danger\">Delete</button>",
-      "css": ".ds-btn-danger{height:30px;padding:0 12px;border:1px solid #ec7064;border-radius:6px;background:transparent;color:#ec7064;font:500 12.5px 'Libre Franklin',sans-serif;cursor:pointer}.ds-btn-danger:hover{background:#3b201e}.ds-btn-danger:focus-visible{outline:2px solid #93b5e9;outline-offset:2px}"
+      "name": "Chat tabs",
+      "kind": "nav",
+      "refersTo": "chat-tab",
+      "description": "Independent conversations within a workspace.",
+      "html": "<div class=\"ds-tabs\"><button class=\"ds-tab is-active\">Implementation</button><button class=\"ds-tab\">Review</button></div>",
+      "css": ".ds-tabs{display:flex;gap:4px;padding:6px;background:#292929d9}.ds-tab{font:500 12px Inter,sans-serif;cursor:pointer;height:30px;padding:0 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:#b1b1b1}.ds-tab.is-active{border-color:#383838;background:#373737;color:#f1f1f1}.ds-tab:hover{background:#333333}.ds-tab:focus-visible{outline:2px solid #858585}"
     },
     {
-      "name": "Find Field",
+      "name": "Composer",
       "kind": "input",
-      "refersTo": "find-field",
-      "description": "Catalog filter; no keyboard shortcut so terminals keep Ctrl-K. Esc clears.",
-      "html": "<label class=\"ds-find\"><svg width=\"13\" height=\"13\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#8b8a85\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM20 20l-4-4\"/></svg><input placeholder=\"Find a session or project\"></label>",
-      "css": ".ds-find{display:flex;align-items:center;gap:8px;width:268px;height:32px;padding:0 8px;border:1px solid #313338;border-radius:6px;background:#121314}.ds-find input{flex:1;min-width:0;border:none;background:transparent;color:#eceae5;font:400 12.5px 'Libre Franklin',sans-serif;outline:none;caret-color:#93b5e9}.ds-find input::placeholder{color:#8b8a85}.ds-find:focus-within{border-color:#93b5e9}"
+      "refersTo": "composer",
+      "description": "A clear editing surface with stable text contrast.",
+      "html": "<label class=\"ds-composer\"><textarea placeholder=\"Ask anything, or describe a task\u2026\"></textarea></label>",
+      "css": ".ds-composer{display:block;padding:12px;border:1px solid #383838;border-radius:16px;background:#303030e8}.ds-composer textarea{width:100%;min-height:64px;resize:vertical;border:0;background:transparent;color:#f1f1f1;font:400 14px Inter,sans-serif}.ds-composer textarea::placeholder{color:#b1b1b1}.ds-composer:focus-within{border-color:#858585}.ds-composer textarea:focus{outline:0}"
     },
     {
-      "name": "Session Card with Signal Tabs",
+      "name": "Status",
+      "kind": "chip",
+      "description": "Status uses text together with its signal color.",
+      "html": "<span class=\"ds-status\">Working</span>",
+      "css": ".ds-status{display:inline-flex;align-items:center;gap:6px;font:500 12px Inter,sans-serif;color:#8dceb0}.ds-status:before{content:\"\";width:6px;height:6px;border-radius:50%;background:currentColor}"
+    },
+    {
+      "name": "Session row",
       "kind": "card",
-      "refersTo": "session-card",
-      "description": "Fixed 56px index card: title, ruled red line, metadata; the clipped tab's shape and hue give state.",
-      "html": "<div class=\"ds-drawer\"><div class=\"ds-card\"><div class=\"ds-card-title\">Fix idle status on multi-tab</div><div class=\"ds-rule\"></div><div class=\"ds-meta\">master <span class=\"ds-dot\">·</span> Idle</div></div><div class=\"ds-card\"><span class=\"ds-tab ds-tab-working\"></span><div class=\"ds-card-title\">Windows WSL host deploy</div><div class=\"ds-rule\"></div><div class=\"ds-meta\">master <span class=\"ds-dot\">·</span> <b style=\"color:#72b783\">Working</b></div></div><div class=\"ds-card\"><span class=\"ds-tab ds-tab-waiting\"></span><div class=\"ds-card-title\">Pairing code expiry</div><div class=\"ds-rule\"></div><div class=\"ds-meta\">master <span class=\"ds-dot\">·</span> <b style=\"color:#eaa93a\">Waiting on you</b></div></div><div class=\"ds-card is-selected\"><span class=\"ds-tab ds-tab-done\"></span><div class=\"ds-card-title\">Release v0.1.21</div><div class=\"ds-rule\"></div><div class=\"ds-meta\">master <span class=\"ds-dot\">·</span> <b style=\"color:#86a9e4\">Done</b></div></div></div>",
-      "css": ".ds-drawer{width:264px;padding:5px;border:1px solid #313338;border-radius:8px;background:#121314;display:flex;flex-direction:column;gap:10px;padding-top:12px}.ds-card{position:relative;height:56px;padding:0 12px;border:1px solid transparent;border-radius:5px;background:#1e1f22;cursor:pointer;font-family:'Libre Franklin',sans-serif}.ds-card:hover{background:#27292c}.ds-card.is-selected{background:#2b2d31;border-color:#e8e5de}.ds-card-title{padding:8px 26px 0 0;height:28px;box-sizing:border-box;font-size:13px;font-weight:500;color:#eceae5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ds-rule{height:1px;background:#a8493c}.ds-meta{height:25px;display:flex;align-items:center;gap:6px;font-size:11.5px;color:#aaa9a3}.ds-meta b{font-weight:500}.ds-dot{color:#8b8a85}.ds-tab{position:absolute;right:12px;width:16px;border-radius:2px 2px 0 0}.ds-tab-working{top:-4px;height:9px;background:#72b783}.ds-tab-waiting{top:-7px;height:12px;background:#eaa93a}.ds-tab-done{top:-4px;height:9px;box-sizing:border-box;border:1.5px solid #86a9e4;border-bottom:0;background:#121314}"
-    },
-    {
-      "name": "Closed Drawer Row",
-      "kind": "nav",
-      "refersTo": "drawer-closed",
-      "description": "One 34px line per project with mono count and miniature signal tabs.",
-      "html": "<div class=\"ds-drawer-row\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#8b8a85\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m9 6 6 6-6 6\"/></svg><span class=\"ds-name\">Lunar</span><span class=\"ds-count\">3</span><span class=\"ds-grow\"></span><span class=\"ds-mini\"><i style=\"height:5px;background:#72b783\"></i><i style=\"height:8px;background:#eaa93a\"></i><i style=\"height:5px;box-sizing:border-box;border:1px solid #86a9e4\"></i></span></div>",
-      "css": ".ds-drawer-row{width:270px;height:34px;padding:0 4px;display:flex;align-items:center;gap:8px;border-radius:5px;background:#17181a;cursor:pointer;font-family:'Libre Franklin',sans-serif}.ds-drawer-row:hover{background:#27292c}.ds-name{font-size:13px;font-weight:500;color:#eceae5}.ds-count{font:400 11px 'JetBrains Mono',monospace;color:#8b8a85}.ds-grow{flex:1}.ds-mini{display:flex;align-items:flex-end;gap:3px}.ds-mini i{display:block;width:10px;border-radius:1px}"
-    },
-    {
-      "name": "Label Frame",
-      "kind": "chip",
-      "refersTo": "label-frame",
-      "description": "The current project's name in an outlined drawer label.",
-      "html": "<span class=\"ds-label-frame\">xd</span>",
-      "css": ".ds-label-frame{display:inline-flex;align-items:center;height:22px;padding:0 7px;border:1.5px solid #e8e5de;border-radius:3px;font:600 13px 'Libre Franklin',sans-serif;color:#eceae5}"
-    },
-    {
-      "name": "Stamp",
-      "kind": "chip",
-      "refersTo": "stamp",
-      "description": "Uppercase rubber-stamp status: session state, Waiting on you, or a failed tool run.",
-      "html": "<span class=\"ds-stamp\" style=\"color:#72b783\">Working</span> <span class=\"ds-stamp\" style=\"color:#eaa93a\">Waiting on you</span> <span class=\"ds-stamp\" style=\"color:#ec7064\">Failed</span>",
-      "css": ".ds-stamp{display:inline-flex;align-items:center;height:18px;padding:0 5px;border:1px solid currentColor;border-radius:2px;font:600 10px 'Libre Franklin',sans-serif;text-transform:uppercase}"
-    },
-    {
-      "name": "Pane Segmented Control",
-      "kind": "nav",
-      "refersTo": "pane-tab-active",
-      "description": "Changes / Files / Terminal switch in the session header; selecting the active pane returns to Chat.",
-      "html": "<div class=\"ds-seg\"><button class=\"is-active\">Changes</button><button>Files</button><button>Terminal</button></div>",
-      "css": ".ds-seg{display:inline-flex;gap:2px;padding:2px;border:1px solid #313338;border-radius:7px}.ds-seg button{height:24px;padding:0 8px;border:none;border-radius:6px;background:transparent;color:#aaa9a3;font:500 12.5px 'Libre Franklin',sans-serif;cursor:pointer}.ds-seg button:hover{background:#27292c;color:#eceae5}.ds-seg button.is-active{background:#2b2d31;color:#eceae5}.ds-seg button:focus-visible{outline:2px solid #93b5e9}"
+      "description": "One row per session, restoring its selected chat.",
+      "html": "<button class=\"ds-session\">Workspace navigation</button>",
+      "css": ".ds-session{font:500 12px Inter,sans-serif;cursor:pointer;height:30px;width:240px;padding:0 10px;text-align:left;border:0;border-radius:6px;background:#373737;color:#f1f1f1}.ds-session:hover{background:#333333}.ds-session:focus-visible{outline:2px solid #858585}"
     }
   ],
   "narrative": {
-    "northStar": "The Card Catalog",
-    "overview": "xd is a library card catalog for agent sessions. Projects are drawers, sessions are index cards, and a small metal signal tab clipped to the top edge of a card says what its agent is doing. One catalog sidebar on the left holds every drawer; only the current project's drawer is pulled out to show its cards, and the rest stay one line tall and show just their tabs. The centre belongs to the session's transcript, and the right dock holds Changes, Files, Terminal and Browser.\n\nThe material is a cool graphite cabinet with bone card-stock ink in Dark, and white card stock with near-black ink in Light. Each card has one thin red ruled line under its title, the only decorative mark in the system. Colour is mostly reserved for state: green, amber and blue live on the signal tabs and the words beside them, and the chrome around them stays neutral so the agent's output stays the content. Density is that of a working tool: 12.5 to 13px UI text, 30px controls, 56px cards.\n\nAndroid follows the same world inside Material 3. Material owns the structure (navigation bar, dialogs, extended FAB, ripples, touch targets). The brand comes through as complete colour roles, Libre Franklin across the type scale, and the same drawer, card, rule and tab shapes.",
+    "northStar": "A Clear Workspace",
+    "overview": "xd uses neutral charcoal and clear glass to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.\n\nDark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Desktop translucency belongs to chrome and the composer; text, code and tool output keep a stable reading background. Android carries the same palette and hierarchy through native Material 3 layouts.",
     "keyCharacteristics": [
-      "Two themes only, Dark and Light. Saved names of retired themes (warm, nord, dracula) load as Dark.",
-      "Session state shows through the tab's shape as well as its hue, so it still reads in grayscale.",
-      "The current drawer is the only one that lifts. The current project's name sits in an outlined label frame.",
-      "Every session card has one fixed height and baseline (56px on desktop).",
-      "Flat, tonal surfaces. Only floating popovers and menus get a soft shadow.",
-      "Drawn 24-grid stroke icons with a 2px stroke, tinted to the text around them."
+      "Two themes: Dark and Light. Retired saved names load as Dark.",
+      "Inter for prose and controls; JetBrains Mono for code and terminal text.",
+      "Separate chat tabs share a session workspace and terminal.",
+      "Real platform window controls; no decorative traffic lights.",
+      "Neutral selection and focus, with color reserved for meaningful status."
     ],
-    "rules": [
-      {
-        "name": "The One Amber Rule",
-        "body": "Amber means one thing: an agent is waiting on the user. No warning, badge, highlight or brand mark may use it.",
-        "section": "colors"
-      },
-      {
-        "name": "The Shape-Before-Hue Rule",
-        "body": "A signal always has its own shape as well as its own colour. Working is a solid flag, Waiting is a taller solid flag, Done is a hollow flag, and Idle has no tab at all. A new signal surface must stay legible in grayscale.",
-        "section": "colors"
-      },
-      {
-        "name": "The Four States Rule",
-        "body": "A session can be Idle, Working, Waiting or Done. Nothing else. There is no failed or queued session state, and cards never show one. A failed tool run is stamped in the transcript instead.",
-        "section": "colors"
-      },
-      {
-        "name": "The Machine Text Rule",
-        "body": "JetBrains Mono is for text a machine wrote or reads: code, terminal, tool output, branch names, counts and agent wire names. Prose and chrome are always Libre Franklin.",
-        "section": "typography"
-      },
-      {
-        "name": "The Lift-By-Contrast Rule",
-        "body": "In-flow surfaces never cast shadows. A drawer, card or panel shows that it is raised through fill and seam alone.",
-        "section": "elevation"
-      }
-    ],
+    "rules": [],
     "dos": [
-      "Do take every colour from the `ThemeColors` roles (desktop) or `minimalColors` / `XdSignals` (Android), and define each new role for both Dark and Light.",
-      "Do give every new session-state surface a shape difference as well as a hue difference, following the signal tab.",
-      "Do keep session cards at one fixed height (56px) with the 1px ruled-red line under the title.",
-      "Do keep primary actions to one per region: a bone fill with ink text in Dark, an ink fill with white text in Light.",
-      "Do stamp a failed tool run in the transcript in danger red, and leave the session card's state alone.",
-      "Do use drawn 24-grid, 2px stroke icons tinted to the surrounding text.",
-      "Do let Material 3 own the structure on Android, and carry the brand through colour roles, Libre Franklin and the catalog shapes."
+      "Do use catalog display names for models and readable labels for known settings; preserve custom identifiers when no display name is available.",
+      "Do use semantic ThemeColors or Material color roles in both themes.",
+      "Do center the empty-state context and heading over the composer, allowing natural text height.",
+      "Do preserve independent chat histories, drafts and agent settings when switching tabs.",
+      "Do retain native window, keyboard, touch and system inset behavior.",
+      "Do keep opaque reading surfaces beneath prose, code and terminal output."
     ],
     "donts": [
-      "Don't use signal amber for anything except an agent waiting on the user.",
-      "Don't add a failed, queued or error state to session cards or signal tabs.",
-      "Don't add a third theme or per-user accent colours. There are exactly two themes, Dark and Light.",
-      "Don't bind a keyboard shortcut to Find in the catalog. Ctrl-K belongs to the terminals.",
-      "Don't cast shadows from in-flow surfaces. Only floating popovers and menus get the floating-layer shadow.",
-      "Don't use the ruled red for errors or emphasis. It is only the card's rule line.",
-      "Don't set prose or chrome in JetBrains Mono, or fall back to the host's `monospace`.",
-      "Don't use text glyphs (←, ✕, +, a letter in a box) as icons.",
-      "Don't add glow, gradients or decorative motion. The only standing animation is the Working dots."
+      "Don't restore the retired red rules, bone palette or card-catalog metaphor.",
+      "Don't make closing a chat tab delete its conversation.",
+      "Don't use fake Mac window controls on other platforms.",
+      "Don't depend on translucency or color alone to identify selection or status.",
+      "Don't scale desktop layouts into phone thumbnails; use native responsive structure."
     ]
   }
 }

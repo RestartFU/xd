@@ -1,8 +1,9 @@
 package com.restartfu.xd.mobile.ui
 
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,22 +25,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ChatViewModel
 import com.restartfu.xd.model.ChatState
+import com.restartfu.xd.model.DisplayLabels
 
 /** The access levels the desktop offers. Plan is the separate toggle. */
 private val ACCESS = listOf(
-    "read-only" to "Read only",
-    "edit" to "Edit files",
-    "full" to "Full access",
-)
-
-internal val EFFORT_LABELS = mapOf(
-    "low" to "Low",
-    "medium" to "Medium",
-    "high" to "High",
-    "xhigh" to "XHigh",
-    "max" to "Max",
-    "ultra" to "Ultra",
-    "ultracode" to "UltraCode",
+    "read-only", "edit", "full",
 )
 
 /**
@@ -49,6 +39,7 @@ internal val EFFORT_LABELS = mapOf(
  * host's catalog rather than being assumed here.
  */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun ChatOptionsDialog(
     model: ChatViewModel,
     state: ChatState,
@@ -65,7 +56,7 @@ internal fun ChatOptionsDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Options") },
+        title = { Text("Chat settings") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 // Plan and Build are one setting: Build is Plan off.
@@ -97,16 +88,17 @@ internal fun ChatOptionsDialog(
                 }
 
                 if (efforts.isNotEmpty()) {
-                    Section("Effort")
-                    Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    Section("Reasoning effort")
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         efforts.forEach { effort ->
                             FilterChip(
                                 selected = state.effort == effort,
                                 onClick = { model.setEffort(effort) },
-                                label = { Text(EFFORT_LABELS[effort] ?: effort) },
+                                label = { Text(DisplayLabels.effort(effort)) },
                                 enabled = !busy,
                             )
                         }
@@ -114,25 +106,26 @@ internal fun ChatOptionsDialog(
                 }
 
                 Section("Access")
-                Row(
-                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    ACCESS.forEach { (wire, label) ->
+                    ACCESS.forEach { wire ->
                         FilterChip(
-                            selected = state.access == wire,
+                            selected = DisplayLabels.canonicalAccess(state.access) == wire,
                             onClick = { model.setAccess(wire) },
                             // Planning overrides access on the host, so
                             // choosing one here would not mean anything.
                             enabled = !busy && !state.plan,
-                            label = { Text(label) },
+                            label = { Text(DisplayLabels.access(wire)) },
                         )
                     }
                 }
                 if (state.plan) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Planning overrides access until Build is back on.",
+                        "Switch to Build to change access.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                     )
@@ -143,11 +136,12 @@ internal fun ChatOptionsDialog(
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         Column(Modifier.weight(1f)) {
                             Text("New worktree")
                             Text(
-                                "Run this chat in its own checkout.",
+                                "Run this session in its own checkout.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
                             )
@@ -178,6 +172,7 @@ private fun OptionSwitch(
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(Modifier.weight(1f)) {
             Text(title)

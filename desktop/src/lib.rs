@@ -6,6 +6,7 @@ pub mod local_socket;
 pub mod markdown;
 pub mod model;
 pub mod paired;
+pub mod presentation;
 pub mod protocol;
 pub mod remote;
 pub mod session_host;

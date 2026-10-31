@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.model.SubagentRun
+import com.restartfu.xd.model.DisplayLabels
 import com.restartfu.xd.model.SubagentState
 import kotlinx.coroutines.delay
 
@@ -127,7 +128,7 @@ internal fun SubagentCard(
             val key = run.key
             if (key != null && (run.canStop || pendingAction != null)) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (pendingAction != null) {
@@ -141,13 +142,13 @@ internal fun SubagentCard(
                             OutlinedButton(
                                 onClick = { onAction(key, "background") },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.heightIn(min = 32.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                             ) { Text("Background", style = MaterialTheme.typography.labelMedium) }
                         }
                         OutlinedButton(
                             onClick = { onAction(key, "stop") },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.heightIn(min = 32.dp),
+                            modifier = Modifier.heightIn(min = 48.dp),
                         ) {
                             Text(
                                 "Stop",
@@ -182,7 +183,8 @@ internal fun SubagentCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            val meta = listOf(run.model, stats).filter { it.isNotBlank() }.joinToString(" · ")
+            val modelName = run.model.takeIf { it.isNotBlank() }?.let { DisplayLabels.model(it, run.provider) }
+            val meta = listOfNotNull(modelName, stats.takeIf { it.isNotBlank() }).joinToString(" · ")
             if (meta.isNotBlank()) {
                 Text(
                     meta,

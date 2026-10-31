@@ -3,6 +3,7 @@ package com.restartfu.xd.mobile
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.restartfu.xd.net.Link
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.store.ChatSession
 import com.restartfu.xd.terminal.Cell
@@ -40,8 +41,9 @@ class TerminalViewModel(
     private val session: ChatSession,
     private val chatId: String,
     private val closeSessionOnClear: Boolean = false,
+    private val client: XdClient? = null,
 ) : ViewModel() {
-    private val screen = TerminalScreen(COLUMNS, ROWS)
+    private var screen = TerminalScreen(COLUMNS, ROWS)
 
     // What the phone can show, once it has measured itself. Until then the
     // usual default, which is what a pty is given when nobody says otherwise.
@@ -51,6 +53,17 @@ class TerminalViewModel(
     val state: StateFlow<TerminalPane> = _state.asStateFlow()
 
     init {
+        client?.let { connected ->
+            // Keep interpreting output while another chat or workspace pane is visible.
+            viewModelScope.launch { connected.terminalEvents.collect(::onEvent) }
+            viewModelScope.launch {
+                var wasConnected = connected.link.value is Link.Up
+                connected.link.collect { link ->
+                    if (link is Link.Up && !wasConnected) open()
+                    wasConnected = link is Link.Up
+                }
+            }
+        }
         open()
     }
 
@@ -60,6 +73,7 @@ class TerminalViewModel(
             try {
                 val existing = session.terminals().firstOrNull { it.agent == null }
                 val id = existing?.id ?: session.openTerminal(columns, rows, reuse = true)
+                screen = TerminalScreen(columns, rows)
                 // A terminal opened elsewhere already has scrollback. Replay
                 // rebuilds it, resize frames included and in order, so older
                 // output is interpreted at the geometry that produced it.
@@ -182,6 +196,7 @@ class TerminalViewModel(
                 session = client.openChat(chatId),
                 chatId = chatId,
                 closeSessionOnClear = true,
+                client = client,
             ) as T
     }
 

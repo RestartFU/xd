@@ -521,7 +521,7 @@ impl StateStore {
             .collect::<Vec<_>>();
 
         let mut statement = database.prepare(
-            "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode FROM chats \
+            "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -535,6 +535,7 @@ impl StateStore {
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -542,8 +543,18 @@ impl StateStore {
 
         let mut branches = HashMap::<String, Option<String>>::new();
         let mut chats = Vec::new();
-        for (id, folder, title, backend, working, workdir, original_workdir, session_mode) in
-            stored_chats
+        let mut sessions = Vec::<Value>::new();
+        for (
+            id,
+            folder,
+            title,
+            backend,
+            working,
+            workdir,
+            original_workdir,
+            session_mode,
+            session,
+        ) in stored_chats
         {
             if !visible_ids.contains(folder.as_str()) {
                 continue;
@@ -585,13 +596,35 @@ impl StateStore {
                 "backend": backend,
                 "working": working,
                 "session_mode": session_mode,
+                "session": session,
             });
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
             }
+            if let Some(group) = sessions.iter_mut().find(|group| group["id"] == session) {
+                group["chats"]
+                    .as_array_mut()
+                    .expect("session members")
+                    .push(json!(id));
+                if working {
+                    group["working"] = json!(true);
+                }
+            } else {
+                let session_title: String = database.query_row(
+                    "SELECT COALESCE(title, 'New Session') FROM workspace_sessions WHERE id = ?",
+                    [&session],
+                    |row| row.get(0),
+                )?;
+                let mut group = json!({"id": session, "folder": folder, "title": session_title,
+                    "chats": [id], "working": working, "terminal_chat": format!("session:{session}")});
+                if let Some(branch) = chat.get("branch") {
+                    group["branch"] = branch.clone();
+                }
+                sessions.push(group);
+            }
             chats.push(chat);
         }
-        Ok(json!({"ok": true, "folders": folders, "chats": chats}))
+        Ok(json!({"ok": true, "folders": folders, "chats": chats, "sessions": sessions}))
     }
 
     pub fn folder_lineage_for_chat(&self, chat_id: &str) -> Result<Vec<String>, StorageError> {
@@ -668,6 +701,12 @@ impl StateStore {
             [chat_id],
             |row| row.get(0),
         )?;
+        let (workspace_session, session_title): (String, Option<String>) = database.query_row(
+            "SELECT s.id, s.title FROM chats c JOIN workspace_sessions s \
+             ON s.id = c.workspace_session_id WHERE c.id = ?",
+            [chat_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         let queue = queue_from_column(row.9.as_deref());
         let attachments = serde_json::from_str::<Value>(&row.13).unwrap_or_else(|_| json!([]));
         let has_messages: bool = database.query_row(
@@ -705,6 +744,9 @@ impl StateStore {
             "backend": row.2,
             "auth_state": "unknown",
             "session_mode": session_mode,
+            "session": workspace_session,
+            "session_title": session_title,
+            "terminal_chat": format!("session:{workspace_session}"),
             "commands": [],
             "plan": row.7,
             "fast": row.2 == "codex" && row.8,
@@ -772,6 +814,23 @@ impl StateStore {
         Ok(response)
     }
 
+    pub fn terminal_owner_aliases(&self) -> Result<HashMap<String, String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare("SELECT id, workspace_session_id FROM chats")?;
+        let members = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut aliases = HashMap::new();
+        for (chat, session) in members {
+            let canonical = format!("session:{session}");
+            aliases.insert(chat, canonical.clone());
+            aliases.insert(session, canonical);
+        }
+        Ok(aliases)
+    }
+
     pub fn terminal_workdir(&self, chat_id: &str) -> Result<PathBuf, StorageError> {
         if chat_id.starts_with("global:") {
             return env::var_os("HOME")
@@ -783,7 +842,12 @@ impl StateStore {
                 });
         }
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        resolve_chat_workdir(&database, &self.workspace_root, chat_id).map(PathBuf::from)
+        let owner = if let Some(session) = chat_id.strip_prefix("session:") {
+            workspace_session_chat(&database, session)?
+        } else {
+            chat_id.to_owned()
+        };
+        resolve_chat_workdir(&database, &self.workspace_root, &owner).map(PathBuf::from)
     }
 
     pub fn list_directory(&self, request: &Value) -> Result<Value, StorageError> {
@@ -1168,6 +1232,14 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        if matches!(option, "new-worktree" | "workspace")
+            && !workspace_is_unused(&transaction, chat_id)?
+        {
+            return Err(StorageError::InvalidRequest(
+                "The workspace can only be changed before the first message in this session."
+                    .into(),
+            ));
+        }
         let now = now_seconds();
         let changed = match option {
             "model" => {
@@ -1303,11 +1375,19 @@ impl StateStore {
             }
             return Err(StorageError::NoChat(chat_id.into()));
         }
+        let mut event = json!({"event": "changed", "chat": chat_id});
+        if matches!(option, "new-worktree" | "workspace") {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM chats WHERE workspace_session_id = \
+                (SELECT workspace_session_id FROM chats WHERE id = ?)",
+            )?;
+            let siblings = statement
+                .query_map([chat_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            event["workspace_chats"] = json!(siblings);
+        }
         transaction.commit()?;
-        Ok((
-            json!({"ok": true}),
-            json!({"event": "changed", "chat": chat_id}),
-        ))
+        Ok((json!({"ok": true}), event))
     }
 
     pub fn prepare_send(&self, request: &Value) -> Result<SendDisposition, StorageError> {
@@ -2832,7 +2912,8 @@ impl StateStore {
     }
 
     pub fn new_chat(&self, request: &Value) -> Result<Value, StorageError> {
-        let folder_id = required_string(request, "folder", "That request needs a folder.")?;
+        let requested_folder = optional_string(request, "folder")?;
+        let requested_session = optional_string(request, "session")?;
         let title = optional_string(request, "title")?.unwrap_or("New Chat");
         let legacy_workdir = optional_string(request, "workdir")?;
         let requested_worktree = requested_new_chat_worktree(request)?;
@@ -2849,6 +2930,42 @@ impl StateStore {
         }
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
+        let shared = if let Some(session) = requested_session {
+            if legacy_workdir.is_some()
+                || !matches!(requested_worktree, RequestedNewChatWorktree::Default)
+            {
+                return Err(StorageError::InvalidRequest(
+                    "A new chat shares its session's workspace.".into(),
+                ));
+            }
+            let owner = workspace_session_chat(&transaction, session)?;
+            Some(transaction.query_row(
+                "SELECT folder_id, workdir, original_workdir, new_worktree FROM chats WHERE id = ?",
+                [&owner],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, bool>(3)?,
+                    ))
+                },
+            )?)
+        } else {
+            None
+        };
+        let folder_id = shared
+            .as_ref()
+            .map(|shared| shared.0.as_str())
+            .or(requested_folder)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("That request needs a folder or session.".into())
+            })?;
+        if requested_folder.is_some_and(|folder| folder != folder_id) {
+            return Err(StorageError::InvalidRequest(
+                "A session cannot span different projects.".into(),
+            ));
+        }
         let root = self.workspace_root.to_string_lossy();
         let folder_exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM workspace_folders WHERE root_path = ? AND id = ?)",
@@ -2905,75 +3022,83 @@ impl StateStore {
         };
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
-        let (workdir, original_workdir) = match requested_worktree {
-            RequestedNewChatWorktree::Default => (legacy_workdir.map(str::to_owned), None),
-            RequestedNewChatWorktree::Existing(requested) => {
-                if !Path::new(requested).is_absolute() {
-                    return Err(StorageError::InvalidRequest(
-                        "An existing worktree path is required.".into(),
-                    ));
+        let (workdir, original_workdir) = if let Some(shared) = &shared {
+            (shared.1.clone(), shared.2.clone())
+        } else {
+            match requested_worktree {
+                RequestedNewChatWorktree::Default => (legacy_workdir.map(str::to_owned), None),
+                RequestedNewChatWorktree::Existing(requested) => {
+                    if !Path::new(requested).is_absolute() {
+                        return Err(StorageError::InvalidRequest(
+                            "An existing worktree path is required.".into(),
+                        ));
+                    }
+                    let source =
+                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                    let requested = normalize_existing_path(Path::new(requested));
+                    let normalized_source = normalize_existing_path(Path::new(&source));
+                    let selected = match list_git_worktrees(Path::new(&source)) {
+                        Ok(worktrees) => worktrees
+                            .into_iter()
+                            .find(|worktree| normalize_existing_path(&worktree.path) == requested)
+                            .map(|worktree| normalize_existing_path(&worktree.path))
+                            .ok_or_else(|| {
+                                StorageError::InvalidRequest(
+                                    "That path is not a worktree of this repository.".into(),
+                                )
+                            })?,
+                        Err(_) if requested == normalized_source => normalized_source,
+                        Err(error) => return Err(error),
+                    };
+                    (Some(selected), Some(source))
                 }
-                let source =
-                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                let requested = normalize_existing_path(Path::new(requested));
-                let normalized_source = normalize_existing_path(Path::new(&source));
-                let selected = match list_git_worktrees(Path::new(&source)) {
-                    Ok(worktrees) => worktrees
-                        .into_iter()
-                        .find(|worktree| normalize_existing_path(&worktree.path) == requested)
-                        .map(|worktree| normalize_existing_path(&worktree.path))
-                        .ok_or_else(|| {
-                            StorageError::InvalidRequest(
-                                "That path is not a worktree of this repository.".into(),
-                            )
-                        })?,
-                    Err(_) if requested == normalized_source => normalized_source,
-                    Err(error) => return Err(error),
-                };
-                (Some(selected), Some(source))
-            }
-            RequestedNewChatWorktree::New => {
-                let source =
-                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                let created = create_worktree(&transaction, &source, &id, Some(title), None)?;
-                (Some(created), Some(source))
-            }
-            RequestedNewChatWorktree::Branch { reference, oid } => {
-                let source =
-                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                let root = git_repository_root(&source)?;
-                let resolved = git_resolve_commit(&root, reference)?;
-                if resolved != oid {
-                    return Err(StorageError::InvalidRequest(
-                        "That branch changed after it was selected. Refresh and try again.".into(),
-                    ));
+                RequestedNewChatWorktree::New => {
+                    let source =
+                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                    let created = create_worktree(&transaction, &source, &id, Some(title), None)?;
+                    (Some(created), Some(source))
                 }
-                let created = create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
-                (Some(created), Some(source))
-            }
-            RequestedNewChatWorktree::PullRequest { number, oid } => {
-                let source =
-                    resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                let root = git_repository_root(&source)?;
-                let reference = format!("refs/pull/{number}/head");
-                let fetched = run_git(&root, &["fetch", "origin", &reference])?;
-                if !fetched.0.success() {
-                    return Err(StorageError::InvalidRequest(command_error(
-                        &fetched.2,
-                        "git could not fetch that pull request",
-                    )));
+                RequestedNewChatWorktree::Branch { reference, oid } => {
+                    let source =
+                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                    let root = git_repository_root(&source)?;
+                    let resolved = git_resolve_commit(&root, reference)?;
+                    if resolved != oid {
+                        return Err(StorageError::InvalidRequest(
+                            "That branch changed after it was selected. Refresh and try again."
+                                .into(),
+                        ));
+                    }
+                    let created =
+                        create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
+                    (Some(created), Some(source))
                 }
-                let resolved = git_resolve_commit(&root, "FETCH_HEAD")?;
-                if resolved != oid {
-                    return Err(StorageError::InvalidRequest(
+                RequestedNewChatWorktree::PullRequest { number, oid } => {
+                    let source =
+                        resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
+                    let root = git_repository_root(&source)?;
+                    let reference = format!("refs/pull/{number}/head");
+                    let fetched = run_git(&root, &["fetch", "origin", &reference])?;
+                    if !fetched.0.success() {
+                        return Err(StorageError::InvalidRequest(command_error(
+                            &fetched.2,
+                            "git could not fetch that pull request",
+                        )));
+                    }
+                    let resolved = git_resolve_commit(&root, "FETCH_HEAD")?;
+                    if resolved != oid {
+                        return Err(StorageError::InvalidRequest(
                         "That pull request changed after it was selected. Refresh and try again."
                             .into(),
                     ));
+                    }
+                    let created =
+                        create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
+                    (Some(created), Some(source))
                 }
-                let created = create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
-                (Some(created), Some(source))
             }
         };
+        let session = requested_session.unwrap_or(&id);
         let sort_order = transaction.query_row(
             "SELECT COALESCE(MIN(sort_order), 0) - 1 FROM chats WHERE folder_id = ?",
             [folder_id],
@@ -2982,8 +3107,8 @@ impl StateStore {
         transaction.execute(
             "INSERT INTO chats \
              (id, folder_id, title, backend, model, effort, access, plan, fast, claude_mode, \
-              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              workdir, original_workdir, sort_order, created_at, updated_at, last_user_message_at, session_mode, workspace_session_id, new_worktree) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![
                 id,
                 folder_id,
@@ -3002,10 +3127,66 @@ impl StateStore {
                 now,
                 now * 1_000_000,
                 "chat",
+                session,
+                shared.as_ref().is_some_and(|shared| shared.3),
             ],
         )?;
         transaction.commit()?;
-        Ok(json!({"ok": true, "id": id, "backend": backend}))
+        Ok(
+            json!({"ok": true, "id": id, "backend": backend, "session": session,
+            "terminal_chat": format!("session:{session}")}),
+        )
+    }
+
+    pub fn session_chats(&self, session: &str) -> Result<Vec<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        let mut statement =
+            database.prepare("SELECT id FROM chats WHERE workspace_session_id = ? ORDER BY id")?;
+        Ok(statement
+            .query_map([session], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn rename_session(&self, request: &Value) -> Result<Value, StorageError> {
+        let session = required_string(request, "session", "A session needs an id and title.")?;
+        let title = required_string(request, "title", "A session needs an id and title.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if database.execute(
+            "UPDATE workspace_sessions SET title = ?, updated_at = ? WHERE id = ?",
+            params![title, now_seconds(), session],
+        )? != 1
+        {
+            return Err(StorageError::InvalidRequest(
+                "No such session on the host.".into(),
+            ));
+        }
+        Ok(json!({"ok": true}))
+    }
+
+    pub fn move_session(&self, request: &Value) -> Result<Value, StorageError> {
+        let session = required_string(request, "session", "move-session needs a session id.")?;
+        let mut adapted = request.clone();
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        adapted["chat"] = json!(workspace_session_chat(&database, session)?);
+        for key in ["before", "after"] {
+            if let Some(anchor) = optional_string(request, key)? {
+                adapted[key] = json!(workspace_session_chat(&database, anchor)?);
+            }
+        }
+        drop(database);
+        self.move_chat(&adapted)
+    }
+
+    pub fn delete_session(&self, request: &Value) -> Result<Value, StorageError> {
+        let session = required_string(request, "session", "delete-session needs a session id.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        database.execute(
+            "DELETE FROM chats WHERE workspace_session_id = ?",
+            [session],
+        )?;
+        Ok(json!({"ok": true}))
     }
 
     pub fn rename_chat(&self, request: &Value) -> Result<Value, StorageError> {
@@ -3046,7 +3227,13 @@ impl StateStore {
         }
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         if let Some(anchor_id) = anchor_id {
-            reorder_chat(&mut database, chat_id, anchor_id, place_after)?;
+            reorder_chat(
+                &mut database,
+                &self.workspace_root,
+                chat_id,
+                anchor_id,
+                place_after,
+            )?;
             return Ok(json!({"ok": true}));
         }
         let folder_id = folder_id.ok_or_else(|| {
@@ -3070,9 +3257,20 @@ impl StateStore {
             [folder_id],
             |row| row.get::<_, i64>(0),
         )?;
+        let previous_folder: String = database
+            .query_row(
+                "SELECT folder_id FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        let workdir = (previous_folder != folder_id)
+            .then(|| resolve_chat_workdir(&database, &self.workspace_root, chat_id))
+            .transpose()?;
         let changed = database.execute(
-            "UPDATE chats SET folder_id = ?, sort_order = ?, updated_at = ? WHERE id = ?",
-            params![folder_id, sort_order, now_seconds(), chat_id],
+            "UPDATE chats SET folder_id = ?, workdir = COALESCE(?, workdir), sort_order = ?, updated_at = ? WHERE id = ?",
+            params![folder_id, workdir, sort_order, now_seconds(), chat_id],
         )?;
         if changed != 1 {
             return Err(StorageError::NoChat(chat_id.into()));
@@ -3083,11 +3281,24 @@ impl StateStore {
     pub fn delete_chat(&self, request: &Value) -> Result<Value, StorageError> {
         let chat_id = required_string(request, "chat", "delete-chat needs a chat id")?;
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let session: Option<String> = database
+            .query_row(
+                "SELECT workspace_session_id FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get(0),
+            )
+            .optional()?;
         let changed = database.execute("DELETE FROM chats WHERE id = ?", [chat_id])?;
         if changed != 1 {
             return Err(StorageError::NoChat(chat_id.into()));
         }
-        Ok(json!({"ok": true}))
+        let session = session.expect("deleted chat had a session");
+        let retained: bool = database.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_sessions WHERE id = ?)",
+            [&session],
+            |row| row.get(0),
+        )?;
+        Ok(json!({"ok": true, "session": session, "session_deleted": !retained}))
     }
 
     pub fn remove_worktree(&self, request: &Value) -> Result<Value, StorageError> {
@@ -3137,9 +3348,9 @@ impl StateStore {
             [chat_id],
             |row| row.get(0),
         )?;
-        if has_messages {
+        if has_messages || !workspace_is_unused(&transaction, chat_id)? {
             return Err(StorageError::InvalidRequest(
-                "A worktree cannot be removed after the first message.".into(),
+                "A worktree cannot be removed after the session's first message.".into(),
             ));
         }
         let worktrees = list_git_worktrees(Path::new(&original))?;
@@ -3157,8 +3368,10 @@ impl StateStore {
             ));
         }
         let references = {
-            let mut statement = transaction
-                .prepare("SELECT workdir FROM chats WHERE id != ? AND workdir IS NOT NULL")?;
+            let mut statement = transaction.prepare(
+                "SELECT workdir FROM chats WHERE workspace_session_id != \
+                    (SELECT workspace_session_id FROM chats WHERE id = ?) AND workdir IS NOT NULL",
+            )?;
             statement
                 .query_map([chat_id], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?
@@ -3382,7 +3595,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             .optional()?
             .and_then(|version| version.parse::<u32>().ok())
             .unwrap_or(0);
-        if version > 24 {
+        if version > 25 {
             return Err(StorageError::InvalidRequest(format!(
                 "The chat database requires a newer xd version (schema {version})."
             )));
@@ -3397,6 +3610,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_shared_events_table(database)?;
             disable_claude_mode(database)?;
             remove_terminal_chats(database)?;
+            ensure_workspace_sessions(database)?;
             return Ok(());
         }
     }
@@ -3488,6 +3702,50 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_shared_events_table(database)?;
     disable_claude_mode(database)?;
     remove_terminal_chats(database)?;
+    ensure_workspace_sessions(database)?;
+    Ok(())
+}
+
+fn ensure_workspace_sessions(database: &Connection) -> Result<(), StorageError> {
+    let transaction = database.unchecked_transaction()?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workspace_sessions (id TEXT PRIMARY KEY, title TEXT, \
+         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
+    )?;
+    let columns = transaction
+        .prepare("PRAGMA table_info(chats)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    if !columns.contains("workspace_session_id") {
+        transaction.execute("ALTER TABLE chats ADD COLUMN workspace_session_id TEXT", [])?;
+    }
+    transaction.execute_batch(
+        "INSERT OR IGNORE INTO workspace_sessions (id, title, created_at, updated_at) \
+         SELECT COALESCE(workspace_session_id, id), COALESCE(title, 'New Session'), created_at, updated_at FROM chats; \
+         UPDATE chats SET workspace_session_id = id WHERE workspace_session_id IS NULL; \
+         CREATE INDEX IF NOT EXISTS chats_workspace_session ON chats (workspace_session_id); \
+         CREATE TRIGGER IF NOT EXISTS chats_create_workspace_session AFTER INSERT ON chats BEGIN \
+           INSERT OR IGNORE INTO workspace_sessions (id, title, created_at, updated_at) \
+             VALUES (COALESCE(NEW.workspace_session_id, NEW.id), COALESCE(NEW.title, 'New Session'), NEW.created_at, NEW.updated_at); \
+           UPDATE chats SET workspace_session_id = NEW.id WHERE id = NEW.id AND workspace_session_id IS NULL; \
+         END; \
+         CREATE TRIGGER IF NOT EXISTS chats_share_workspace \
+         AFTER UPDATE OF folder_id, workdir, original_workdir, new_worktree ON chats \
+         WHEN OLD.folder_id IS NOT NEW.folder_id OR OLD.workdir IS NOT NEW.workdir \
+           OR OLD.original_workdir IS NOT NEW.original_workdir OR OLD.new_worktree IS NOT NEW.new_worktree BEGIN \
+           UPDATE chats SET folder_id = NEW.folder_id, workdir = NEW.workdir, \
+             original_workdir = NEW.original_workdir, new_worktree = NEW.new_worktree, updated_at = NEW.updated_at \
+             WHERE workspace_session_id = NEW.workspace_session_id AND id != NEW.id; \
+         END; \
+         CREATE TRIGGER IF NOT EXISTS chats_remove_empty_workspace_session AFTER DELETE ON chats BEGIN \
+           DELETE FROM workspace_sessions WHERE id = OLD.workspace_session_id \
+             AND NOT EXISTS (SELECT 1 FROM chats WHERE workspace_session_id = OLD.workspace_session_id); \
+         END; \
+         DELETE FROM workspace_sessions WHERE NOT EXISTS \
+           (SELECT 1 FROM chats WHERE workspace_session_id = workspace_sessions.id); \
+         UPDATE meta SET value = '25' WHERE key = 'schema_version';",
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -3828,6 +4086,7 @@ fn reorder_workspace(
 
 fn reorder_chat(
     database: &mut Connection,
+    workspace_root: &Path,
     chat_id: &str,
     anchor_id: &str,
     after: bool,
@@ -3848,6 +4107,51 @@ fn reorder_chat(
         )
         .optional()?
         .ok_or_else(|| StorageError::NoChat(anchor_id.into()))?;
+    let source_session: String = database.query_row(
+        "SELECT workspace_session_id FROM chats WHERE id = ?",
+        [chat_id],
+        |row| row.get(0),
+    )?;
+    let anchor_session: String = database.query_row(
+        "SELECT workspace_session_id FROM chats WHERE id = ?",
+        [anchor_id],
+        |row| row.get(0),
+    )?;
+    if source_session != anchor_session {
+        let mut sessions = {
+            let mut statement = database.prepare("SELECT workspace_session_id FROM chats WHERE folder_id = ? \
+                GROUP BY workspace_session_id ORDER BY MIN(sort_order), MAX(last_user_message_at) DESC, MAX(created_at) DESC")?;
+            statement
+                .query_map([&anchor_folder], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        sessions.retain(|session| session != &source_session);
+        let anchor = sessions
+            .iter()
+            .position(|session| session == &anchor_session)
+            .expect("anchor session exists");
+        sessions.insert(anchor + usize::from(after), source_session.clone());
+        let source_folder: String = database.query_row(
+            "SELECT folder_id FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get(0),
+        )?;
+        let source_workdir = (source_folder != anchor_folder)
+            .then(|| resolve_chat_workdir(database, workspace_root, chat_id))
+            .transpose()?;
+        let transaction = database.transaction()?;
+        let now = now_seconds();
+        transaction.execute(
+            "UPDATE chats SET workdir = COALESCE(?, workdir) WHERE workspace_session_id = ?",
+            params![source_workdir, source_session],
+        )?;
+        for (order, session) in sessions.iter().enumerate() {
+            transaction.execute("UPDATE chats SET folder_id = ?, sort_order = ?, updated_at = ? WHERE workspace_session_id = ?",
+                params![anchor_folder, order as i64, now, session])?;
+        }
+        transaction.commit()?;
+        return Ok(());
+    }
     let mut ids = {
         let mut statement = database.prepare(
             "SELECT id FROM chats WHERE folder_id = ? \
@@ -4274,6 +4578,27 @@ fn resolve_workdir(
             "The chat working directory does not exist: {fallback}"
         )))
     }
+}
+
+fn workspace_session_chat(database: &Connection, session: &str) -> Result<String, StorageError> {
+    database
+        .query_row(
+            "SELECT id FROM chats WHERE workspace_session_id = ? ORDER BY created_at, id LIMIT 1",
+            [session],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::InvalidRequest("No such session on the host.".into()))
+}
+
+fn workspace_is_unused(database: &Connection, chat: &str) -> Result<bool, StorageError> {
+    Ok(database.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM chats c WHERE c.workspace_session_id = \
+         (SELECT workspace_session_id FROM chats WHERE id = ?) AND (c.host_working = 1 OR \
+         EXISTS(SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.role = 'user')))",
+        [chat],
+        |row| row.get(0),
+    )?)
 }
 
 fn resolve_chat_workdir(
@@ -5441,6 +5766,12 @@ fn prepare_turn(
         chat.9.as_deref(),
     )?;
     if chat.8 {
+        if !workspace_is_unused(transaction, chat_id)? {
+            return Err(StorageError::InvalidRequest(
+                "The workspace can only be changed before the first message in this session."
+                    .into(),
+            ));
+        }
         let source = workdir.clone();
         workdir = create_worktree(
             transaction,
@@ -5894,6 +6225,215 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn workspace_sessions_migrate_legacy_chats_without_touching_agent_state() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("Project")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "legacy", "Project");
+        database
+            .execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', '24')",
+                [],
+            )
+            .unwrap();
+        database.execute("UPDATE chats SET draft = 'unfinished', title = 'Existing task' WHERE id = 'legacy'", []).unwrap();
+        database.execute("INSERT INTO messages (chat_id, role, content, created_at) VALUES ('legacy', 'user', 'history', 1)", []).unwrap();
+        database.execute("INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES ('legacy', 'codex', 'agent-resume')", []).unwrap();
+        drop(database);
+        for _ in 0..2 {
+            let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+            let tree = store.tree().unwrap();
+            assert_eq!(tree["sessions"].as_array().unwrap().len(), 1);
+            assert_eq!(tree["sessions"][0]["id"], "legacy");
+            assert_eq!(tree["sessions"][0]["title"], "Existing task");
+            assert_eq!(tree["sessions"][0]["chats"], json!(["legacy"]));
+            assert_eq!(store.chat("legacy").unwrap()["draft"], "unfinished");
+            let database = store.database.lock().unwrap();
+            assert_eq!(
+                database
+                    .query_row(
+                        "SELECT session_id FROM chat_sessions WHERE chat_id = 'legacy'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "agent-resume"
+            );
+            assert_eq!(
+                database
+                    .query_row(
+                        "SELECT content FROM messages WHERE chat_id = 'legacy'",
+                        [],
+                        |r| r.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "history"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_session_tabs_share_one_generated_worktree_and_keep_agent_state_separate() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Project"})).unwrap()["id"].clone();
+        let repository = fixture.workspaces.join("Project");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=xd test",
+                "-c",
+                "user.email=xd@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        ] {
+            assert!(run_git(&repository, &args).unwrap().0.success());
+        }
+        let first = store
+            .new_chat(&json!({"folder": folder, "title": "Shared task", "backend": "codex"}))
+            .unwrap();
+        let first_id = first["id"].as_str().unwrap();
+        store
+            .set_option(&json!({"chat": first_id, "option": "new-worktree", "value": "true"}))
+            .unwrap();
+        let second = store
+            .new_chat(&json!({"session": first["session"], "backend": "claude"}))
+            .unwrap();
+        let second_id = second["id"].as_str().unwrap();
+        assert_eq!(first["terminal_chat"], second["terminal_chat"]);
+        let error = store
+            .new_chat(&json!({"session": first["session"], "worktree": {"kind": "new"}}))
+            .unwrap_err();
+        assert!(error.to_string().contains("shares its session's workspace"));
+        store
+            .set_draft(&json!({"chat": first_id, "text": "codex draft"}))
+            .unwrap();
+        store
+            .set_draft(&json!({"chat": second_id, "text": "claude draft"}))
+            .unwrap();
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": second_id, "text": "work", "worktree_name": "shared"}))
+            .unwrap()
+        else {
+            panic!("first turn")
+        };
+        assert_eq!(turn.backend, "claude");
+        let first_state = store.chat(first_id).unwrap();
+        let second_state = store.chat(second_id).unwrap();
+        assert_eq!(first_state["workdir"], turn.workdir);
+        assert_eq!(second_state["workdir"], turn.workdir);
+        assert_eq!(first_state["draft"], "codex draft");
+        assert_eq!(second_state["draft"], "");
+        assert_eq!(first_state["has_messages"], false);
+        assert_eq!(second_state["has_messages"], true);
+        assert_eq!(list_git_worktrees(&repository).unwrap().len(), 2);
+        assert!(
+            store
+                .remove_worktree(&json!({"chat": first_id, "worktree": turn.workdir}))
+                .is_err()
+        );
+        assert!(
+            store
+                .set_option(&json!({"chat": first_id, "option": "new-worktree", "value": "true"}))
+                .is_err()
+        );
+        let third = store
+            .new_chat(&json!({"session": first["session"], "backend": "codex"}))
+            .unwrap();
+        assert_eq!(
+            store.chat(third["id"].as_str().unwrap()).unwrap()["workdir"],
+            turn.workdir
+        );
+        assert_eq!(list_git_worktrees(&repository).unwrap().len(), 2);
+        assert_eq!(store.tree().unwrap()["sessions"][0]["working"], true);
+        let deleted = store.delete_chat(&json!({"chat": first_id})).unwrap();
+        assert_eq!(deleted["session_deleted"], false);
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let tree = store.tree().unwrap();
+        assert_eq!(tree["sessions"][0]["id"], first["session"]);
+        assert_eq!(tree["sessions"][0]["title"], "Shared task");
+        assert_eq!(
+            store
+                .terminal_workdir(first["terminal_chat"].as_str().unwrap())
+                .unwrap(),
+            PathBuf::from(&turn.workdir)
+        );
+        assert!(Path::new(&turn.workdir).is_dir());
+    }
+
+    #[test]
+    fn workspace_session_moves_and_deletes_keep_members_together() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let one = store.new_folder(&json!({"name": "One"})).unwrap()["id"].clone();
+        let two = store.new_folder(&json!({"name": "Two"})).unwrap()["id"].clone();
+        let first = store
+            .new_chat(&json!({"folder": one, "title": "Task"}))
+            .unwrap();
+        let second = store
+            .new_chat(&json!({"session": first["session"]}))
+            .unwrap();
+        assert!(
+            store
+                .new_chat(&json!({"session": first["session"], "folder": two}))
+                .is_err()
+        );
+        store
+            .rename_session(&json!({"session": first["session"], "title": "Renamed session"}))
+            .unwrap();
+        store
+            .move_chat(&json!({"chat": second["id"], "folder": two}))
+            .unwrap();
+        let tree = store.tree().unwrap();
+        assert!(
+            tree["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|chat| chat["folder"] == two)
+        );
+        assert_eq!(
+            store.chat(second["id"].as_str().unwrap()).unwrap()["session_title"],
+            "Renamed session"
+        );
+        let anchor = store.new_chat(&json!({"folder": one})).unwrap();
+        store
+            .move_session(&json!({"session": first["session"], "before": anchor["session"]}))
+            .unwrap();
+        let tree = store.tree().unwrap();
+        assert_eq!(tree["sessions"][0]["id"], first["session"]);
+        assert!(
+            tree["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|chat| chat["folder"] == one)
+        );
+        store
+            .delete_session(&json!({"session": first["session"]}))
+            .unwrap();
+        assert!(matches!(
+            store.chat(first["id"].as_str().unwrap()),
+            Err(StorageError::NoChat(_))
+        ));
+        assert!(matches!(
+            store.chat(second["id"].as_str().unwrap()),
+            Err(StorageError::NoChat(_))
+        ));
+        assert_eq!(
+            store.tree().unwrap()["sessions"].as_array().unwrap().len(),
+            1
+        );
+        assert!(fixture.workspaces.join("One").is_dir());
+    }
 
     #[test]
     fn opening_database_deletes_only_terminal_chats_and_their_history() {
@@ -6495,7 +7035,7 @@ mod tests {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "24"
+            "25"
         );
         let fts_exists: bool = database
             .query_row(
@@ -7250,6 +7790,17 @@ mod tests {
         store
             .move_chat(&json!({"chat": alpha, "after": bravo}))
             .unwrap();
+        let pinned: i64 = store
+            .database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM chats WHERE workdir IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pinned, 0, "Reordering must preserve workspace inheritance");
         drop(store);
         let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         assert_eq!(

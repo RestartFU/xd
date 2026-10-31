@@ -73,6 +73,7 @@ pub struct Engine {
     workflows: WorkflowStatuses,
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    session_resources: Mutex<()>,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
     git_actions: Arc<Mutex<()>>,
@@ -131,6 +132,7 @@ impl Engine {
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
+            session_resources: Mutex::new(()),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
             git_actions: Arc::new(Mutex::new(())),
@@ -172,6 +174,7 @@ impl Engine {
             workflows: WorkflowStatuses::new(events.clone()),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
+            session_resources: Mutex::new(()),
             secrets,
             git_drafts,
             git_actions: Arc::new(Mutex::new(())),
@@ -355,7 +358,16 @@ impl Engine {
             Some("rename-folder") => self.tree_mutation(|store| store.rename_folder(&request)),
             Some("move-folder") => self.tree_mutation(|store| store.move_folder(&request)),
             Some("trash-folder") => self.tree_mutation(|store| store.trash_folder(&request)),
-            Some("new-chat") => self.tree_mutation(|store| store.new_chat(&request)),
+            Some("new-chat") => {
+                let _resources = self
+                    .session_resources
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                self.tree_mutation(|store| store.new_chat(&request))
+            }
+            Some("rename-session") => self.tree_mutation(|store| store.rename_session(&request)),
+            Some("move-session") => self.tree_mutation(|store| store.move_session(&request)),
+            Some("delete-session") => self.delete_session(&request),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
             Some("delete-chat") => self.delete_chat(&request),
@@ -567,6 +579,9 @@ impl Engine {
     }
 
     fn tree(&self) -> Value {
+        if let Err(error) = self.terminal_owner("") {
+            return error_reply(error);
+        }
         let mut tree = self.read(StateStore::tree);
         if tree.get("ok").and_then(Value::as_bool) == Some(true) {
             let activity = self.terminals.activity_snapshot();
@@ -850,12 +865,32 @@ impl Engine {
         }
     }
 
+    fn terminal_owner(&self, owner: &str) -> Result<String, String> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(owner.to_owned());
+        };
+        let aliases = store
+            .terminal_owner_aliases()
+            .map_err(|error| error.to_string())?;
+        self.terminals.adopt_chat_owners(&aliases)?;
+        Ok(aliases
+            .get(owner)
+            .cloned()
+            .unwrap_or_else(|| owner.to_owned()))
+    }
+
     fn terminal_list(&self, request: &Value) -> Value {
         let chat_id = match required_string(request, "chat", "terminal-list needs a chat id") {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
         };
-        self.terminals.list(chat_id)
+        match self.terminal_owner(chat_id) {
+            Ok(owner) => match self.terminals.register_chat_alias(&owner, chat_id) {
+                Ok(()) => self.terminals.list(&owner),
+                Err(error) => error_reply(error),
+            },
+            Err(error) => error_reply(error),
+        }
     }
 
     fn terminal_paste_image(&self, request: &Value) -> Value {
@@ -898,12 +933,61 @@ impl Engine {
             Ok(execution) => execution,
             Err(_) => return error_reply("This session's agent state is unavailable."),
         };
+        let _resources = match self.session_resources.lock() {
+            Ok(resources) => resources,
+            Err(_) => return error_reply("Session resources are unavailable."),
+        };
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
+        if let Err(error) = self.terminal_owner(chat_id) {
+            return error_reply(error);
+        }
         match store.delete_chat(request) {
             Ok(reply) => {
-                self.terminals.kill_chat(chat_id);
+                if let Some(runtime) = &self.runtime {
+                    runtime.discard_chat(chat_id);
+                }
+                if reply["session_deleted"] == true {
+                    if let Some(session) = reply["session"].as_str() {
+                        self.terminals.kill_chat(&format!("session:{session}"));
+                    }
+                }
+                self.events.publish(json!({"event": "tree"}));
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    fn delete_session(&self, request: &Value) -> Value {
+        let session =
+            match required_string(request, "session", "delete-session needs a session id.") {
+                Ok(session) => session,
+                Err(error) => return error_reply(error),
+            };
+        let _resources = match self.session_resources.lock() {
+            Ok(resources) => resources,
+            Err(_) => return error_reply("Session resources are unavailable."),
+        };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let chats = match store.session_chats(session) {
+            Ok(chats) => chats,
+            Err(error) => return error_reply(error),
+        };
+        if let Err(error) = self.terminal_owner(session) {
+            return error_reply(error);
+        }
+        match store.delete_session(request) {
+            Ok(reply) => {
+                for chat in chats {
+                    if let Some(runtime) = &self.runtime {
+                        runtime.discard_chat(&chat);
+                    }
+                }
+                self.terminals.kill_chat(&format!("session:{session}"));
                 self.events.publish(json!({"event": "tree"}));
                 reply
             }
@@ -916,13 +1000,28 @@ impl Engine {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
         };
+        let _resources = match self.session_resources.lock() {
+            Ok(resources) => resources,
+            Err(_) => return error_reply("Session resources are unavailable."),
+        };
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
-        match store.terminal_workdir(chat_id) {
+        let owner = match self.terminal_owner(chat_id) {
+            Ok(owner) => owner,
+            Err(error) => return error_reply(error),
+        };
+        let mut canonical_request = request.clone();
+        canonical_request["chat"] = json!(owner);
+        canonical_request["_terminal_alias"] = if chat_id != owner {
+            json!(chat_id)
+        } else {
+            Value::Null
+        };
+        match store.terminal_workdir(&owner) {
             Ok(workdir) => self
                 .terminals
-                .open(request, &workdir)
+                .open(&canonical_request, &workdir)
                 .unwrap_or_else(error_reply),
             Err(error) => error_reply(error),
         }
@@ -1011,6 +1110,16 @@ impl Engine {
         };
         match operation(store) {
             Ok((reply, event)) => {
+                if let Some(chats) = event.get("workspace_chats").and_then(Value::as_array) {
+                    for chat in chats {
+                        if chat != &event["chat"] {
+                            self.events
+                                .publish(json!({"event": "changed", "chat": chat}));
+                        }
+                    }
+                    self.events.publish(json!({"event": "tree"}));
+                    self.events.publish(json!({"event": "worktrees-changed"}));
+                }
                 self.events.publish(event);
                 reply
             }
@@ -1045,6 +1154,10 @@ impl Engine {
                 Err(error) => eprintln!("xd: cannot prepare AI worktree naming: {error}"),
             }
         }
+        let _resources = match self.session_resources.lock() {
+            Ok(resources) => resources,
+            Err(_) => return error_reply("Session resources are unavailable."),
+        };
         match store.prepare_send(&request) {
             Ok(SendDisposition::Queued { reply, event }) => {
                 self.events.publish(event);
@@ -1590,8 +1703,9 @@ fn write_frames(
     frames: std::sync::mpsc::Receiver<Value>,
 ) -> std::io::Result<()> {
     while let Ok(frame) = frames.recv() {
-        serde_json::to_writer(&mut stream, &frame)?;
-        stream.write_all(b"\n")?;
+        let mut encoded = serde_json::to_vec(&frame)?;
+        encoded.push(b'\n');
+        stream.write_all(&encoded)?;
         stream.flush()?;
     }
     Ok(())
@@ -1618,8 +1732,29 @@ fn overlay_terminal_working(tree: &mut Value, working_chats: &HashSet<String>) {
         let working = chat
             .get("id")
             .and_then(Value::as_str)
-            .is_some_and(|chat_id| working_chats.contains(chat_id));
+            .is_some_and(|chat_id| working_chats.contains(chat_id))
+            || chat
+                .get("session")
+                .and_then(Value::as_str)
+                .is_some_and(|session| working_chats.contains(&format!("session:{session}")));
         chat["terminal_working"] = Value::Bool(working);
+    }
+    let active_sessions = tree
+        .get("chats")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|chat| chat["terminal_working"] == true)
+        .filter_map(|chat| chat["session"].as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+    if let Some(sessions) = tree.get_mut("sessions").and_then(Value::as_array_mut) {
+        for session in sessions {
+            session["terminal_working"] = json!(
+                session["id"]
+                    .as_str()
+                    .is_some_and(|id| active_sessions.contains(id))
+            );
+        }
     }
 }
 
@@ -1663,6 +1798,42 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn outgoing_json_frames_are_written_as_complete_lines() {
+        #[derive(Default)]
+        struct RecordingWriter {
+            writes: Vec<Vec<u8>>,
+            flushes: usize,
+        }
+        impl Write for &mut RecordingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes.push(bytes.to_vec());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.flushes += 1;
+                Ok(())
+            }
+        }
+        let frames = [
+            json!({"event":"tree","sessions":[{"id":"session","chats":["one","two"]}]}),
+            json!({"ok":true,"text":"escaped \"quotes\" and \nnewlines"}),
+        ];
+        let (sender, receiver) = std::sync::mpsc::channel();
+        for frame in &frames {
+            sender.send(frame.clone()).unwrap();
+        }
+        drop(sender);
+        let mut writer = RecordingWriter::default();
+        write_frames(&mut writer, receiver).unwrap();
+        assert_eq!(writer.flushes, frames.len());
+        assert_eq!(writer.writes.len(), frames.len());
+        for (bytes, expected) in writer.writes.iter().zip(frames) {
+            assert_eq!(bytes.last(), Some(&b'\n'));
+            assert_eq!(serde_json::from_slice::<Value>(bytes).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn a_loaded_chat_carries_where_its_live_turn_already_is() {
@@ -1905,6 +2076,111 @@ mod tests {
         assert_eq!(opened["ok"], true, "{opened}");
         let terminal = opened["id"].as_str().expect("global terminal id");
         let _ = engine.dispatch(json!({"op": "terminal-kill", "terminal": terminal}));
+        drop(engine);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn shared_session_terminals_survive_initial_tab_deletion_and_close_with_the_session() {
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let first = engine.dispatch(json!({"op": "new-chat", "folder": folder}));
+        let resource = first["terminal_chat"].clone();
+        let opened = engine
+            .terminals
+            .open(
+                &json!({"chat":first["id"]}),
+                &root.join("Workspaces/Project"),
+            )
+            .unwrap();
+        let adopted = engine.dispatch(json!({"op":"terminal-list","chat":resource}));
+        assert_eq!(adopted["terminals"].as_array().unwrap().len(), 1);
+        assert_eq!(adopted["terminals"][0]["id"], opened["id"]);
+        assert_eq!(
+            engine.dispatch(json!({"op":"terminal-list","chat":first["id"]}))["terminals"][0]["id"],
+            opened["id"]
+        );
+        let (sender, terminal_events) = sync_channel(64);
+        let subscriber = engine
+            .events
+            .subscribe_with_auth(sender, None, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        engine.terminals.input(&json!({"terminal":opened["id"],"data":STANDARD.encode(b"printf 'ownership-probe\\n'\n")})).unwrap();
+        let mut owners = HashSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while owners.len() < 2 {
+            let event = terminal_events
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
+            if event["event"] == "terminal-output"
+                && event["terminal"] == opened["id"]
+                && event["data"]
+                    .as_str()
+                    .and_then(|data| STANDARD.decode(data).ok())
+                    .is_some_and(|data| String::from_utf8_lossy(&data).contains("ownership-probe"))
+            {
+                owners.insert(event["chat"].as_str().unwrap().to_owned());
+            }
+        }
+        assert_eq!(
+            owners,
+            HashSet::from([
+                first["id"].as_str().unwrap().to_owned(),
+                resource.as_str().unwrap().to_owned()
+            ])
+        );
+        engine.events.unsubscribe(subscriber);
+        let replay = engine.dispatch(json!({"op":"terminal-list","chat":resource}))["terminals"][0]
+            ["replay"]
+            .clone();
+        assert!(
+            replay
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|frame| frame["data"].as_str())
+                .filter_map(|data| STANDARD.decode(data).ok())
+                .any(|data| String::from_utf8_lossy(&data).contains("ownership-probe"))
+        );
+        let second =
+            engine.dispatch(json!({"op":"new-chat","session":first["session"],"backend":"claude"}));
+        assert_eq!(second["ok"], true, "{second}");
+        let deleted = engine.dispatch(json!({"op": "delete-chat", "chat": first["id"]}));
+        assert_eq!(deleted["session_deleted"], false);
+        let reused =
+            engine.dispatch(json!({"op": "terminal-open", "chat": resource, "reuse": true}));
+        assert_eq!(reused["id"], opened["id"]);
+        let deleted = engine.dispatch(json!({"op": "delete-chat", "chat": second["id"]}));
+        assert_eq!(deleted["session_deleted"], true);
+        assert_eq!(
+            engine.dispatch(json!({"op": "terminal-list", "chat": resource}))["terminals"],
+            json!([])
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op": "terminal-open", "chat": resource}))["ok"],
+            false
+        );
+        let first = engine.dispatch(json!({"op": "new-chat", "folder": folder}));
+        let second = engine.dispatch(json!({"op": "new-chat", "session": first["session"]}));
+        let resource = first["terminal_chat"].clone();
+        assert_eq!(
+            engine.dispatch(json!({"op": "terminal-open", "chat": resource}))["ok"],
+            true
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op": "delete-session", "session": first["session"]}))["ok"],
+            true
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op": "terminal-list", "chat": resource}))["terminals"],
+            json!([])
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op": "chat", "chat": second["id"]}))["ok"],
+            false
+        );
         drop(engine);
         fs::remove_dir_all(root).ok();
     }

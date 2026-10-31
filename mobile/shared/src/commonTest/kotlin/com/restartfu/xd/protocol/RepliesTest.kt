@@ -7,6 +7,21 @@ import kotlin.test.assertNull
 
 class RepliesTest {
     @Test
+    fun sessionMembershipIsAdditiveToLegacyTreeReplies() {
+        val legacy = WireJson.parseToJsonElement(
+            """{"ok":true,"folders":[],"chats":[{"id":"one","folder":"p","title":"One","backend":"codex","working":false}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals(emptyList(), legacy.sessions)
+        assertNull(legacy.chats.single().session)
+
+        val grouped = WireJson.parseToJsonElement(
+            """{"ok":true,"folders":[],"sessions":[{"id":"s","folder":"p","title":"Workspace","chats":["one"],"terminal_chat":"session:s"}],"chats":[{"id":"one","session":"s","folder":"p","title":"One","backend":"codex","working":false}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals("s", grouped.chats.single().session)
+        assertEquals("session:s", grouped.sessions.single().terminalChat)
+    }
+
+    @Test
     fun workflowStatusCarriesRunAndJobClocks() {
         val reply = WireJson.parseToJsonElement(
             """

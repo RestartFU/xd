@@ -1,6 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,12 +9,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -28,9 +30,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.mobile.ChatViewModel
+import com.restartfu.xd.mobile.R
+import com.restartfu.xd.model.DisplayLabels
 
 /**
  * Chooses a model for the assistant fixed to this chat.
@@ -50,10 +56,14 @@ internal fun ModelPicker(
     val loading by model.catalogLoading.collectAsStateWithLifecycle()
     val error by model.catalogError.collectAsStateWithLifecycle()
     val busy by model.selectingModel.collectAsStateWithLifecycle()
+    val selectionError by model.modelSelectionError.collectAsStateWithLifecycle()
     var effortBackendId by remember { mutableStateOf<String?>(null) }
     var effortModelId by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) { model.loadCatalog() }
+    LaunchedEffect(Unit) {
+        model.clearModelSelectionError()
+        model.loadCatalog()
+    }
 
     val currentAssistant = catalog.firstOrNull { it.id == currentBackend }
     val effortBackend = catalog.firstOrNull { it.id == effortBackendId }
@@ -62,13 +72,24 @@ internal fun ModelPicker(
         currentBackend == effortBackend.id &&
         (currentModel ?: effortBackend.defaultModel) == effortModelId
 
+    LaunchedEffect(modelReady, efforts) {
+        if (modelReady && efforts.isEmpty()) onDismiss()
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(if (effortBackendId == null) "Model" else "Reasoning effort")
+            Text(if (effortBackendId == null) "Choose model" else "Reasoning effort")
         },
         text = {
             when {
+                effortBackendId != null && !modelReady && selectionError != null -> Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(selectionError.orEmpty(), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = { effortModelId?.let(model::selectModel) }) { Text("Retry") }
+                }
+
                 effortBackendId != null && !modelReady -> Box(
                     Modifier.fillMaxWidth(),
                     contentAlignment = Alignment.Center,
@@ -80,16 +101,17 @@ internal fun ModelPicker(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable(enabled = !busy) {
+                                .heightIn(min = 48.dp)
+                                .selectable(selected = selected, enabled = !busy, role = Role.RadioButton) {
                                     if (!selected) model.setEffort(effort)
                                     onDismiss()
                                 }
                                 .padding(vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(if (selected) "✓" else " ", Modifier.width(24.dp))
+                            SelectionMark(selected)
                             Text(
-                                EFFORT_LABELS[effort] ?: effort,
+                                DisplayLabels.effort(effort),
                                 fontWeight = if (selected) FontWeight.Bold else null,
                             )
                         }
@@ -101,10 +123,12 @@ internal fun ModelPicker(
                     contentAlignment = Alignment.Center,
                 ) { CircularProgressIndicator() }
 
-                error != null && catalog.isEmpty() -> Text(
-                    error.orEmpty(),
-                    color = MaterialTheme.colorScheme.error,
-                )
+                error != null && catalog.isEmpty() -> Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
+                    TextButton(onClick = model::loadCatalog) { Text("Retry") }
+                }
 
                 currentAssistant == null -> Text(
                     "No models are available for this assistant.",
@@ -120,7 +144,7 @@ internal fun ModelPicker(
                         ) {
                             BackendIcon(currentAssistant.id, size = 16.dp)
                             Text(
-                                currentAssistant.name,
+                                DisplayLabels.backend(currentAssistant.id, catalog),
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.outline,
                             )
@@ -136,7 +160,9 @@ internal fun ModelPicker(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
+                                .heightIn(min = 48.dp)
+                                .selectable(selected = selected, enabled = !busy, role = Role.RadioButton) {
+                                    model.clearModelSelectionError()
                                     if (!selected) model.selectModel(entry.id)
                                     effortBackendId = currentAssistant.id
                                     effortModelId = entry.id
@@ -144,11 +170,11 @@ internal fun ModelPicker(
                                 .padding(vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(if (selected) "✓" else " ", Modifier.width(24.dp))
+                            SelectionMark(selected)
                             Column(Modifier.weight(1f)) {
                                 Text(
-                                    entry.name,
-                                    maxLines = 1,
+                                    DisplayLabels.model(entry.id, currentAssistant.id, catalog),
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                     fontWeight = if (selected) FontWeight.Bold else null,
                                 )
@@ -172,6 +198,7 @@ internal fun ModelPicker(
             } else {
                 TextButton(
                     onClick = {
+                        model.clearModelSelectionError()
                         effortBackendId = null
                         effortModelId = null
                     },
@@ -182,4 +209,16 @@ internal fun ModelPicker(
             { TextButton(onClick = onDismiss) { Text("Cancel") } }
         },
     )
+}
+
+@Composable
+private fun SelectionMark(selected: Boolean) {
+    Box(Modifier.width(24.dp), contentAlignment = Alignment.CenterStart) {
+        if (selected) Icon(
+            painterResource(R.drawable.ic_check),
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+    }
 }

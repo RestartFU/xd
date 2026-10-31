@@ -39,6 +39,7 @@ use xd_desktop::{
     markdown,
     model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, ToolView, Worktree},
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
+    presentation,
     session_host::{SessionHost, SshCommand, TMUX_CONFIGURATION},
     session_runtime::{
         SessionEndpoint, SessionEvent, SessionEventKind, SessionEventReceiver, SessionRuntime,
@@ -58,6 +59,7 @@ mod speech;
 mod terminal;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
+mod workspace_settings;
 
 use browser::{BrowserEvent, BrowserPane, BrowserSession, SideTab};
 use editor::{
@@ -123,6 +125,7 @@ const TRASH_ICON: &str = "icons/trash.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
+const CHECK_ICON: &str = "icons/check.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
 const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
@@ -140,7 +143,7 @@ const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Width of the catalog sidebar that holds project drawers and session cards.
-const CATALOG_WIDTH: f32 = 288.0;
+const CATALOG_WIDTH: f32 = 256.0;
 /// Every session row shares one height and baseline.
 const CARD_HEIGHT: f32 = 30.0;
 const BROWSER_DIVIDER_WIDTH: f32 = 1.0;
@@ -1284,6 +1287,7 @@ struct ShortcutPanel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SidebarTarget {
     Folder(String),
+    Session(String),
     Chat(String),
 }
 
@@ -1463,6 +1467,7 @@ struct XdDesktop {
     /// Width of the chat's reading column, measured by the workspace layout.
     chat_column_width: f32,
     native_option_open: Option<&'static str>,
+    settings_section: usize,
     expanded_activities: HashSet<i64>,
     expanded_work_logs: HashSet<i64>,
     /// Agents asked to stop or move to the background, until their record
@@ -1530,6 +1535,8 @@ struct XdDesktop {
     terminal_input: Entity<ComposerInput>,
     terminal_scroll: ScrollHandle,
     terminal_tabs_scroll: ScrollHandle,
+    session_chat_tabs_scroll: ScrollHandle,
+    session_chat_tabs_selected: Option<String>,
     terminal_tabs_selected: Option<String>,
     auth_input: Entity<ComposerInput>,
     secret_name_input: Entity<ComposerInput>,
@@ -1564,6 +1571,7 @@ struct XdDesktop {
     pending_clone_requests: HashMap<ChatEndpoint, String>,
     workspace_clone_outcomes: HashMap<(ChatEndpoint, String), Option<String>>,
     creating_chat_folder: Option<String>,
+    creating_chat_session: Option<String>,
     chat_create_title: String,
     chat_create_submitting: bool,
     chat_create_worktree: Option<NewSessionWorktree>,
@@ -1992,6 +2000,7 @@ impl XdDesktop {
             dock_drag: None,
             chat_column_width: 780.0,
             native_option_open: None,
+            settings_section: 0,
             expanded_activities: HashSet::new(),
             expanded_work_logs: HashSet::new(),
             subagent_actions: HashMap::new(),
@@ -2054,6 +2063,8 @@ impl XdDesktop {
             terminal_input,
             terminal_scroll: ScrollHandle::new(),
             terminal_tabs_scroll: ScrollHandle::new(),
+            session_chat_tabs_scroll: ScrollHandle::new(),
+            session_chat_tabs_selected: None,
             terminal_tabs_selected: None,
             auth_input,
             secret_name_input,
@@ -2086,6 +2097,7 @@ impl XdDesktop {
             pending_clone_requests: HashMap::new(),
             workspace_clone_outcomes: HashMap::new(),
             creating_chat_folder: None,
+            creating_chat_session: None,
             chat_create_title: String::new(),
             chat_create_submitting: false,
             chat_create_worktree: None,
@@ -2359,6 +2371,9 @@ impl XdDesktop {
                 | RequestKind::SetFolderSettings { .. }
                 | RequestKind::NewFolder { .. }
                 | RequestKind::NewChat { .. }
+                | RequestKind::RenameSession { .. }
+                | RequestKind::MoveSession { .. }
+                | RequestKind::DeleteSession { .. }
                 | RequestKind::RenameFolder { .. }
                 | RequestKind::MoveFolder { .. }
                 | RequestKind::TrashFolder { .. }
@@ -2441,6 +2456,7 @@ impl XdDesktop {
         self.sidebar_move = None;
         self.creating_workspace = false;
         self.creating_chat_folder = None;
+        self.creating_chat_session = None;
         self.workspace_context_folder = None;
         self.workspace_defaults = None;
         self.workspace_clone_status = None;
@@ -3049,11 +3065,16 @@ impl XdDesktop {
 
     fn handle_reply(
         &mut self,
-        kind: RequestKind,
+        mut kind: RequestKind,
         body: serde_json::Map<String, Value>,
         attachments: Option<Vec<Attachment>>,
         cx: &mut Context<Self>,
     ) {
+        if let RequestKind::TerminalList { chat_id } | RequestKind::TerminalOpen { chat_id, .. } =
+            &mut kind
+        {
+            *chat_id = self.model.canonical_terminal_key(chat_id);
+        }
         let value = Value::Object(body);
         if self.handle_workspace_create_reply(self.active_endpoint, &kind, &value, cx) {
             return;
@@ -3499,6 +3520,22 @@ impl XdDesktop {
                     }
                     self.request_tree();
                 }
+                RequestKind::RenameSession { session_id, .. } => {
+                    if let Some(edit) = &mut self.sidebar_edit
+                        && edit.target == SidebarTarget::Session(session_id.clone())
+                    {
+                        edit.submitting = false;
+                    }
+                    self.request_tree();
+                }
+                RequestKind::MoveSession { .. } => {
+                    self.sidebar_move_submitting = false;
+                    self.request_tree();
+                }
+                RequestKind::DeleteSession { .. } => {
+                    self.sidebar_delete_submitting = false;
+                    self.request_tree();
+                }
                 RequestKind::RenameChat { chat_id, .. } => {
                     if let Some(edit) = &mut self.sidebar_edit
                         && edit.target == SidebarTarget::Chat(chat_id.clone())
@@ -3806,10 +3843,7 @@ impl XdDesktop {
                 path,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                    || self.diff_panel.is_none()
-                {
+                if generation != self.diff_generation || self.diff_panel.is_none() {
                     return;
                 }
                 let output = value
@@ -3830,7 +3864,7 @@ impl XdDesktop {
                         }
                         if let Some(host) = self.active_host().cloned()
                             && let Err(error) = host.diff_read(
-                                &chat_id,
+                                self.model.selected_chat.as_deref().unwrap_or(&chat_id),
                                 "branch-status",
                                 Some(base),
                                 None,
@@ -3862,9 +3896,7 @@ impl XdDesktop {
                 chat_id,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 match serde_json::from_value::<GitStatus>(value.clone()) {
@@ -3881,7 +3913,10 @@ impl XdDesktop {
                         }
                         if check_pull_request
                             && let Some(host) = self.active_host().cloned()
-                            && let Err(error) = host.git_pull_request_status(&chat_id, generation)
+                            && let Err(error) = host.git_pull_request_status(
+                                self.model.selected_chat.as_deref().unwrap_or(&chat_id),
+                                generation,
+                            )
                             && let Some(diff) = &mut self.diff_panel
                         {
                             diff.pr_loading = false;
@@ -3899,12 +3934,11 @@ impl XdDesktop {
             }
             RequestKind::GitState { .. } => {}
             RequestKind::FileBrowseList {
-                chat_id,
+                chat_id: _,
                 path,
                 generation,
             } => {
                 if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
                     || !self.diff_panel.as_ref().is_some_and(|diff| diff.files_mode)
                 {
                     return;
@@ -3930,12 +3964,11 @@ impl XdDesktop {
                 }
             }
             RequestKind::FileBrowseRead {
-                chat_id,
+                chat_id: _,
                 path,
                 generation,
             } => {
                 if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
                     || !self.diff_panel.as_ref().is_some_and(|diff| diff.files_mode)
                 {
                     return;
@@ -4026,14 +4059,12 @@ impl XdDesktop {
                 self.open_files.set_saved(&path, content);
             }
             RequestKind::FileBrowseWrite {
-                chat_id,
+                chat_id: _,
                 path,
                 content,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(preview) = self
@@ -4058,13 +4089,11 @@ impl XdDesktop {
                 }
             }
             RequestKind::GitCommit {
-                chat_id,
+                chat_id: _,
                 message,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if self.git_commit_message.trim() == message {
@@ -4079,12 +4108,10 @@ impl XdDesktop {
                 self.refresh_diff(cx);
             }
             RequestKind::GitPush {
-                chat_id,
+                chat_id: _,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(diff) = &mut self.diff_panel {
@@ -4094,12 +4121,10 @@ impl XdDesktop {
                 self.refresh_diff(cx);
             }
             RequestKind::GitPullRequestStatus {
-                chat_id,
+                chat_id: _,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(diff) = &mut self.diff_panel {
@@ -4112,12 +4137,10 @@ impl XdDesktop {
                 }
             }
             RequestKind::GitPullRequestCreate {
-                chat_id,
+                chat_id: _,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(diff) = &mut self.diff_panel {
@@ -4273,6 +4296,9 @@ impl XdDesktop {
                 self.pending_minimal_session = Some((folder_id, chat_id.to_owned()));
                 self.request_tree();
             }
+            RequestKind::RenameSession { .. }
+            | RequestKind::MoveSession { .. }
+            | RequestKind::DeleteSession { .. } => self.request_tree(),
             RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder { .. } => self.request_tree(),
             RequestKind::TrashFolder { .. } => self.request_tree(),
@@ -4541,11 +4567,14 @@ impl XdDesktop {
     ) -> bool {
         match kind {
             RequestKind::TerminalList { chat_id } => {
+                let chat_id = self
+                    .endpoint_model(endpoint)
+                    .canonical_terminal_key(chat_id);
                 if endpoint == self.active_endpoint
                     && self
                         .terminal_panel
                         .as_ref()
-                        .is_some_and(|panel| &panel.chat_id == chat_id)
+                        .is_some_and(|panel| panel.chat_id == chat_id)
                 {
                     return false;
                 }
@@ -4567,9 +4596,12 @@ impl XdDesktop {
                 true
             }
             RequestKind::TerminalOpen { chat_id, agent, .. } => {
+                let chat_id = self
+                    .endpoint_model(endpoint)
+                    .canonical_terminal_key(chat_id);
                 if endpoint == self.active_endpoint
                     && self.terminal_panel.as_ref().is_some_and(|panel| {
-                        &panel.chat_id == chat_id
+                        panel.chat_id == chat_id
                             && panel.opening_matches_protocol_agent(agent.as_deref())
                     })
                 {
@@ -4718,9 +4750,12 @@ impl XdDesktop {
         body: &Value,
         cx: &mut Context<Self>,
     ) {
-        let Some(chat_id) = body.get("chat").and_then(Value::as_str).map(str::to_owned) else {
+        let Some(chat_id) = body.get("chat").and_then(Value::as_str) else {
             return;
         };
+        let chat_id = self
+            .endpoint_model(endpoint)
+            .canonical_terminal_key(chat_id);
         if !chat_id.starts_with("global:")
             && !self
                 .endpoint_model(endpoint)
@@ -4822,23 +4857,18 @@ impl XdDesktop {
         terminal_id: &str,
         working: Option<bool>,
     ) {
+        let chat_id = self
+            .endpoint_model(endpoint)
+            .canonical_terminal_key(chat_id);
         let terminal_working = update_terminal_activity_state(
             &mut self.terminal_activity_by_tab,
             endpoint,
-            chat_id,
+            &chat_id,
             terminal_id,
             working,
         );
-        let unchanged = self
-            .endpoint_model(endpoint)
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .is_some_and(|chat| chat.terminal_working == terminal_working);
-        if !unchanged {
-            self.endpoint_model_mut(endpoint)
-                .apply_desktop_terminal_activity(chat_id, terminal_working);
-        }
+        self.endpoint_model_mut(endpoint)
+            .apply_desktop_terminal_activity(&chat_id, terminal_working);
     }
 
     fn record_terminal_tab_activity(&mut self, endpoint: ChatEndpoint, body: &Value) {
@@ -4847,10 +4877,13 @@ impl XdDesktop {
             body.get("terminal").and_then(Value::as_str),
             body.get("working").and_then(Value::as_bool),
         ) {
+            let chat_id = self
+                .endpoint_model(endpoint)
+                .canonical_terminal_key(chat_id);
             update_terminal_activity_state(
                 &mut self.terminal_activity_by_tab,
                 endpoint,
-                chat_id,
+                &chat_id,
                 terminal_id,
                 Some(working),
             );
@@ -4927,7 +4960,7 @@ impl XdDesktop {
                 }
             }
             "terminal-opened" | "terminal-output" | "terminal-resized" | "terminal-closed" => {}
-            "git-draft-finished" if self.event_is_active(&body) => {
+            "git-draft-finished" => {
                 let kind = body.get("kind").and_then(Value::as_str).unwrap_or_default();
                 let expected = match kind {
                     "commit" => format!("gpui-{}", self.diff_generation),
@@ -5536,12 +5569,331 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn session_tab_key(&self, chat_id: &str) -> String {
+        format!(
+            "{}/session/{}",
+            self.current_connection_key(),
+            self.model.session_key_for_chat(chat_id)
+        )
+    }
+
+    fn catalog_session_chats(&self) -> Vec<xd_desktop::model::ChatSummary> {
+        let mut seen = HashSet::new();
+        self.model
+            .chats
+            .iter()
+            .filter_map(|chat| {
+                let Some(session) = self.model.session_for_chat(&chat.id) else {
+                    return Some(chat.clone());
+                };
+                if !seen.insert(session.id.clone()) {
+                    return None;
+                }
+                let key = self.session_tab_key(&chat.id);
+                let preferred = self
+                    .model
+                    .selected_chat
+                    .as_ref()
+                    .filter(|id| session.chats.contains(id))
+                    .or_else(|| self.settings.session_chats.get(&key));
+                let selected = preferred
+                    .and_then(|id| {
+                        self.model
+                            .chats
+                            .iter()
+                            .find(|candidate| &candidate.id == id && session.chats.contains(id))
+                    })
+                    .unwrap_or(chat);
+                let mut row = selected.clone();
+                row.title = Some(session.title.clone());
+                row.branch = session.branch.clone().or(row.branch);
+                row.working = session.working;
+                row.terminal_working = session.terminal_working;
+                Some(row)
+            })
+            .collect()
+    }
+
+    fn begin_session_chat_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(session) = self.model.session_for_chat(&chat_id).cloned() else {
+            return;
+        };
+        if !session.terminal_chat.starts_with("session:") {
+            self.model.connection_error =
+                Some("Update the connected host to add chats inside a session.".into());
+            cx.notify();
+            return;
+        }
+        self.begin_chat_create(session.folder.clone(), window, cx);
+        self.creating_chat_session = Some(session.id);
+        self.chat_create_title = "New chat".into();
+        self.chat_create_input
+            .update(cx, |input, cx| input.set_text_selected("New chat", cx));
+        self.chat_create_worktrees_loading = false;
+        self.chat_create_sources_loading = false;
+        cx.notify();
+    }
+
+    fn close_session_chat_tab(
+        &mut self,
+        chat_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.model.session_for_chat(&chat_id).cloned() else {
+            return;
+        };
+        let key = self.session_tab_key(&chat_id);
+        let hidden = self
+            .settings
+            .hidden_chat_tabs
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let remaining = session
+            .chats
+            .iter()
+            .filter(|id| **id != chat_id && !hidden.contains(id))
+            .filter_map(|id| self.model.chats.iter().find(|chat| &chat.id == id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(next) = remaining.first() else {
+            return;
+        };
+        if !self.flush_draft_before_navigation() {
+            return;
+        }
+        self.settings
+            .hidden_chat_tabs
+            .entry(key)
+            .or_default()
+            .push(chat_id.clone());
+        if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
+            if let Some(agent) = AgentCli::from_backend(&next.backend) {
+                self.open_minimal_session(next.folder.clone(), next.id.clone(), agent, window, cx);
+            }
+        }
+        let _ = self.settings.save();
+        cx.notify();
+    }
+
+    fn reopen_session_chat_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(current) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let key = self.session_tab_key(&current);
+        let Some(chat_id) = self
+            .settings
+            .hidden_chat_tabs
+            .get_mut(&key)
+            .and_then(Vec::pop)
+        else {
+            return;
+        };
+        if let Some(chat) = self
+            .model
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .cloned()
+            && let Some(agent) = AgentCli::from_backend(&chat.backend)
+        {
+            self.open_minimal_session(chat.folder, chat.id, agent, window, cx);
+        }
+        let _ = self.settings.save();
+        cx.notify();
+    }
+
+    fn render_session_chat_tabs(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let Some(active) = self.model.selected_chat.clone() else {
+            return div().into_any_element();
+        };
+        let key = self.session_tab_key(&active);
+        let members = self
+            .model
+            .session_for_chat(&active)
+            .map(|s| s.chats.clone())
+            .unwrap_or_else(|| vec![active.clone()]);
+        let hidden = self
+            .settings
+            .hidden_chat_tabs
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let chats = members
+            .iter()
+            .filter(|id| !hidden.contains(id) || **id == active)
+            .filter_map(|id| self.model.chats.iter().find(|chat| &chat.id == id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if self.session_chat_tabs_selected.as_ref() != Some(&active) {
+            if self.session_chat_tabs_scroll.bounds().size.width > px(0.0) {
+                if let Some(index) = chats.iter().position(|chat| chat.id == active) {
+                    self.session_chat_tabs_scroll.scroll_to_item(index);
+                }
+                self.session_chat_tabs_selected = Some(active.clone());
+            } else {
+                window.request_animation_frame();
+            }
+        }
+        let can_close = chats.len() > 1;
+        let tabs = chats
+            .into_iter()
+            .enumerate()
+            .map(|(index, chat)| {
+                let selected = chat.id == active;
+                let open = chat.clone();
+                let close_id = chat.id.clone();
+                let rename_id = chat.id.clone();
+                let title = chat
+                    .title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| "New chat".into());
+                let rename_title = title.clone();
+                div()
+                    .id(("session-chat-tab", index))
+                    .h(px(30.0))
+                    .max_w(px(210.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(rgba(if selected {
+                        (colors.border << 8) | 0xff
+                    } else {
+                        0
+                    }))
+                    .when(selected, |tab| tab.bg(rgb(colors.selected_surface)))
+                    .text_size(px(12.0))
+                    .text_color(rgb(if selected { colors.text } else { colors.muted }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.flush_draft_before_navigation()
+                            && let Some(agent) = AgentCli::from_backend(&open.backend)
+                        {
+                            this.open_minimal_session(
+                                open.folder.clone(),
+                                open.id.clone(),
+                                agent,
+                                window,
+                                cx,
+                            );
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.open_sidebar_context_menu(
+                                SidebarTarget::Chat(rename_id.clone()),
+                                rename_title.clone(),
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
+                    .child(icon(
+                        agent_icon(
+                            AgentCli::from_backend(&chat.backend).unwrap_or(AgentCli::Codex),
+                        ),
+                        13.0,
+                        colors.muted,
+                    ))
+                    .child(div().min_w_0().truncate().child(title))
+                    .when(self.model.is_waiting(&chat.id), |tab| {
+                        tab.child(icon(STOP_ICON, 9.0, colors.waiting))
+                    })
+                    .when(can_close, |tab| {
+                        tab.child(
+                            div()
+                                .id(("close-session-chat-tab", index))
+                                .size(px(22.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(5.0))
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.close_session_chat_tab(close_id.clone(), window, cx);
+                                }))
+                                .child(icon(CLOSE_ICON, 11.0, colors.muted)),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id("session-chat-tab-bar")
+            .h(px(43.0))
+            .w_full()
+            .flex_none()
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_1()
+            .bg(rgba(colors.chrome_glass))
+            .border_b_1()
+            .border_color(rgb(colors.border))
+            .child(
+                div()
+                    .id("session-chat-tab-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.session_chat_tabs_scroll)
+                    .children(tabs),
+            )
+            .when(!hidden.is_empty(), |bar| {
+                bar.child(
+                    ui_button("reopen-session-chat", ButtonKind::Ghost, colors)
+                        .h(px(28.0))
+                        .px_2()
+                        .text_size(px(11.0))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.reopen_session_chat_tab(window, cx)
+                        }))
+                        .child(format!("Reopen ({})", hidden.len())),
+                )
+            })
+            .child(
+                ui_button("add-session-chat", ButtonKind::Ghost, colors)
+                    .size(px(28.0))
+                    .px_0()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.begin_session_chat_create(window, cx)
+                        }),
+                    )
+                    .child(plus_icon(colors.muted)),
+            )
+            .into_any_element()
+    }
+
     fn begin_chat_create(
         &mut self,
         folder_id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.creating_chat_session = None;
         self.creating_chat_folder = Some(folder_id.clone());
         // Naming a chat up front is busywork: the title is renamed later or
         // never. Open on the name the chat would have had anyway, selected, so
@@ -5587,6 +5939,7 @@ impl XdDesktop {
 
     fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
         self.creating_chat_folder = None;
+        self.creating_chat_session = None;
         self.chat_create_title.clear();
         self.chat_create_submitting = false;
         self.chat_create_worktree = None;
@@ -5937,14 +6290,111 @@ impl XdDesktop {
         }
     }
 
+    fn merge_terminal_panels(target: &mut TerminalPanel, source: TerminalPanel) {
+        for tab in source.sessions {
+            if let Some(existing) = target.sessions.iter_mut().find(|tab_| tab_.id == tab.id) {
+                if tab.sequence > existing.sequence {
+                    *existing = tab;
+                }
+            } else {
+                target.sessions.push(tab);
+            }
+        }
+        target.selected =
+            target.selection_after_refresh(target.selected.clone().or(source.selected));
+        target.workdir = target.workdir.take().or(source.workdir);
+        target.viewport = target.viewport.or(source.viewport);
+        target.auto_open &= source.auto_open;
+        target.loading &= source.loading;
+        target.pending_events.extend(source.pending_events);
+    }
+
+    fn adopt_terminal_owners(&mut self, endpoint: ChatEndpoint) {
+        let model = self.endpoint_model(endpoint);
+        let mut aliases = model
+            .chats
+            .iter()
+            .map(|chat| (chat.id.clone(), model.terminal_key_for_chat(&chat.id)))
+            .collect::<HashMap<_, _>>();
+        aliases.extend(
+            model
+                .sessions
+                .iter()
+                .map(|session| (session.id.clone(), session.terminal_chat.clone())),
+        );
+        aliases.retain(|owner, canonical| owner != canonical);
+        if aliases.is_empty() {
+            return;
+        }
+        if let Err(error) = self
+            .terminal_runtime
+            .adopt_chat_owners(endpoint.into(), &aliases)
+        {
+            self.endpoint_model_mut(endpoint).connection_error = Some(error);
+            return;
+        }
+        if endpoint == self.active_endpoint
+            && let Some(panel) = &mut self.terminal_panel
+            && let Some(canonical) = aliases.get(&panel.chat_id)
+        {
+            panel.chat_id = canonical.clone();
+        }
+        let panels = std::mem::take(&mut self.terminal_panel_cache);
+        for ((cached_endpoint, owner), mut panel) in panels {
+            let canonical = if cached_endpoint == endpoint {
+                aliases.get(&owner).cloned().unwrap_or(owner)
+            } else {
+                owner
+            };
+            panel.chat_id = canonical.clone();
+            if cached_endpoint == self.active_endpoint
+                && let Some(active) = &mut self.terminal_panel
+                && active.chat_id == canonical
+            {
+                Self::merge_terminal_panels(active, panel);
+                continue;
+            }
+            match self
+                .terminal_panel_cache
+                .entry((cached_endpoint, canonical))
+            {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    Self::merge_terminal_panels(entry.get_mut(), panel);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(panel);
+                }
+            }
+        }
+        let activity = std::mem::take(&mut self.terminal_activity_by_tab);
+        for ((activity_endpoint, owner, terminal), working) in activity {
+            let canonical = if activity_endpoint == endpoint {
+                aliases.get(&owner).cloned().unwrap_or(owner)
+            } else {
+                owner
+            };
+            *self
+                .terminal_activity_by_tab
+                .entry((activity_endpoint, canonical, terminal))
+                .or_default() |= working;
+        }
+    }
+
     fn prime_terminal_cache(&mut self, endpoint: ChatEndpoint) {
+        self.adopt_terminal_owners(endpoint);
         let refresh_all = self.terminal_cache_refresh.remove(&endpoint);
         let chats = self
             .endpoint_model(endpoint)
             .chats
             .iter()
             .filter_map(|chat| {
-                AgentCli::from_backend(&chat.backend).map(|agent| (chat.id.clone(), agent))
+                AgentCli::from_backend(&chat.backend).map(|agent| {
+                    (
+                        self.endpoint_model(endpoint)
+                            .terminal_key_for_chat(&chat.id),
+                        agent,
+                    )
+                })
             })
             .collect::<Vec<_>>();
         let live_chats = chats
@@ -6016,11 +6466,18 @@ impl XdDesktop {
 
     fn prune_browser_panes(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) {
         let prefix = format!("{}/chat/", self.connection_key(endpoint));
+        let session_prefix = format!("{}/session/", self.connection_key(endpoint));
         let live_chats = self
             .endpoint_model(endpoint)
             .chats
             .iter()
             .map(|chat| chat.id.as_str())
+            .collect::<HashSet<_>>();
+        let live_sessions = self
+            .endpoint_model(endpoint)
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
             .collect::<HashSet<_>>();
         let removed = self
             .browser_panes
@@ -6029,6 +6486,9 @@ impl XdDesktop {
             .filter(|key| {
                 key.strip_prefix(&prefix)
                     .is_some_and(|chat_id| !live_chats.contains(chat_id))
+                    || key
+                        .strip_prefix(&session_prefix)
+                        .is_some_and(|session_id| !live_sessions.contains(session_id))
             })
             .cloned()
             .collect::<HashSet<_>>();
@@ -6066,7 +6526,12 @@ impl XdDesktop {
             _ => self.model.selected_chat.as_deref(),
         };
         match chat_id {
-            Some(chat_id) => format!("{connection}/chat/{chat_id}"),
+            Some(chat_id) => self
+                .model
+                .session_for_chat(chat_id)
+                .filter(|session| session.terminal_chat.starts_with("session:"))
+                .map(|session| format!("{connection}/session/{}", session.id))
+                .unwrap_or_else(|| format!("{connection}/chat/{chat_id}")),
             None => format!("{connection}/browser"),
         }
     }
@@ -6288,8 +6753,20 @@ impl XdDesktop {
     }
 
     fn remember_last_chat(&mut self, chat_id: &str) {
+        let session_key = self.session_tab_key(chat_id);
+        let mut changed = self
+            .settings
+            .session_chats
+            .insert(session_key.clone(), chat_id.to_owned())
+            .as_deref()
+            != Some(chat_id);
+        if let Some(hidden) = self.settings.hidden_chat_tabs.get_mut(&session_key) {
+            let count = hidden.len();
+            hidden.retain(|id| id != chat_id);
+            changed |= hidden.len() != count;
+        }
         let key = self.current_connection_key();
-        let mut changed = self.settings.last_chats.get(&key).map(String::as_str) != Some(chat_id);
+        changed |= self.settings.last_chats.get(&key).map(String::as_str) != Some(chat_id);
         self.settings.last_chats.insert(key, chat_id.to_owned());
         if self.active_endpoint == ChatEndpoint::Local
             && self.settings.last_chat.as_deref() != Some(chat_id)
@@ -6617,14 +7094,16 @@ impl XdDesktop {
     /// Reattaches the selected card to its persistent tmux session. The PTY is
     /// window-owned, while the command remains alive in tmux between windows.
     fn refresh_terminal_sessions(&mut self, cx: &mut Context<Self>) {
-        let Some(chat_id) = self
-            .terminal_panel
-            .as_ref()
-            .filter(|panel| {
-                panel.chat_id.starts_with("global:")
-                    || self.model.selected_chat.as_deref() == Some(panel.chat_id.as_str())
-            })
-            .map(|panel| panel.chat_id.clone())
+        let Some(chat_id) =
+            self.terminal_panel
+                .as_ref()
+                .filter(|panel| {
+                    panel.chat_id.starts_with("global:")
+                        || self.model.selected_chat.as_deref().is_some_and(|chat| {
+                            self.model.terminal_key_for_chat(chat) == panel.chat_id
+                        })
+                })
+                .map(|panel| panel.chat_id.clone())
         else {
             return;
         };
@@ -7392,6 +7871,7 @@ impl XdDesktop {
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|host| match &target {
                 SidebarTarget::Folder(folder_id) => host.trash_folder(folder_id),
+                SidebarTarget::Session(session_id) => host.delete_session(session_id),
                 SidebarTarget::Chat(chat_id) => host.delete_chat(chat_id),
             });
         match result {
@@ -7429,6 +7909,7 @@ impl XdDesktop {
         }
         let result = self.active_host().map(|host| match &edit.target {
             SidebarTarget::Folder(folder_id) => host.rename_folder(folder_id, text),
+            SidebarTarget::Session(session_id) => host.rename_session(session_id, text),
             SidebarTarget::Chat(chat_id) => host.rename_chat(chat_id, text),
         });
         match result {
@@ -7442,6 +7923,16 @@ impl XdDesktop {
                             .find(|folder| &folder.id == folder_id)
                         {
                             folder.name = text.to_owned();
+                        }
+                    }
+                    SidebarTarget::Session(session_id) => {
+                        if let Some(session) = self
+                            .model
+                            .sessions
+                            .iter_mut()
+                            .find(|session| &session.id == session_id)
+                        {
+                            session.title = text.to_owned();
                         }
                     }
                     SidebarTarget::Chat(chat_id) => {
@@ -8184,6 +8675,11 @@ impl XdDesktop {
                 .folders
                 .iter()
                 .any(|folder| &folder.id == folder_id),
+            SidebarTarget::Session(session_id) => self
+                .model
+                .sessions
+                .iter()
+                .any(|session| &session.id == session_id),
             SidebarTarget::Chat(chat_id) => self.model.chats.iter().any(|chat| &chat.id == chat_id),
         }
     }
@@ -8418,6 +8914,9 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.flush_draft_before_navigation() {
+            return;
+        }
         self.select_minimal_session(project_id, chat_id, agent, cx);
         let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
@@ -8431,14 +8930,40 @@ impl XdDesktop {
         agent: AgentCli,
         cx: &mut Context<Self>,
     ) {
+        if self.model.selected_chat.as_deref() != Some(chat_id.as_str())
+            && !self.flush_draft_before_navigation()
+        {
+            return;
+        }
+        if let Some(session) = self
+            .model
+            .session_for_chat(&chat_id)
+            .filter(|session| session.terminal_chat.starts_with("session:"))
+        {
+            let new_scope = format!("{}/session/{}", self.current_connection_key(), session.id);
+            let old_scope = format!("{}/chat/{}", self.current_connection_key(), session.id);
+            if !self.settings.browser_sessions.contains_key(&new_scope)
+                && let Some(old) = self.settings.browser_sessions.get(&old_scope).cloned()
+            {
+                self.settings.browser_sessions.insert(new_scope, old);
+            }
+        }
+        let same_workspace = self.model.selected_chat.as_deref().is_some_and(|current| {
+            self.model.session_key_for_chat(current) == self.model.session_key_for_chat(&chat_id)
+        });
         if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
-            self.native_pane = NativePane::Chat;
-            self.bottom_terminal_open = false;
-            self.native_panels.clear();
-            self.diff_generation = self.diff_generation.saturating_add(1);
-            self.diff_panel = None;
+            if !same_workspace {
+                self.native_pane = NativePane::Chat;
+                self.bottom_terminal_open = false;
+                self.native_panels.clear();
+                self.diff_generation = self.diff_generation.saturating_add(1);
+                self.diff_panel = None;
+            }
             self.interaction_answers.clear();
             self.model.select_chat(chat_id.clone());
+            self.set_composer_text(String::new(), cx);
+            self.draft_dirty = false;
+            self.attachments_dirty = false;
             self.remember_last_chat(&chat_id);
             self.invalidate_live_render();
             self.transcript_snapshot = TranscriptSnapshot::default();
@@ -8513,19 +9038,35 @@ impl XdDesktop {
         let Some(folder_id) = self.creating_chat_folder.clone() else {
             return;
         };
-        if self.chat_create_submitting || self.chat_create_worktrees_loading {
+        if self.chat_create_submitting
+            || (self.creating_chat_session.is_none() && self.chat_create_worktrees_loading)
+        {
             return;
         }
-        let Some(worktree) = self.chat_create_worktree.clone() else {
+        let worktree = self.chat_create_worktree.clone();
+        if self.creating_chat_session.is_none() && worktree.is_none() {
             return;
-        };
+        }
+        if !self.flush_draft_before_navigation() {
+            cx.notify();
+            return;
+        }
         let title = chat_create_title(&self.chat_create_title).to_owned();
         let agent = self.minimal_new_session_agent.protocol_name();
         let result = self
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|host| {
-                host.new_chat_with_backend_in_worktree(&folder_id, &title, agent, &worktree)
+                if let Some(session) = &self.creating_chat_session {
+                    host.new_chat_in_session(&folder_id, session, &title, agent)
+                } else {
+                    host.new_chat_with_backend_in_worktree(
+                        &folder_id,
+                        &title,
+                        agent,
+                        worktree.as_ref().expect("worktree checked"),
+                    )
+                }
             });
         match result {
             Ok(()) => {
@@ -9024,7 +9565,7 @@ impl XdDesktop {
             } else {
                 16.0
             }))
-            .bg(rgb(colors.sidebar))
+            .bg(rgba(colors.chrome_glass))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
@@ -9141,7 +9682,12 @@ impl XdDesktop {
             .as_deref()
             .and_then(|id| self.model.chats.iter().find(|chat| chat.id == id));
         let title = chat
-            .and_then(|chat| chat.title.as_deref())
+            .and_then(|chat| {
+                self.model
+                    .session_for_chat(&chat.id)
+                    .map(|session| session.title.as_str())
+                    .or(chat.title.as_deref())
+            })
             .filter(|title| !title.trim().is_empty())
             .unwrap_or(DEFAULT_CHAT_TITLE)
             .to_owned();
@@ -9176,7 +9722,7 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .bg(rgb(colors.background))
+            .bg(rgba(colors.chrome_glass))
             .child(
                 div()
                     .min_w_0()
@@ -9207,7 +9753,7 @@ impl XdDesktop {
                                 .size(px(13.0))
                                 .text_color(rgb(colors.muted)),
                         )
-                        .child(agent.protocol_name()),
+                        .child(presentation::provider_name(agent.protocol_name())),
                 )
             })
             .when_some(branch, |toolbar, branch| {
@@ -9302,10 +9848,18 @@ impl XdDesktop {
     }
 
     fn session_signal(&self, session: &SessionCard) -> SessionSignal {
+        let members = self
+            .model
+            .session_for_chat(&session.id)
+            .map(|group| group.chats.as_slice());
         SessionSignal::of(
             session.working,
-            self.model.is_waiting(&session.id),
-            self.model.unread_chats.contains(&session.id),
+            members
+                .map(|ids| ids.iter().any(|id| self.model.is_waiting(id)))
+                .unwrap_or_else(|| self.model.is_waiting(&session.id)),
+            members
+                .map(|ids| ids.iter().any(|id| self.model.unread_chats.contains(id)))
+                .unwrap_or_else(|| self.model.unread_chats.contains(&session.id)),
         )
     }
 
@@ -9335,6 +9889,12 @@ impl XdDesktop {
         let open_project_id = project_id.to_owned();
         let chat_id = session.id.clone();
         let context_chat_id = session.id.clone();
+        let context_target = self
+            .model
+            .session_for_chat(&session.id)
+            .filter(|group| group.terminal_chat.starts_with("session:"))
+            .map(|group| SidebarTarget::Session(group.id.clone()))
+            .unwrap_or_else(|| SidebarTarget::Chat(context_chat_id.clone()));
         let context_title = session.title.clone();
         let drag_payload = SessionDragPayload {
             chat_id: session.id.clone(),
@@ -9381,7 +9941,7 @@ impl XdDesktop {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
                     this.open_sidebar_context_menu(
-                        SidebarTarget::Chat(context_chat_id.clone()),
+                        context_target.clone(),
                         context_title.clone(),
                         event.position,
                         window,
@@ -9474,7 +10034,7 @@ impl XdDesktop {
         active_chat_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let projects = project_cards(&self.model.folders, &self.model.chats);
+        let projects = project_cards(&self.model.folders, &self.catalog_session_chats());
         let current_project = self.selected_minimal_project_id();
         let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
@@ -9484,7 +10044,7 @@ impl XdDesktop {
         for (project_index, project) in projects.iter().enumerate() {
             let current = current_project.as_deref() == Some(project.id.as_str())
                 && !matches!(self.minimal_route, MinimalRoute::Terminal);
-            let mut sessions = project_sessions(&project.id, &self.model.chats);
+            let mut sessions = project_sessions(&project.id, &self.catalog_session_chats());
             let finding = !query.is_empty();
             if finding && !project.name.to_lowercase().contains(&query) {
                 sessions.retain(|session| {
@@ -9673,7 +10233,7 @@ impl XdDesktop {
             .flex_col()
             .border_r_1()
             .border_color(rgb(colors.border))
-            .bg(rgb(colors.sidebar))
+            .bg(rgba(colors.sidebar_glass))
             .child(
                 div()
                     .h(px(40.0))
@@ -9821,7 +10381,7 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let resume = resumable_session(self.cached_last_chat().as_deref(), &self.model.chats)
             .and_then(|(project_id, chat_id, agent)| {
-                let title = project_sessions(&project_id, &self.model.chats)
+                let title = project_sessions(&project_id, &self.catalog_session_chats())
                     .into_iter()
                     .find(|session| session.id == chat_id)?
                     .title;
@@ -10768,7 +11328,7 @@ impl XdDesktop {
                             .flex_none()
                             .text_size(px(11.5))
                             .text_color(rgb(colors.faint))
-                            .child(view.model.clone()),
+                            .child(presentation::model_name(&view.model, None)),
                     )
                 })
                 .when(!stats.is_empty(), |row| {
@@ -11447,6 +12007,7 @@ impl XdDesktop {
         let workflow_statuses = self.workflow_statuses.clone();
         let workflow_pending = self.workflow_pending.clone();
         let column = self.chat_column_width;
+        let empty_ready = transcript_empty && !transcript_loading && self.transcript_loaded;
         let transcript = if transcript_loading {
             div()
                 .size_full()
@@ -11458,18 +12019,55 @@ impl XdDesktop {
                 .child("Loading transcript…")
                 .into_any_element()
         } else if transcript_empty {
+            let project = self
+                .selected_minimal_project_id()
+                .and_then(|id| self.model.folders.iter().find(|folder| folder.id == id))
+                .map(|folder| folder.name.clone())
+                .unwrap_or_default();
             div()
-                .size_full()
+                .w_full()
+                .min_h(px(140.0))
+                .py_3()
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
-                .text_size(px(13.0))
-                .text_color(rgb(colors.muted))
-                .child(if self.transcript_loaded {
-                    "Start this session with a message."
-                } else {
-                    "Conversation did not load. Select the session to retry."
-                })
+                .gap(px(10.0))
+                .text_center()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap_2()
+                        .text_size(px(12.0))
+                        .text_color(rgb(colors.muted))
+                        .child(icon(FOLDER_ICON, 14.0, colors.muted))
+                        .child(project),
+                )
+                .child(
+                    div()
+                        .text_size(px(28.0))
+                        .debug_selector(|| "empty-chat-heading".into())
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(colors.text))
+                        .child(if self.transcript_loaded {
+                            "What are we working on?"
+                        } else {
+                            "Conversation did not load"
+                        }),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .debug_selector(|| "empty-chat-description".into())
+                        .text_color(rgb(colors.muted))
+                        .child(if self.transcript_loaded {
+                            "A new conversation in the same workspace."
+                        } else {
+                            "Select this chat to retry."
+                        }),
+                )
                 .into_any_element()
         } else {
             list(self.transcript.clone(), move |index, _window, _cx| {
@@ -11528,7 +12126,11 @@ impl XdDesktop {
                     )))
                     .into_any_element()
             })
-            .size_full()
+            .with_sizing_behavior(gpui::ListSizingBehavior::Infer)
+            .flex_initial()
+            .min_h_0()
+            .w_full()
+            .max_h_full()
             .into_any_element()
         };
         let queued = self
@@ -11640,7 +12242,9 @@ impl XdDesktop {
                 )
         });
         let composer_focus = self.composer_input.read(cx).focus_handle(cx);
+        let metadata_ready = !self.model.backend.is_empty();
         let can_send = self.model.connected
+            && metadata_ready
             && !self.sending
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
         let can_queue = self.model.connected
@@ -11691,22 +12295,35 @@ impl XdDesktop {
         let interaction = self.render_interaction(colors, cx);
         let agents_tray =
             Self::render_agents_tray(colors, &self.transcript_snapshot.running_agents);
+        let supports_effort = self
+            .model
+            .agent_backends
+            .iter()
+            .find(|backend| backend.id == self.model.backend)
+            .map(|backend| !backend.efforts.is_empty())
+            .unwrap_or(self.model.backend != "jcode");
         let options = [
+            ("model", self.model.selected_model_label()),
             (
-                "model",
-                self.model
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "Default model".to_owned()),
+                "effort",
+                format!("{} effort", presentation::effort_name(&self.model.effort)),
             ),
-            ("effort", format!("{} effort", self.model.effort)),
-            ("access", self.model.access.clone()),
+            (
+                "access",
+                presentation::access_name(if self.model.plan {
+                    "read-only"
+                } else {
+                    &self.model.access
+                })
+                .to_owned(),
+            ),
             (
                 "plan",
                 if self.model.plan { "Plan" } else { "Build" }.to_owned(),
             ),
         ]
         .into_iter()
+        .filter(|(option, _)| *option != "effort" || supports_effort)
         .enumerate()
         .map(|(index, (option, label))| {
             ui_button(("native-option", index), ButtonKind::Ghost, colors)
@@ -11714,16 +12331,21 @@ impl XdDesktop {
                 .px(px(8.0))
                 .gap(px(5.0))
                 .text_size(px(12.0))
+                .max_w(px(if option == "model" { 240.0 } else { 170.0 }))
+                .min_w_0()
+                .debug_selector(move || format!("native-option-{option}").into())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.native_option_open = Some(option);
                     this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                    this.minimal_popup_previous_focus =
+                        Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
                     cx.notify();
                 }))
                 .when(option == "model", |chip| {
                     chip.children(agent.map(|agent| icon(agent_icon(agent), 13.0, colors.muted)))
                 })
-                .child(label)
+                .child(div().min_w_0().truncate().child(label))
                 .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
         })
         .collect::<Vec<_>>();
@@ -11732,13 +12354,23 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .items_center()
+            .when(empty_ready, |chat| chat.justify_center())
             .px(px(24.0))
             .bg(rgb(colors.background))
             .child(
                 div()
                     .id("native-transcript")
                     .relative()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
                     .flex_1()
+                    .when(empty_ready, |pane| {
+                        pane.flex_none()
+                            .flex_basis(gpui::Length::Auto)
+                            .h_auto()
+                            .mb(px(28.0))
+                    })
                     .min_h_0()
                     .w_full()
                     .pt_4()
@@ -11794,7 +12426,7 @@ impl XdDesktop {
                 chat.child(
                     div()
                         .w_full()
-                        .max_w(px(780.0))
+                        .max_w(px(736.0))
                         .mb_2()
                         .flex()
                         .gap_3()
@@ -11802,7 +12434,7 @@ impl XdDesktop {
                 )
             })
             .when_some(interaction, |chat, card| {
-                chat.child(div().w_full().max_w(px(780.0)).mb_3().child(card))
+                chat.child(div().w_full().max_w(px(736.0)).mb_3().child(card))
             })
             .children(agents_tray)
             .when_some(
@@ -11827,7 +12459,7 @@ impl XdDesktop {
                     chat.child(
                         div()
                             .w_full()
-                            .max_w(px(780.0))
+                            .max_w(px(736.0))
                             .mb_3()
                             .px_4()
                             .py_3()
@@ -11877,7 +12509,7 @@ impl XdDesktop {
                 chat.child(
                     div()
                         .w_full()
-                        .max_w(px(780.0))
+                        .max_w(px(736.0))
                         .mb_2()
                         .px(px(2.0))
                         .flex()
@@ -11903,7 +12535,7 @@ impl XdDesktop {
                         .max_h(px(150.0))
                         .overflow_y_scroll()
                         .w_full()
-                        .max_w(px(780.0))
+                        .max_w(px(736.0))
                         .mb_2()
                         .flex()
                         .flex_col()
@@ -11914,8 +12546,9 @@ impl XdDesktop {
             .child(
                 div()
                     .id("native-composer-shell")
+                    .debug_selector(|| "chat-composer".into())
                     .w_full()
-                    .max_w(px(780.0))
+                    .max_w(px(if empty_ready { 660.0 } else { 736.0 }))
                     .mb(px(16.0))
                     .pt(px(10.0))
                     .pb(px(8.0))
@@ -11923,14 +12556,14 @@ impl XdDesktop {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .rounded(px(20.0))
+                    .rounded(px(16.0))
                     .border_1()
                     .border_color(rgb(if composer_focus.is_focused(window) {
                         colors.selected_border
                     } else {
                         colors.border
                     }))
-                    .bg(rgb(colors.surface))
+                    .bg(rgba(colors.composer_glass))
                     .shadow_md()
                     .on_click(cx.listener(|this, _, window, cx| {
                         let focus = this.composer_input.read(cx).focus_handle(cx);
@@ -11945,11 +12578,19 @@ impl XdDesktop {
                             .py_1()
                             .text_size(px(14.0))
                             .track_focus(&composer_focus)
-                            .child(self.composer_input.clone()),
+                            .when(metadata_ready, |editor| {
+                                editor.child(self.composer_input.clone())
+                            })
+                            .when(!metadata_ready, |editor| {
+                                editor.child(
+                                    div().text_color(rgb(colors.muted)).child("Loading chat…"),
+                                )
+                            }),
                     )
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap_1()
                             .children(options)
@@ -12121,6 +12762,7 @@ impl XdDesktop {
                 self.refresh_git_status();
             }
             NativePane::Terminal => {
+                let chat_id = self.model.terminal_key_for_chat(&chat_id);
                 self.bottom_terminal_open = true;
                 if !self
                     .terminal_panel
@@ -12539,8 +13181,9 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let available = self.minimal_workspace_width(window);
-        self.chat_column_width = (available - 48.0).clamp(240.0, 780.0);
+        self.chat_column_width = (available - 48.0).clamp(240.0, 736.0);
         let chat = self.render_native_chat(colors, window, cx);
+        let chat_tabs = self.render_session_chat_tabs(colors, window, cx);
         let terminal = self
             .bottom_terminal_open
             .then(|| self.render_minimal_terminal(colors, window, cx));
@@ -12553,6 +13196,7 @@ impl XdDesktop {
             .min_h_0()
             .flex()
             .flex_col()
+            .child(chat_tabs)
             .child(div().flex_1().min_h_0().min_w_0().child(chat))
             .when_some(terminal, |column, terminal| {
                 column
@@ -12755,6 +13399,7 @@ impl XdDesktop {
             let rename_title = menu.title.clone();
             let delete_target = menu.target.clone();
             let project = matches!(menu.target, SidebarTarget::Folder(_));
+            let chat = matches!(menu.target, SidebarTarget::Chat(_));
             div()
                 .occlude()
                 .absolute()
@@ -12808,6 +13453,8 @@ impl XdDesktop {
                                 }))
                                 .child(if project {
                                     "Rename project"
+                                } else if chat {
+                                    "Rename chat"
                                 } else {
                                     "Rename session"
                                 }),
@@ -12832,6 +13479,8 @@ impl XdDesktop {
                                 }))
                                 .child(if project {
                                     "Delete project"
+                                } else if chat {
+                                    "Delete chat"
                                 } else {
                                     "Delete session"
                                 }),
@@ -12839,215 +13488,9 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
-        let theme_overlay = self.minimal_theme_open.then(|| {
-            let allow_all_permissions = self.settings.allow_all_permissions;
-            let menu_row = |id: &'static str, label: &'static str| {
-                div()
-                    .id(id)
-                    .w_full()
-                    .h(px(32.0))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded(px(5.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(colors.text))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .child(label)
-            };
-            let group_label = |label: &'static str| {
-                div()
-                    .px_3()
-                    .pt(px(10.0))
-                    .pb(px(4.0))
-                    .text_size(px(11.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(colors.faint))
-                    .child(label)
-            };
-            let rows = ThemePreset::ALL
-                .into_iter()
-                .enumerate()
-                .map(|(index, theme)| {
-                    let selected = self.settings.theme == theme;
-                    let swatch = theme.colors();
-                    div()
-                        .id(("minimal-theme-choice", index))
-                        .flex_1()
-                        .h(px(34.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(rgb(if selected {
-                            colors.selected_border
-                        } else {
-                            colors.border
-                        }))
-                        .bg(rgb(if selected {
-                            colors.selected_surface
-                        } else {
-                            colors.surface
-                        }))
-                        .text_size(px(13.0))
-                        .font_weight(if selected {
-                            FontWeight::SEMIBOLD
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(rgb(colors.text))
-                        .cursor_pointer()
-                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.choose_minimal_theme(theme, cx)),
-                        )
-                        .child(
-                            div()
-                                .w(px(20.0))
-                                .h(px(14.0))
-                                .rounded(px(3.0))
-                                .border_1()
-                                .border_color(rgb(swatch.border))
-                                .bg(rgb(swatch.surface))
-                                .child(
-                                    div()
-                                        .mt(px(4.0))
-                                        .mx(px(3.0))
-                                        .h(px(1.0))
-                                        .bg(rgb(swatch.rule)),
-                                ),
-                        )
-                        .child(theme.label())
-                })
-                .collect::<Vec<_>>();
-            div()
-                .occlude()
-                .absolute()
-                .inset_0()
-                .track_focus(&minimal_popup_focus)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.close_minimal_theme_popup(window, cx)
-                    }),
-                )
-                .child(
-                    div()
-                        .occlude()
-                        .absolute()
-                        .id("workbench-settings")
-                        .bottom(px(56.0))
-                        .left(px(10.0))
-                        .w(px(300.0))
-                        .max_h(px(f32::from(window.viewport_size().height) - 24.0))
-                        .overflow_y_scroll()
-                        .p(px(6.0))
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(group_label("Appearance"))
-                        .child(div().px(px(6.0)).pb(px(4.0)).flex().gap_2().children(rows))
-                        .when(self.active_endpoint == ChatEndpoint::Local, |card| {
-                            card.child(group_label("Devices"))
-                                .child(menu_row("pair-device", "Pair a device").on_click(cx.listener(|this, _, _, cx| {
-                                    this.minimal_theme_open = false;
-                                    this.share_panel = Some(SharePanel { loading: true, ..Default::default() });
-                                    if let Some(host) = &this.host { let _ = host.peer_pairing(); }
-                                    cx.notify();
-                                })))
-                                .child(menu_row("paired-devices", "Paired devices").on_click(cx.listener(|this, _, _, cx| {
-                                    this.minimal_theme_open = false;
-                                    this.devices_panel = Some(DevicesPanel { loading: true, ..Default::default() });
-                                    this.request_devices();
-                                    cx.notify();
-                                })))
-                        })
-                        .child(group_label("Updates"))
-                        .child(div().px_3().py_1().text_size(px(12.0)).text_color(rgb(colors.muted))
-                            .child(self.self_update_panel.as_ref().map(|panel| {
-                                if let Some(error) = &panel.error { return error.clone(); }
-                                match panel.status.as_ref() {
-                                    Some(status) if status.state == "installed" => "Installed. Restart xd to finish updating.".into(),
-                                    Some(status) if status.state == "installing" => "Installing update…".into(),
-                                    Some(status) if status.state == "checking" => "Checking for updates…".into(),
-                                    Some(status) if !status.supported => "This installation requires a manual update.".into(),
-                                    Some(status) if status.available => format!("Update available: {}", status.latest.as_deref().unwrap_or("new version")),
-                                    Some(status) if status.latest.is_none() => format!("xd {} · Check for updates", status.version),
-                                    Some(status) => format!("xd {} · Up to date", status.version),
-                                    None => "Connecting to the local update service…".into(),
-                                }
-                            }).unwrap_or_default()))
-                        .when(!self.self_update_panel.as_ref().is_some_and(|panel| panel.busy || panel.status.as_ref().is_some_and(|status| status.state == "installed")), |card| {
-                            card.child(menu_row("check-app-update", "Check for updates").on_click(cx.listener(|this, _, _, cx| {
-                                this.request_app_update("check", cx);
-                            })))
-                        })
-                        .when(self.self_update_panel.as_ref().is_some_and(|panel| !panel.busy && panel.status.as_ref().is_some_and(|status| status.supported && status.available && status.state != "installed")), |card| {
-                            card.child(menu_row("install-app-update", "Install update").on_click(cx.listener(|this, _, _, cx| {
-                                this.request_app_update("install", cx);
-                            })))
-                        })
-                        .when(self.self_update_panel.as_ref().is_some_and(|panel| !panel.busy && panel.status.as_ref().is_some_and(|status| status.state == "installed")), |card| {
-                            card.child(menu_row("restart-app-update", "Restart to update").on_click(cx.listener(|this, _, _, cx| {
-                                if this.flush_draft_before_navigation() {
-                                    this.request_app_update("restart", cx);
-                                }
-                            })))
-                        })
-                        .child(group_label("Assistants"))
-                        .child(menu_row("assistant-accounts", "Assistant accounts").on_click(cx.listener(|this, _, window, cx| {
-                            this.minimal_theme_open = false; this.auth_open = true;
-                            if let Some(host) = this.active_host() { let _ = host.agent_auth(); let _ = host.agent_clis(); }
-                            this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
-                            cx.notify();
-                        })))
-                        .child(div().mx_2().my(px(6.0)).h(px(1.0)).bg(rgb(colors.border)))
-                        .child(
-                            div()
-                                .id("minimal-all-permissions")
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .rounded(px(5.0))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_minimal_all_permissions(cx)
-                                }))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .child(
-                                            div()
-                                                .text_size(px(13.0))
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(rgb(colors.text))
-                                                .child("All permissions"),
-                                        )
-                                        .child(
-                                            div()
-                                                .mt_1()
-                                                .text_size(px(12.0))
-                                                .line_height(px(17.0))
-                                                .text_color(rgb(colors.muted))
-                                                .child("New agent tabs skip approvals and sandboxing when the CLI supports it."),
-                                        ),
-                                )
-                                .child(settings_switch(colors, allow_all_permissions)),
-                        ),
-                )
-                .into_any_element()
-        });
+        let theme_overlay = self
+            .minimal_theme_open
+            .then(|| self.render_workspace_settings(colors, window, cx));
         let share_overlay = self.share_panel.clone().map(|panel| {
             let invite = xd_transport::PairingInvite { host: panel.host.clone(), port: panel.port.unwrap_or(0), fingerprint: panel.fingerprint.clone(), code: panel.code.clone() };
             let can_copy = !panel.loading && xd_transport::validate_endpoint(&invite.host, invite.port, &invite.fingerprint).is_ok();
@@ -13165,13 +13608,40 @@ impl XdDesktop {
                 .agent_backends
                 .iter()
                 .find(|backend| backend.id == self.model.backend);
+            let title = match option {
+                "model" => "Choose model",
+                "effort" => "Reasoning effort",
+                "access" => "Workspace access",
+                _ => "Chat mode",
+            };
+            let current = match option {
+                "model" => self
+                    .model
+                    .model
+                    .clone()
+                    .or_else(|| catalog.map(|backend| backend.default_model.clone()))
+                    .unwrap_or_default(),
+                "effort" => self.model.effort.clone(),
+                "access" => presentation::canonical_access(if self.model.plan {
+                    "read-only"
+                } else {
+                    &self.model.access
+                })
+                .to_owned(),
+                _ => self.model.plan.to_string(),
+            };
             let choices = match option {
                 "model" => catalog
                     .map(|backend| {
                         backend
                             .models
                             .iter()
-                            .map(|model| (model.id.clone(), model.name.clone()))
+                            .map(|model| {
+                                (
+                                    model.id.clone(),
+                                    presentation::model_name(&model.id, Some(&model.name)),
+                                )
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
@@ -13180,35 +13650,72 @@ impl XdDesktop {
                         backend
                             .efforts
                             .iter()
-                            .map(|effort| (effort.clone(), effort.clone()))
+                            .map(|effort| {
+                                (effort.clone(), presentation::effort_name(effort).to_owned())
+                            })
                             .collect()
                     })
                     .unwrap_or_default(),
-                "access" => vec![
-                    ("read-only".into(), "Read only".into()),
-                    ("edit".into(), "Edit workspace".into()),
-                    ("full".into(), "Full access".into()),
-                ],
+                "access" => ["read-only", "edit", "full"]
+                    .into_iter()
+                    .map(|value| {
+                        (
+                            value.to_owned(),
+                            presentation::access_name(value).to_owned(),
+                        )
+                    })
+                    .collect(),
                 _ => vec![
-                    ("false".into(), "Act".into()),
+                    ("false".into(), "Build".into()),
                     ("true".into(), "Plan".into()),
                 ],
+            };
+            let empty = choices.is_empty();
+            let disabled = option == "access" && self.model.plan;
+            let current_label = match option {
+                "model" => self.model.selected_model_label(),
+                "effort" => presentation::effort_name(&current).to_owned(),
+                "access" => presentation::access_name(&current).to_owned(),
+                _ => if self.model.plan { "Plan" } else { "Build" }.to_owned(),
             };
             let rows = choices
                 .into_iter()
                 .enumerate()
                 .map(|(index, (value, label))| {
+                    let selected = current == value;
                     div()
                         .id(("native-setting-choice", index))
+                        .w_full()
+                        .min_h(px(36.0))
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(colors.surface_high)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.set_native_option(option, value.clone(), cx)
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+                        .when(disabled, |row| row.opacity(0.6))
+                        .when(!disabled, |row| {
+                            row.cursor_pointer()
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if !disabled {
+                                if selected {
+                                    this.native_option_open = None;
+                                } else {
+                                    this.set_native_option(option, value.clone(), cx);
+                                }
+                                if this.native_option_open.is_none() {
+                                    this.restore_minimal_popup_focus(window);
+                                }
+                                cx.notify();
+                            }
                         }))
-                        .child(label)
+                        .child(div().min_w_0().flex_1().child(label))
+                        .child(div().size(px(16.0)).flex_none().when(selected, |mark| {
+                            mark.child(icon(CHECK_ICON, 16.0, colors.text))
+                        }))
                 })
                 .collect::<Vec<_>>();
             div()
@@ -13220,6 +13727,14 @@ impl XdDesktop {
                 .items_center()
                 .justify_center()
                 .bg(rgba(colors.backdrop))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.native_option_open = None;
+                        this.restore_minimal_popup_focus(window);
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .w(px(420.0))
@@ -13231,20 +13746,63 @@ impl XdDesktop {
                         .rounded_xl()
                         .bg(rgb(colors.surface))
                         .text_color(rgb(colors.text))
-                        .child(div().text_size(px(16.0)).child(format!("Choose {option}")))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             div()
-                                .id("native-setting-choices")
-                                .overflow_y_scroll()
-                                .children(rows),
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title),
                         )
                         .child(
                             div()
-                                .id("close-native-setting")
-                                .py_2()
-                                .cursor_pointer()
+                                .text_size(px(12.0))
+                                .text_color(rgb(colors.muted))
+                                .child(if disabled {
+                                    "Planning uses read-only access. Switch to Build to change it."
+                                        .to_owned()
+                                } else {
+                                    format!("Current: {current_label}")
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("native-setting-choices")
+                                .min_h_0()
+                                .max_h(px(352.0))
+                                .overflow_y_scroll()
+                                .children(rows),
+                        )
+                        .when(empty, |card| {
+                            card.child(
+                                div()
+                                    .py_3()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(colors.muted))
+                                    .child(if option == "model" {
+                                        "No models are available for this assistant."
+                                    } else {
+                                        "No reasoning options are available for this assistant."
+                                    }),
+                            )
+                            .child(
+                                ui_button(
+                                    "retry-native-setting-catalog",
+                                    ButtonKind::Secondary,
+                                    colors,
+                                )
                                 .on_click(cx.listener(|this, _, _, cx| {
+                                    this.request_agent_catalog();
+                                    cx.notify();
+                                }))
+                                .child("Reload options"),
+                            )
+                        })
+                        .child(
+                            ui_button("close-native-setting", ButtonKind::Ghost, colors)
+                                .debug_selector(|| "native-option-cancel".into())
+                                .on_click(cx.listener(|this, _, window, cx| {
                                     this.native_option_open = None;
+                                    this.restore_minimal_popup_focus(window);
                                     cx.notify();
                                 }))
                                 .child("Cancel"),
@@ -13267,7 +13825,11 @@ impl XdDesktop {
                         .flex_col()
                         .gap_2()
                         .py_2()
-                        .child(format!("{} · {}", provider.provider, provider.state))
+                        .child(format!(
+                            "{} · {}",
+                            presentation::provider_name(&provider.provider),
+                            presentation::auth_state_name(&provider.state)
+                        ))
                         .when_some(provider.detail, |row, detail| {
                             row.child(div().text_xs().text_color(rgb(colors.muted)).child(detail))
                         })
@@ -13635,8 +14197,13 @@ impl XdDesktop {
                     "minimal-cancel-project-rename",
                     "minimal-save-project-rename",
                 ),
-                SidebarTarget::Chat(_) => (
+                SidebarTarget::Session(_) => (
                     "Rename session",
+                    "minimal-cancel-session-rename",
+                    "minimal-save-session-rename",
+                ),
+                SidebarTarget::Chat(_) => (
+                    "Rename chat",
                     "minimal-cancel-session-rename",
                     "minimal-save-session-rename",
                 ),
@@ -13862,18 +14429,11 @@ impl XdDesktop {
             )
         });
         let chat_delete_overlay = self.pending_sidebar_delete.clone().and_then(|target| {
-            let SidebarTarget::Chat(chat_id) = target else {
-                return None;
+            let (session_name, deleting_group) = match &target {
+                SidebarTarget::Session(id) => (self.model.sessions.iter().find(|session| &session.id == id)?.title.clone(), true),
+                SidebarTarget::Chat(id) => (self.model.chats.iter().find(|chat| &chat.id == id)?.title.clone().unwrap_or_else(|| "New chat".into()), false),
+                _ => return None,
             };
-            let session_name = self
-                .model
-                .chats
-                .iter()
-                .find(|chat| chat.id == chat_id)
-                .and_then(|chat| chat.title.as_deref())
-                .filter(|title| !title.trim().is_empty())
-                .unwrap_or("New Session")
-                .to_owned();
             let submitting = self.sidebar_delete_submitting;
             Some(
                 div()
@@ -13902,15 +14462,17 @@ impl XdDesktop {
                                     .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
-                                    .child("Delete session?"),
+                                    .child(if deleting_group { "Delete session?" } else { "Delete chat?" }),
                             )
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(rgb(colors.muted))
-                                    .child(format!(
-                                        "This permanently removes {session_name} and its conversation from xd. Project files are not deleted."
-                                    )),
+                                    .child(if deleting_group {
+                                        format!("This permanently removes {session_name} and all its chats from xd. Project files are kept.")
+                                    } else {
+                                        format!("This permanently removes {session_name} and its conversation from xd. Project files are kept.")
+                                    }),
                             )
                             .child(
                                 div()
@@ -13969,7 +14531,7 @@ impl XdDesktop {
                                             .child(if submitting {
                                                 "Deleting…"
                                             } else {
-                                                "Delete session"
+                                                if deleting_group { "Delete session" } else { "Delete chat" }
                                             }),
                                     ),
                             ),
@@ -13979,8 +14541,7 @@ impl XdDesktop {
         });
         let chat_overlay = self.creating_chat_folder.is_some().then(|| {
             let can_save = !self.chat_create_submitting
-                && !self.chat_create_worktrees_loading
-                && self.chat_create_worktree.is_some();
+                && (self.creating_chat_session.is_some() || (!self.chat_create_worktrees_loading && self.chat_create_worktree.is_some()));
             let selected_worktree = self.chat_create_worktree.clone();
             let can_create_worktree = self.chat_create_can_new_worktree;
             div()
@@ -14009,7 +14570,7 @@ impl XdDesktop {
                                 .text_size(px(16.0))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(colors.text))
-                                .child("New agent session"),
+                                .child(if self.creating_chat_session.is_some() { "New chat" } else { "New agent session" }),
                         )
                         .child(
                             div()
@@ -14083,6 +14644,8 @@ impl XdDesktop {
                                 .text_color(rgb(colors.muted))
                                 .child("Start a chat with the selected assistant."),
                         )
+                        .when(self.creating_chat_session.is_some(), |card| card.child(div().text_size(px(12.0)).text_color(rgb(colors.muted)).child("Shares this session's project directory, files, and terminal.")))
+                        .when(self.creating_chat_session.is_none(), |card| card
                         .child(
                             div()
                                 .mt_1()
@@ -14318,6 +14881,7 @@ impl XdDesktop {
                                     list.child(div().px_3().py_2().text_xs().text_color(rgb(colors.muted)).child(error))
                                 }),
                         )
+)
                         .child(
                             div()
                                 .mt_2()
@@ -14375,6 +14939,8 @@ impl XdDesktop {
                                         }))
                                         .child(if self.chat_create_submitting {
                                             "Creating…"
+                                        } else if self.creating_chat_session.is_some() {
+                                            "Create chat"
                                         } else {
                                             "Create session"
                                         }),
@@ -14411,7 +14977,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .key_context("XdDesktop")
-            .bg(rgb(colors.background))
+            .bg(rgba((colors.background << 8) | 0xd9))
             .font_family(UI_FONT)
             .on_mouse_down(
                 MouseButton::Left,
@@ -14974,6 +15540,9 @@ impl AssetSource for EmbeddedIcons {
             CLOSE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/close.svg").as_slice(),
             )),
+            CHECK_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/check.svg").as_slice(),
+            )),
             SIDE_LAYOUT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/panel-right.svg").as_slice(),
             )),
@@ -15222,6 +15791,11 @@ fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
             .iter()
             .find(|folder| &folder.id == folder_id)
             .map(|folder| folder.name.as_str()),
+        SidebarTarget::Session(session_id) => model
+            .sessions
+            .iter()
+            .find(|session| &session.id == session_id)
+            .map(|session| session.title.as_str()),
         SidebarTarget::Chat(chat_id) => model
             .chats
             .iter()
@@ -15242,6 +15816,12 @@ fn sidebar_move_applied(
             .iter()
             .find(|folder| &folder.id == folder_id)
             .is_some_and(|folder| folder.parent.as_deref() == destination),
+        SidebarTarget::Session(session_id) => destination.is_some_and(|destination| {
+            model
+                .sessions
+                .iter()
+                .any(|session| &session.id == session_id && session.folder == destination)
+        }),
         SidebarTarget::Chat(chat_id) => destination.is_some_and(|destination| {
             model
                 .chats
@@ -15329,6 +15909,500 @@ mod tests {
 
     use super::*;
 
+    fn grouped_workspace_fixture() -> AppModel {
+        let mut model = AppModel::default();
+        model.apply_tree(&serde_json::json!({
+            "folders":[{"id":"atlas","name":"Atlas"}],
+            "chats":[
+                {"id":"implementation","folder":"atlas","title":"Implementation","backend":"codex"},
+                {"id":"review","folder":"atlas","title":"Review","backend":"claude"}
+            ],
+            "sessions":[{"id":"workspace","folder":"atlas","title":"Workspace switcher","chats":["implementation","review"],"terminal_chat":"session:workspace"}]
+        })).unwrap();
+        model
+    }
+
+    #[gpui::test]
+    fn catalog_groups_chats_and_restores_the_sessions_active_tab(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.settings.session_chats.clear();
+            desktop
+                .settings
+                .session_chats
+                .insert(desktop.session_tab_key("review"), "review".into());
+            let rows = desktop.catalog_session_chats();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, "review");
+            assert_eq!(rows[0].title.as_deref(), Some("Workspace switcher"));
+            desktop.model.select_chat("implementation");
+            assert_eq!(desktop.catalog_session_chats()[0].id, "implementation");
+        });
+    }
+
+    #[gpui::test]
+    fn sibling_chat_navigation_preserves_shared_tools_and_clears_the_previous_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.bottom_terminal_open = true;
+            desktop.terminal_panel =
+                Some(XdDesktop::new_terminal_panel("session:workspace".into()));
+            desktop.set_composer_text("Text belonging to implementation".into(), cx);
+            let browser_scope = desktop.browser_scope_key();
+            desktop.select_minimal_session("atlas".into(), "review".into(), AgentCli::Claude, cx);
+            assert!(desktop.bottom_terminal_open);
+            assert_eq!(
+                desktop.terminal_panel.as_ref().unwrap().chat_id,
+                "session:workspace"
+            );
+            assert_eq!(desktop.browser_scope_key(), browser_scope);
+            assert!(
+                desktop.composer.is_empty(),
+                "an outgoing draft must not appear in a different chat"
+            );
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+        });
+    }
+
+    #[gpui::test]
+    fn closing_a_chat_tab_preserves_history_and_can_reopen_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.draft_dirty = false;
+            desktop.attachments_dirty = false;
+            desktop.settings.hidden_chat_tabs.clear();
+            desktop.close_session_chat_tab("implementation".into(), window, cx);
+            assert_eq!(
+                desktop.model.chats.len(),
+                2,
+                "closing a tab must never delete a conversation"
+            );
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+            let key = desktop.session_tab_key("review");
+            assert_eq!(
+                desktop.settings.hidden_chat_tabs[&key],
+                vec!["implementation"]
+            );
+            desktop.reopen_session_chat_tab(window, cx);
+            assert_eq!(
+                desktop.model.selected_chat.as_deref(),
+                Some("implementation")
+            );
+            assert!(desktop.settings.hidden_chat_tabs[&key].is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn shared_file_operations_and_git_drafts_finish_after_switching_chat_tabs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.diff_generation = 41;
+            desktop.diff_panel = Some(DiffPanel {
+                files_mode: true,
+                file_loading: true,
+                ..DiffPanel::default()
+            });
+            desktop.native_pane = NativePane::Files;
+            desktop.select_minimal_session("atlas".into(), "review".into(), AgentCli::Claude, cx);
+            assert_eq!(desktop.diff_generation, 41);
+            desktop.handle_reply(
+                RequestKind::FileBrowseRead {
+                    chat_id: "implementation".into(),
+                    path: "src/main.rs".into(),
+                    generation: 41,
+                },
+                serde_json::json!({"ok":true,"content":"loaded"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            let preview = desktop
+                .diff_panel
+                .as_mut()
+                .unwrap()
+                .file_preview
+                .as_mut()
+                .unwrap();
+            preview.content = "edited".into();
+            preview.saving = true;
+            desktop.handle_reply(
+                RequestKind::FileBrowseWrite {
+                    chat_id: "implementation".into(),
+                    path: "src/main.rs".into(),
+                    content: "edited".into(),
+                    generation: 41,
+                },
+                serde_json::json!({"ok":true}).as_object().unwrap().clone(),
+                None,
+                cx,
+            );
+            let diff = desktop.diff_panel.as_mut().unwrap();
+            assert!(!diff.file_loading);
+            let preview = diff.file_preview.as_ref().unwrap();
+            assert_eq!(preview.original, "edited");
+            assert!(!preview.saving);
+            diff.action = Some("Writing a pull request".into());
+            desktop.handle_event(
+                "git-draft-finished",
+                serde_json::json!({
+                    "chat":"implementation","request":"gpui-pr-41","kind":"pull-request",
+                    "success":true,"title":"Shared result","body":"Draft body"
+                }),
+                None,
+                cx,
+            );
+            let diff = desktop.diff_panel.as_ref().unwrap();
+            assert!(diff.action.is_none());
+            assert_eq!(diff.pr_title.as_deref(), Some("Shared result"));
+            let mut other = desktop.model.chats[0].clone();
+            other.id = "other-workspace".into();
+            desktop.model.chats.push(other);
+            desktop.select_minimal_session(
+                "atlas".into(),
+                "other-workspace".into(),
+                AgentCli::Codex,
+                cx,
+            );
+            desktop.diff_panel = Some(DiffPanel {
+                files_mode: true,
+                ..DiffPanel::default()
+            });
+            desktop.handle_reply(
+                RequestKind::FileBrowseRead {
+                    chat_id: "implementation".into(),
+                    path: "src/main.rs".into(),
+                    generation: 41,
+                },
+                serde_json::json!({"ok":true,"content":"stale"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            assert!(desktop.diff_panel.as_ref().unwrap().file_preview.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn selected_chat_tab_stays_visible_with_many_chats(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            let ids = (0..40).map(|index| format!("chat-{index}")).collect::<Vec<_>>();
+            let chats = ids.iter().map(|id| serde_json::json!({
+                "id":id,"folder":"atlas","title":format!("Conversation {id}"),"backend":"codex"
+            })).collect::<Vec<_>>();
+            desktop.model.apply_tree(&serde_json::json!({
+                "folders":[{"id":"atlas","name":"Atlas"}], "chats":chats,
+                "sessions":[{"id":"workspace","folder":"atlas","title":"Workspace","chats":ids,"terminal_chat":"session:workspace"}]
+            })).unwrap();
+            desktop.model.select_chat("chat-39");
+            desktop.minimal_route = MinimalRoute::Cli { project_id:"atlas".into(), chat_id:"chat-39".into(), agent:AgentCli::Codex };
+            desktop.settings.hidden_chat_tabs.clear();
+        });
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        desktop.update(cx, |desktop, cx| {
+            let scroll = &desktop.session_chat_tabs_scroll;
+            let tab = scroll.bounds_for_item(39).unwrap();
+            assert!(scroll.offset().x < px(0.0));
+            assert!(tab.left() + scroll.offset().x >= scroll.bounds().left());
+            assert!(tab.right() + scroll.offset().x <= scroll.bounds().right());
+            desktop.select_minimal_session("atlas".into(), "chat-0".into(), AgentCli::Codex, cx);
+        });
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(desktop.session_chat_tabs_scroll.offset().x, px(0.0))
+        });
+    }
+
+    #[gpui::test]
+    fn sibling_chat_terminal_refresh_hydrates_the_shared_shell(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("review");
+            let mut panel = XdDesktop::new_terminal_panel("session:workspace".into());
+            panel.loading = false;
+            desktop.terminal_panel = Some(panel);
+            desktop.refresh_terminal_sessions(cx);
+            assert!(
+                desktop.terminal_panel.as_ref().unwrap().loading,
+                "a sibling chat must refresh its shared terminal history"
+            );
+            desktop.handle_reply(
+                RequestKind::TerminalList {
+                    chat_id: "session:workspace".into(),
+                },
+                serde_json::json!({"ok":true,"terminals":[{
+                    "id":"existing-shell","columns":80,"rows":24,"sequence":1,
+                    "replay":[{"data":STANDARD.encode(b"shared output")}]
+                }]})
+                .as_object()
+                .unwrap()
+                .clone(),
+                None,
+                cx,
+            );
+            let panel = desktop.terminal_panel.as_ref().unwrap();
+            assert!(!panel.loading);
+            assert!(!panel.auto_open, "an existing shell must be reused");
+            assert_eq!(panel.selected.as_deref(), Some("existing-shell"));
+            assert_eq!(panel.sessions[0].screen.rendered().text, "shared output");
+        });
+    }
+
+    #[gpui::test]
+    fn session_upgrade_preserves_terminal_panels_output_and_legacy_events(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            let mut panel = XdDesktop::new_terminal_panel("implementation".into());
+            panel.loading = false;
+            panel.selected = Some("kept-shell".into());
+            let mut screen = TerminalScreen::new(80, 24);
+            screen.feed(b"before upgrade");
+            panel.sessions.push(TerminalTab {
+                id: "kept-shell".into(),
+                title: "Terminal".into(),
+                agent: None,
+                sequence: Some(1),
+                screen,
+            });
+            desktop.terminal_panel = Some(panel);
+            desktop.terminal_panel_cache.insert(
+                (ChatEndpoint::Local, "review".into()),
+                XdDesktop::new_terminal_panel("review".into()),
+            );
+            desktop.terminal_activity_by_tab.insert(
+                (
+                    ChatEndpoint::Local,
+                    "implementation".into(),
+                    "kept-shell".into(),
+                ),
+                true,
+            );
+            desktop.prime_terminal_cache(ChatEndpoint::Local);
+            let panel = desktop.terminal_panel.as_ref().unwrap();
+            assert_eq!(panel.chat_id, "session:workspace");
+            assert_eq!(panel.selected.as_deref(), Some("kept-shell"));
+            assert_eq!(panel.sessions[0].screen.rendered().text, "before upgrade");
+            assert_eq!(
+                desktop.terminal_activity_by_tab.get(&(
+                    ChatEndpoint::Local,
+                    "session:workspace".into(),
+                    "kept-shell".into()
+                )),
+                Some(&true)
+            );
+            assert!(
+                !desktop
+                    .terminal_panel_cache
+                    .contains_key(&(ChatEndpoint::Local, "implementation".into()))
+            );
+            desktop.handle_terminal_screen_event(
+                ChatEndpoint::Local,
+                "terminal-output",
+                &serde_json::json!({
+                    "chat":"implementation", "terminal":"kept-shell", "sequence":2,
+                    "data":STANDARD.encode(b"\r\nafter upgrade")
+                }),
+                cx,
+            );
+            let text = desktop.terminal_panel.as_ref().unwrap().sessions[0]
+                .screen
+                .rendered()
+                .text;
+            assert!(text.contains("before upgrade"));
+            assert!(text.contains("after upgrade"));
+        });
+    }
+
+    #[gpui::test]
+    fn compact_transcript_keeps_its_scroll_viewport_above_the_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(), chat_id: "implementation".into(), agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages = Arc::new((0..12).map(|index| Message::new(
+                Some(index), "assistant",
+                format!("Message {index}. {}", "A paragraph that wraps at a narrow viewport and remains readable while scrolling. ".repeat(8)),
+                None,
+            )).collect());
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        cx.run_until_parked();
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        desktop.update(cx, |desktop, _| {
+            let viewport = desktop.transcript.viewport_bounds();
+            assert!(viewport.size.height > px(0.0));
+            assert!(
+                viewport.bottom() <= composer.top(),
+                "transcript must not paint under the composer"
+            );
+            assert!(
+                desktop.transcript_pinned(),
+                "the loaded transcript follows its newest message"
+            );
+            assert!(
+                desktop.transcript.max_offset_for_scrollbar().height > px(0.0),
+                "overflow remains scrollable"
+            );
+            desktop.transcript.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        });
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        desktop.update(cx, |desktop, _| {
+            let first = desktop
+                .transcript
+                .bounds_for_item(0)
+                .expect("first message is reachable");
+            assert!(first.top() >= desktop.transcript.viewport_bounds().top() - px(1.0));
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_a_composer_option_restores_the_editor(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.model.agent_backends = vec![xd_desktop::model::AgentBackend {
+                id: "codex".into(),
+                name: "Codex".into(),
+                default_model: "gpt-5.3-codex".into(),
+                models: vec![],
+                efforts: vec!["low".into(), "high".into()],
+            }];
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.set_composer_text(String::new(), cx);
+            window.blur();
+        });
+        cx.run_until_parked();
+        let option = cx.debug_bounds("native-option-effort").unwrap();
+        cx.simulate_click(option.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let cancel = cx.debug_bounds("native-option-cancel").unwrap();
+        cx.simulate_click(cancel.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(desktop.native_option_open.is_none());
+            assert!(
+                desktop
+                    .composer_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn empty_chat_text_is_centered_and_stays_above_the_composer(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("review");
+            desktop.model.backend = "claude".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "review".into(),
+                agent: AgentCli::Claude,
+            };
+            desktop.transcript_snapshot = TranscriptSnapshot::default();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.settings.browser_sessions.clear();
+            desktop.set_composer_text("An independent draft".into(), cx);
+        });
+        for (width, height) in [(1280.0, 900.0), (760.0, 560.0)] {
+            cx.simulate_resize(size(px(width), px(height)));
+            cx.run_until_parked();
+            let heading = cx
+                .debug_bounds("empty-chat-heading")
+                .expect("visible empty-chat heading");
+            let description = cx
+                .debug_bounds("empty-chat-description")
+                .expect("visible empty-chat description");
+            let composer = cx
+                .debug_bounds("chat-composer")
+                .expect("visible chat composer");
+            assert!(heading.bottom() <= description.top());
+            assert!(
+                description.bottom() + px(12.0) <= composer.top(),
+                "the composer must not cover empty-chat text at {width}x{height}: heading={heading:?}, description={description:?}, composer={composer:?}"
+            );
+            assert!((heading.center().x - composer.center().x).abs() <= px(2.0));
+        }
+    }
+
     #[test]
     fn live_approvals_reach_the_model_without_waiting_for_a_reload() {
         let source = include_str!("main.rs");
@@ -15414,6 +16488,8 @@ mod tests {
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
 
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
+        cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
     }
 
@@ -15550,6 +16626,7 @@ mod tests {
     #[test]
     fn desktop_platforms_mount_the_in_app_titlebar() {
         let source = include_str!("main.rs");
+        let production = source.split_once("#[cfg(test)]").expect("production").0;
         let titlebar = source
             .split_once("fn render_minimal_window_controls")
             .expect("minimal window controls renderer")
@@ -15563,13 +16640,10 @@ mod tests {
         assert!(titlebar.contains("window_control_area(WindowControlArea::Max)"));
         assert!(titlebar.contains("window_control_area(WindowControlArea::Close)"));
 
-        let render = source
+        let render = production
             .split_once("impl Render for XdDesktop")
             .expect("desktop render implementation")
-            .1
-            .split_once("fn load_png_attachments")
-            .expect("end of desktop render implementation")
-            .0;
+            .1;
         assert!(render.contains("client_decorations || cfg!(target_os = \"macos\")"));
         assert!(render.contains("self.render_minimal(custom_titlebar, window, cx)"));
 
@@ -15596,21 +16670,10 @@ mod tests {
 
     #[test]
     fn minimal_settings_exposes_the_all_permissions_toggle() {
-        let source = include_str!("main.rs");
-        let production = source
-            .split_once("#[cfg(test)]")
-            .expect("desktop production source")
-            .0;
-        let settings = production
-            .split_once("let theme_overlay = self.minimal_theme_open.then(||")
-            .expect("minimal settings overlay")
-            .1
-            .split_once("let remote_overlay")
-            .expect("end of minimal settings overlay")
-            .0;
+        let settings = include_str!("workspace_settings.rs");
 
         for behavior in [
-            ".child(\"All permissions\")",
+            "\"All permissions\"",
             "self.settings.allow_all_permissions",
             "this.toggle_minimal_all_permissions(cx)",
         ] {
@@ -15690,18 +16753,7 @@ mod tests {
 
     #[test]
     fn minimal_settings_closes_when_the_backdrop_is_clicked() {
-        let source = include_str!("main.rs");
-        let production = source
-            .split_once("#[cfg(test)]")
-            .expect("desktop production source")
-            .0;
-        let settings = production
-            .split_once("let theme_overlay = self.minimal_theme_open.then(||")
-            .expect("minimal settings overlay")
-            .1
-            .split_once("let remote_overlay")
-            .expect("end of minimal settings overlay")
-            .0;
+        let settings = include_str!("workspace_settings.rs");
 
         assert!(settings.contains("this.close_minimal_theme_popup(window, cx)"));
         assert!(settings.contains("cx.stop_propagation()"));
@@ -16949,8 +18001,14 @@ mod tests {
     }
 
     #[test]
-    fn every_agent_mark_is_embedded_and_drawable() {
-        for path in [CLAUDE_ICON, CODEX_ICON, JCODE_ICON, COPILOT_ICON] {
+    fn agent_marks_and_selection_icon_are_embedded_and_drawable() {
+        for path in [
+            CLAUDE_ICON,
+            CODEX_ICON,
+            JCODE_ICON,
+            COPILOT_ICON,
+            CHECK_ICON,
+        ] {
             let bytes = EmbeddedIcons
                 .load(path)
                 .expect("embedded marks load")
@@ -18141,7 +19199,7 @@ mod tests {
             "\"Delete session\"",
             "this.begin_sidebar_delete(",
             "delete_target.clone()",
-            ".child(\"Delete session?\")",
+            "\"Delete session?\"",
             "minimal-cancel-session-delete",
             "minimal-confirm-session-delete",
             "this.confirm_sidebar_delete(cx)",
@@ -18160,13 +19218,10 @@ mod tests {
             .0;
         assert!(!production.contains("fn minimal_agent_desktop_enabled()"));
 
-        let render = source
+        let render = production
             .split_once("impl Render for XdDesktop")
             .expect("desktop render implementation")
-            .1
-            .split_once("fn load_png_attachments")
-            .expect("end of desktop render implementation")
-            .0;
+            .1;
         assert!(render.contains("self.expire_action_error(cx);"));
         assert!(render.contains("self.render_minimal(custom_titlebar, window, cx)"));
         for legacy_surface in [
@@ -18704,7 +19759,7 @@ fn main() {
                     window_bounds: Some(window_bounds),
                     is_resizable: true,
                     window_min_size: Some(size(px(760.0), px(560.0))),
-                    window_background: WindowBackgroundAppearance::Opaque,
+                    window_background: WindowBackgroundAppearance::Blurred,
                     titlebar: Some(TitlebarOptions {
                         title: Some("xd".into()),
                         appears_transparent: true,

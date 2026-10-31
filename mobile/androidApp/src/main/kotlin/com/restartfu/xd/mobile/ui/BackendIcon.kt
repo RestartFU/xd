@@ -10,6 +10,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.mobile.R
+import com.restartfu.xd.model.DisplayLabels
 
 /**
  * The assistant mark for a chat, matching the desktop sidebar.
@@ -39,7 +40,7 @@ internal fun BackendIcon(
 
     Icon(
         painter = painterResource(drawable),
-        contentDescription = backend,
+        contentDescription = DisplayLabels.backend(backend),
         modifier = modifier.size(size),
         tint = tint,
     )

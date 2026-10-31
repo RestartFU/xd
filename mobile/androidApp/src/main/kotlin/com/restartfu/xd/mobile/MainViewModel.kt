@@ -45,6 +45,7 @@ data class CreatedDirectSession(
     val chatId: String,
     val agent: DirectAgent,
     val title: String,
+    val sessionId: String? = null,
 )
 
 data class PendingHostKeyConfirmation(
@@ -244,6 +245,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         folderId: String,
         title: String,
         agent: DirectAgent,
+        sessionId: String? = null,
     ) {
         if (_creatingChat.value) return
         _creatingChat.value = true
@@ -254,12 +256,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     folderId = folderId,
                     title = title.takeIf(String::isNotBlank),
                     backend = agent.wire,
+                    sessionId = sessionId,
                 )
                 _createdDirectSession.value = CreatedDirectSession(
                     folderId,
                     chatId,
                     agent,
-                    title.takeIf(String::isNotBlank) ?: "New Session",
+                    title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat",
+                    sessionId,
                 )
             } catch (error: CancellationException) {
                 throw error
@@ -469,10 +473,12 @@ class ChatViewModel(
     private val _catalogLoading = MutableStateFlow(false)
     private val _catalogError = MutableStateFlow<String?>(null)
     private val _selectingModel = MutableStateFlow(false)
+    private val _modelSelectionError = MutableStateFlow<String?>(null)
     val catalog: StateFlow<List<BackendReply>> = _catalog.asStateFlow()
     val catalogLoading: StateFlow<Boolean> = _catalogLoading.asStateFlow()
     val catalogError: StateFlow<String?> = _catalogError.asStateFlow()
     val selectingModel: StateFlow<Boolean> = _selectingModel.asStateFlow()
+    val modelSelectionError: StateFlow<String?> = _modelSelectionError.asStateFlow()
     val draft: StateFlow<String> = _draft.asStateFlow()
     private var draftSyncJob: Job? = null
     private var draftTextDirty = false
@@ -484,6 +490,7 @@ class ChatViewModel(
     }
 
     init {
+        loadCatalog()
         viewModelScope.launch {
             state.collect { synced ->
                 if (synced.draftRevision <= draftRevision) return@collect
@@ -632,6 +639,7 @@ class ChatViewModel(
     fun loadCatalog() {
         if (_catalog.value.isNotEmpty() || _catalogLoading.value) return
         _catalogLoading.value = true
+        _catalogError.value = null
         viewModelScope.launch {
             try {
                 _catalog.value = session.catalog()
@@ -682,9 +690,24 @@ class ChatViewModel(
     }
 
     fun selectModel(model: String) {
-        launchGuarded(_selectingModel) {
-            session.selectModel(model)
+        if (_selectingModel.value) return
+        _selectingModel.value = true
+        _modelSelectionError.value = null
+        viewModelScope.launch {
+            try {
+                session.selectModel(model)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _modelSelectionError.value = error.message ?: "Could not change the model. Try again."
+            } finally {
+                _selectingModel.value = false
+            }
         }
+    }
+
+    fun clearModelSelectionError() {
+        _modelSelectionError.value = null
     }
 
     fun clearCatalogError() {

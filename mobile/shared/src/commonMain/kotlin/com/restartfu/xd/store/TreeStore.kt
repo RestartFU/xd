@@ -3,6 +3,7 @@ package com.restartfu.xd.store
 import com.restartfu.xd.model.ChatSummary
 import com.restartfu.xd.model.Folder
 import com.restartfu.xd.model.TreeSnapshot
+import com.restartfu.xd.model.WorkspaceSession
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.TreeReply
@@ -27,6 +28,25 @@ internal class TreeStore(
     private val terminalWorkingEvents = mutableMapOf<String, WorkingEvent>()
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
+
+    fun terminalChatIds(owner: String): Set<String> = terminalChatIds(_state.value, owner)
+
+    fun terminalOwner(owner: String): String {
+        val snapshot = _state.value
+        return snapshot.sessions.firstOrNull {
+            it.terminalChatId == owner || it.id == owner || owner in it.chatIds
+        }?.terminalChatId ?: owner
+    }
+
+    fun terminalChatIds(snapshot: TreeSnapshot, owner: String): Set<String> {
+        snapshot.sessions.firstOrNull {
+            it.terminalChatId == owner || it.id == owner || owner in it.chatIds
+        }?.let { return it.chatIds.toSet() }
+        val sessionId = if (owner.startsWith("session:")) owner.removePrefix("session:") else {
+            snapshot.chats.firstOrNull { it.id == owner }?.sessionId ?: return emptySet()
+        }
+        return snapshot.chats.filter { it.sessionId == sessionId }.map { it.id }.toSet()
+    }
 
     suspend fun clear() {
         stateMutex.withLock {
@@ -69,9 +89,10 @@ internal class TreeStore(
             if ((terminalWorkingEvents[chatId]?.sequence ?: Long.MIN_VALUE) >= sequence) return
             lifecycleVersion += 1
             terminalWorkingEvents[chatId] = WorkingEvent(sequence, working)
+            val members = terminalChatIds(_state.value, chatId)
             _state.value = _state.value.copy(
                 chats = _state.value.chats.map { chat ->
-                    if (chat.id == chatId) chat.copy(terminalWorking = working) else chat
+                    if (chat.id in members) chat.copy(terminalWorking = working) else chat
                 },
             )
         }
@@ -96,6 +117,10 @@ internal class TreeStore(
                         folders = reply.folders.map {
                             Folder(id = it.id, name = it.name, parentId = it.parent)
                         },
+                        sessions = reply.sessions.map {
+                            WorkspaceSession(it.id, it.folder, it.title, it.chats,
+                                it.branch, it.working, it.terminalChat)
+                        },
                         chats = reply.chats.map {
                             ChatSummary(
                                 id = it.id,
@@ -103,6 +128,7 @@ internal class TreeStore(
                                 title = it.title,
                                 backend = it.backend,
                                 sessionMode = it.sessionMode,
+                                sessionId = it.session ?: it.id,
                                 branch = it.branch,
                                 working = workingEvents[it.id]
                                     ?.takeIf { event ->
@@ -110,7 +136,14 @@ internal class TreeStore(
                                     }
                                     ?.working
                                     ?: it.working,
-                                terminalWorking = terminalWorkingEvents[it.id]
+                                terminalWorking = terminalWorkingEvents.entries
+                                    .filter { (owner, _) ->
+                                        owner == it.id || owner == "session:${it.session ?: it.id}" ||
+                                            reply.sessions.any { session ->
+                                                it.id in session.chats && (owner == session.terminalChat || owner == session.id || owner in session.chats)
+                                            }
+                                    }
+                                    .maxByOrNull { (_, event) -> event.sequence }?.value
                                     ?.takeIf { event ->
                                         event.sequence > authoritativeSequence
                                     }

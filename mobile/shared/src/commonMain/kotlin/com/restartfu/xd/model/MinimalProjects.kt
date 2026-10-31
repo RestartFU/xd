@@ -28,29 +28,40 @@ public data class MinimalSession(
     val agent: DirectAgent,
     val branch: String,
     val working: Boolean,
+    val chatIds: List<String> = listOf(id),
+    val terminalChatId: String = id,
 )
 
 public fun TreeSnapshot.minimalProjects(): List<MinimalProject> = folders.map { folder ->
-    val sessions = chats.filter { chat ->
-        chat.folderId == folder.id && DirectAgent.fromBackend(chat.backend) != null
-    }
+    val sessions = minimalSessions(folder.id)
     MinimalProject(
         id = folder.id,
         name = folder.name,
         sessions = sessions.size,
-        working = sessions.count { it.working || it.terminalWorking },
+        working = sessions.count { it.working },
     )
 }
 
-public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession> = chats
-    .filter { it.folderId == projectId }
-    .mapNotNull { chat ->
-        val agent = DirectAgent.fromBackend(chat.backend) ?: return@mapNotNull null
+/** Legacy hosts expose each chat as a session; newer hosts group independent tabs. */
+public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession> {
+    val directChats = chats.filter {
+        it.folderId == projectId && DirectAgent.fromBackend(it.backend) != null
+    }
+    return directChats.groupBy(ChatSummary::sessionId).map { (id, grouped) ->
+        val workspace = sessions.firstOrNull { it.id == id }
+        val first = grouped.first()
+        val orderedIds = workspace?.chatIds.orEmpty().filter { candidate ->
+            grouped.any { it.id == candidate }
+        }.let { ordered -> ordered + grouped.map(ChatSummary::id).filterNot { it in ordered } }
         MinimalSession(
-            id = chat.id,
-            title = chat.title.takeIf(String::isNotBlank) ?: "New Session",
-            agent = agent,
-            branch = chat.branch?.takeIf(String::isNotBlank) ?: "Project directory",
-            working = chat.working || chat.terminalWorking,
+            id = id,
+            title = (workspace?.title ?: first.title).takeIf(String::isNotBlank) ?: "New Session",
+            agent = checkNotNull(DirectAgent.fromBackend(first.backend)),
+            branch = (workspace?.branch ?: first.branch)?.takeIf(String::isNotBlank)
+                ?: "Project directory",
+            working = grouped.any { it.working || it.terminalWorking },
+            chatIds = orderedIds,
+            terminalChatId = workspace?.terminalChatId ?: first.id,
         )
     }
+}

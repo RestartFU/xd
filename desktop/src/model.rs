@@ -74,6 +74,24 @@ pub struct ChatSummary {
     pub terminal_working: bool,
 }
 
+/// A persistent workspace shared by independent agent conversations.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub folder: String,
+    pub title: String,
+    #[serde(default)]
+    pub chats: Vec<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub working: bool,
+    #[serde(default)]
+    pub terminal_working: bool,
+    #[serde(default)]
+    pub terminal_chat: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalActivityStamp {
     pub revision: u64,
@@ -288,6 +306,7 @@ pub struct AgentBackend {
 pub struct AppModel {
     pub folders: Vec<Folder>,
     pub chats: Vec<ChatSummary>,
+    pub sessions: Vec<SessionSummary>,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -341,9 +360,71 @@ struct TreeSnapshot {
     folders: Vec<Folder>,
     chats: Vec<ChatSummary>,
     #[serde(default)]
+    sessions: Vec<SessionSummary>,
+    #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
     terminal_activity_revision: Option<u64>,
+}
+
+fn normalize_sessions(snapshot: &mut TreeSnapshot, body: &Value) {
+    let known_chats = snapshot
+        .chats
+        .iter()
+        .map(|chat| chat.id.as_str())
+        .collect::<HashSet<_>>();
+    for session in &mut snapshot.sessions {
+        session.chats.retain(|id| known_chats.contains(id.as_str()));
+        if session.terminal_chat.is_empty() {
+            session.terminal_chat = format!("session:{}", session.id);
+        }
+    }
+    for chat in &snapshot.chats {
+        if snapshot
+            .sessions
+            .iter()
+            .any(|session| session.chats.contains(&chat.id))
+        {
+            continue;
+        }
+        let stored = body
+            .get("chats")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|value| value.get("id").and_then(Value::as_str) == Some(chat.id.as_str()));
+        let session_id = stored
+            .and_then(|value| value.get("session"))
+            .and_then(Value::as_str);
+        if let Some(session) = snapshot
+            .sessions
+            .iter_mut()
+            .find(|session| Some(session.id.as_str()) == session_id)
+        {
+            session.chats.push(chat.id.clone());
+            continue;
+        }
+        snapshot.sessions.push(SessionSummary {
+            id: session_id.unwrap_or(&chat.id).to_owned(),
+            folder: chat.folder.clone(),
+            title: stored
+                .and_then(|value| value.get("session_title"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| chat.title.clone())
+                .unwrap_or_else(|| "New Session".into()),
+            chats: vec![chat.id.clone()],
+            branch: chat.branch.clone(),
+            working: chat.working,
+            terminal_working: chat.terminal_working,
+            terminal_chat: session_id
+                .map(|id| format!("session:{id}"))
+                .unwrap_or_else(|| chat.id.clone()),
+        });
+    }
+    snapshot
+        .sessions
+        .retain(|session| !session.chats.is_empty());
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,7 +453,80 @@ pub struct MessagePageChange {
 }
 
 impl AppModel {
+    pub fn session_for_chat(&self, chat_id: &str) -> Option<&SessionSummary> {
+        self.sessions
+            .iter()
+            .find(|session| session.chats.iter().any(|id| id == chat_id))
+    }
+
+    pub fn session_key_for_chat(&self, chat_id: &str) -> String {
+        self.session_for_chat(chat_id)
+            .map(|session| session.id.clone())
+            .unwrap_or_else(|| chat_id.to_owned())
+    }
+
+    pub fn terminal_key_for_chat(&self, chat_id: &str) -> String {
+        self.session_for_chat(chat_id)
+            .map(|session| {
+                if session.terminal_chat.is_empty() {
+                    format!("session:{}", session.id)
+                } else {
+                    session.terminal_chat.clone()
+                }
+            })
+            .unwrap_or_else(|| chat_id.to_owned())
+    }
+
+    pub fn canonical_terminal_key(&self, owner: &str) -> String {
+        if owner.starts_with("global:") {
+            return owner.to_owned();
+        }
+        self.sessions
+            .iter()
+            .find(|session| {
+                session.id == owner
+                    || session.terminal_chat == owner
+                    || session.chats.iter().any(|chat| chat == owner)
+            })
+            .map(|session| {
+                if session.terminal_chat.is_empty() {
+                    format!("session:{}", session.id)
+                } else {
+                    session.terminal_chat.clone()
+                }
+            })
+            .unwrap_or_else(|| owner.to_owned())
+    }
+
+    fn refresh_session_activity(&mut self) {
+        for session in &mut self.sessions {
+            session.working = self
+                .chats
+                .iter()
+                .any(|chat| session.chats.contains(&chat.id) && chat.working);
+            session.terminal_working = self
+                .chats
+                .iter()
+                .any(|chat| session.chats.contains(&chat.id) && chat.terminal_working);
+        }
+    }
+
     pub fn apply_desktop_terminal_activity(&mut self, chat_id: &str, working: bool) {
+        let chat_id = self.canonical_terminal_key(chat_id);
+        let current = self
+            .sessions
+            .iter()
+            .find(|session| session.terminal_chat == chat_id)
+            .map(|session| session.terminal_working)
+            .or_else(|| {
+                self.chats
+                    .iter()
+                    .find(|chat| chat.id == chat_id)
+                    .map(|chat| chat.terminal_working)
+            });
+        if current == Some(working) {
+            return;
+        }
         let revision = self
             .terminal_activity_by_chat
             .values()
@@ -393,16 +547,24 @@ impl AppModel {
 
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
         let mut snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
+        normalize_sessions(&mut snapshot, body);
         let terminal_activity_revision = self.prepare_terminal_activity_version(
             snapshot.terminal_activity_epoch.as_deref(),
             snapshot.terminal_activity_revision,
         );
         if let Some(revision) = terminal_activity_revision {
             for chat in &mut snapshot.chats {
-                if let Some(activity) = self
-                    .terminal_activity_by_chat
-                    .get(chat.id.as_str())
+                let resource = snapshot
+                    .sessions
+                    .iter()
+                    .find(|session| session.chats.contains(&chat.id))
+                    .map(|session| session.terminal_chat.as_str());
+                if let Some(activity) = [Some(chat.id.as_str()), resource]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|key| self.terminal_activity_by_chat.get(key))
                     .filter(|activity| activity.revision > revision)
+                    .max_by_key(|activity| activity.revision)
                     .copied()
                 {
                     chat.terminal_working = activity.working;
@@ -416,10 +578,32 @@ impl AppModel {
                     );
                 }
             }
+            for session in &snapshot.sessions {
+                if self
+                    .terminal_activity_by_chat
+                    .get(&session.terminal_chat)
+                    .is_none_or(|activity| activity.revision <= revision)
+                {
+                    let working = snapshot
+                        .chats
+                        .iter()
+                        .any(|chat| session.chats.contains(&chat.id) && chat.terminal_working);
+                    self.terminal_activity_by_chat.insert(
+                        session.terminal_chat.clone(),
+                        TerminalActivityStamp { revision, working },
+                    );
+                }
+            }
             let snapshot_chats = snapshot
                 .chats
                 .iter()
                 .map(|chat| chat.id.as_str())
+                .chain(
+                    snapshot
+                        .sessions
+                        .iter()
+                        .map(|session| session.terminal_chat.as_str()),
+                )
                 .collect::<HashSet<_>>();
             self.terminal_activity_by_chat.retain(|chat_id, activity| {
                 snapshot_chats.contains(chat_id.as_str()) || activity.revision > revision
@@ -427,6 +611,8 @@ impl AppModel {
         }
         self.folders = snapshot.folders;
         self.chats = snapshot.chats;
+        self.sessions = snapshot.sessions;
+        self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
             .retain(|chat_id| self.chats.iter().any(|chat| &chat.id == chat_id));
@@ -727,6 +913,7 @@ impl AppModel {
             .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default();
         self.apply_draft(body);
+        self.refresh_session_activity();
     }
 
     pub fn apply_agent_catalog(&mut self, body: &Value) -> Result<(), serde_json::Error> {
@@ -749,10 +936,19 @@ impl AppModel {
         let model = self.model.as_deref()?;
         self.agent_backends
             .iter()
+            .find(|backend| backend.id == self.backend)
+            .into_iter()
             .flat_map(|backend| &backend.models)
             .find(|candidate| candidate.id == model)
             .map(|candidate| candidate.name.as_str())
             .or(Some(model))
+    }
+
+    pub fn selected_model_label(&self) -> String {
+        crate::presentation::model_name(
+            self.model.as_deref().unwrap_or_default(),
+            self.selected_model_name(),
+        )
     }
 
     pub fn apply_shortcuts(&mut self, body: &Value) {
@@ -915,6 +1111,8 @@ impl AppModel {
             && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
             && let Some(working) = body.get("terminal_working").and_then(Value::as_bool)
         {
+            let owner = self.canonical_terminal_key(chat_id);
+            let chat_id = owner.as_str();
             let revision = self.prepare_terminal_activity_version(
                 body.get("terminal_activity_epoch").and_then(Value::as_str),
                 body.get("terminal_activity_revision")
@@ -934,18 +1132,33 @@ impl AppModel {
                 );
                 true
             });
-            let completed = accept
-                && self
+            if accept {
+                let shared = self
+                    .sessions
+                    .iter()
+                    .find(|session| session.terminal_chat == chat_id);
+                let member_ids = shared
+                    .map(|session| session.chats.clone())
+                    .unwrap_or_else(|| vec![chat_id.to_owned()]);
+                let shared_is_selected = shared.is_some_and(|session| {
+                    self.selected_chat
+                        .as_ref()
+                        .is_some_and(|selected| session.chats.contains(selected))
+                });
+                for chat in self
                     .chats
                     .iter_mut()
-                    .find(|chat| chat.id == chat_id)
-                    .is_some_and(|chat| {
-                        let completed = chat.terminal_working && !working;
-                        chat.terminal_working = working;
-                        completed
-                    });
-            if completed && self.selected_chat.as_deref() != Some(chat_id) {
-                self.unread_chats.insert(chat_id.to_owned());
+                    .filter(|chat| member_ids.contains(&chat.id))
+                {
+                    let completed = chat.terminal_working && !working;
+                    chat.terminal_working = working;
+                    if completed
+                        && !shared_is_selected
+                        && self.selected_chat.as_deref() != Some(chat.id.as_str())
+                    {
+                        self.unread_chats.insert(chat.id.clone());
+                    }
+                }
             }
         }
         let chat_working = match name {
@@ -959,6 +1172,7 @@ impl AppModel {
         {
             chat.working = working;
         }
+        self.refresh_session_activity();
         if name == "turn-finished"
             && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
             && self.selected_chat.as_deref() != Some(chat_id)
@@ -1164,7 +1378,7 @@ impl AppModel {
     }
 
     pub fn demo() -> Self {
-        Self {
+        let mut model = Self {
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -1190,6 +1404,7 @@ impl AppModel {
                     terminal_working: false,
                 },
             ],
+            sessions: Vec::new(),
             terminal_activity_epoch: None,
             terminal_activity_by_chat: HashMap::new(),
             selected_chat: Some("chat-gpui".into()),
@@ -1246,7 +1461,22 @@ impl AppModel {
             turn_epoch: String::new(),
             turn_watermark_id: 0,
             turn_watermark_sequence: 0,
-        }
+        };
+        model.sessions = model
+            .chats
+            .iter()
+            .map(|chat| SessionSummary {
+                id: chat.id.clone(),
+                folder: chat.folder.clone(),
+                title: chat.title.clone().unwrap_or_else(|| "New Session".into()),
+                chats: vec![chat.id.clone()],
+                branch: chat.branch.clone(),
+                working: chat.working,
+                terminal_working: chat.terminal_working,
+                terminal_chat: chat.id.clone(),
+            })
+            .collect();
+        model
     }
 }
 
@@ -1266,6 +1496,139 @@ fn string_array(values: &[Value]) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn grouped_tree() -> Value {
+        json!({
+            "folders":[{"id":"project","name":"Project"}],
+            "chats":[
+                {"id":"codex-chat","folder":"project","title":"Codex tab","backend":"codex","session":"shared"},
+                {"id":"claude-chat","folder":"project","title":"Claude tab","backend":"claude","session":"shared"}
+            ],
+            "sessions":[{"id":"shared","folder":"project","title":"Workspace task","chats":["codex-chat","claude-chat"],"terminal_chat":"session:shared"}],
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":0
+        })
+    }
+
+    #[test]
+    fn shared_workspace_membership_preserves_independent_chat_selection_and_approvals() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert_eq!(model.session_key_for_chat("codex-chat"), "shared");
+        assert_eq!(model.session_key_for_chat("claude-chat"), "shared");
+        assert_eq!(model.terminal_key_for_chat("claude-chat"), "session:shared");
+        assert_eq!(model.sessions[0].title, "Workspace task");
+        model.select_chat("codex-chat");
+        model.apply_event("interaction", &json!({"chat":"claude-chat","request_id":"approval","interaction_epoch":"epoch","interaction_revision":1}));
+        assert!(model.is_waiting("claude-chat"));
+        assert!(!model.is_waiting("codex-chat"));
+        assert_eq!(model.selected_chat.as_deref(), Some("codex-chat"));
+        let mut updated = grouped_tree();
+        updated["chats"].as_array_mut().unwrap().remove(0);
+        updated["sessions"][0]["chats"] = json!(["claude-chat"]);
+        model.apply_tree(&updated).unwrap();
+        assert_eq!(model.session_key_for_chat("claude-chat"), "shared");
+        assert_eq!(model.sessions[0].title, "Workspace task");
+        assert_eq!(model.terminal_key_for_chat("claude-chat"), "session:shared");
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat":"shared","terminal_working":true,
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":1}),
+        );
+        assert!(model.chats[0].terminal_working);
+        assert!(model.sessions[0].terminal_working);
+        assert_eq!(model.canonical_terminal_key("global:tools"), "global:tools");
+    }
+
+    #[test]
+    fn legacy_trees_normalize_to_single_chat_sessions_with_legacy_terminal_owners() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({"folders":[],"chats":[
+                {"id":"legacy","folder":"project","title":"Old task","backend":"codex"},
+                {"id":"untitled","folder":"project","title":null,"backend":"claude"}
+            ]}))
+            .unwrap();
+        assert_eq!(model.sessions.len(), 2);
+        assert_eq!(model.sessions[0].title, "Old task");
+        assert_eq!(model.sessions[1].title, "New Session");
+        assert_eq!(model.session_key_for_chat("legacy"), "legacy");
+        assert_eq!(model.terminal_key_for_chat("legacy"), "legacy");
+        assert_eq!(model.session_key_for_chat("unlisted"), "unlisted");
+        assert_eq!(model.terminal_key_for_chat("unlisted"), "unlisted");
+    }
+
+    #[test]
+    fn session_activity_aggregates_agents_and_orders_shared_terminal_events_against_tree_snapshots()
+    {
+        let mut model = AppModel::default();
+        let tree = grouped_tree();
+        model.apply_tree(&tree).unwrap();
+        model.select_chat("codex-chat");
+        model.apply_chat(&json!({"working":true}));
+        assert!(model.sessions[0].working);
+        model.apply_chat(&json!({"working":false}));
+        assert!(!model.sessions[0].working);
+        model.apply_event("turn-started", &json!({"chat":"claude-chat"}));
+        assert!(model.sessions[0].working);
+        assert!(!model.chats[0].working);
+        model.apply_event("turn-finished", &json!({"chat":"claude-chat"}));
+        assert!(!model.sessions[0].working);
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat":"session:shared","terminal_working":true,
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":2}),
+        );
+        assert!(model.chats.iter().all(|chat| chat.terminal_working));
+        assert!(model.sessions[0].terminal_working);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.chats.iter().all(|chat| chat.terminal_working));
+        assert!(model.sessions[0].terminal_working);
+        model.unread_chats.clear();
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat":"session:shared","terminal_working":false,
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":3}),
+        );
+        assert!(model.chats.iter().all(|chat| !chat.terminal_working));
+        assert!(!model.sessions[0].terminal_working);
+        assert!(model.unread_chats.is_empty());
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat":"session:shared","terminal_working":true,
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":2}),
+        );
+        assert!(!model.sessions[0].terminal_working);
+        let mut newer_tree = tree.clone();
+        newer_tree["terminal_activity_revision"] = json!(4);
+        model.apply_tree(&newer_tree).unwrap();
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat":"session:shared","terminal_working":true,
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":3}),
+        );
+        assert!(!model.sessions[0].terminal_working);
+    }
+
+    #[test]
+    fn repeated_local_terminal_output_preserves_the_next_daemon_activity_revision() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        model.apply_desktop_terminal_activity("codex-chat", true);
+        for owner in ["session:shared", "shared", "claude-chat"] {
+            model.apply_desktop_terminal_activity(owner, true);
+        }
+        assert_eq!(
+            model.terminal_activity_by_chat["session:shared"].revision,
+            1
+        );
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat":"session:shared","terminal_working":false,
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":2}),
+        );
+        assert!(model.chats.iter().all(|chat| !chat.terminal_working));
+        assert!(!model.sessions[0].terminal_working);
+    }
 
     #[test]
     fn chat_snapshots_restore_the_live_turn_age() {
@@ -2022,6 +2385,21 @@ mod tests {
         }));
         assert!(!model.new_worktree);
         assert!(model.has_messages);
+    }
+
+    #[test]
+    fn catalog_names_are_scoped_to_the_current_assistant() {
+        let mut model = AppModel::default();
+        model.backend = "codex".into();
+        model.model = Some("shared-id".into());
+        model.apply_agent_catalog(&json!({"backends":[
+            {"id":"claude","name":"Claude Code","default_model":"shared-id","models":[{"id":"shared-id","name":"Other assistant model"}],"efforts":[]},
+            {"id":"codex","name":"Codex","default_model":"shared-id","models":[{"id":"shared-id","name":"My team model"}],"efforts":["high"]}
+        ]})).unwrap();
+        assert_eq!(model.selected_model_label(), "My team model");
+        model.model = Some("gpt-5.3-codex".into());
+        assert_eq!(model.selected_model_label(), "GPT-5.3 Codex");
+        assert_eq!(model.model.as_deref(), Some("gpt-5.3-codex"));
     }
 
     #[test]

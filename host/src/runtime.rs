@@ -892,6 +892,24 @@ impl TurnRuntime {
         killed
     }
 
+    /// Releases running and idle resources when a conversation is deleted.
+    pub(crate) fn discard_chat(&self, chat_id: &str) {
+        self.cancel(chat_id);
+        self.drop_session(chat_id);
+        if let Ok(mut commands) = self.inner.commands.lock() {
+            commands.remove(chat_id);
+        }
+        if let Ok(mut todos) = self.inner.todos.lock() {
+            todos.remove(chat_id);
+        }
+        if let Ok(mut interactions) = self.inner.interactions.lock() {
+            interactions.remove(chat_id);
+        }
+        if let Ok(mut records) = self.inner.records.lock() {
+            records.remove(chat_id);
+        }
+    }
+
     /// Where the chat's turn has got to, or `None` when nothing is running.
     pub fn live_turn(&self, chat_id: &str) -> Option<LiveTurn> {
         let active = self.inner.active.lock().ok()?;
@@ -2275,6 +2293,21 @@ read third
         assert_eq!(records[0]["steps"][0]["text"], "$ ls");
         assert_eq!(records[0]["background"], true);
 
+        let idle_child = runtime
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&chat)
+            .expect("the idle assistant process is retained between turns")
+            .child
+            .clone();
+        runtime.discard_chat(&chat);
+        assert!(!runtime.inner.sessions.lock().unwrap().contains_key(&chat));
+        assert!(
+            idle_child.lock().unwrap().try_wait().unwrap().is_some(),
+            "deleting a conversation must stop its retained idle process"
+        );
         drop(runtime);
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
