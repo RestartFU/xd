@@ -512,6 +512,21 @@ impl AppModel {
     }
 
     pub fn apply_desktop_terminal_activity(&mut self, chat_id: &str, working: bool) {
+        let chat_id = self.canonical_terminal_key(chat_id);
+        let current = self
+            .sessions
+            .iter()
+            .find(|session| session.terminal_chat == chat_id)
+            .map(|session| session.terminal_working)
+            .or_else(|| {
+                self.chats
+                    .iter()
+                    .find(|chat| chat.id == chat_id)
+                    .map(|chat| chat.terminal_working)
+            });
+        if current == Some(working) {
+            return;
+        }
         let revision = self
             .terminal_activity_by_chat
             .values()
@@ -1591,6 +1606,27 @@ mod tests {
             &json!({"chat":"session:shared","terminal_working":true,
             "terminal_activity_epoch":"daemon","terminal_activity_revision":3}),
         );
+        assert!(!model.sessions[0].terminal_working);
+    }
+
+    #[test]
+    fn repeated_local_terminal_output_preserves_the_next_daemon_activity_revision() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        model.apply_desktop_terminal_activity("codex-chat", true);
+        for owner in ["session:shared", "shared", "claude-chat"] {
+            model.apply_desktop_terminal_activity(owner, true);
+        }
+        assert_eq!(
+            model.terminal_activity_by_chat["session:shared"].revision,
+            1
+        );
+        model.apply_event(
+            "terminal-activity",
+            &json!({"chat":"session:shared","terminal_working":false,
+            "terminal_activity_epoch":"daemon","terminal_activity_revision":2}),
+        );
+        assert!(model.chats.iter().all(|chat| !chat.terminal_working));
         assert!(!model.sessions[0].terminal_working);
     }
 

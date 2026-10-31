@@ -338,7 +338,9 @@ internal fun ChatScreen(
             }
             return@Scaffold
         }
-        if (!state.loading && items.isEmpty() && state.error == null && !state.working) {
+        if (state.transcriptLoaded && !state.loading && !state.hasOlderMessages &&
+            items.isEmpty() && state.error == null && !state.working
+        ) {
             Box(
                 Modifier.fillMaxSize().padding(padding).padding(horizontal = 28.dp),
                 contentAlignment = Alignment.Center,

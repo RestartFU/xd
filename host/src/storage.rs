@@ -6308,11 +6308,10 @@ mod tests {
             .unwrap();
         let second_id = second["id"].as_str().unwrap();
         assert_eq!(first["terminal_chat"], second["terminal_chat"]);
-        assert!(
-            store
-                .new_chat(&json!({"session": first["session"], "worktree": "new"}))
-                .is_err()
-        );
+        let error = store
+            .new_chat(&json!({"session": first["session"], "worktree": {"kind": "new"}}))
+            .unwrap_err();
+        assert!(error.to_string().contains("shares its session's workspace"));
         store
             .set_draft(&json!({"chat": first_id, "text": "codex draft"}))
             .unwrap();

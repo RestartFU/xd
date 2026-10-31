@@ -338,6 +338,7 @@ public object TranscriptMachine {
                 liveItems = liveItems,
                 liveSegment = if (chat.working) chat.segment.orEmpty() else "",
                 pendingUser = null,
+                transcriptLoaded = true,
                 loading = false,
                 loadingOlder = false,
                 error = null,

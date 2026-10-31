@@ -4867,16 +4867,8 @@ impl XdDesktop {
             terminal_id,
             working,
         );
-        let unchanged = self
-            .endpoint_model(endpoint)
-            .chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .is_some_and(|chat| chat.terminal_working == terminal_working);
-        if !unchanged {
-            self.endpoint_model_mut(endpoint)
-                .apply_desktop_terminal_activity(&chat_id, terminal_working);
-        }
+        self.endpoint_model_mut(endpoint)
+            .apply_desktop_terminal_activity(&chat_id, terminal_working);
     }
 
     fn record_terminal_tab_activity(&mut self, endpoint: ChatEndpoint, body: &Value) {

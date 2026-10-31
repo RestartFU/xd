@@ -67,6 +67,7 @@ public data class ChatState(
     val interactionRevision: Long = 0,
     val interactionEpoch: String = "",
     val pendingUser: TranscriptItem? = null,
+    val transcriptLoaded: Boolean = false,
     val loading: Boolean = false,
     val loadingOlder: Boolean = false,
     val hasOlderMessages: Boolean = false,
