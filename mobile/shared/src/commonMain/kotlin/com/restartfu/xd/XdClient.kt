@@ -28,6 +28,10 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.booleanOrNull
@@ -53,18 +57,26 @@ public class XdClient(
     public val hasCredentials: StateFlow<Boolean> = actor.hasCredentials
     public val credentialsReady: StateFlow<Boolean> = actor.credentialsReady
     public val tree: StateFlow<TreeSnapshot> = treeStore.state
+    private val _sessionGeneration = MutableStateFlow(0L)
+    /** Changes when forgetting a remote invalidates all retained chat handles. */
+    public val sessionGeneration: StateFlow<Long> = _sessionGeneration.asStateFlow()
 
     private val pendingInteractions = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     private val _waitingChats = MutableStateFlow<Set<String>>(emptySet())
-    private val _unreadChats = MutableStateFlow<Set<String>>(emptySet())
-    private val terminalBusy = mutableSetOf<String>()
+    private val unreadTurns = MutableStateFlow<Set<String>>(emptySet())
+    private val unreadTerminalOwners = MutableStateFlow<Set<String>>(emptySet())
+    private val terminalBusy = MutableStateFlow<Set<String>>(emptySet())
     private val visibleChat = MutableStateFlow<String?>(null)
 
     /** Chats with an approval or question waiting on the user, across every chat. */
     public val waitingChats: StateFlow<Set<String>> = _waitingChats.asStateFlow()
 
     /** Chats whose turn finished while they were not open. */
-    public val unreadChats: StateFlow<Set<String>> = _unreadChats.asStateFlow()
+    public val unreadChats: StateFlow<Set<String>> = combine(
+        unreadTurns, unreadTerminalOwners, treeStore.state,
+    ) { turns, owners, snapshot ->
+        turns + owners.flatMap { treeStore.terminalChatIds(snapshot, it) }
+    }.stateIn(scope, SharingStarted.Eagerly, emptySet())
 
     /** The displayed transcript; cached background tabs can still become unread. */
     public fun setVisibleChat(chatId: String?) {
@@ -73,7 +85,10 @@ public class XdClient(
     }
 
     public fun markSeen(chatId: String) {
-        _unreadChats.update { it - chatId }
+        unreadTurns.update { it - chatId }
+        unreadTerminalOwners.update { owners ->
+            owners.filterNot { it == chatId || chatId in treeStore.terminalChatIds(it) }.toSet()
+        }
     }
 
     private fun trackSignals(eventName: String?, chatId: String, event: kotlinx.serialization.json.JsonObject) {
@@ -86,16 +101,24 @@ public class XdClient(
                 pendingInteractions.update { it + (chatId to (it[chatId].orEmpty() - requestId)) }
             }
             "interactions-cleared" -> pendingInteractions.update { it - chatId }
-            "turn-started" -> _unreadChats.update { it - chatId }
-            "turn-finished" -> if (chatId != visibleChat.value) _unreadChats.update { it + chatId }
+            "turn-started" -> unreadTurns.update { it - chatId }
+            "turn-finished" -> if (chatId != visibleChat.value) unreadTurns.update { it + chatId }
             // A terminal agent finishing is the same news as a chat turn finishing.
             "terminal-activity" -> {
                 val working = (event["terminal_working"] as? JsonPrimitive)?.booleanOrNull ?: return
+                val members = treeStore.terminalChatIds(chatId)
+                val owner = treeStore.terminalOwner(chatId)
                 if (working) {
-                    terminalBusy += chatId
-                    _unreadChats.update { it - chatId }
-                } else if (terminalBusy.remove(chatId) && chatId != visibleChat.value) {
-                    _unreadChats.update { it + chatId }
+                    terminalBusy.update { it + owner }
+                    unreadTerminalOwners.update { owners ->
+                        owners.filterNot { treeStore.terminalOwner(it) == owner }.toSet()
+                    }
+                } else {
+                    val previouslyBusy = terminalBusy.getAndUpdate { it - owner - members }
+                    val finished = owner in previouslyBusy || members.any { it in previouslyBusy }
+                    if (finished && visibleChat.value !in members && visibleChat.value != chatId) {
+                        unreadTerminalOwners.update { it + owner }
+                    }
                 }
             }
             else -> return
@@ -174,6 +197,13 @@ public class XdClient(
         actor.forget()
         treeStore.clear()
         takeSessions().values.forEach { it.core.invalidate() }
+        pendingInteractions.value = emptyMap()
+        _waitingChats.value = emptySet()
+        unreadTurns.value = emptySet()
+        unreadTerminalOwners.value = emptySet()
+        terminalBusy.value = emptySet()
+        visibleChat.value = null
+        _sessionGeneration.update { it + 1 }
     }
 
     public fun openChat(chatId: String): ChatSession {

@@ -154,7 +154,7 @@ Desktop has a 256px project sidebar, a session header, a separate 43px chat-tab 
 
 Changes, Files, Browser and Terminal belong to the session workspace. Chat tabs control independent conversations. Desktop settings use a bounded panel up to 900×760px, with section navigation that changes to a horizontal strip in compact windows. The application minimum is 760×560px.
 
-Android uses bottom navigation on compact screens and a navigation rail from 600dp. Chat tabs scroll horizontally and reveal the selected chat. Changes, Files and Terminal remain separate workspace tabs below them. Touch controls preserve 48dp targets; dialogs and reading areas respect system insets and enlarged text.
+Android uses bottom navigation outside an open chat on compact screens and a navigation rail from 600dp. Phone chats use the header back action to return to projects. Chat tabs scroll horizontally and reveal the selected chat. Changes, Files and Terminal remain separate workspace tabs below them. Touch controls preserve 48dp targets; dialogs and reading areas respect system insets and enlarged text.
 
 ## Elevation & Depth
 
@@ -170,7 +170,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 **Project navigation.** Each project reveals its sessions. One sidebar row represents a session even when it contains several chats. The row restores that session's last active chat and aggregates working, waiting and unread activity.
 
-**Chat tabs.** Each tab has an agent mark and title. Add creates another chat sharing the workspace. Close hides a tab without deleting history; Reopen on desktop and All chats on Android restore it. Explicit rename and confirmed delete remain separate actions. Desktop keeps the final visible chat open. Android can hide all tabs and shows a saved-chats state with reopen and create actions.
+**Chat tabs.** Each tab has an agent mark and title. Add creates another chat sharing the workspace. Close hides a tab without deleting history; Reopen on desktop and All chats on Android restore it. Phone tabs omit inline close buttons; All chats contains Close chat. Explicit rename and confirmed delete remain separate actions. Desktop keeps the final visible chat open. Android can hide all tabs and shows a saved-chats state with reopen and create actions.
 
 **Composer.** A bordered translucent desktop surface, or opaque Material surface on Android, holds the editor, attachments, agent options and send action. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft.
 

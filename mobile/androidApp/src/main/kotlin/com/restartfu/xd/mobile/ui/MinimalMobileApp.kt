@@ -119,6 +119,13 @@ private val ChatSelectionsSaver = listSaver<Map<String, String>, String>(
 internal class MobileWorkspaceModels : ViewModel() {
     private val chats = mutableMapOf<String, SessionViewModelOwner>()
     private val workspaces = mutableMapOf<String, SessionViewModelOwner>()
+    private var generation: Long? = null
+
+    fun bindGeneration(value: Long) {
+        if (generation == value) return
+        clearStores()
+        generation = value
+    }
 
     fun chat(id: String): ViewModelStoreOwner = chats.getOrPut(id) { SessionViewModelOwner() }
     fun workspace(id: String): ViewModelStoreOwner = workspaces.getOrPut(id) { SessionViewModelOwner() }
@@ -129,10 +136,14 @@ internal class MobileWorkspaceModels : ViewModel() {
         chats.keys.filterNot { it in chatIds }.forEach { chats.remove(it)?.viewModelStore?.clear() }
     }
 
-    override fun onCleared() {
+    private fun clearStores() {
         workspaces.values.forEach { it.viewModelStore.clear() }
         chats.values.forEach { it.viewModelStore.clear() }
+        workspaces.clear()
+        chats.clear()
     }
+
+    override fun onCleared() = clearStores()
 }
 
 @Composable
@@ -148,6 +159,8 @@ internal fun MinimalMobileApp(
     val scope = rememberCoroutineScope()
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
     val stores: MobileWorkspaceModels = viewModel()
+    val sessionGeneration by model.client.sessionGeneration.collectAsStateWithLifecycle()
+    remember(stores, sessionGeneration) { stores.bindGeneration(sessionGeneration) }
     val savedChatState = rememberSaveableStateHolder()
     var activeSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var chatSelections by rememberSaveable(stateSaver = ChatSelectionsSaver) { mutableStateOf(emptyMap()) }
@@ -203,6 +216,8 @@ internal fun MinimalMobileApp(
     BackHandler(enabled = mobileDestination != MobileDestination.PROJECTS, onBack = showProjects)
     val expanded = LocalConfiguration.current.screenWidthDp >= 600
     val imeVisible = WindowInsets.isImeVisible
+    val chatOpen = mobileDestination == MobileDestination.SESSIONS && activeChat != null
+    val showBottomNavigation = !expanded && !imeVisible && !chatOpen
 
     LaunchedEffect(operationError) {
         operationError?.let { snackbar.showSnackbar(it) }
@@ -221,6 +236,7 @@ internal fun MinimalMobileApp(
                     mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
                         val tabStrip: @Composable () -> Unit = {
                             SessionTabStrip(
+                                compact = !expanded,
                                 chats = sessionChats,
                                 hiddenChatIds = hiddenChatIds,
                                 selectedChatId = activeChat?.id,
@@ -285,12 +301,12 @@ internal fun MinimalMobileApp(
                     )
                 }
             }
-            if (!expanded && !imeVisible) {
+            if (showBottomNavigation) {
                 XdNavigationBar(mobileDestination, showProjects, showSessions, showTerminal)
             }
         }
     }
-    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = if (expanded) 24.dp else 96.dp))
+    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = if (showBottomNavigation) 96.dp else 24.dp))
     }
     if (settingsOpen) {
         MinimalSettingsDialog(settings, onDismiss = { settingsOpen = false }, onDisconnect = {
@@ -549,6 +565,7 @@ private fun MinimalGlobalTerminal(
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun SessionTabStrip(
+    compact: Boolean,
     chats: List<ChatSummary>,
     hiddenChatIds: List<String>,
     selectedChatId: String?,
@@ -595,8 +612,10 @@ private fun SessionTabStrip(
                                 style = MaterialTheme.typography.labelLarge,
                                 color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        IconButton(onClick = { closeTab(chat.id) }, modifier = Modifier.size(48.dp)) {
-                            Icon(painterResource(R.drawable.ic_close), "Close ${chat.title}", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (!compact) {
+                            IconButton(onClick = { closeTab(chat.id) }, modifier = Modifier.size(48.dp)) {
+                                Icon(painterResource(R.drawable.ic_close), "Close ${chat.title}", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
                 }
@@ -619,6 +638,10 @@ private fun SessionTabStrip(
                 }
                 chats.firstOrNull { it.id == selectedChatId }?.let { active ->
                     HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Close chat") },
+                        onClick = { openMenu = false; closeTab(active.id) },
+                    )
                     DropdownMenuItem(
                         text = { Text("Rename chat") },
                         onClick = { openMenu = false; renameChat(active) },

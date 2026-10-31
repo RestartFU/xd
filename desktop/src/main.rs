@@ -3841,10 +3841,7 @@ impl XdDesktop {
                 path,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                    || self.diff_panel.is_none()
-                {
+                if generation != self.diff_generation || self.diff_panel.is_none() {
                     return;
                 }
                 let output = value
@@ -3865,7 +3862,7 @@ impl XdDesktop {
                         }
                         if let Some(host) = self.active_host().cloned()
                             && let Err(error) = host.diff_read(
-                                &chat_id,
+                                self.model.selected_chat.as_deref().unwrap_or(&chat_id),
                                 "branch-status",
                                 Some(base),
                                 None,
@@ -3897,9 +3894,7 @@ impl XdDesktop {
                 chat_id,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 match serde_json::from_value::<GitStatus>(value.clone()) {
@@ -3916,7 +3911,10 @@ impl XdDesktop {
                         }
                         if check_pull_request
                             && let Some(host) = self.active_host().cloned()
-                            && let Err(error) = host.git_pull_request_status(&chat_id, generation)
+                            && let Err(error) = host.git_pull_request_status(
+                                self.model.selected_chat.as_deref().unwrap_or(&chat_id),
+                                generation,
+                            )
                             && let Some(diff) = &mut self.diff_panel
                         {
                             diff.pr_loading = false;
@@ -3934,12 +3932,11 @@ impl XdDesktop {
             }
             RequestKind::GitState { .. } => {}
             RequestKind::FileBrowseList {
-                chat_id,
+                chat_id: _,
                 path,
                 generation,
             } => {
                 if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
                     || !self.diff_panel.as_ref().is_some_and(|diff| diff.files_mode)
                 {
                     return;
@@ -3965,12 +3962,11 @@ impl XdDesktop {
                 }
             }
             RequestKind::FileBrowseRead {
-                chat_id,
+                chat_id: _,
                 path,
                 generation,
             } => {
                 if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
                     || !self.diff_panel.as_ref().is_some_and(|diff| diff.files_mode)
                 {
                     return;
@@ -4061,14 +4057,12 @@ impl XdDesktop {
                 self.open_files.set_saved(&path, content);
             }
             RequestKind::FileBrowseWrite {
-                chat_id,
+                chat_id: _,
                 path,
                 content,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(preview) = self
@@ -4093,13 +4087,11 @@ impl XdDesktop {
                 }
             }
             RequestKind::GitCommit {
-                chat_id,
+                chat_id: _,
                 message,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if self.git_commit_message.trim() == message {
@@ -4114,12 +4106,10 @@ impl XdDesktop {
                 self.refresh_diff(cx);
             }
             RequestKind::GitPush {
-                chat_id,
+                chat_id: _,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(diff) = &mut self.diff_panel {
@@ -4129,12 +4119,10 @@ impl XdDesktop {
                 self.refresh_diff(cx);
             }
             RequestKind::GitPullRequestStatus {
-                chat_id,
+                chat_id: _,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(diff) = &mut self.diff_panel {
@@ -4147,12 +4135,10 @@ impl XdDesktop {
                 }
             }
             RequestKind::GitPullRequestCreate {
-                chat_id,
+                chat_id: _,
                 generation,
             } => {
-                if generation != self.diff_generation
-                    || self.model.selected_chat.as_deref() != Some(chat_id.as_str())
-                {
+                if generation != self.diff_generation {
                     return;
                 }
                 if let Some(diff) = &mut self.diff_panel {
@@ -4980,7 +4966,7 @@ impl XdDesktop {
                 }
             }
             "terminal-opened" | "terminal-output" | "terminal-resized" | "terminal-closed" => {}
-            "git-draft-finished" if self.event_is_active(&body) => {
+            "git-draft-finished" => {
                 let kind = body.get("kind").and_then(Value::as_str).unwrap_or_default();
                 let expected = match kind {
                     "commit" => format!("gpui-{}", self.diff_generation),
@@ -15871,6 +15857,109 @@ mod tests {
                 Some("implementation")
             );
             assert!(desktop.settings.hidden_chat_tabs[&key].is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn shared_file_operations_and_git_drafts_finish_after_switching_chat_tabs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.diff_generation = 41;
+            desktop.diff_panel = Some(DiffPanel {
+                files_mode: true,
+                file_loading: true,
+                ..DiffPanel::default()
+            });
+            desktop.native_pane = NativePane::Files;
+            desktop.select_minimal_session("atlas".into(), "review".into(), AgentCli::Claude, cx);
+            assert_eq!(desktop.diff_generation, 41);
+            desktop.handle_reply(
+                RequestKind::FileBrowseRead {
+                    chat_id: "implementation".into(),
+                    path: "src/main.rs".into(),
+                    generation: 41,
+                },
+                serde_json::json!({"ok":true,"content":"loaded"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            let preview = desktop
+                .diff_panel
+                .as_mut()
+                .unwrap()
+                .file_preview
+                .as_mut()
+                .unwrap();
+            preview.content = "edited".into();
+            preview.saving = true;
+            desktop.handle_reply(
+                RequestKind::FileBrowseWrite {
+                    chat_id: "implementation".into(),
+                    path: "src/main.rs".into(),
+                    content: "edited".into(),
+                    generation: 41,
+                },
+                serde_json::json!({"ok":true}).as_object().unwrap().clone(),
+                None,
+                cx,
+            );
+            let diff = desktop.diff_panel.as_mut().unwrap();
+            assert!(!diff.file_loading);
+            let preview = diff.file_preview.as_ref().unwrap();
+            assert_eq!(preview.original, "edited");
+            assert!(!preview.saving);
+            diff.action = Some("Writing a pull request".into());
+            desktop.handle_event(
+                "git-draft-finished",
+                serde_json::json!({
+                    "chat":"implementation","request":"gpui-pr-41","kind":"pull-request",
+                    "success":true,"title":"Shared result","body":"Draft body"
+                }),
+                None,
+                cx,
+            );
+            let diff = desktop.diff_panel.as_ref().unwrap();
+            assert!(diff.action.is_none());
+            assert_eq!(diff.pr_title.as_deref(), Some("Shared result"));
+            let mut other = desktop.model.chats[0].clone();
+            other.id = "other-workspace".into();
+            desktop.model.chats.push(other);
+            desktop.select_minimal_session(
+                "atlas".into(),
+                "other-workspace".into(),
+                AgentCli::Codex,
+                cx,
+            );
+            desktop.diff_panel = Some(DiffPanel {
+                files_mode: true,
+                ..DiffPanel::default()
+            });
+            desktop.handle_reply(
+                RequestKind::FileBrowseRead {
+                    chat_id: "implementation".into(),
+                    path: "src/main.rs".into(),
+                    generation: 41,
+                },
+                serde_json::json!({"ok":true,"content":"stale"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            assert!(desktop.diff_panel.as_ref().unwrap().file_preview.is_none());
         });
     }
 

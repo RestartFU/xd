@@ -139,6 +139,18 @@
         2400
       ],
       "after": "android-new-chat-dark-after.png"
+    },
+    {
+      "surface": "Android phone keyboard",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "before_base": null,
+      "before_state": "Redesigned phone UI before keyboard resize correction",
+      "before": "android-phone-keyboard-dark-before.png",
+      "after": "android-phone-keyboard-dark-after.png"
     }
   ]
 }

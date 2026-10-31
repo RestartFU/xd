@@ -31,7 +31,8 @@ Native chat retains activity, questions, and approvals.
 **Changes**, **Files**, and **Terminal** belong to the shared session. Switching
 chat tabs keeps the same workspace, open file state, changes view, and shell.
 Closing a chat tab hides it without deleting its history or stopping its agent;
-use **All chats** to reopen it. Permanent deletion is a separate action with a
+use **All chats** to close or reopen it. Phone chats hide the bottom app navigation
+and inline close buttons; the header back action returns to projects. Permanent deletion is a separate action with a
 confirmation.
 
 Older hosts appear as one chat per session. Update the connected host before

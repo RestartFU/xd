@@ -2,6 +2,7 @@ package com.restartfu.xd
 
 import com.restartfu.xd.credentials.MemoryCredentialStore
 import com.restartfu.xd.model.TranscriptKind
+import com.restartfu.xd.model.minimalSessions
 import com.restartfu.xd.net.FakeSocketFactory
 import com.restartfu.xd.net.FakeSocket
 import com.restartfu.xd.net.Link
@@ -155,7 +156,9 @@ class XdClientVerticalSliceTest {
         assertTrue(cancelling.await().isFailure)
         assertEquals("cancel rejected", session.state.value.error)
 
+        val oldGeneration = client.sessionGeneration.value
         client.forget()
+        assertEquals(oldGeneration + 1, client.sessionGeneration.value)
         assertTrue(client.tree.value.chats.isEmpty())
         assertTrue(client.tree.value.folders.isEmpty())
         assertTrue(session.state.value.messages.isEmpty())
@@ -193,9 +196,49 @@ class XdClientVerticalSliceTest {
         assertTrue("cached" in client.unreadChats.value)
         assertFalse("foreground" in client.unreadChats.value)
         client.setVisibleChat("cached")
+        runCurrent()
         assertFalse("cached" in client.unreadChats.value)
         cached.close()
         sharedShell.close()
+    }
+
+    @Test
+    fun sharedTerminalSignalsFollowMembersAndDoNotClearIndependentTurns() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val connecting = async { client.connect(testConnection()) }
+        runCurrent()
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receiveReadinessTreeReply()
+        runCurrent()
+        connecting.await()
+        socket.receive("""{"ok":true,"folders":[{"id":"folder","name":"Work"}],"chats":[
+            {"id":"one","folder":"folder","session":"workspace","title":"One","backend":"codex","working":false},
+            {"id":"two","folder":"folder","session":"workspace","title":"Two","backend":"claude","working":false}],
+            "sessions":[{"id":"workspace","folder":"folder","title":"Workspace","chats":["one","two"],"terminal_chat":"session:workspace"}]}""".replace("\n", ""))
+        runCurrent()
+        socket.receive("""{"event":"terminal-activity","chat":"session:workspace","terminal_working":true}""")
+        runCurrent()
+        assertTrue(client.tree.value.chats.all { it.terminalWorking })
+        assertTrue(client.tree.value.minimalSessions("folder").single().working)
+        socket.receive("""{"event":"terminal-activity","chat":"session:workspace","terminal_working":false}""")
+        runCurrent()
+        assertFalse(client.tree.value.chats.any { it.terminalWorking })
+        assertEquals(setOf("one", "two"), client.unreadChats.value)
+        client.setVisibleChat("two")
+        runCurrent()
+        assertTrue(client.unreadChats.value.isEmpty(), "seeing any member sees the shared terminal completion")
+        socket.receive("""{"event":"turn-finished","chat":"one","ok":true}""")
+        socket.receive("""{"event":"terminal-activity","chat":"one","terminal_working":true}""")
+        socket.receive("""{"event":"terminal-activity","chat":"session:workspace","terminal_working":false}""")
+        runCurrent()
+        assertEquals(setOf("one"), client.unreadChats.value, "shared terminal state must preserve another chat's unread turn")
+        assertFalse(client.tree.value.chats.any { it.terminalWorking })
+        client.forget()
+        runCurrent()
+        assertTrue(client.unreadChats.value.isEmpty())
     }
 
     @Test
