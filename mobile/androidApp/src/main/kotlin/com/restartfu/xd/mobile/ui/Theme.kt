@@ -14,19 +14,7 @@ import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import com.restartfu.xd.mobile.R
 
-/**
- * The desktop's colours, so the two clients look like one program.
- *
- * Material's own dark scheme is built around a violet, which is nothing to do
- * with anything else here: put the phone beside the desktop and they read as
- * two applications that happen to show the same chats. These values are the
- * desktop palette — near-black surfaces, one blue accent, and the same
- * greens and reds the desktop uses for state.
- *
- * Dark only, and not because a light scheme would be hard: the desktop has no
- * light mode, and a phone that turned white at sunset would be the same
- * mismatch again from the other side.
- */
+/** Legacy accent preferences remain readable for compatibility. */
 public enum class AccentPreset(
     val key: String,
     val label: String,
@@ -141,8 +129,8 @@ public enum class MinimalThemePreset(
     val label: String,
     val preview: Color,
 ) {
-    DARK("dark", "Dark", Color(0xFF161618)),
-    LIGHT("light", "Light", Color(0xFFFFFFFF)),
+    DARK("dark", "Dark", Color(0xFF1B1B1B)),
+    LIGHT("light", "Light", Color(0xFFF4F4F4)),
     ;
 
     public companion object {
@@ -169,108 +157,60 @@ public data class XdSignals(
 
 public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
     MinimalThemePreset.DARK -> XdSignals(
-        working = Color(0xFF34D399),
-        waiting = Color(0xFFFBBF24),
-        done = Color(0xFF6AA1FF),
-        rule = Color(0xFF252528),
-        link = Color(0xFF7AA5FF),
-        faint = Color(0xFF76767D),
-        diffAdded = Color(0xFF10261A),
-        diffRemoved = Color(0xFF2C1515),
+        working = Color(0xFF8DCEB0), waiting = Color(0xFFE2C28D),
+        done = Color(0xFFC2C2C2), rule = Color(0xFF393939),
+        link = Color(0xFFDEDEDE), faint = Color(0xFFABABAB),
+        diffAdded = Color(0xFF263B30), diffRemoved = Color(0xFF462C30),
     )
     MinimalThemePreset.LIGHT -> XdSignals(
-        working = Color(0xFF047857),
-        waiting = Color(0xFF92400E),
-        done = Color(0xFF1D4ED8),
-        rule = Color(0xFFE4E4E7),
-        link = Color(0xFF1D4ED8),
-        faint = Color(0xFF6B6B74),
-        diffAdded = Color(0xFFE6F5EB),
-        diffRemoved = Color(0xFFFCEBEB),
+        working = Color(0xFF226347), waiting = Color(0xFF745319),
+        done = Color(0xFF555555), rule = Color(0xFFD4D4D4),
+        link = Color(0xFF444444), faint = Color(0xFF606060),
+        diffAdded = Color(0xFFE0EEE5), diffRemoved = Color(0xFFF4E2E5),
     )
 }
 
 public val LocalXdSignals = staticCompositionLocalOf { xdSignals(MinimalThemePreset.DARK) }
 
-/**
- * The desktop palette as complete Material roles, so no default violet leaks
- * in: a near-black or near-white canvas, hairline borders, and one blue for
- * the primary action.
- */
+/** Neutral charcoal and silver expressed through complete Material color roles. */
 public fun minimalColors(theme: MinimalThemePreset): ColorScheme = when (theme) {
     MinimalThemePreset.DARK -> darkColorScheme(
-        primary = Color(0xFF2F6BF2),
-        onPrimary = Color(0xFFFFFFFF),
-        primaryContainer = Color(0xFF1F1F23),
-        onPrimaryContainer = Color(0xFFF1F3F7),
-        secondary = Color(0xFFA3A3A8),
-        onSecondary = Color(0xFF0B0B0C),
-        secondaryContainer = Color(0xFF1D1D20),
-        onSecondaryContainer = Color(0xFFF1F3F7),
-        tertiary = Color(0xFF7AA5FF),
-        onTertiary = Color(0xFF0B0B0C),
-        tertiaryContainer = Color(0xFF16233D),
-        onTertiaryContainer = Color(0xFFD6E3FF),
-        background = Color(0xFF0B0B0C),
-        onBackground = Color(0xFFF1F3F7),
-        surface = Color(0xFF0B0B0C),
-        onSurface = Color(0xFFF1F3F7),
-        surfaceVariant = Color(0xFF161618),
-        onSurfaceVariant = Color(0xFFA3A3A8),
-        surfaceContainerLowest = Color(0xFF0B0B0C),
-        surfaceContainerLow = Color(0xFF0F0F10),
-        surfaceContainer = Color(0xFF161618),
-        surfaceContainerHigh = Color(0xFF1D1D20),
-        surfaceContainerHighest = Color(0xFF1F1F23),
-        surfaceBright = Color(0xFF1F1F23),
-        surfaceDim = Color(0xFF0B0B0C),
-        inverseSurface = Color(0xFFF1F3F7),
-        inverseOnSurface = Color(0xFF0B0B0C),
-        inversePrimary = Color(0xFF1D4ED8),
-        outline = Color(0xFF3F3F46),
-        outlineVariant = Color(0xFF252528),
-        scrim = Color(0xFF000000),
-        error = Color(0xFFF87171),
-        onError = Color(0xFF0B0B0C),
-        errorContainer = Color(0xFF2A1616),
-        onErrorContainer = Color(0xFFFCC9C9),
+        primary = Color(0xFFDEDEDE), onPrimary = Color(0xFF1B1B1B),
+        primaryContainer = Color(0xFF383838), onPrimaryContainer = Color(0xFFF1F1F1),
+        secondary = Color(0xFFB1B1B1), onSecondary = Color(0xFF1B1B1B),
+        secondaryContainer = Color(0xFF383838), onSecondaryContainer = Color(0xFFF1F1F1),
+        tertiary = Color(0xFFC2C2C2), onTertiary = Color(0xFF1B1B1B),
+        tertiaryContainer = Color(0xFF383838), onTertiaryContainer = Color(0xFFF1F1F1),
+        background = Color(0xFF101010), onBackground = Color(0xFFF1F1F1),
+        surface = Color(0xFF1B1B1B), onSurface = Color(0xFFF1F1F1),
+        surfaceVariant = Color(0xFF303030), onSurfaceVariant = Color(0xFFB1B1B1),
+        surfaceContainerLowest = Color(0xFF101010), surfaceContainerLow = Color(0xFF202020),
+        surfaceContainer = Color(0xFF2A2A2A), surfaceContainerHigh = Color(0xFF303030),
+        surfaceContainerHighest = Color(0xFF383838), surfaceBright = Color(0xFF383838),
+        surfaceDim = Color(0xFF1B1B1B), inverseSurface = Color(0xFFF1F1F1),
+        inverseOnSurface = Color(0xFF202020), inversePrimary = Color(0xFF363636),
+        outline = Color(0xFF858585), outlineVariant = Color(0xFF414141),
+        scrim = Color(0xFF000000), error = Color(0xFFEFA7AD), onError = Color(0xFF462C30),
+        errorContainer = Color(0xFF462C30), onErrorContainer = Color(0xFFF6D9DC),
     )
     MinimalThemePreset.LIGHT -> lightColorScheme(
-        primary = Color(0xFF1D4ED8),
-        onPrimary = Color(0xFFFFFFFF),
-        primaryContainer = Color(0xFFE9E9EC),
-        onPrimaryContainer = Color(0xFF18181B),
-        secondary = Color(0xFF52525B),
-        onSecondary = Color(0xFFFFFFFF),
-        secondaryContainer = Color(0xFFEFEFF1),
-        onSecondaryContainer = Color(0xFF18181B),
-        tertiary = Color(0xFF1D4ED8),
-        onTertiary = Color(0xFFFFFFFF),
-        tertiaryContainer = Color(0xFFDCE6FB),
-        onTertiaryContainer = Color(0xFF13305A),
-        background = Color(0xFFFCFCFC),
-        onBackground = Color(0xFF18181B),
-        surface = Color(0xFFFCFCFC),
-        onSurface = Color(0xFF18181B),
-        surfaceVariant = Color(0xFFFFFFFF),
-        onSurfaceVariant = Color(0xFF52525B),
-        surfaceContainerLowest = Color(0xFFFFFFFF),
-        surfaceContainerLow = Color(0xFFF5F5F6),
-        surfaceContainer = Color(0xFFFFFFFF),
-        surfaceContainerHigh = Color(0xFFEFEFF1),
-        surfaceContainerHighest = Color(0xFFE9E9EC),
-        surfaceBright = Color(0xFFFFFFFF),
-        surfaceDim = Color(0xFFE9E9EC),
-        inverseSurface = Color(0xFF18181B),
-        inverseOnSurface = Color(0xFFFCFCFC),
-        inversePrimary = Color(0xFF7AA5FF),
-        outline = Color(0xFFA1A1AA),
-        outlineVariant = Color(0xFFE4E4E7),
-        scrim = Color(0xFF000000),
-        error = Color(0xFFB91C1C),
-        onError = Color(0xFFFFFFFF),
-        errorContainer = Color(0xFFFDEEEE),
-        onErrorContainer = Color(0xFF5C140E),
+        primary = Color(0xFF363636), onPrimary = Color(0xFFFFFFFF),
+        primaryContainer = Color(0xFFE4E4E4), onPrimaryContainer = Color(0xFF202020),
+        secondary = Color(0xFF5A5A5A), onSecondary = Color(0xFFFFFFFF),
+        secondaryContainer = Color(0xFFFFFFFF), onSecondaryContainer = Color(0xFF202020),
+        tertiary = Color(0xFF444444), onTertiary = Color(0xFFFFFFFF),
+        tertiaryContainer = Color(0xFFE4E4E4), onTertiaryContainer = Color(0xFF202020),
+        background = Color(0xFFF4F4F4), onBackground = Color(0xFF202020),
+        surface = Color(0xFFFAFAFA), onSurface = Color(0xFF202020),
+        surfaceVariant = Color(0xFFE4E4E4), onSurfaceVariant = Color(0xFF5A5A5A),
+        surfaceContainerLowest = Color(0xFFFFFFFF), surfaceContainerLow = Color(0xFFF1F1F1),
+        surfaceContainer = Color(0xFFFFFFFF), surfaceContainerHigh = Color(0xFFE8E8E8),
+        surfaceContainerHighest = Color(0xFFE4E4E4), surfaceBright = Color(0xFFFFFFFF),
+        surfaceDim = Color(0xFFE4E4E4), inverseSurface = Color(0xFF202020),
+        inverseOnSurface = Color(0xFFFAFAFA), inversePrimary = Color(0xFFDEDEDE),
+        outline = Color(0xFF7D7D7D), outlineVariant = Color(0xFFD0D0D0),
+        scrim = Color(0xFF000000), error = Color(0xFFA13242), onError = Color(0xFFFFFFFF),
+        errorContainer = Color(0xFFF4E2E5), onErrorContainer = Color(0xFF701D29),
     )
 }
 

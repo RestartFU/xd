@@ -147,7 +147,7 @@ internal fun ChatOptionsDialog(
                         Column(Modifier.weight(1f)) {
                             Text("New worktree")
                             Text(
-                                "Run this chat in its own checkout.",
+                                "Run this session in its own checkout.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.outline,
                             )

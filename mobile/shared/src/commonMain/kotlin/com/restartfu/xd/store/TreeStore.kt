@@ -3,6 +3,7 @@ package com.restartfu.xd.store
 import com.restartfu.xd.model.ChatSummary
 import com.restartfu.xd.model.Folder
 import com.restartfu.xd.model.TreeSnapshot
+import com.restartfu.xd.model.WorkspaceSession
 import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.TreeReply
@@ -96,6 +97,10 @@ internal class TreeStore(
                         folders = reply.folders.map {
                             Folder(id = it.id, name = it.name, parentId = it.parent)
                         },
+                        sessions = reply.sessions.map {
+                            WorkspaceSession(it.id, it.folder, it.title, it.chats,
+                                it.branch, it.working, it.terminalChat)
+                        },
                         chats = reply.chats.map {
                             ChatSummary(
                                 id = it.id,
@@ -103,6 +108,7 @@ internal class TreeStore(
                                 title = it.title,
                                 backend = it.backend,
                                 sessionMode = it.sessionMode,
+                                sessionId = it.session ?: it.id,
                                 branch = it.branch,
                                 working = workingEvents[it.id]
                                     ?.takeIf { event ->

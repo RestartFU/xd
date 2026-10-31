@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,6 +39,19 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.width
+import androidx.activity.compose.BackHandler
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.NavigationRail
+import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.Role
+import androidx.lifecycle.ViewModel
+import com.restartfu.xd.model.ChatSummary
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
@@ -55,6 +70,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -84,14 +100,7 @@ import com.restartfu.xd.model.MinimalSession
 import com.restartfu.xd.model.minimalProjects
 import com.restartfu.xd.model.minimalSessions
 import com.restartfu.xd.net.Link
-
-private data class SessionDestination(
-    val projectId: String,
-    val projectName: String,
-    val chatId: String,
-    val title: String,
-    val agent: DirectAgent,
-)
+import kotlinx.coroutines.launch
 
 private enum class MobileDestination {
     PROJECTS,
@@ -101,27 +110,30 @@ private enum class MobileDestination {
 
 private const val GLOBAL_TERMINAL_CHAT_ID = "global:mobile"
 
-private val SessionTabsSaver = listSaver<List<SessionDestination>, String>(
-    save = { tabs ->
-        tabs.flatMap { tab ->
-            listOf(tab.projectId, tab.projectName, tab.chatId, tab.title, tab.agent.name)
-        }
-    },
-    restore = { saved ->
-        saved.chunked(5).mapNotNull { fields ->
-            if (fields.size != 5) return@mapNotNull null
-            val agent = DirectAgent.entries.firstOrNull { it.name == fields[4] }
-                ?: return@mapNotNull null
-            SessionDestination(
-                projectId = fields[0],
-                projectName = fields[1],
-                chatId = fields[2],
-                title = fields[3],
-                agent = agent,
-            )
-        }
-    },
+private val ChatSelectionsSaver = listSaver<Map<String, String>, String>(
+    save = { selected -> selected.flatMap { listOf(it.key, it.value) } },
+    restore = { saved -> saved.chunked(2).filter { it.size == 2 }.associate { it[0] to it[1] } },
 )
+
+/** Retains chat drafts and shared workspace panes when a tab leaves composition. */
+internal class MobileWorkspaceModels : ViewModel() {
+    private val chats = mutableMapOf<String, SessionViewModelOwner>()
+    private val workspaces = mutableMapOf<String, SessionViewModelOwner>()
+
+    fun chat(id: String): ViewModelStoreOwner = chats.getOrPut(id) { SessionViewModelOwner() }
+    fun workspace(id: String): ViewModelStoreOwner = workspaces.getOrPut(id) { SessionViewModelOwner() }
+
+    fun retain(chatIds: Set<String>, sessionIds: Set<String>) {
+        // Panes can reference a chat connection, so release them first.
+        workspaces.keys.filterNot { it in sessionIds }.forEach { workspaces.remove(it)?.viewModelStore?.clear() }
+        chats.keys.filterNot { it in chatIds }.forEach { chats.remove(it)?.viewModelStore?.clear() }
+    }
+
+    override fun onCleared() {
+        workspaces.values.forEach { it.viewModelStore.clear() }
+        chats.values.forEach { it.viewModelStore.clear() }
+    }
+}
 
 @Composable
 internal fun MinimalMobileApp(
@@ -131,143 +143,196 @@ internal fun MinimalMobileApp(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     val created by model.createdDirectSession.collectAsStateWithLifecycle()
-    var tabs by rememberSaveable(stateSaver = SessionTabsSaver) {
-        mutableStateOf(emptyList())
-    }
-    var activeChatId by rememberSaveable { mutableStateOf<String?>(null) }
-    var mobileDestination by rememberSaveable {
-        mutableStateOf(MobileDestination.PROJECTS)
-    }
-    var createTabFor by remember { mutableStateOf<Pair<String, String>?>(null) }
+    val operationError by model.error.collectAsStateWithLifecycle()
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    var settingsOpen by rememberSaveable { mutableStateOf(false) }
+    val stores: MobileWorkspaceModels = viewModel()
+    val savedChatState = rememberSaveableStateHolder()
+    var activeSessionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var chatSelections by rememberSaveable(stateSaver = ChatSelectionsSaver) { mutableStateOf(emptyMap()) }
+    var hiddenChatIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var mobileDestination by rememberSaveable { mutableStateOf(MobileDestination.PROJECTS) }
+    var createChatIn by remember { mutableStateOf<MinimalSession?>(null) }
+    var renameChat by remember { mutableStateOf<ChatSummary?>(null) }
+    var deleteChat by remember { mutableStateOf<ChatSummary?>(null) }
+    val deleting by model.deletingChat.collectAsStateWithLifecycle()
     val projects = tree.minimalProjects()
-    val knownDestinations = projects.flatMap { project ->
-        tree.minimalSessions(project.id).map { session ->
-            SessionDestination(
-                projectId = project.id,
-                projectName = project.name,
-                chatId = session.id,
-                title = session.title,
-                agent = session.agent,
-            )
+    val sessions = projects.flatMap { project -> tree.minimalSessions(project.id) }
+    val activeSession = sessions.firstOrNull { it.id == activeSessionId }
+    val activeProject = projects.firstOrNull { project ->
+        tree.minimalSessions(project.id).any { it.id == activeSessionId }
+    }
+    val sessionChats = activeSession?.chatIds.orEmpty().mapNotNull { id -> tree.chats.firstOrNull { it.id == id } }
+    val openChats = sessionChats.filterNot { it.id in hiddenChatIds }
+    val activeChat = openChats.firstOrNull { it.id == chatSelections[activeSessionId] } ?: openChats.firstOrNull()
+
+    LaunchedEffect(tree.chats, tree.loading, tree.error) {
+        if (!tree.loading && tree.error == null) {
+            stores.retain(tree.chats.map { it.id }.toSet(), sessions.map { it.id }.toSet())
         }
     }
-
-    LaunchedEffect(knownDestinations, tree.loading, tree.error) {
-        // Wait for the host's workspace snapshot before pruning restored tabs.
-        if (!tree.loading && tree.error == null && tree.folders.isNotEmpty()) {
-            val current = knownDestinations.associateBy(SessionDestination::chatId)
-            tabs = tabs.mapNotNull { current[it.chatId] }
-            if (tabs.none { it.chatId == activeChatId }) activeChatId = tabs.firstOrNull()?.chatId
-        }
-    }
-
-    LaunchedEffect(created, projects) {
-        created?.let { session ->
-            val destination = SessionDestination(
-                projectId = session.projectId,
-                projectName = projects.firstOrNull { it.id == session.projectId }?.name ?: "Project",
-                chatId = session.chatId,
-                title = session.title,
-                agent = session.agent,
-            )
-            tabs = tabs.filterNot { it.chatId == destination.chatId } + destination
-            activeChatId = destination.chatId
+    LaunchedEffect(created, tree.chats) {
+        created?.let { result ->
+            val chat = tree.chats.firstOrNull { it.id == result.chatId } ?: return@let
+            activeSessionId = chat.sessionId
+            chatSelections = chatSelections + (chat.sessionId to chat.id)
+            hiddenChatIds = hiddenChatIds - chat.id
             mobileDestination = MobileDestination.SESSIONS
-            model.consumeCreatedDirectSession(session)
+            model.consumeCreatedDirectSession(result)
         }
     }
-
-    val active = tabs.firstOrNull { it.chatId == activeChatId }
+    val visibleChatId = activeChat?.id.takeIf { mobileDestination == MobileDestination.SESSIONS }
+    DisposableEffect(visibleChatId) {
+        model.client.setVisibleChat(visibleChatId)
+        onDispose { model.client.setVisibleChat(null) }
+    }
     val showProjects = { mobileDestination = MobileDestination.PROJECTS }
     val showSessions = {
-        val destination = active ?: knownDestinations.firstOrNull()
-        if (destination != null) {
-            tabs = tabs.filterNot { it.chatId == destination.chatId } + destination
-            activeChatId = destination.chatId
-            mobileDestination = MobileDestination.SESSIONS
-        }
+        if (activeSession == null) activeSessionId = sessions.firstOrNull()?.id
+        mobileDestination = if (sessions.isEmpty()) MobileDestination.PROJECTS else MobileDestination.SESSIONS
     }
     val showTerminal = { mobileDestination = MobileDestination.TERMINAL }
-    val closeTab: (String) -> Unit = { chatId ->
-        val closingIndex = tabs.indexOfFirst { it.chatId == chatId }
-        val remaining = tabs.filterNot { it.chatId == chatId }
-        if (activeChatId == chatId) {
-            activeChatId = if (remaining.isEmpty()) {
-                null
-            } else {
-                remaining[closingIndex.coerceAtMost(remaining.lastIndex)].chatId
-            }
+    val addChat: (MinimalSession) -> Unit = { session ->
+        if (session.terminalChatId.startsWith("session:")) {
+            createChatIn = session
+        } else {
+            scope.launch { snackbar.showSnackbar("Update the connected host to add chats inside a session.") }
         }
-        tabs = remaining
-        if (remaining.isEmpty()) mobileDestination = MobileDestination.PROJECTS
     }
-
+    BackHandler(enabled = mobileDestination != MobileDestination.PROJECTS, onBack = showProjects)
+    val expanded = LocalConfiguration.current.screenWidthDp >= 600
     val imeVisible = WindowInsets.isImeVisible
-    Column(Modifier.fillMaxSize()) {
-    Box(Modifier.weight(1f)) {
-    when {
-        mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
-            model = model,
-            settings = settings,
-            link = link,
-            onProjects = showProjects,
-            onSessions = showSessions,
-        )
 
-        mobileDestination == MobileDestination.SESSIONS && active != null -> {
-            key(active.chatId) {
-                val owner = remember(active.chatId) { SessionViewModelOwner() }
-                DisposableEffect(owner) { onDispose { owner.viewModelStore.clear() } }
-                val chat: ChatViewModel = viewModel(key = "chat-${active.chatId}", viewModelStoreOwner = owner, factory = ChatViewModel.Factory(model.client, active.chatId))
-                ChatScreen(model = chat, settings = settings, goBack = showProjects,
-                    productHeader = {},
-                    sessionTabs = { SessionTabStrip(tabs = tabs, selectedChatId = active.chatId, selectTab = { activeChatId = it }, closeTab = closeTab, addTab = { createTabFor = active.projectId to active.projectName }) },
-                )
+    LaunchedEffect(operationError) {
+        operationError?.let { snackbar.showSnackbar(it) }
+    }
+    Box(Modifier.fillMaxSize()) {
+    Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        if (expanded) {
+            XdNavigationRail(mobileDestination, showProjects, showSessions, showTerminal)
+        }
+        Column(Modifier.weight(1f)) {
+            Box(Modifier.weight(1f)) {
+                when {
+                    mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
+                        model, settings, link, showProjects, showSessions,
+                    )
+                    mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
+                        val tabStrip: @Composable () -> Unit = {
+                            SessionTabStrip(
+                                chats = sessionChats,
+                                hiddenChatIds = hiddenChatIds,
+                                selectedChatId = activeChat?.id,
+                                selectTab = { id ->
+                                    hiddenChatIds = hiddenChatIds - id
+                                    chatSelections = chatSelections + (activeSession.id to id)
+                                },
+                                closeTab = { id ->
+                                    val index = openChats.indexOfFirst { it.id == id }
+                                    val remaining = openChats.filterNot { it.id == id }
+                                    if (id == activeChat?.id && remaining.isNotEmpty()) {
+                                        chatSelections = chatSelections + (activeSession.id to remaining[index.coerceAtMost(remaining.lastIndex)].id)
+                                    }
+                                    hiddenChatIds = hiddenChatIds + id
+                                },
+                                addTab = { addChat(activeSession) },
+                                renameChat = { renameChat = it },
+                                deleteChat = { deleteChat = it },
+                            )
+                        }
+                        if (activeChat != null) {
+                            savedChatState.SaveableStateProvider(activeChat.id) {
+                                val chat: ChatViewModel = viewModel(
+                                    key = "chat-${activeChat.id}",
+                                    viewModelStoreOwner = stores.chat(activeChat.id),
+                                    factory = ChatViewModel.Factory(model.client, activeChat.id),
+                                )
+                                ChatScreen(
+                                    model = chat, settings = settings, goBack = showProjects,
+                                    sessionTitle = activeSession.title,
+                                    projectName = activeProject?.name.orEmpty(),
+                                    workspaceId = activeSession.id,
+                                    terminalChatId = activeSession.terminalChatId,
+                                    workspaceOwner = stores.workspace(activeSession.id),
+                                    sessionTabs = tabStrip,
+                                )
+                            }
+                        } else {
+                            Column(Modifier.fillMaxSize()) {
+                                ProductHeader(link, activeSession.title, onSettings = { settingsOpen = true })
+                                tabStrip()
+                                Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        Text("Your chats are saved", style = MaterialTheme.typography.titleLarge)
+                                        Text("Reopen a chat from the tab menu, or start a new one.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Button(onClick = { addChat(activeSession) }) { Text("New chat") }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else -> MinimalProjectsHome(
+                        model, settings, link, projects, tree.loading, tree.error, showSessions, showTerminal,
+                        open = { _, session ->
+                            activeSessionId = session.id
+                            // Opening a session always reveals at least its most recent chat.
+                            if (session.chatIds.all { it in hiddenChatIds }) {
+                                hiddenChatIds = hiddenChatIds - session.chatIds.first()
+                            }
+                            mobileDestination = MobileDestination.SESSIONS
+                        },
+                    )
+                }
+            }
+            if (!expanded && !imeVisible) {
+                XdNavigationBar(mobileDestination, showProjects, showSessions, showTerminal)
             }
         }
-
-        else -> MinimalProjectsHome(
-            model = model,
-            settings = settings,
-            link = link,
-            projects = projects,
-            loading = tree.loading,
-            treeError = tree.error,
-            onSessions = showSessions,
-            onTerminal = showTerminal,
-            open = { project, session ->
-                val destination = SessionDestination(
-                    projectId = project.id,
-                    projectName = project.name,
-                    chatId = session.id,
-                    title = session.title,
-                    agent = session.agent,
-                )
-                tabs = tabs.filterNot { it.chatId == destination.chatId } + destination
-                activeChatId = destination.chatId
-                mobileDestination = MobileDestination.SESSIONS
-                model.client.markSeen(session.id)
+    }
+    SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = if (expanded) 24.dp else 96.dp))
+    }
+    if (settingsOpen) {
+        MinimalSettingsDialog(settings, onDismiss = { settingsOpen = false }, onDisconnect = {
+            settingsOpen = false
+            model.forget()
+        })
+    }
+    renameChat?.let { chat ->
+        var title by rememberSaveable(chat.id) { mutableStateOf(chat.title) }
+        AlertDialog(
+            onDismissRequest = { renameChat = null },
+            title = { Text("Rename chat") },
+            text = {
+                OutlinedTextField(title, onValueChange = { title = it }, label = { Text("Chat title") }, singleLine = true)
             },
+            confirmButton = {
+                TextButton(onClick = { model.renameChat(chat.id, title.trim()); renameChat = null }, enabled = title.isNotBlank()) { Text("Rename") }
+            },
+            dismissButton = { TextButton(onClick = { renameChat = null }) { Text("Cancel") } },
         )
     }
-    }
-    if (!imeVisible) {
-        XdNavigationBar(
-            active = mobileDestination,
-            onProjects = showProjects,
-            onSessions = showSessions,
-            onTerminal = showTerminal,
+    deleteChat?.let { chat ->
+        AlertDialog(
+            onDismissRequest = { if (!deleting) deleteChat = null },
+            title = { Text("Delete this chat?") },
+            text = { Text("This permanently deletes “${chat.title}” and its history. Other chats in this session stay saved.") },
+            confirmButton = {
+                TextButton(onClick = { model.deleteChat(chat.id); deleteChat = null }, enabled = !deleting) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleteChat = null }, enabled = !deleting) { Text("Cancel") } },
         )
     }
-    }
-
-    createTabFor?.let { (projectId, projectName) ->
+    createChatIn?.let { session ->
         NewSessionDialog(
-            projectName = projectName,
-            onDismiss = { createTabFor = null },
+            projectName = session.title,
+            chatTab = true,
+            onDismiss = { createChatIn = null },
             onCreate = { title, agent ->
-                createTabFor = null
-                model.createDirectSession(projectId, title, agent)
+                createChatIn = null
+                activeProject?.let { project -> model.createDirectSession(project.id, title, agent, session.id) }
             },
         )
     }
@@ -298,9 +363,9 @@ private fun MinimalProjectsHome(
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
     val signalOf = { session: MinimalSession ->
         when {
-            session.id in waiting -> SessionSignal.WAITING
+            session.chatIds.any { it in waiting } -> SessionSignal.WAITING
             session.working -> SessionSignal.WORKING
-            session.id in unread -> SessionSignal.DONE
+            session.chatIds.any { it in unread } -> SessionSignal.DONE
             else -> SessionSignal.IDLE
         }
     }
@@ -436,9 +501,6 @@ private fun MinimalGlobalTerminal(
             chatId = GLOBAL_TERMINAL_CHAT_ID,
         ),
     )
-    LaunchedEffect(terminal) {
-        model.client.terminalEvents.collect(terminal::onEvent)
-    }
 
     Column(
         Modifier
@@ -484,72 +546,89 @@ private fun MinimalGlobalTerminal(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun SessionTabStrip(
-    tabs: List<SessionDestination>,
-    selectedChatId: String,
+    chats: List<ChatSummary>,
+    hiddenChatIds: List<String>,
+    selectedChatId: String?,
     selectTab: (String) -> Unit,
     closeTab: (String) -> Unit,
     addTab: () -> Unit,
+    renameChat: (ChatSummary) -> Unit,
+    deleteChat: (ChatSummary) -> Unit,
 ) {
+    var openMenu by remember { mutableStateOf(false) }
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(46.dp)
-            .horizontalScroll(rememberScrollState())
-            .background(MaterialTheme.colorScheme.surface),
+        modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        tabs.forEach { tab ->
-            val selected = tab.chatId == selectedChatId
-            Row(
-                modifier = Modifier
-                    .height(46.dp)
-                    .background(
-                        if (selected) MaterialTheme.colorScheme.surfaceContainerHigh
-                        else MaterialTheme.colorScheme.surface,
-                    )
-                    .clickable { selectTab(tab.chatId) }
-                    .padding(start = 13.dp, end = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
-            ) {
-                BackendIcon(tab.agent.wire, size = 15.dp)
-                Text(
-                    tab.title,
-                    modifier = Modifier.widthIn(max = 126.dp),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    fontSize = 12.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                )
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .clickable { closeTab(tab.chatId) },
-                    contentAlignment = Alignment.Center,
+        Row(
+            modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()).padding(vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            chats.filterNot { it.id in hiddenChatIds }.forEach { chat ->
+                val selected = chat.id == selectedChatId
+                val reveal = remember(chat.id) { BringIntoViewRequester() }
+                LaunchedEffect(chat.id, selected) {
+                    if (selected) {
+                        androidx.compose.runtime.withFrameNanos { }
+                        reveal.bringIntoView()
+                    }
+                }
+                Surface(
+                    modifier = Modifier.bringIntoViewRequester(reveal),
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                    border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
                 ) {
-                    Icon(
-                        painterResource(R.drawable.ic_close),
-                        contentDescription = "Close ${tab.title}",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { selectTab(chat.id) }.padding(start = 12.dp, end = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            BackendIcon(chat.backend, size = 16.dp)
+                            Text(chat.title.ifBlank { "New chat" }, modifier = Modifier.widthIn(max = 140.dp),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { closeTab(chat.id) }, modifier = Modifier.size(48.dp)) {
+                            Icon(painterResource(R.drawable.ic_close), "Close ${chat.title}", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                 }
             }
         }
-        Box(
-            modifier = Modifier
-                .size(46.dp)
-                .clickable(onClick = addTab),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                painterResource(R.drawable.ic_add),
-                contentDescription = "New tab",
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        IconButton(onClick = addTab, modifier = Modifier.size(48.dp)) {
+            Icon(painterResource(R.drawable.ic_add), "New chat")
+        }
+        Box {
+            IconButton(onClick = { openMenu = true }, modifier = Modifier.size(48.dp)) {
+                Icon(painterResource(R.drawable.ic_sessions), "All chats")
+            }
+            DropdownMenu(expanded = openMenu, onDismissRequest = { openMenu = false }) {
+                chats.forEach { chat ->
+                    DropdownMenuItem(
+                        text = { Text(chat.title.ifBlank { "New chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        leadingIcon = { BackendIcon(chat.backend, size = 18.dp) },
+                        onClick = { openMenu = false; selectTab(chat.id) },
+                    )
+                }
+                chats.firstOrNull { it.id == selectedChatId }?.let { active ->
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Rename chat") },
+                        onClick = { openMenu = false; renameChat(active) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete chat…", color = MaterialTheme.colorScheme.error) },
+                        onClick = { openMenu = false; deleteChat(active) },
+                    )
+                }
+            }
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -622,6 +701,35 @@ private fun XdNavigationBar(
         NavItem("Projects", R.drawable.ic_projects, active = active == MobileDestination.PROJECTS, onClick = onProjects)
         NavItem("Sessions", R.drawable.ic_sessions, active = active == MobileDestination.SESSIONS, onClick = onSessions)
         NavItem("Terminal", R.drawable.ic_terminal, active = active == MobileDestination.TERMINAL, onClick = onTerminal)
+    }
+}
+
+@Composable
+private fun XdNavigationRail(
+    active: MobileDestination,
+    onProjects: () -> Unit,
+    onSessions: () -> Unit,
+    onTerminal: () -> Unit,
+) {
+    NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
+        Spacer(Modifier.height(16.dp))
+        listOf(
+            Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects),
+            Triple(MobileDestination.SESSIONS, "Sessions", R.drawable.ic_sessions),
+            Triple(MobileDestination.TERMINAL, "Terminal", R.drawable.ic_terminal),
+        ).forEach { (destination, label, icon) ->
+            NavigationRailItem(
+                selected = active == destination,
+                onClick = when (destination) {
+                    MobileDestination.PROJECTS -> onProjects
+                    MobileDestination.SESSIONS -> onSessions
+                    MobileDestination.TERMINAL -> onTerminal
+                },
+                icon = { Icon(painterResource(icon), contentDescription = null) },
+                label = { Text(label) },
+            )
+            Spacer(Modifier.height(8.dp))
+        }
     }
 }
 
@@ -705,7 +813,7 @@ private fun DrawerRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 44.dp)
+            .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 8.dp),
@@ -798,7 +906,7 @@ private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: 
         modifier = Modifier
             .fillMaxWidth()
             .padding(start = 18.dp)
-            .heightIn(min = 48.dp)
+            .heightIn(min = 64.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp),
@@ -806,23 +914,29 @@ private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: 
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         BackendIcon(session.agent.wire, size = 15.dp)
-        Text(
-            session.title,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (signal == SessionSignal.IDLE && session.branch != "Project directory") {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(
-                session.branch,
-                modifier = Modifier.widthIn(max = 110.dp),
-                color = signals.faint,
-                fontFamily = XdMonoFamily,
-                fontSize = 11.sp,
+                session.title,
+                style = MaterialTheme.typography.bodyLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "${session.chatIds.size} chat${if (session.chatIds.size == 1) "" else "s"}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = signals.faint,
+                )
+                if (session.branch != "Project directory") Text(
+                    session.branch,
+                    modifier = Modifier.widthIn(max = 160.dp),
+                    color = signals.faint,
+                    fontFamily = XdMonoFamily,
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         SignalMark(signal)
     }
@@ -900,6 +1014,7 @@ private fun EmptyCard(text: String) {
 @Composable
 private fun NewSessionDialog(
     projectName: String,
+    chatTab: Boolean = false,
     onDismiss: () -> Unit,
     onCreate: (String, DirectAgent) -> Unit,
 ) {
@@ -907,7 +1022,7 @@ private fun NewSessionDialog(
     var agent by rememberSaveable { mutableStateOf(DirectAgent.CODEX) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New session") },
+        title = { Text(if (chatTab) "New chat" else "New session") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(projectName, color = MaterialTheme.colorScheme.onSurfaceVariant)

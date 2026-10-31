@@ -569,6 +569,8 @@ internal class ChatSessionCore(
     }
 
     fun requestReload() {
+        // Terminal scopes share transport but have no conversation snapshot.
+        if (chatId.startsWith("global:") || chatId.startsWith("session:")) return
         reloadRequests.trySend(Unit)
     }
 

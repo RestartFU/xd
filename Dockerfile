@@ -71,6 +71,7 @@ COPY data/fonts /src/data/fonts
 COPY terminal-core/src /src/terminal-core/src
 COPY transport-core/src /src/transport-core/src
 COPY desktop/src ./src
+COPY desktop/tests ./tests
 
 FROM gpui-desktop-source AS gpui-desktop-tests
 

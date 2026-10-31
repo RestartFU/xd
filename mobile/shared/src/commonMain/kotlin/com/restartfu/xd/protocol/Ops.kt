@@ -215,10 +215,15 @@ public object Ops {
         folderId: String,
         title: String? = null,
         backend: String? = null,
+        sessionId: String? = null,
     ): JsonObject = buildJsonObject {
         put("op", "new-chat")
         require(folderId.isNotBlank()) { "Folder id must not be blank" }
         put("folder", folderId)
+        if (sessionId != null) {
+            require(sessionId.isNotBlank()) { "Session id must not be blank" }
+            put("session", sessionId)
+        }
         if (!title.isNullOrBlank()) put("title", title)
         if (!backend.isNullOrBlank()) put("backend", backend)
     }

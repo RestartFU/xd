@@ -28,7 +28,7 @@ public data class DiffPane(
  * switching scope costs two calls rather than one.
  */
 class DiffViewModel(
-    private val session: ChatSession,
+    private val session: () -> ChatSession,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DiffPane())
     val state: StateFlow<DiffPane> = _state.asStateFlow()
@@ -56,9 +56,9 @@ class DiffViewModel(
         viewModelScope.launch {
             try {
                 val patch = if (branch) {
-                    session.diff("branch-all", session.diffBase())
+                    session().diff("branch-all", session().diffBase())
                 } else {
-                    session.diff("working-all")
+                    session().diff("working-all")
                 }
                 _state.value = _state.value.copy(patch = patch, loading = false)
             } catch (error: CancellationException) {
@@ -72,7 +72,7 @@ class DiffViewModel(
         }
     }
 
-    class Factory(private val session: ChatSession) : ViewModelProvider.Factory {
+    class Factory(private val session: () -> ChatSession) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             DiffViewModel(session) as T
@@ -94,7 +94,7 @@ public data class FilesPane(
  * whole, and most of it is never looked at.
  */
 class FilesViewModel(
-    private val session: ChatSession,
+    private val session: () -> ChatSession,
 ) : ViewModel() {
     private val _state = MutableStateFlow(FilesPane())
     val state: StateFlow<FilesPane> = _state.asStateFlow()
@@ -121,7 +121,7 @@ class FilesViewModel(
         _state.value = _state.value.copy(loading = true, error = null)
         viewModelScope.launch {
             try {
-                val content = session.readFile(path)
+                val content = session().readFile(path)
                 _state.value = _state.value.let {
                     it.copy(open = it.open.opened(path, content), loading = false)
                 }
@@ -165,7 +165,7 @@ class FilesViewModel(
         _state.value = _state.value.let { it.copy(open = it.open.saving(path)) }
         viewModelScope.launch {
             try {
-                session.writeFile(path, against, sending)
+                session().writeFile(path, against, sending)
                 _state.value = _state.value.let { it.copy(open = it.open.saved(path, sending)) }
             } catch (error: CancellationException) {
                 throw error
@@ -202,7 +202,7 @@ class FilesViewModel(
         _state.value = _state.value.let { it.copy(tree = it.tree.loading(path)) }
         viewModelScope.launch {
             try {
-                val entries = session.listDirectory(path.takeIf { it.isNotEmpty() })
+                val entries = session().listDirectory(path.takeIf { it.isNotEmpty() })
                 _state.value = _state.value.let {
                     it.copy(tree = it.tree.withChildren(path, entries))
                 }
@@ -219,7 +219,7 @@ class FilesViewModel(
         }
     }
 
-    class Factory(private val session: ChatSession) : ViewModelProvider.Factory {
+    class Factory(private val session: () -> ChatSession) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             FilesViewModel(session) as T

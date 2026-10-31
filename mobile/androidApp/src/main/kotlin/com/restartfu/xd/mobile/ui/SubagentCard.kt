@@ -127,7 +127,7 @@ internal fun SubagentCard(
             val key = run.key
             if (key != null && (run.canStop || pendingAction != null)) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (pendingAction != null) {
@@ -141,13 +141,13 @@ internal fun SubagentCard(
                             OutlinedButton(
                                 onClick = { onAction(key, "background") },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.heightIn(min = 32.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
                             ) { Text("Background", style = MaterialTheme.typography.labelMedium) }
                         }
                         OutlinedButton(
                             onClick = { onAction(key, "stop") },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.heightIn(min = 32.dp),
+                            modifier = Modifier.heightIn(min = 48.dp),
                         ) {
                             Text(
                                 "Stop",

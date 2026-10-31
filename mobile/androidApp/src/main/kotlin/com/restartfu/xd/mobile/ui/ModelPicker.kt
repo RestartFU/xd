@@ -80,6 +80,7 @@ internal fun ModelPicker(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .heightIn(min = 48.dp)
                                 .clickable(enabled = !busy) {
                                     if (!selected) model.setEffort(effort)
                                     onDismiss()
@@ -136,6 +137,7 @@ internal fun ModelPicker(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .heightIn(min = 48.dp)
                                 .clickable {
                                     if (!selected) model.selectModel(entry.id)
                                     effortBackendId = currentAssistant.id

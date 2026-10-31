@@ -67,6 +67,7 @@ unsafe extern "C" {
 pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
     opening: Mutex<()>,
+    legacy_aliases: Mutex<HashMap<String, HashSet<String>>>,
     events: Arc<EventBus>,
     activity: Arc<TerminalActivityState>,
 }
@@ -85,7 +86,8 @@ pub(crate) struct TerminalActivitySnapshot {
 
 struct TerminalSession {
     id: String,
-    chat_id: String,
+    chat_id: Mutex<String>,
+    legacy_owners: Mutex<HashSet<String>>,
     title: String,
     pid: c_int,
     writer: Mutex<Option<File>>,
@@ -98,6 +100,7 @@ impl TerminalManager {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             opening: Mutex::new(()),
+            legacy_aliases: Mutex::new(HashMap::new()),
             events,
             activity: Arc::new(TerminalActivityState {
                 epoch: Uuid::new_v4().to_string(),
@@ -107,11 +110,72 @@ impl TerminalManager {
         }
     }
 
+    pub fn adopt_chat_owners(&self, aliases: &HashMap<String, String>) -> Result<(), String> {
+        let _opening = self
+            .opening
+            .lock()
+            .map_err(|_| "Terminal opening state is unavailable.".to_owned())?;
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?;
+        let mut adopted = Vec::new();
+        for session in sessions.values() {
+            let mut owner = session
+                .chat_id
+                .lock()
+                .map_err(|_| "Terminal ownership is unavailable.".to_owned())?;
+            if let Some(canonical) = aliases.get(owner.as_str())
+                && canonical != owner.as_str()
+            {
+                adopted.push((canonical.clone(), owner.clone()));
+                *owner = canonical.clone();
+            }
+        }
+        drop(sessions);
+        for (owner, alias) in adopted {
+            self.register_chat_alias_locked(&owner, &alias)?;
+        }
+        Ok(())
+    }
+
+    pub fn register_chat_alias(&self, owner: &str, alias: &str) -> Result<(), String> {
+        let _opening = self
+            .opening
+            .lock()
+            .map_err(|_| "Terminal opening state is unavailable.".to_owned())?;
+        self.register_chat_alias_locked(owner, alias)
+    }
+
+    fn register_chat_alias_locked(&self, owner: &str, alias: &str) -> Result<(), String> {
+        if owner == alias || alias.starts_with("global:") {
+            return Ok(());
+        }
+        self.legacy_aliases
+            .lock()
+            .map_err(|_| "Terminal ownership is unavailable.".to_owned())?
+            .entry(owner.to_owned())
+            .or_default()
+            .insert(alias.to_owned());
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?;
+        for session in sessions.values().filter(|session| session.owner() == owner) {
+            session
+                .legacy_owners
+                .lock()
+                .map_err(|_| "Terminal ownership is unavailable.".to_owned())?
+                .insert(alias.to_owned());
+        }
+        Ok(())
+    }
+
     pub fn list(&self, chat_id: &str) -> Value {
         let sessions = match self.sessions.lock() {
             Ok(sessions) => sessions
                 .values()
-                .filter(|session| session.chat_id == chat_id)
+                .filter(|session| session.owner() == chat_id)
                 .cloned()
                 .collect::<Vec<_>>(),
             Err(_) => return error("Terminal state is unavailable."),
@@ -125,8 +189,15 @@ impl TerminalManager {
 
     pub fn open(&self, request: &Value, workdir: &Path) -> Result<Value, String> {
         let chat_id = text(request, "chat", "terminal-open needs a chat id")?;
+        let legacy_owner = request
+            .get("_terminal_alias")
+            .and_then(Value::as_str)
+            .filter(|alias| *alias != chat_id);
         let columns = geometry(request, "columns", DEFAULT_COLUMNS, MAX_COLUMNS)?;
         let rows = geometry(request, "rows", DEFAULT_ROWS, MAX_ROWS)?;
+        if let Some(alias) = legacy_owner {
+            self.register_chat_alias(chat_id, alias)?;
+        }
         let reuse = request
             .get("reuse")
             .and_then(Value::as_bool)
@@ -146,8 +217,15 @@ impl TerminalManager {
                 .lock()
                 .map_err(|_| "Terminal state is unavailable.".to_string())?
                 .values()
-                .find(|session| session.chat_id == chat_id && !session.is_closing())
+                .find(|session| session.owner() == chat_id && !session.is_closing())
         {
+            if let Some(alias) = legacy_owner {
+                existing
+                    .legacy_owners
+                    .lock()
+                    .map_err(|_| "Terminal ownership is unavailable.".to_owned())?
+                    .insert(alias.to_owned());
+            }
             return Ok(json!({"ok": true, "id": existing.id}));
         }
         let queries = TerminalQueryResponder::from_request(request);
@@ -155,21 +233,45 @@ impl TerminalManager {
         let (session, reader) =
             TerminalSession::spawn(chat_id, workdir, columns, rows, self.activity.clone())?;
         let id = session.id.clone();
+        if let Some(aliases) = self
+            .legacy_aliases
+            .lock()
+            .map_err(|_| "Terminal ownership is unavailable.".to_owned())?
+            .get(chat_id)
+            .cloned()
+        {
+            session
+                .legacy_owners
+                .lock()
+                .map_err(|_| "Terminal ownership is unavailable.".to_owned())?
+                .extend(aliases);
+        }
+        if let Some(alias) = legacy_owner {
+            session
+                .legacy_owners
+                .lock()
+                .map_err(|_| "Terminal ownership is unavailable.".to_owned())?
+                .insert(alias.to_owned());
+        }
         self.sessions
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_string())?
             .insert(id.clone(), session.clone());
-        self.events.publish(json!({
-            "event": "terminal-opened",
-            "chat": chat_id,
-            "terminal": id,
-            "title": session.title,
-            "agent": null,
-            "columns": columns,
-            "rows": rows,
-            "working": false,
-            "sequence": 0,
-        }));
+        publish_terminal_event(
+            &self.events,
+            &session,
+            json!({
+                "event": "terminal-opened",
+                "chat": chat_id,
+                "terminal": id,
+                "title": session.title,
+                "agent": null,
+                "columns": columns,
+                "rows": rows,
+                "working": false,
+                "sequence": 0,
+            }),
+        );
         start_reader(
             session,
             reader,
@@ -264,14 +366,18 @@ impl TerminalManager {
         drop(writer);
         let outcome = state.record_resize_bounded(columns, rows, REPLAY_ITEM_LIMIT);
         if let RecordOutcome::Accepted(sequence) = outcome {
-            self.events.publish(json!({
-                "event": "terminal-resized",
-                "chat": session.chat_id,
-                "terminal": session.id,
-                "columns": columns,
-                "rows": rows,
-                "sequence": sequence,
-            }));
+            publish_terminal_event(
+                &self.events,
+                &session,
+                json!({
+                    "event": "terminal-resized",
+                    "chat": session.owner(),
+                    "terminal": session.id,
+                    "columns": columns,
+                    "rows": rows,
+                    "sequence": sequence,
+                }),
+            );
         }
         match outcome {
             RecordOutcome::Accepted(_) => Ok(json!({"ok": true, "changed": true})),
@@ -294,13 +400,16 @@ impl TerminalManager {
     }
 
     pub fn kill_chat(&self, chat_id: &str) {
+        if let Ok(mut aliases) = self.legacy_aliases.lock() {
+            aliases.remove(chat_id);
+        }
         let sessions = self
             .sessions
             .lock()
             .map(|sessions| {
                 sessions
                     .values()
-                    .filter(|session| session.chat_id == chat_id)
+                    .filter(|session| session.owner() == chat_id)
                     .cloned()
                     .collect::<Vec<_>>()
             })
@@ -441,7 +550,8 @@ impl TerminalSession {
             .map_err(|error| format!("Cannot prepare terminal output: {error}."))?;
         let session = Arc::new(Self {
             id: Uuid::new_v4().to_string(),
-            chat_id: chat_id.to_owned(),
+            chat_id: Mutex::new(chat_id.to_owned()),
+            legacy_owners: Mutex::new(HashSet::new()),
             title,
             pid,
             writer: Mutex::new(Some(writer)),
@@ -481,6 +591,13 @@ impl TerminalSession {
             "sequence": state.sequence,
             "replay": replay,
         }))
+    }
+
+    fn owner(&self) -> String {
+        self.chat_id
+            .lock()
+            .map(|owner| owner.clone())
+            .unwrap_or_default()
     }
 
     fn is_closing(&self) -> bool {
@@ -550,6 +667,20 @@ impl TerminalSession {
     }
 }
 
+fn publish_terminal_event(events: &EventBus, session: &TerminalSession, mut event: Value) {
+    let owner = session.owner();
+    let mut owners = session
+        .legacy_owners
+        .lock()
+        .map(|aliases| aliases.clone())
+        .unwrap_or_default();
+    owners.insert(owner);
+    for owner in owners {
+        event["chat"] = json!(owner);
+        events.publish(event.clone());
+    }
+}
+
 fn working_chats(sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>) -> HashSet<String> {
     sessions
         .lock()
@@ -557,7 +688,7 @@ fn working_chats(sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>) -
             sessions
                 .values()
                 .filter(|session| session.contributes_working())
-                .map(|session| session.chat_id.clone())
+                .map(|session| session.owner())
                 .collect()
         })
         .unwrap_or_default()
@@ -572,7 +703,7 @@ fn chat_terminal_working(
         .map(|sessions| {
             sessions
                 .values()
-                .any(|session| session.chat_id == chat_id && session.contributes_working())
+                .any(|session| session.owner() == chat_id && session.contributes_working())
         })
         .unwrap_or(false)
 }
@@ -584,16 +715,20 @@ fn publish_activity_locked(
     working: bool,
     revision: u64,
 ) {
-    let terminal_working = chat_terminal_working(sessions, &session.chat_id);
-    events.publish(json!({
-        "event": "terminal-activity",
-        "chat": session.chat_id,
-        "terminal": session.id,
-        "working": working,
-        "terminal_working": terminal_working,
-        "terminal_activity_epoch": session.activity.epoch,
-        "terminal_activity_revision": revision,
-    }));
+    let terminal_working = chat_terminal_working(sessions, &session.owner());
+    publish_terminal_event(
+        events,
+        session,
+        json!({
+            "event": "terminal-activity",
+            "chat": session.owner(),
+            "terminal": session.id,
+            "working": working,
+            "terminal_working": terminal_working,
+            "terminal_activity_epoch": session.activity.epoch,
+            "terminal_activity_revision": revision,
+        }),
+    );
 }
 
 fn transition_activity(
@@ -678,13 +813,17 @@ fn start_reader(
                             REPLAY_ITEM_LIMIT,
                         );
                         if let RecordOutcome::Accepted(sequence) = outcome {
-                            events.publish(json!({
-                                "event": "terminal-output",
-                                "chat": session.chat_id,
-                                "terminal": session.id,
-                                "data": STANDARD.encode(&data),
-                                "sequence": sequence,
-                            }));
+                            publish_terminal_event(
+                                &events,
+                                &session,
+                                json!({
+                                    "event": "terminal-output",
+                                    "chat": session.owner(),
+                                    "terminal": session.id,
+                                    "data": STANDARD.encode(&data),
+                                    "sequence": sequence,
+                                }),
+                            );
                         }
                         outcome
                     });
@@ -706,12 +845,16 @@ fn start_reader(
                 .lock()
                 .map(|state| state.sequence)
                 .unwrap_or_default();
-            events.publish(json!({
-                "event": "terminal-closed",
-                "chat": session.chat_id,
-                "terminal": session.id,
-                "sequence": sequence,
-            }));
+            publish_terminal_event(
+                &events,
+                &session,
+                json!({
+                    "event": "terminal-closed",
+                    "chat": session.owner(),
+                    "terminal": session.id,
+                    "sequence": sequence,
+                }),
+            );
         })
         .expect("terminal reader thread should start");
 }

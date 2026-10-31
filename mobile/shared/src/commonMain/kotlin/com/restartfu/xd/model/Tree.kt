@@ -15,6 +15,17 @@ public data class ChatSummary(
     val branch: String? = null,
     val terminalWorking: Boolean = false,
     val sessionMode: String = "chat",
+    val sessionId: String = id,
+)
+
+public data class WorkspaceSession(
+    val id: String,
+    val folderId: String,
+    val title: String,
+    val chatIds: List<String>,
+    val branch: String? = null,
+    val working: Boolean = false,
+    val terminalChatId: String = "session:$id",
 )
 
 public data class TreeSnapshot(
@@ -22,4 +33,5 @@ public data class TreeSnapshot(
     val chats: List<ChatSummary> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
+    val sessions: List<WorkspaceSession> = emptyList(),
 )

@@ -23,6 +23,18 @@ public data class ChatSummaryReply(
     val terminalWorking: Boolean = false,
     @SerialName("session_mode")
     val sessionMode: String = "chat",
+    val session: String? = null,
+)
+
+@Serializable
+public data class SessionSummaryReply(
+    val id: String,
+    val folder: String,
+    val title: String,
+    val chats: List<String> = emptyList(),
+    val branch: String? = null,
+    val working: Boolean = false,
+    @SerialName("terminal_chat") val terminalChat: String = "session:$id",
 )
 
 @Serializable
@@ -30,6 +42,7 @@ public data class TreeReply(
     val ok: Boolean,
     val folders: List<FolderReply>,
     val chats: List<ChatSummaryReply>,
+    val sessions: List<SessionSummaryReply> = emptyList(),
 )
 
 @Serializable
@@ -139,6 +152,8 @@ public data class MessagesReply(
 public data class DoneReply(
     val ok: Boolean,
     val id: String? = null,
+    val session: String? = null,
+    @SerialName("terminal_chat") val terminalChat: String? = null,
 )
 
 @Serializable

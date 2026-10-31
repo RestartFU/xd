@@ -1,0 +1,144 @@
+{
+  "before_base": "b2b9091",
+  "captures": [
+    {
+      "surface": "Desktop conversation",
+      "theme": "dark",
+      "before": "desktop-chat-dark-before.png",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "after": "desktop-chat-dark-after.png"
+    },
+    {
+      "surface": "Desktop empty chat",
+      "theme": "dark",
+      "before": "desktop-empty-dark-before.png",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "after": "desktop-empty-dark-after.png"
+    },
+    {
+      "surface": "Desktop workbench",
+      "theme": "dark",
+      "before": "desktop-workbench-dark-before.png",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "after": "desktop-workbench-dark-after.png"
+    },
+    {
+      "surface": "Desktop settings",
+      "theme": "light",
+      "before": "desktop-settings-light-before.png",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "after": "desktop-settings-light-after.png"
+    },
+    {
+      "surface": "Desktop conversation",
+      "theme": "light",
+      "before": "desktop-chat-light-before.png",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "after": "desktop-chat-light-after.png"
+    },
+    {
+      "surface": "Desktop browser",
+      "theme": "dark",
+      "before": "desktop-browser-dark-before.png",
+      "viewport": [
+        2560,
+        1440
+      ],
+      "after": "desktop-browser-dark-after.png"
+    },
+    {
+      "surface": "Android phone projects",
+      "theme": "dark",
+      "before": "android-phone-projects-dark-before.png",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "after": "android-phone-projects-dark-after.png"
+    },
+    {
+      "surface": "Android phone conversation",
+      "theme": "dark",
+      "before": "android-phone-chat-dark-before.png",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "after": "android-phone-chat-dark-after.png"
+    },
+    {
+      "surface": "Android phone settings",
+      "theme": "light",
+      "before": "android-phone-settings-light-before.png",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "after": "android-phone-settings-light-after.png"
+    },
+    {
+      "surface": "Android tablet conversation",
+      "theme": "light",
+      "before": "android-tablet-chat-light-before.png",
+      "viewport": [
+        1920,
+        1200
+      ],
+      "after": "android-tablet-chat-light-after.png"
+    },
+    {
+      "surface": "Android tablet changes",
+      "theme": "dark",
+      "before": "android-tablet-changes-dark-before.png",
+      "viewport": [
+        1920,
+        1200
+      ],
+      "after": "android-tablet-changes-dark-after.png"
+    },
+    {
+      "surface": "Android tablet files",
+      "theme": "dark",
+      "before": "android-tablet-files-dark-before.png",
+      "viewport": [
+        1920,
+        1200
+      ],
+      "after": "android-tablet-files-dark-after.png"
+    },
+    {
+      "surface": "Android tablet terminal",
+      "theme": "dark",
+      "before": "android-tablet-terminal-dark-before.png",
+      "viewport": [
+        1920,
+        1200
+      ],
+      "after": "android-tablet-terminal-dark-after.png"
+    },
+    {
+      "surface": "Android new chat",
+      "theme": "dark",
+      "viewport": [
+        1080,
+        2400
+      ],
+      "after": "android-new-chat-dark-after.png"
+    }
+  ]
+}

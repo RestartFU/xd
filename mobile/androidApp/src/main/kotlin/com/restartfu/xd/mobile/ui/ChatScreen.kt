@@ -78,6 +78,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -111,9 +113,14 @@ import com.restartfu.xd.voice.SpeakTagVisibility
 /** The desktop's conversation, diff, files and terminal panes, as tabs. */
 internal enum class Pane(val label: String) {
     CHAT("Chat"),
-    DIFF("Diff"),
+    DIFF("Changes"),
     FILES("Files"),
     TERMINAL("Terminal"),
+}
+
+internal class WorkspacePaneModel : ViewModel() {
+    var pane by mutableStateOf(Pane.CHAT)
+    lateinit var chat: com.restartfu.xd.store.ChatSession
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -122,6 +129,11 @@ internal fun ChatScreen(
     model: ChatViewModel,
     settings: MobileSettings,
     goBack: () -> Unit,
+    sessionTitle: String = "",
+    projectName: String = "",
+    workspaceId: String = model.state.value.chatId,
+    terminalChatId: String = model.state.value.chatId,
+    workspaceOwner: ViewModelStoreOwner? = null,
     productHeader: @Composable () -> Unit = {},
     sessionTabs: @Composable () -> Unit = {},
 ) {
@@ -140,7 +152,12 @@ internal fun ChatScreen(
 
     // The desktop shows these beside the conversation. A phone has room for
     // one at a time, so they are tabs over the same chat.
-    var pane by rememberSaveable(state.chatId) { mutableStateOf(Pane.CHAT) }
+    val workspacePane: WorkspacePaneModel = viewModel(
+        key = "workspace-pane-$workspaceId",
+        viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
+    )
+    workspacePane.chat = model.session
+    var pane by workspacePane::pane
     var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
     var choosingOptions by rememberSaveable(state.chatId) { mutableStateOf(false) }
 
@@ -199,20 +216,28 @@ internal fun ChatScreen(
     }
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
             Column {
                 productHeader()
                 TopAppBar(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            BackendIcon(state.backend)
-                            if (state.backend.isNotEmpty()) Spacer(Modifier.width(10.dp))
-                            Text(
-                                state.title.ifEmpty { "Chat" },
-                                style = MaterialTheme.typography.titleMedium,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Column {
+                                Text(
+                                    sessionTitle.ifBlank { state.title.ifEmpty { "Session" } },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (projectName.isNotBlank()) Text(
+                                    projectName,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     },
                     navigationIcon = {
@@ -284,27 +309,52 @@ internal fun ChatScreen(
                 when (pane) {
                     Pane.DIFF -> DiffPaneContent(
                         viewModel(
-                            key = "diff-${state.chatId}",
-                            factory = DiffViewModel.Factory(model.session),
+                            key = "diff-$workspaceId",
+                            viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
+                            factory = DiffViewModel.Factory { workspacePane.chat },
                         ),
                     )
                     Pane.FILES -> FilesPaneContent(
                         viewModel(
-                            key = "files-${state.chatId}",
-                            factory = FilesViewModel.Factory(model.session),
+                            key = "files-$workspaceId",
+                            viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
+                            factory = FilesViewModel.Factory { workspacePane.chat },
                         ),
                     )
                     Pane.TERMINAL -> {
                         val terminal: TerminalViewModel = viewModel(
-                            key = "terminal-${state.chatId}",
-                            factory = TerminalViewModel.Factory(model.session, state.chatId),
+                            key = "terminal-$workspaceId",
+                            viewModelStoreOwner = workspaceOwner ?: checkNotNull(androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner.current),
+                            factory = TerminalViewModel.ShellFactory(model.client, terminalChatId),
                         )
-                        LaunchedEffect(terminal) {
-                            model.client.terminalEvents.collect(terminal::onEvent)
-                        }
                         TerminalPaneContent(terminal)
                     }
                     else -> Unit
+                }
+            }
+            return@Scaffold
+        }
+        if (!state.loading && items.isEmpty() && state.error == null && !state.working) {
+            Box(
+                Modifier.fillMaxSize().padding(padding).padding(horizontal = 28.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.widthIn(max = 480.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(painterResource(R.drawable.ic_folder), null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(projectName.ifBlank { sessionTitle.ifBlank { "Workspace" } }, style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text("What are we working on?", style = MaterialTheme.typography.headlineSmall,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Text("A new conversation in the same workspace.", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Text("History, drafts, and agent settings stay in this chat.", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                 }
             }
             return@Scaffold
@@ -472,14 +522,11 @@ private fun Composer(
                                 .clip(MaterialTheme.shapes.small),
                             contentScale = ContentScale.Crop,
                         )
-                        Surface(
-                            color = MaterialTheme.colorScheme.surface,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .clickable { model.removeAttachment(index) },
+                        IconButton(
+                            onClick = { model.removeAttachment(index) },
+                            modifier = Modifier.align(Alignment.TopEnd).size(48.dp),
                         ) {
-                            Text("✕", modifier = Modifier.padding(horizontal = 5.dp))
+                            Icon(painterResource(R.drawable.ic_close), "Remove attached image", modifier = Modifier.size(20.dp))
                         }
                     }
                 }
@@ -592,7 +639,7 @@ private fun Composer(
         // One rounded box, the way the desktop draws it: the message on top,
         // attach and send underneath.
         Surface(
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(20.dp),
             color = MaterialTheme.colorScheme.surfaceContainer,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
@@ -601,7 +648,7 @@ private fun Composer(
                     value = composer,
                     onValueChange = model::updateDraft,
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Message", color = LocalXdSignals.current.faint) },
+                    placeholder = { Text("Ask anything, or describe a task…", color = LocalXdSignals.current.faint) },
                     minLines = 1,
                     maxLines = 6,
                     colors = TextFieldDefaults.colors(
@@ -641,6 +688,11 @@ private fun Composer(
                             modifier = Modifier.size(20.dp),
                         )
                     }
+                    Text(
+                        state.backend.ifBlank { "Agent" },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Spacer(Modifier.weight(1f))
                     // One round button that sends and then stops, as on the
                     // desktop: an arrow in the accent while it is yours to send,
@@ -653,7 +705,7 @@ private fun Composer(
                             // The host accepts text, images, or both.
                             !sending && (composer.isNotBlank() || attachments.isNotEmpty())
                         },
-                        modifier = Modifier.size(40.dp),
+                        modifier = Modifier.size(48.dp),
                         colors = if (state.working) {
                             IconButtonDefaults.filledIconButtonColors(
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,

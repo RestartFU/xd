@@ -89,6 +89,16 @@ class OpsTest {
     }
 
     @Test
+    fun newChatCanJoinAnExistingWorkspaceSession() {
+        val request = Ops.newChat("project", "Review", "claude", sessionId = "session")
+        assertEquals("session", request.getValue("session").jsonPrimitive.content)
+        assertEquals("claude", request.getValue("backend").jsonPrimitive.content)
+        assertFalse("workdir" in request)
+        assertFalse("session" in Ops.newChat("project"))
+        assertFailsWith<IllegalArgumentException> { Ops.newChat("project", sessionId = " ") }
+    }
+
+    @Test
     fun newFolderDistinguishesAWorkspaceFromANestedFolder() {
         val workspace = Ops.newFolder("Mobile")
         val nested = Ops.newFolder("App", "workspace")

@@ -1,372 +1,199 @@
 ---
 name: xd
-description: A card catalog for the agent sessions running across your projects.
+description: A clear workspace for your coding agents.
 colors:
-  cabinet-graphite: "#121314"
-  drawer-graphite: "#17181a"
-  card-stock-dark: "#1e1f22"
-  card-stock-raised: "#27292c"
-  cabinet-seam: "#313338"
-  pulled-card: "#2b2d31"
-  bone: "#e8e5de"
-  bone-ink: "#eceae5"
-  pencil-gray: "#aaa9a3"
-  faint-gray: "#8b8a85"
-  bone-hover: "#ffffff"
-  ink-blue-dark: "#93b5e9"
-  ruled-red-dark: "#a8493c"
-  signal-green-dark: "#72b783"
-  signal-amber-dark: "#eaa93a"
-  signal-blue-dark: "#86a9e4"
-  danger-dark: "#ec7064"
-  danger-surface-dark: "#3b201e"
-  diff-added-dark: "#1b2b20"
-  diff-removed-dark: "#33201e"
-  selection-dark: "#93b5e955"
-  backdrop-dark: "#000000a6"
-  reading-room-white: "#f7f7f5"
-  drawer-white: "#eeeeeb"
-  card-stock-white: "#ffffff"
-  card-stock-white-raised: "#e9e9e5"
-  cabinet-seam-light: "#d7d6d0"
-  pulled-card-light: "#e6e5e0"
-  catalog-ink: "#1b1c1e"
-  pencil-gray-light: "#56554f"
-  faint-gray-light: "#64635d"
-  ink-hover: "#3a3c40"
-  ink-blue-light: "#2b5897"
-  ruled-red-light: "#c2483b"
-  signal-green-light: "#276b3c"
-  signal-amber-light: "#8c5100"
-  danger-light: "#b2342a"
-  danger-surface-light: "#f8e2df"
-  diff-added-light: "#e2f0e5"
-  diff-removed-light: "#f8e4e1"
-  selection-light: "#2b589740"
-  backdrop-light: "#1b1c1e66"
+  dark-background: "#1b1b1b"
+  dark-sidebar: "#202020"
+  dark-surface: "#292929"
+  dark-surface-high: "#333333"
+  dark-border: "#383838"
+  dark-selected-surface: "#373737"
+  dark-selected-border: "#858585"
+  dark-text: "#f1f1f1"
+  dark-muted: "#b1b1b1"
+  dark-faint: "#ababab"
+  dark-accent: "#dedede"
+  dark-accent-ink: "#dedede"
+  dark-accent-hover: "#f2f2f2"
+  dark-accent-text: "#1b1b1b"
+  dark-rule: "#383838"
+  dark-working: "#8dceb0"
+  dark-waiting: "#e2c28d"
+  dark-done: "#dedede"
+  dark-danger: "#efa7ad"
+  dark-danger-surface: "#2a1616"
+  dark-diff-added: "#263b30"
+  dark-diff-removed: "#462c30"
+  dark-selection: "#ffffff35"
+  dark-backdrop: "#000000b3"
+  dark-chrome-glass: "#292929d9"
+  dark-sidebar-glass: "#202020df"
+  dark-composer-glass: "#303030e8"
+  light-background: "#fafafa"
+  light-sidebar: "#e4e4e4"
+  light-surface: "#ffffff"
+  light-surface-high: "#efefef"
+  light-border: "#d0d0d0"
+  light-selected-surface: "#ededed"
+  light-selected-border: "#7d7d7d"
+  light-text: "#202020"
+  light-muted: "#5a5a5a"
+  light-faint: "#606060"
+  light-accent: "#363636"
+  light-accent-ink: "#444444"
+  light-accent-hover: "#202020"
+  light-accent-text: "#ffffff"
+  light-rule: "#d0d0d0"
+  light-working: "#226347"
+  light-waiting: "#745319"
+  light-done: "#444444"
+  light-danger: "#a13242"
+  light-danger-surface: "#fdeeee"
+  light-diff-added: "#e6f5eb"
+  light-diff-removed: "#fcebeb"
+  light-selection: "#20202030"
+  light-backdrop: "#18181b66"
+  light-chrome-glass: "#f1f1f1dc"
+  light-sidebar-glass: "#e4e4e4dc"
+  light-composer-glass: "#ffffffd9"
 typography:
   display:
-    fontFamily: "Libre Franklin"
-    fontSize: "22px"
-    fontWeight: 600
-  headline:
-    fontFamily: "Libre Franklin"
-    fontSize: "15px"
-    fontWeight: 600
+    fontFamily: "Inter"
+    fontSize: "28px"
+    fontWeight: 500
   title:
-    fontFamily: "Libre Franklin"
+    fontFamily: "Inter"
     fontSize: "13px"
     fontWeight: 500
   body:
-    fontFamily: "Libre Franklin"
+    fontFamily: "Inter"
     fontSize: "14px"
     fontWeight: 400
-    lineHeight: "23px"
-  body-ui:
-    fontFamily: "Libre Franklin"
-    fontSize: "12.5px"
-    fontWeight: 400
-    lineHeight: "19px"
   label:
-    fontFamily: "Libre Franklin"
-    fontSize: "11.5px"
-    fontWeight: 500
-  stamp:
-    fontFamily: "Libre Franklin"
-    fontSize: "10px"
-    fontWeight: 600
+    fontFamily: "Inter"
+    fontSize: "12px"
+    fontWeight: 400
   mono:
     fontFamily: "JetBrains Mono"
     fontSize: "12.5px"
     fontWeight: 400
     lineHeight: "19px"
 rounded:
-  tab: "2px"
-  label: "3px"
-  control-sm: "4px"
-  card: "5px"
   control: "6px"
-  segmented: "7px"
+  tab: "7px"
   panel: "8px"
-  card-android: "7dp"
-  drawer-android: "10dp"
+  composer: "16px"
 spacing:
-  card-gap: "3px"
-  drawer-inset: "5px"
-  list-gutter: "7px"
+  xs: "4px"
   sm: "8px"
-  field-inset: "10px"
   md: "12px"
   lg: "16px"
+  xl: "24px"
 components:
   button-primary:
-    backgroundColor: "{colors.bone}"
-    textColor: "{colors.cabinet-graphite}"
-    typography: "{typography.body-ui}"
+    backgroundColor: "{colors.dark-accent}"
+    textColor: "{colors.dark-accent-text}"
     rounded: "{rounded.control}"
-    padding: "0 12px"
     height: "30px"
-  button-primary-hover:
-    backgroundColor: "{colors.bone-hover}"
+    padding: "0 12px"
   button-secondary:
-    backgroundColor: "{colors.card-stock-dark}"
-    textColor: "{colors.bone-ink}"
+    backgroundColor: "{colors.dark-surface}"
+    textColor: "{colors.dark-text}"
     rounded: "{rounded.control}"
-    padding: "0 12px"
     height: "30px"
-  button-secondary-hover:
-    backgroundColor: "{colors.card-stock-raised}"
   button-ghost:
-    textColor: "{colors.pencil-gray}"
+    textColor: "{colors.dark-muted}"
     rounded: "{rounded.control}"
-    padding: "0 12px"
     height: "30px"
-  button-ghost-hover:
-    backgroundColor: "{colors.card-stock-raised}"
-    textColor: "{colors.bone-ink}"
-  button-ghost-active:
-    backgroundColor: "{colors.pulled-card}"
-    textColor: "{colors.bone-ink}"
-  button-danger:
-    textColor: "{colors.danger-dark}"
-    rounded: "{rounded.control}"
-    padding: "0 12px"
-    height: "30px"
-  button-danger-hover:
-    backgroundColor: "{colors.danger-surface-dark}"
-  session-card:
-    backgroundColor: "{colors.card-stock-dark}"
-    textColor: "{colors.bone-ink}"
-    typography: "{typography.title}"
-    rounded: "{rounded.card}"
-    padding: "0 12px"
-    height: "56px"
-  session-card-hover:
-    backgroundColor: "{colors.card-stock-raised}"
-  session-card-selected:
-    backgroundColor: "{colors.pulled-card}"
-  drawer-closed:
-    textColor: "{colors.bone-ink}"
-    typography: "{typography.title}"
-    rounded: "{rounded.card}"
-    height: "34px"
-  drawer-open:
-    backgroundColor: "{colors.cabinet-graphite}"
-    rounded: "{rounded.panel}"
-    padding: "5px"
-  label-frame:
-    textColor: "{colors.bone-ink}"
-    rounded: "{rounded.label}"
-    padding: "0 7px"
-    height: "22px"
-  stamp:
-    textColor: "{colors.signal-amber-dark}"
-    typography: "{typography.stamp}"
+  chat-tab:
+    backgroundColor: "{colors.dark-selected-surface}"
+    textColor: "{colors.dark-text}"
     rounded: "{rounded.tab}"
-    padding: "0 5px"
-    height: "18px"
-  find-field:
-    backgroundColor: "{colors.cabinet-graphite}"
-    typography: "{typography.body-ui}"
-    rounded: "{rounded.control}"
-    padding: "0 8px"
-    height: "32px"
-  catalog-sidebar:
-    backgroundColor: "{colors.drawer-graphite}"
-    width: "288px"
-  title-bar:
-    backgroundColor: "{colors.drawer-graphite}"
-    height: "38px"
-  session-header:
-    backgroundColor: "{colors.cabinet-graphite}"
-    typography: "{typography.headline}"
-    height: "48px"
-  pane-tab-active:
-    backgroundColor: "{colors.pulled-card}"
-    textColor: "{colors.bone-ink}"
-    rounded: "{rounded.control}"
-    height: "24px"
-  popover:
-    backgroundColor: "{colors.card-stock-dark}"
-    rounded: "{rounded.panel}"
-    padding: "6px"
-    width: "300px"
+    height: "30px"
+  composer:
+    backgroundColor: "{colors.dark-composer-glass}"
+    textColor: "{colors.dark-text}"
+    rounded: "{rounded.composer}"
+    width: "736px"
 ---
-
 # Design System: xd
 
 ## Overview
 
-**Creative North Star: "The Card Catalog"**
+**Creative North Star: "A Clear Workspace"**
 
-xd is a library card catalog for agent sessions. Projects are drawers, sessions are index cards, and a small metal signal tab clipped to the top edge of a card says what its agent is doing. One catalog sidebar on the left holds every drawer; only the current project's drawer is pulled out to show its cards, and the rest stay one line tall and show just their tabs. The centre belongs to the session's transcript, and the right dock holds Browser, Files and Changes, with Terminal below the chat.
+xd uses neutral charcoal and clear glass to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.
 
-The material is a cool graphite cabinet with bone card-stock ink in Dark, and white card stock with near-black ink in Light. Each card has one thin red ruled line under its title, the only decorative mark in the system. Colour is mostly reserved for state: green, amber and blue live on the signal tabs and the words beside them, and the chrome around them stays neutral so the agent's output stays the content. Density is that of a working tool: 12.5 to 13px UI text, 30px controls, 56px cards.
-
-Android follows the same world inside Material 3. Material owns the structure (navigation bar, dialogs, extended FAB, ripples, touch targets). The brand comes through as complete colour roles, Libre Franklin across the type scale, and the same drawer, card, rule and tab shapes.
+Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Desktop translucency belongs to chrome and the composer; text, code and tool output keep a stable reading background. Android carries the same palette and hierarchy through native Material 3 layouts.
 
 **Key Characteristics:**
-- Two themes only, Dark and Light. Saved names of retired themes (warm, nord, dracula) load as Dark.
-- Session state shows through the tab's shape as well as its hue, so it still reads in grayscale.
-- The current drawer is the only one that lifts. The current project's name sits in an outlined label frame.
-- Every session card has one fixed height and baseline (56px on desktop).
-- Flat, tonal surfaces. Only floating popovers and menus get a soft shadow.
-- Drawn 24-grid stroke icons with a 2px stroke, tinted to the text around them.
+
+- Two themes: Dark and Light. Retired saved names load as Dark.
+- Inter for prose and controls; JetBrains Mono for code and terminal text.
+- Separate chat tabs share a session workspace and terminal.
+- Real platform window controls; no decorative traffic lights.
+- Neutral selection and focus, with color reserved for meaningful status.
 
 ## Colors
 
-A neutral graphite and bone palette with one red ruled line, ink-blue links, and three signal hues used only for session state. Each role has a Dark value and a Light value. Desktop reads them from `ThemeColors` in `desktop/src/theme.rs`, and Android maps the same values onto Material roles in `minimalColors` and `XdSignals`.
+The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-` and `light-` prefixes. `selection`, `backdrop` and the three glass roles include alpha as `#RRGGBBAA`; other values are opaque.
 
-### Primary
-- **Bone** (Dark) / **Catalog Ink** (Light): the fill of the primary action, with cabinet graphite or white text on it. Bone also outlines the selected card and the label frame in Dark, and catalog ink does both in Light. On Android this is `primary`.
-- **Ink Blue** (`ink-blue-dark` / `ink-blue-light`): links, focus rings and the caret. Text selection is ink blue at reduced alpha. On Android this is `tertiary` and `XdSignals.link`.
+Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral. Working is green, waiting is amber, and destructive actions are rose. Status also has text or an icon.
 
-### Secondary
-- **Ruled Red** (`ruled-red-dark` / `ruled-red-light`): the 1px line under every card title, and nothing else. It is not an error colour.
-
-### Tertiary (session signals)
-- **Signal Green** (`signal-green-dark` / `signal-green-light`): Working. Used for the solid tab, the "Working" label and its animated dots, and the connected dot in the phone header.
-- **Signal Amber** (`signal-amber-dark` / `signal-amber-light`): Waiting on you, meaning an approval or question is waiting for the user. It covers the taller solid tab, the "Waiting on you" stamp and the 1.5px border of the interaction card.
-- **Signal Blue** (`signal-blue-dark` / `ink-blue-light`): Done, meaning a finished turn the user has not opened yet. It is drawn as a hollow tab. In Light the done colour and the link colour are the same ink blue.
-- **Danger** (`danger-*`, `danger-surface-*`): destructive buttons, failed tool runs (border and stamp), error message cards and the disconnected dot. Danger is not a session state.
-
-### Neutral
-- **Cabinet Graphite** / **Reading-Room White**: the window ground, the chat column, the inside of the open drawer, and the Find field.
-- **Drawer Graphite** / **Drawer White**: the catalog sidebar and the title bar.
-- **Card Stock** / **Card Stock White**: session cards, secondary buttons, popovers, activity and message cards, code blocks.
-- **Raised Card Stock**: the hover fill on cards, ghost buttons and drawer rows.
-- **Pulled Card**: the selected card, the active pane tab and active ghost buttons.
-- **Cabinet Seam**: every 1px border and divider.
-- **Bone Ink** / **Catalog Ink**: primary text. **Pencil Gray**: secondary text, card metadata and inactive ghost labels. **Faint Gray**: counts, hints, timestamps, chevrons and the Idle label. Never body copy.
-- **Diff Added / Diff Removed**: line backgrounds in the Changes pane.
-- **Backdrop**: the modal scrim behind dialogs.
-
-### Named Rules
-**The One Amber Rule.** Amber means one thing: an agent is waiting on the user. No warning, badge, highlight or brand mark may use it.
-
-**The Shape-Before-Hue Rule.** A signal always has its own shape as well as its own colour. Working is a solid flag, Waiting is a taller solid flag, Done is a hollow flag, and Idle has no tab at all. A new signal surface must stay legible in grayscale.
-
-**The Four States Rule.** A session can be Idle, Working, Waiting or Done. Nothing else. There is no failed or queued session state, and cards never show one. A failed tool run is stamped in the transcript instead.
+Android uses complete Material color roles in `ui/Theme.kt`, with small platform-specific surface adjustments. Its charcoal conversation surface matches the desktop canvas; silver action, text and signal colors follow the same roles. Legacy accent preferences remain readable but do not recolor the main workspace.
 
 ## Typography
 
-**UI Font:** Libre Franklin (static Regular, Medium, SemiBold, Bold and Italic, embedded in the desktop binary; on Android a variable font set to the same four weights)
-**Mono Font:** JetBrains Mono (bundled; never the host's `monospace` alias)
+Inter is bundled for interface text, prose and headings. JetBrains Mono is bundled for source, terminal output, paths and branches. Desktop UI controls typically use 12–13px, body copy 14px, and the empty-chat heading 28px. Android maps Inter onto the Material type scale and respects system font scaling.
 
-**Character:** Libre Franklin is a plain, sturdy grotesque that reads like typewritten catalog cards. It carries every piece of chrome. JetBrains Mono appears only where the text is machine text.
-
-### Hierarchy
-- **Display** (600, 22px): the project name on the project home, set inside its label frame. Markdown H1 in the transcript is 22px Bold, H2 is 19px and H3 is 16px.
-- **Headline** (600, 15px): the session title in the 48px session header.
-- **Title** (500 to 600, 13px): card titles (500), drawer names (500 when closed, 600 when current), the "Projects" header and popover row labels.
-- **Body** (400, 14px / 23px): agent and user messages in the chat column. The column is capped at 860px, assistant messages at 820px and user messages at 720px.
-- **Body UI** (400 to 500, 12.5px / 19px): buttons (500), the Find field, empty states and hints.
-- **Label** (500, 11.5px): card metadata (branch, state), message role labels (600, faint) and settings group labels (600, faint, sentence case).
-- **Stamp** (600, 10px, uppercase): the rubber-stamp status frame. On Android it uses `labelSmall` with 0.6sp tracking.
-- **Mono** (400, 12.5px / 19px): code blocks, tool output, the terminal, branch names in lists, and drawer session counts (11px, faint).
-
-On Android the Material 3 type scale is kept and set in Libre Franklin. Headline-small and every title role are SemiBold.
-
-### Named Rules
-**The Machine Text Rule.** JetBrains Mono is for text a machine wrote or reads: code, terminal, tool output, branch names, counts and agent wire names. Prose and chrome are always Libre Franklin.
+Keep the conversation readable at its actual window size. Titles truncate where necessary; explanatory text wraps and determines its own height.
 
 ## Layout
 
-The desktop window has three regions. At the top is a 38px title bar (drawer graphite, 1px seam below) with the xd mark, a project / session breadcrumb, the connection state and, outside sessions, a side-pane icon toggle. On the left is the 288px catalog sidebar (`CATALOG_WIDTH`; the direction contract said 296px, and the build is what this records). The centre is the session. On macOS the title bar is inset 86px for the traffic lights, and on other platforms 16px.
+Desktop has a 256px project sidebar, a session header, a separate 43px chat-tab row, and a central conversation. The regular composer and chat measure cap at 736px; an empty conversation centers a 660px composer beneath its context, heading and description. A short transcript starts at the top; longer transcripts retain scrolling and the existing latest-output behavior.
 
-The catalog stacks a 44px "Projects" header with an add button, then the Find field (32px, 10px side margins), then the drawer list (7px side gutter, 3px between drawers), then a footer with a 1px top seam and 10px vertical padding. The footer holds the primary New session button, a Terminal ghost button and a Settings ghost button. A closed drawer is one 34px row: a chevron, the name, a mono count, and on the right its non-idle signal tabs (at most six) followed by an add button. The open drawer insets its 56px cards by 5px, 3px apart.
+Changes, Files, Browser and Terminal belong to the session workspace. Chat tabs control independent conversations. Desktop settings use a bounded panel up to 900×760px, with section navigation that changes to a horizontal strip in compact windows. The application minimum is 760×560px.
 
-In the centre, a 48px session header holds the title, agent and branch chips (24px, 1px seam border), the state stamp, and two layout icons for the side pane and bottom terminal, with hover labels and selected backgrounds. The chat column below it is centred and capped at 860px, with the composer at the bottom. The right dock opens a browser page by default; its plus menu adds browser pages, Files, or Changes as tabs. The bottom pane opens a shell terminal. Both panes resize independently and can stay open together.
-
-Spacing is small and irregular rather than a strict scale: 3, 5, 7 and 10px for catalog joinery, and 8, 12 and 16px for general padding.
-
-On Android, a 56px product header with the mark, the title, a connection dot and Settings sits above a 52px context bar. The catalog is the Projects destination, and a Material navigation bar switches between Projects, Sessions and Terminal. All touch targets are at least 48dp.
+Android uses bottom navigation on compact screens and a navigation rail from 600dp. Chat tabs scroll horizontally and reveal the selected chat. Changes, Files and Terminal remain separate workspace tabs below them. Touch controls preserve 48dp targets; dialogs and reading areas respect system insets and enlarged text.
 
 ## Elevation & Depth
 
-Surfaces are flat and depth is tonal. The cabinet ground sits lowest, the drawer and title bar sit one step above it, cards sit on card stock, and hover or selection brings in raised or pulled card stock. The open drawer "lifts" by contrast, not by shadow: it is a well with an 8px radius and a 1px seam that is filled with the cabinet ground colour, so its cards stand out against it. Floating layers (the settings popover, context menus and pickers) are the only places a shadow appears.
+Desktop requests a blurred native window background and uses translucent title, sidebar and composer roles. The compositor determines the final blur; unsupported environments retain the neutral tonal hierarchy. Native OS decorations remain responsible for window controls where provided. Reading surfaces stay opaque, and floating menus and dialogs retain their existing shadows.
 
-### Shadow Vocabulary
-- **Floating layer** (`box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1)`, GPUI `shadow_lg`): popovers, menus and pickers that float over the shell.
-- **Android**: Material 3 tonal elevation and the extended FAB's default shadow. Nothing custom.
-
-### Named Rules
-**The Lift-By-Contrast Rule.** In-flow surfaces never cast shadows. A drawer, card or panel shows that it is raised through fill and seam alone.
+Android expresses the material through opaque layered neutral surfaces and restrained outlines, without compositor blur. It retains native dialogs, ripples and navigation behavior.
 
 ## Shapes
 
-Corners are small and practical, like card stock and steel. Signal tabs and stamps round only by 2px, and signal tabs round only their top corners so they look clipped to the card's edge. The label frame is 3px with a 1.5px outline in the primary colour. Cards are 5px. Buttons, the Find field and pane tabs are 6px. Layout toggles use 6px corners. Panels, the open drawer, popovers and message cards are 8px. Borders are 1px cabinet seam by default. A 1.5px border marks the label frame, the hollow Done tab and the amber interaction card.
-
-Android scales the same shapes for touch: cards 7dp, the open drawer 10dp, theme choices and chat panels 8dp, the label frame 3dp. Material components keep their own shapes.
-
-Icons are drawn on a 24 grid with a 2px round-capped, round-joined stroke and no fill, and are tinted with the surrounding text colour (desktop `assets/icons/*.svg`, Android `res/drawable/ic_*.xml`). Agent logos are the exception: they keep their own marks.
+Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on desktop. Fine borders separate chrome without decorative rules. Android keeps Material shapes and touch sizing, with a rounded composer and tonal active tabs.
 
 ## Components
 
-### Buttons
-Calm and compact. There is one vocabulary (`ui_button` with `ButtonKind`) for the shell, popovers and dialogs.
-- **Shape:** 6px radius, 30px tall, 12px horizontal padding, 12.5px Medium, 8px gap to an icon.
-- **Primary:** a bone fill with cabinet graphite text in Dark, and an ink fill with white text in Light. On hover it brightens to white (Dark) or ink hover (Light). Use one per region, for example New session.
-- **Secondary:** card stock with a 1px seam border and primary text. Hover moves to raised card stock.
-- **Ghost:** no fill and pencil gray text. Hover moves to raised card stock with primary text. When the button's panel is open, it takes the pulled-card fill.
-- **Danger:** a 1px danger border and danger text. Hover fills with the danger surface.
+**Project navigation.** Each project reveals its sessions. One sidebar row represents a session even when it contains several chats. The row restores that session's last active chat and aggregates working, waiting and unread activity.
 
-### Signal Tab (signature)
-A metal flag clipped to the top-right of a card, 12px in from the edge and 16px wide, with 2px top corners.
-- **Working:** solid green, 9px tall, rising 4px above the card.
-- **Waiting:** solid amber, 12px tall, rising 7px above the card.
-- **Done:** hollow, with a 1.5px blue outline and no bottom edge, 9px tall, filled with the cabinet ground.
-- **Idle:** no tab.
-- **Drawer tabs:** a closed drawer shows its sessions' tabs as 10px-wide miniatures, 3px apart and bottom-aligned. Working and Done are 5px tall, and Waiting is 8px.
+**Chat tabs.** Each tab has an agent mark and title. Add creates another chat sharing the workspace. Close hides a tab without deleting history; Reopen on desktop and All chats on Android restore it. Explicit rename and confirmed delete remain separate actions. Desktop keeps the final visible chat open. Android can hide all tabs and shows a saved-chats state with reopen and create actions.
 
-### Session Card (signature)
-- **Corner Style:** 5px (7dp on Android).
-- **Background:** card stock. Hover uses raised card stock. A selected card uses pulled card stock with a 1px primary-colour border.
-- **Structure:** a 28px title line (13px Medium, with 26px right clearance for the tab), then a 1px ruled-red line, then a 25px metadata line: agent logo at 12px, branch, a faint "·", and the state label in its signal colour (Medium when not Idle, with animated dots when Working).
-- **Height:** fixed at 56px (`CARD_HEIGHT`; the direction contract said 54px). Cards are draggable to reorder within their drawer.
-- **Android:** the agent logo moves to the title row, the branch is set in mono, and the Waiting state shows as a stamp instead of plain text.
+**Composer.** A bordered translucent desktop surface, or opaque Material surface on Android, holds the editor, attachments, agent options and send action. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft.
 
-### Drawer
-- **Closed:** a 34px row with a 5px hover radius: chevron, name (13px Medium), mono count, signal tabs and an add button.
-- **Current:** the name sits in the **label frame** (22px tall, 7px padding, 1.5px primary-colour outline, 3px radius) and is set SemiBold. The drawer becomes the 8px well with 5px padding, filled with the cabinet ground.
+**Workspace tools.** Files, Changes, Browser and Terminal retain session scope across sibling chat switches. Agent history, options, approvals and drafts retain chat scope. Hosts without grouped-session support remain usable with singleton sessions and show an update message when adding a sibling chat.
 
-### Stamp
-A rubber-stamp status in small uppercase: a 1px border in the state's colour, 2px radius, 18px tall, 10px SemiBold. It is used for the session state in the header and on project home rows, for "Waiting on you" on interactions, and for a failed tool run's status in danger red. It is a status mark, never a section heading.
+**Settings.** Desktop groups Appearance, General, Agents, Devices and Shortcuts in one panel using existing capabilities. Android preserves its native settings dialog. Both offer Dark and Light.
 
-### Inputs / Fields
-- **Find:** 32px tall with a 6px radius, a 1px seam border, the cabinet ground fill, a 13px faint search icon and 12.5px text. It filters drawers and cards live, and Esc clears it. It deliberately has no keyboard shortcut, so that terminals keep Ctrl-K.
-- **Composer:** pinned to the foot of the chat column, inside the same 860px measure.
-
-### Navigation
-- **Desktop:** the catalog is the primary navigation (project, then session). The 48px session header has two 28px ghost icon buttons for the side pane and bottom terminal. An open pane gives its button the pulled-card fill and primary text. Selecting an active button hides its pane while preserving its content.
-- **Android:** a Material `NavigationBar` on the surface colour, with a `secondaryContainer` indicator, for Projects, Sessions and Terminal, using drawn stroke icons.
-
-### Cards / Containers (transcript)
-- **Activity card:** card stock, 6px radius and a 1px seam, in the 860px measure, with 7px vertical padding. A chevron toggles its detail, which opens into a well with a 5px radius filled with the cabinet ground, 12px mono text and a 260px maximum height. A failed run turns the border danger red and adds a danger stamp.
-- **Message card:** user messages sit on card stock with an 8px radius, a 1px seam and 16×12px padding, under an 11.5px SemiBold faint role label. Assistant messages sit directly on the ground. Errors use a danger border on the danger surface.
-- **Interaction (approval or question):** card stock, 8px radius, a 1.5px amber border, 13px text and a "Waiting on you" stamp.
-
-### Settings Popover
-It opens from the catalog footer, anchored 56px from the bottom and 10px from the left: 300px wide, 6px padding, 8px radius, a 1px seam, card stock and the floating-layer shadow. The Appearance group offers exactly two theme choices, Dark and Light. Each choice is a 34px row with a 6px radius, a miniature card swatch (20×14px, 3px radius, with a ruled line) and a primary-colour border when selected. On Android, `MinimalSettingsDialog` is a Material `AlertDialog` that offers the same two choices as 48dp rows with an 8dp radius and a 1.5dp primary-colour border when chosen.
+**Buttons and fields.** Primary actions use the neutral action role; secondary and ghost controls use tonal hover and focus feedback. Destructive actions use the danger role and explicit confirmation where data is removed. Search and text fields retain visible focus and readable hints.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** take every colour from the `ThemeColors` roles (desktop) or `minimalColors` / `XdSignals` (Android), and define each new role for both Dark and Light.
-- **Do** give every new session-state surface a shape difference as well as a hue difference, following the signal tab.
-- **Do** keep session cards at one fixed height (56px) with the 1px ruled-red line under the title.
-- **Do** keep primary actions to one per region: a bone fill with ink text in Dark, an ink fill with white text in Light.
-- **Do** stamp a failed tool run in the transcript in danger red, and leave the session card's state alone.
-- **Do** use drawn 24-grid, 2px stroke icons tinted to the surrounding text.
-- **Do** let Material 3 own the structure on Android, and carry the brand through colour roles, Libre Franklin and the catalog shapes.
+
+- Do use semantic ThemeColors or Material color roles in both themes.
+- Do center the empty-state context and heading over the composer, allowing natural text height.
+- Do preserve independent chat histories, drafts and agent settings when switching tabs.
+- Do retain native window, keyboard, touch and system inset behavior.
+- Do keep opaque reading surfaces beneath prose, code and terminal output.
 
 ### Don't:
-- **Don't** use signal amber for anything except an agent waiting on the user.
-- **Don't** add a failed, queued or error state to session cards or signal tabs.
-- **Don't** add a third theme or per-user accent colours. There are exactly two themes, Dark and Light.
-- **Don't** bind a keyboard shortcut to Find in the catalog. Ctrl-K belongs to the terminals.
-- **Don't** cast shadows from in-flow surfaces. Only floating popovers and menus get the floating-layer shadow.
-- **Don't** use the ruled red for errors or emphasis. It is only the card's rule line.
-- **Don't** set prose or chrome in JetBrains Mono, or fall back to the host's `monospace`.
-- **Don't** use text glyphs (←, ✕, +, a letter in a box) as icons.
-- **Don't** add glow, gradients or decorative motion. The only standing animation is the Working dots.
+
+- Don't restore the retired red rules, bone palette or card-catalog metaphor.
+- Don't make closing a chat tab delete its conversation.
+- Don't use fake Mac window controls on other platforms.
+- Don't depend on translucency or color alone to identify selection or status.
+- Don't scale desktop layouts into phone thumbnails; use native responsive structure.

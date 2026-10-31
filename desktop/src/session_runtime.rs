@@ -275,7 +275,7 @@ impl SessionEventReceiver {
 
 struct Session {
     endpoint: SessionEndpoint,
-    chat_id: String,
+    chat_id: Mutex<String>,
     terminal_id: String,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
@@ -345,7 +345,7 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_owned())?;
         if let Some(session) = sessions.get(terminal_id).cloned() {
-            let same_session = session.endpoint == endpoint && session.chat_id == chat_id;
+            let same_session = session.endpoint == endpoint && session.owner() == chat_id;
             drop(sessions);
             if !same_session {
                 return Err("That terminal id is already in use by another session.".to_owned());
@@ -404,7 +404,7 @@ impl SessionRuntime {
             .map_err(|error| format!("Cannot prepare terminal input: {error}."))?;
         let session = Arc::new(Session {
             endpoint,
-            chat_id: chat_id.to_owned(),
+            chat_id: Mutex::new(chat_id.to_owned()),
             terminal_id: terminal_id.to_owned(),
             master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(writer)),
@@ -466,7 +466,7 @@ impl SessionRuntime {
         let _ = self.events.send(SessionEvent::new(
             session.endpoint,
             SessionEventKind::Resized {
-                chat_id: session.chat_id.clone(),
+                chat_id: session.owner(),
                 terminal_id: session.terminal_id.clone(),
                 columns,
                 rows,
@@ -488,7 +488,7 @@ impl SessionRuntime {
         let _ = self.events.send(SessionEvent::new(
             session.endpoint,
             SessionEventKind::Closed {
-                chat_id: session.chat_id.clone(),
+                chat_id: session.owner(),
                 terminal_id: session.terminal_id.clone(),
             },
         ));
@@ -513,11 +513,37 @@ impl SessionRuntime {
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_owned())?
             .values()
-            .filter(|session| session.endpoint == endpoint && chat_ids.contains(&session.chat_id))
+            .filter(|session| session.endpoint == endpoint && chat_ids.contains(&session.owner()))
             .map(|session| session.terminal_id.clone())
             .collect::<Vec<_>>();
         for terminal_id in terminal_ids {
             self.kill(&terminal_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn adopt_chat_owners(
+        &self,
+        endpoint: SessionEndpoint,
+        aliases: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "Terminal state is unavailable.".to_owned())?;
+        for session in sessions
+            .values()
+            .filter(|session| session.endpoint == endpoint)
+        {
+            let mut owner = session
+                .chat_id
+                .lock()
+                .map_err(|_| "Terminal ownership is unavailable.".to_owned())?;
+            if !owner.starts_with("global:")
+                && let Some(canonical) = aliases.get(owner.as_str())
+            {
+                *owner = canonical.clone();
+            }
         }
         Ok(())
     }
@@ -534,10 +560,10 @@ impl SessionRuntime {
             .values()
             .filter(|session| {
                 session.endpoint == endpoint
-                    && !session.chat_id.starts_with("global:")
-                    && !live_chats.contains(&session.chat_id)
+                    && !session.owner().starts_with("global:")
+                    && !live_chats.contains(&session.owner())
             })
-            .map(|session| session.chat_id.clone())
+            .map(|session| session.owner())
             .collect::<HashSet<_>>();
         self.kill_chats(endpoint, &removed)
     }
@@ -601,6 +627,13 @@ fn run_cleanup(spec: ProcessSpec) {
 }
 
 impl Session {
+    fn owner(&self) -> String {
+        self.chat_id
+            .lock()
+            .map(|owner| owner.clone())
+            .unwrap_or_default()
+    }
+
     fn close(&self) {
         if let Ok(mut writer) = self.writer.lock() {
             writer.take();
@@ -656,7 +689,7 @@ fn start_reader(
                     .send(SessionEvent::new(
                         session.endpoint,
                         SessionEventKind::Output {
-                            chat_id: session.chat_id.clone(),
+                            chat_id: session.owner(),
                             terminal_id: session.terminal_id.clone(),
                             data: buffer[..count].to_vec(),
                         },
@@ -669,7 +702,7 @@ fn start_reader(
                     let _ = events.send(SessionEvent::new(
                         session.endpoint,
                         SessionEventKind::Activity {
-                            chat_id: session.chat_id.clone(),
+                            chat_id: session.owner(),
                             terminal_id: session.terminal_id.clone(),
                             working,
                         },
@@ -690,7 +723,7 @@ fn start_reader(
                 let _ = events.send(SessionEvent::new(
                     session.endpoint,
                     SessionEventKind::Closed {
-                        chat_id: session.chat_id.clone(),
+                        chat_id: session.owner(),
                         terminal_id: session.terminal_id.clone(),
                     },
                 ));
@@ -886,6 +919,79 @@ mod tests {
         assert!(!cursor.feed(b"\x1b[6"));
         assert!(!cursor.feed(b"ordinary text"));
         assert!(cursor.feed(b"\x1b\x1b[6n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn adopting_terminal_owners_preserves_processes_output_and_persistent_identity() {
+        let (runtime, events) = SessionRuntime::new();
+        runtime
+            .open(
+                "legacy",
+                "retained-terminal-id",
+                "Tool",
+                Some("codex"),
+                ProcessSpec::new(
+                    "/bin/sh",
+                    [
+                        "-c",
+                        "printf ready; while read line; do printf ':%s' \"$line\"; done",
+                    ],
+                ),
+                None,
+                80,
+                24,
+            )
+            .unwrap();
+        assert!(matches!(
+            events.recv_blocking().unwrap().kind,
+            SessionEventKind::Opened { .. }
+        ));
+        assert!(recv_output_containing(&events, "ready"));
+        let retained = runtime.session("retained-terminal-id").unwrap();
+        runtime
+            .adopt_chat_owners(
+                SessionEndpoint::Local,
+                &std::collections::HashMap::from([("legacy".into(), "session:legacy".into())]),
+            )
+            .unwrap();
+        runtime
+            .reconcile_chats(
+                SessionEndpoint::Local,
+                &std::collections::HashSet::from(["session:legacy".into()]),
+            )
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &retained,
+            &runtime.session("retained-terminal-id").unwrap()
+        ));
+        assert_eq!(retained.owner(), "session:legacy");
+        runtime
+            .adopt_chat_owners(
+                SessionEndpoint::Local,
+                &std::collections::HashMap::from([
+                    ("legacy".into(), "session:legacy".into()),
+                    ("sibling".into(), "session:legacy".into()),
+                ]),
+            )
+            .unwrap();
+        runtime
+            .adopt_chat_owners(
+                SessionEndpoint::Local,
+                &std::collections::HashMap::from([("sibling".into(), "session:legacy".into())]),
+            )
+            .unwrap();
+        runtime
+            .reconcile_chats(
+                SessionEndpoint::Local,
+                &std::collections::HashSet::from(["session:legacy".into()]),
+            )
+            .unwrap();
+        runtime
+            .input("retained-terminal-id", b"after-adoption\n")
+            .unwrap();
+        assert!(recv_output_containing(&events, ":after-adoption"));
+        runtime.kill("retained-terminal-id").unwrap();
     }
 
     #[cfg(unix)]

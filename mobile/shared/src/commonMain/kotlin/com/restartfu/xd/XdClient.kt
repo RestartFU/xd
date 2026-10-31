@@ -58,12 +58,19 @@ public class XdClient(
     private val _waitingChats = MutableStateFlow<Set<String>>(emptySet())
     private val _unreadChats = MutableStateFlow<Set<String>>(emptySet())
     private val terminalBusy = mutableSetOf<String>()
+    private val visibleChat = MutableStateFlow<String?>(null)
 
     /** Chats with an approval or question waiting on the user, across every chat. */
     public val waitingChats: StateFlow<Set<String>> = _waitingChats.asStateFlow()
 
     /** Chats whose turn finished while they were not open. */
     public val unreadChats: StateFlow<Set<String>> = _unreadChats.asStateFlow()
+
+    /** The displayed transcript; cached background tabs can still become unread. */
+    public fun setVisibleChat(chatId: String?) {
+        visibleChat.value = chatId
+        if (chatId != null) markSeen(chatId)
+    }
 
     public fun markSeen(chatId: String) {
         _unreadChats.update { it - chatId }
@@ -80,14 +87,14 @@ public class XdClient(
             }
             "interactions-cleared" -> pendingInteractions.update { it - chatId }
             "turn-started" -> _unreadChats.update { it - chatId }
-            "turn-finished" -> if (chatId !in sessions.value) _unreadChats.update { it + chatId }
+            "turn-finished" -> if (chatId != visibleChat.value) _unreadChats.update { it + chatId }
             // A terminal agent finishing is the same news as a chat turn finishing.
             "terminal-activity" -> {
                 val working = (event["terminal_working"] as? JsonPrimitive)?.booleanOrNull ?: return
                 if (working) {
                     terminalBusy += chatId
                     _unreadChats.update { it - chatId }
-                } else if (terminalBusy.remove(chatId) && chatId !in sessions.value) {
+                } else if (terminalBusy.remove(chatId) && chatId != visibleChat.value) {
                     _unreadChats.update { it + chatId }
                 }
             }
@@ -197,6 +204,7 @@ public class XdClient(
         }
         if (
             !chatId.startsWith("global:") &&
+            !chatId.startsWith("session:") &&
             chosen.state.value.title.isEmpty() &&
             actor.link.value is Link.Up
         ) {
@@ -265,13 +273,16 @@ public class XdClient(
         folderId: String,
         title: String?,
         backend: String? = null,
+        sessionId: String? = null,
     ): String {
-        val value = actor.call(Ops.newChat(folderId, title, backend))
-        return actor.decodeReply(value) {
+        val value = actor.call(Ops.newChat(folderId, title, backend, sessionId))
+        val id = actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
             reply.id?.takeIf(String::isNotBlank)
                 ?: throw RemoteProtocolException("New chat reply has no id")
         }
+        requestTreeRefresh()
+        return id
     }
 
     public suspend fun createFolder(

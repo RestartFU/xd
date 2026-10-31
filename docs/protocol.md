@@ -136,7 +136,27 @@ restarts, but unused codes and pending backend requests do not.
       "folder":"folder-1",
       "title":"Fix mobile layout",
       "backend":"codex",
-      "working":false
+      "working":false,
+      "session":"session-1"
+    },
+    {
+      "id":"chat-2",
+      "folder":"folder-1",
+      "title":"Review changes",
+      "backend":"claude",
+      "working":false,
+      "session":"session-1"
+    }
+  ],
+  "sessions": [
+    {
+      "id":"session-1",
+      "folder":"folder-1",
+      "title":"Layout task",
+      "chats":["chat-1","chat-2"],
+      "working":false,
+      "terminal_working":false,
+      "terminal_chat":"session:session-1"
     }
   ]
 }
@@ -144,6 +164,20 @@ restarts, but unused codes and pending backend requests do not.
 
 `parent` is absent for root folders. Arrays are complete snapshots. Clients
 must tolerate a child appearing before its parent and treat ids as opaque.
+
+A folder contains persistent workspace sessions, each containing independent
+chats. Each chat's `session` names its session; the matching `sessions` entry
+provides its title, folder, ordered chat membership, and stable `terminal_chat`
+resource. `branch` is present when known. Session `working` and
+`terminal_working` aggregate activity across its members. A session's identity
+and title survive deletion of its first chat while other members remain.
+
+The `sessions` array and chat `session` members are additive. Existing chats
+migrate into separate singleton sessions without changing their chat ids,
+transcripts, drafts, options, or backend resume state. Existing clients may
+continue reading `folders` and `chats`; clients reading an older host without
+`sessions` may display one session per chat and retain its chat id as the
+terminal owner.
 
 ### `chat`
 
@@ -153,7 +187,9 @@ must tolerate a child appearing before its parent and treat ids as opaque.
 
 Success always includes `ok`, `title`, `backend`, `session_mode`, `auth_state`, `commands`,
 `plan`, `queue` (oldest first), `working`, `effort`, `new_worktree`, and
-`has_messages`.
+`has_messages`. It also includes `session`, `session_title`, and
+`terminal_chat` for its shared workspace session. The chat's `title` belongs to
+that conversation; the session title is managed independently.
 
 Optional members: `auth_detail`, `queued` (compatibility alias for the first
 queue item), `model`, `access`, `context_used`, `context_window`, `workdir`,
@@ -288,15 +324,74 @@ acting at once are therefore ordered by the host rather than racing.
 
 ```json
 {"op":"new-chat","folder":"folder-1","title":"Optional","worktree":{"kind":"branch","ref":"refs/heads/feature","oid":"0123456789abcdef0123456789abcdef01234567"}}
-{"ok":true,"id":"chat-9"}
+{"ok":true,"id":"chat-9","backend":"codex","session":"session-9","terminal_chat":"session:session-9"}
 ```
 
-`folder` is **required**. `title` defaults to `New Chat`. The new chat inherits
-its folder's backend and model. `worktree` may select `new`, an `existing` path,
-a full local or remote-tracking branch ref plus its listed commit, or a pull
-request number plus its listed head commit. Branch and pull request selections
-create an isolated managed `xd/*` worktree and are revalidated before checkout.
-The legacy `workdir` field remains supported when `worktree` is omitted.
+Without `session`, `folder` is required and the operation creates a new session
+containing the new chat. `title` defaults to `New Chat` and also supplies the
+initial session title. Optional `backend` selects the chat's assistant;
+otherwise the folder and host defaults apply. `worktree` may select `new`, an
+`existing` path, a full local or remote-tracking branch ref plus its listed
+commit, or a pull request number plus its listed head commit. Branch and pull
+request selections create an isolated managed `xd/*` worktree and are
+revalidated before checkout. The legacy `workdir` field remains supported when
+`worktree` is omitted.
+
+To add an independent chat to an existing session:
+
+```json
+{"op":"new-chat","session":"session-9","title":"Review","backend":"claude"}
+{"ok":true,"id":"chat-10","backend":"claude","session":"session-9","terminal_chat":"session:session-9"}
+```
+
+Here `folder` is optional; if supplied, it must match the session's folder.
+`workdir` and worktree selection are refused because the new chat shares the
+session's current checkout and branch. Joining creates no additional worktree.
+Agent options, drafts, queues, history, backend resume state, and approvals
+remain scoped to the returned chat `id`.
+
+### Session mutations
+
+```json
+{"op":"rename-session","session":"session-9","title":"Review layout"}
+{"op":"move-session","session":"session-9","folder":"folder-2"}
+{"op":"move-session","session":"session-9","before":"session-3"}
+{"op":"delete-session","session":"session-9"}
+```
+
+Each operation requires a session id, replies with `ok`, and broadcasts `tree`.
+`rename-session` requires a nonempty title. `move-session` takes either a target
+`folder`, `before`, or `after`; ordering anchors are session ids. Moving keeps
+all member chats together and preserves their shared checkout.
+
+`delete-session` deletes every member chat and its conversation state, stops
+its agents, and closes its shared terminals. It retains checkout files and
+worktrees. `delete-chat` with an actual chat id removes only that conversation;
+its reply includes `session` and `session_deleted`. Shared terminals close only
+when the final member is deleted. `rename-chat` changes only the conversation
+title. Hiding a client tab does not require either deletion operation.
+
+### Shared session terminals
+
+Use the session's `terminal_chat` value as the `chat` parameter for
+`terminal-list` and `terminal-open`:
+
+```json
+{"op":"terminal-open","chat":"session:session-9","reuse":true}
+```
+
+This resource remains valid while any chat in the session remains, including
+when the initial chat has been deleted. Terminal ids returned by these
+operations are used unchanged for input, resize, and kill requests. Terminal
+activity events use the same shared resource in their `chat` member. Clients
+should associate that activity with the session's current members. Existing
+terminal requests using actual chat ids resolve the same session resources.
+Previously opened terminals are adopted without restarting their processes or
+losing replay output. For existing clients, terminal events may also carry an
+observed legacy chat owner; repeated frames retain the same terminal id and
+sequence and must not duplicate output. Agent, approval, file, and Git requests
+continue to use an actual chat id; file and Git operations resolve its shared
+session workspace.
 
 ### `set-shortcuts`
 
@@ -331,9 +426,13 @@ takes precedence. The selected repository is not moved or modified.
 {"ok":true}
 ```
 
-Both `chat` and `folder` are required. The target folder must exist. Moving a
-chat changes which folder settings it inherits; the chat id and transcript stay
-the same. The host broadcasts a `tree` event after a successful move.
+Supply `chat` plus either a target `folder`, `before`, or `after`; ordering
+anchors here are actual chat ids. The target folder must exist. Moving between
+folders moves the chat's entire workspace session, preserving its checkout,
+chat ids, and transcripts. The destination supplies inherited folder settings.
+Ordering around a chat in another session reorders the whole source session;
+ordering within the same session reorders its chats. The host broadcasts a
+`tree` event after a successful move.
 
 ### `send`
 
@@ -460,6 +559,11 @@ Options: `model`, `effort`, `access`, `plan`, `fast`, `backend`,
 `new-worktree`, `workspace`. Boolean options take `"true"`/`"false"`.
 `fast` is Codex-only. An unknown option is an error.
 
+`new-worktree` and `workspace` change the shared session workspace atomically
+for every member chat. They are allowed only before any member has a user
+message or running turn. A pending new worktree is created once on the first
+member's send; subsequent chats share it. Other agent options remain per chat.
+
 Selecting a model atomically requires sending `backend` alongside `value`;
 without `backend` only the model string is stored. The atomic form validates
 both, clears an unsupported effort, and appends a visible `Switched to …`
@@ -502,18 +606,19 @@ while the desktop card may fetch the same data directly.
 ```
 
 The `chat` and absolute `worktree` path are required. Only the selected linked
-worktree reported by `selected_worktree` may be removed, and the chat must not
-have any messages. The target must be a clean, registered worktree that is
-neither the repository's main checkout nor its current checkout, and no other
-chat may reference it. The host removes the checkout without force and keeps
-the Git branch, then returns the chat to its original checkout. A successful
-request replies with `ok` alone.
+worktree reported by `selected_worktree` may be removed, and no chat in the
+session may have a user message or running turn. The target must be a clean,
+registered linked worktree outside the repository's main checkout, and no other
+session may reference it. The host removes the checkout without force and
+keeps the Git branch, then returns all sibling chats to their original
+checkout. A successful request replies with `ok` alone.
 
 ### Folder and chat mutations
 
 `new-folder`, `rename-folder`, `move-folder`, `trash-folder`, `rename-chat`,
-`move-chat`, `delete-chat`, `set-folder-context`, and `set-folder-settings` all
-reply with `ok` alone and broadcast a `tree` event.
+`move-chat`, `set-folder-context`, and `set-folder-settings` acknowledge with
+`ok` and broadcast a `tree` event. `new-folder` also returns its id;
+`delete-chat` additionally returns the session deletion fields described above.
 
 `set-shortcuts` replies with the resulting shortcut sets and broadcasts a
 `shortcuts-changed` event so open chats can refresh their buttons.

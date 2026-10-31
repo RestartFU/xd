@@ -167,6 +167,38 @@ class XdClientVerticalSliceTest {
     }
 
     @Test
+    fun cachedBackgroundTabsBecomeUnreadAndSharedShellsSkipTranscriptLoads() = runTest {
+        val factory = FakeSocketFactory()
+        val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)
+        val connecting = async { client.connect(testConnection()) }
+        runCurrent()
+        val socket = factory.latest
+        socket.connected()
+        runCurrent()
+        socket.receiveReadinessTreeReply()
+        runCurrent()
+        connecting.await()
+        socket.receive("""{"ok":true,"folders":[],"chats":[]}""")
+        runCurrent()
+        val sharedShell = client.openChat("session:workspace")
+        runCurrent()
+        assertEquals(2, socket.writes.size)
+
+        val cached = client.openChat("cached")
+        runCurrent()
+        client.setVisibleChat("foreground")
+        socket.receive("""{"event":"turn-finished","chat":"cached","ok":true}""")
+        socket.receive("""{"event":"turn-finished","chat":"foreground","ok":true}""")
+        runCurrent()
+        assertTrue("cached" in client.unreadChats.value)
+        assertFalse("foreground" in client.unreadChats.value)
+        client.setVisibleChat("cached")
+        assertFalse("cached" in client.unreadChats.value)
+        cached.close()
+        sharedShell.close()
+    }
+
+    @Test
     fun failedSendDuringReloadDoesNotRestoreOptimisticRow() = runTest {
         val factory = FakeSocketFactory()
         val client = XdClient(factory, MemoryCredentialStore(), backgroundScope)

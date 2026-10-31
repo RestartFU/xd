@@ -208,6 +208,17 @@ pub enum RequestKind {
     TrashFolder {
         folder_id: String,
     },
+    RenameSession {
+        session_id: String,
+        title: String,
+    },
+    MoveSession {
+        session_id: String,
+        folder_id: Option<String>,
+    },
+    DeleteSession {
+        session_id: String,
+    },
     RenameChat {
         chat_id: String,
         title: String,
@@ -746,6 +757,24 @@ impl HostHandle {
         )
     }
 
+    pub fn new_chat_in_session(
+        &self,
+        folder_id: &str,
+        session_id: &str,
+        title: &str,
+        backend: &str,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::NewChat {
+                folder_id: folder_id.to_owned(),
+                title: title.to_owned(),
+                workdir: None,
+            },
+            json!({"op": "new-chat", "folder": folder_id, "session": session_id,
+                "title": title, "backend": backend}),
+        )
+    }
+
     pub fn rename_folder(&self, folder_id: &str, name: &str) -> Result<(), String> {
         self.send(
             RequestKind::RenameFolder {
@@ -793,6 +822,52 @@ impl HostHandle {
                 folder_id: folder_id.to_owned(),
             },
             json!({"op": "trash-folder", "folder": folder_id}),
+        )
+    }
+
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::RenameSession {
+                session_id: session_id.to_owned(),
+                title: title.to_owned(),
+            },
+            json!({"op": "rename-session", "session": session_id, "title": title}),
+        )
+    }
+
+    pub fn move_session(&self, session_id: &str, folder_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::MoveSession {
+                session_id: session_id.to_owned(),
+                folder_id: Some(folder_id.to_owned()),
+            },
+            json!({"op": "move-session", "session": session_id, "folder": folder_id}),
+        )
+    }
+
+    pub fn reorder_session(
+        &self,
+        session_id: &str,
+        anchor_id: &str,
+        after: bool,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "move-session", "session": session_id});
+        body[if after { "after" } else { "before" }] = Value::String(anchor_id.to_owned());
+        self.send(
+            RequestKind::MoveSession {
+                session_id: session_id.to_owned(),
+                folder_id: None,
+            },
+            body,
+        )
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::DeleteSession {
+                session_id: session_id.to_owned(),
+            },
+            json!({"op": "delete-session", "session": session_id}),
         )
     }
 
@@ -2366,6 +2441,83 @@ mod tests {
             } if path == "/srv/workspaces"
         ));
 
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn session_tab_and_lifecycle_requests_keep_session_and_chat_ids_distinct() {
+        let directory = env::temp_dir().join(format!("xd-session-contract-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for expected in [
+                json!({"op":"new-chat","folder":"project","session":"workspace-session","title":"Claude tab","backend":"claude"}),
+                json!({"op":"rename-session","session":"workspace-session","title":"Shared task"}),
+                json!({"op":"move-session","session":"workspace-session","folder":"other-project"}),
+                json!({"op":"move-session","session":"workspace-session","before":"anchor-session"}),
+                json!({"op":"move-session","session":"workspace-session","after":"anchor-session"}),
+                json!({"op":"delete-session","session":"workspace-session"}),
+            ] {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut request: Value = serde_json::from_str(&line).unwrap();
+                let request_id = request
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("_xd_request")
+                    .unwrap();
+                assert_eq!(request, expected);
+                let reply = json!({"ok":true,"id":"new-chat-id","session":"workspace-session",
+                    "terminal_chat":"session:workspace-session","_xd_request":request_id});
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        host.new_chat_in_session("project", "workspace-session", "Claude tab", "claude")
+            .unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::NewChat { folder_id, title, workdir:None }, body, ..
+        } if folder_id == "project" && title == "Claude tab" && body["id"] == "new-chat-id" && body["session"] == "workspace-session")
+        );
+        host.rename_session("workspace-session", "Shared task")
+            .unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::RenameSession {session_id,title}, ..
+        } if session_id == "workspace-session" && title == "Shared task")
+        );
+        host.move_session("workspace-session", "other-project")
+            .unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::MoveSession {session_id,folder_id:Some(folder_id)}, ..
+        } if session_id == "workspace-session" && folder_id == "other-project")
+        );
+        for after in [false, true] {
+            host.reorder_session("workspace-session", "anchor-session", after)
+                .unwrap();
+            assert!(
+                matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+                kind:RequestKind::MoveSession {session_id,folder_id:None}, ..
+            } if session_id == "workspace-session")
+            );
+        }
+        host.delete_session("workspace-session").unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::DeleteSession {session_id}, ..
+        } if session_id == "workspace-session")
+        );
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
     }

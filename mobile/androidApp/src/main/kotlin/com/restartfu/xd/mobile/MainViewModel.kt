@@ -45,6 +45,7 @@ data class CreatedDirectSession(
     val chatId: String,
     val agent: DirectAgent,
     val title: String,
+    val sessionId: String? = null,
 )
 
 data class PendingHostKeyConfirmation(
@@ -244,6 +245,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         folderId: String,
         title: String,
         agent: DirectAgent,
+        sessionId: String? = null,
     ) {
         if (_creatingChat.value) return
         _creatingChat.value = true
@@ -254,12 +256,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     folderId = folderId,
                     title = title.takeIf(String::isNotBlank),
                     backend = agent.wire,
+                    sessionId = sessionId,
                 )
                 _createdDirectSession.value = CreatedDirectSession(
                     folderId,
                     chatId,
                     agent,
-                    title.takeIf(String::isNotBlank) ?: "New Session",
+                    title.takeIf(String::isNotBlank) ?: if (sessionId == null) "New Session" else "New chat",
+                    sessionId,
                 )
             } catch (error: CancellationException) {
                 throw error

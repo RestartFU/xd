@@ -22,10 +22,23 @@ used by the new transport: pair again after upgrading.
 
 The shared Kotlin module owns JSON Lines framing, request matching, reconnect
 policy, tree/chat stores, terminal events, and transcript state. Android supplies
-pinned TLS transport and encrypted credential storage. Supported sessions
-open native chat with model/settings controls, activity, questions, approvals,
-and diff/files/shell tabs. The host automatically deletes legacy terminal chats
-and their saved history when opening the database; their worktrees are retained.
+pinned TLS transport and encrypted credential storage. Navigation follows
+**Project → Session → Chat tabs**. A session owns one workspace; each chat keeps
+its own history, draft, attachments, assistant, model, and agent settings.
+Switching tabs restores that chat without replacing the other conversations.
+Native chat retains activity, questions, and approvals.
+
+**Changes**, **Files**, and **Terminal** belong to the shared session. Switching
+chat tabs keeps the same workspace, open file state, changes view, and shell.
+Closing a chat tab hides it without deleting its history or stopping its agent;
+use **All chats** to reopen it. Permanent deletion is a separate action with a
+confirmation.
+
+Older hosts appear as one chat per session. Update the connected host before
+adding another chat inside an existing session; Android displays an update
+message instead of creating a separate session. The host automatically deletes
+legacy terminal chats and their saved history when opening the database; their
+worktrees are retained.
 
 Leaving the app closes its connection; returning reconnects and takes fresh
 snapshots. Work and pending approvals continue in the host daemon. There is no
