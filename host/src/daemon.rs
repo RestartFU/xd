@@ -9,7 +9,7 @@ use std::{
     os::{
         fd::AsRawFd,
         unix::{
-            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::{UnixListener, UnixStream},
             process::CommandExt,
         },
@@ -68,8 +68,8 @@ fn paths(options: &HostOptions) -> io::Result<Paths> {
     })
 }
 fn private_directory(path: &Path) -> io::Result<()> {
-    match fs::create_dir(path) {
-        Ok(()) => fs::set_permissions(path, fs::Permissions::from_mode(0o700))?,
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
@@ -458,5 +458,32 @@ impl PeerServer {
         });
         *endpoint = Some((bind.to_owned(), address.port(), result.clone()));
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_daemons_create_a_private_runtime_directory() {
+        let root = std::env::temp_dir().join(format!("xd-runtime-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        for round in 0..32 {
+            let runtime = root.join(round.to_string());
+            let barrier = std::sync::Barrier::new(16);
+            thread::scope(|scope| {
+                for _ in 0..16 {
+                    let runtime = &runtime;
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        private_directory(runtime).unwrap();
+                    });
+                }
+            });
+            assert_eq!(fs::metadata(&runtime).unwrap().mode() & 0o777, 0o700);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }
