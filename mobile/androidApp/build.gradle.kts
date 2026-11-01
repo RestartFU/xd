@@ -38,8 +38,8 @@ android {
         applicationId = xdApplicationId
         minSdk = 26
         targetSdk = 35
-        versionCode = 1021
-        versionName = "0.1.21"
+        versionCode = 2000
+        versionName = "0.2.0"
         resValue("string", "app_name", xdDisplayName)
         resValue("string", "remote_data_name", xdRemoteDataName)
     }
