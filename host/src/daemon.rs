@@ -82,7 +82,9 @@ fn private_directory(path: &Path) -> io::Result<()> {
             "Daemon directory must be owned by you and private (0700).",
         ));
     }
-    Ok(())
+    // A restrictive umask may remove owner access at creation. Every caller
+    // restores it after verifying ownership and rejecting public directories.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 struct Singleton {
     _lock: File,
@@ -469,6 +471,10 @@ mod tests {
     fn concurrent_daemons_create_a_private_runtime_directory() {
         let root = std::env::temp_dir().join(format!("xd-runtime-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
+        if std::env::var_os("XD_TEST_RESTRICTIVE_UMASK").is_some() {
+            // Only the subprocess test sets this process-wide mask.
+            unsafe { libc::umask(0o700) };
+        }
         for round in 0..32 {
             let runtime = root.join(round.to_string());
             let barrier = std::sync::Barrier::new(16);
@@ -483,7 +489,27 @@ mod tests {
                 }
             });
             assert_eq!(fs::metadata(&runtime).unwrap().mode() & 0o777, 0o700);
+            File::create(runtime.join("lock")).unwrap();
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_daemons_restore_owner_access_under_a_restrictive_umask() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "daemon::tests::concurrent_daemons_create_a_private_runtime_directory",
+                "--nocapture",
+            ])
+            .env("XD_TEST_RESTRICTIVE_UMASK", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
