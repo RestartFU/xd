@@ -22,6 +22,7 @@ mod cli_versions;
 mod codex_app;
 mod git_draft;
 mod local_socket;
+mod model_catalog;
 mod pairing;
 mod private_fs;
 mod repository_monitor;

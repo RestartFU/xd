@@ -3009,13 +3009,7 @@ impl StateStore {
             Some(default_model(&backend).to_owned())
         } else {
             match folder_values.model {
-                Some(model)
-                    if backend_models(&backend)
-                        .iter()
-                        .any(|known| known.0 == model) =>
-                {
-                    Some(model)
-                }
+                Some(model) if validate_model(&backend, &model).is_ok() => Some(model),
                 Some(_) => None,
                 None => defaults.1,
             }
@@ -4456,12 +4450,22 @@ fn catalog_backend(
     models: &[(&str, &str, i64)],
     extra_effort: &str,
 ) -> Value {
-    let models = models
+    let discovered = crate::model_catalog::models(id);
+    let default_model = discovered
+        .iter()
+        .find(|model| model.is_default)
+        .map(|model| model.id.as_str())
+        .unwrap_or(default_model);
+    let models = if discovered.is_empty() {
+        models
         .iter()
         .map(|(id, name, context_window)| {
             json!({"id": id, "name": name, "context_window": context_window})
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+    } else {
+        discovered.iter().map(|model| json!({"id":model.id,"name":model.name,"context_window":model.context_window})).collect()
+    };
     let mut efforts = BASE_EFFORTS.to_vec();
     efforts.push(extra_effort);
     json!({
@@ -4491,7 +4495,11 @@ fn default_model(backend: &str) -> &'static str {
 
 fn validate_model(backend: &str, model: &str) -> Result<(), StorageError> {
     validate_backend(backend)?;
-    if backend_models(backend).iter().any(|known| known.0 == model) {
+    if backend_models(backend).iter().any(|known| known.0 == model)
+        || crate::model_catalog::models(backend)
+            .iter()
+            .any(|known| known.id == model)
+    {
         Ok(())
     } else {
         Err(StorageError::InvalidRequest("No such model.".into()))
@@ -4507,12 +4515,19 @@ fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)]
     }
 }
 
-fn model_label<'a>(backend: &str, model: &'a str) -> &'a str {
+fn model_label(backend: &str, model: &str) -> String {
+    if let Some(known) = crate::model_catalog::models(backend)
+        .iter()
+        .find(|known| known.id == model)
+    {
+        return known.name.clone();
+    }
     backend_models(backend)
         .iter()
         .find(|known| known.0 == model)
         .map(|known| known.1)
         .unwrap_or(model)
+        .to_owned()
 }
 
 fn effort_supported(backend: &str, effort: &str) -> bool {
