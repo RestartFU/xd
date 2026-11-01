@@ -76,6 +76,9 @@ adb install -r dist/mobile/xd-mobile-debug.apk
 
 ## Published APKs
 
+Stable releases publish `xd-android.apk` and its SHA-256 checksum. A stable
+release fails if signing credentials or the Android artifact are missing.
+
 The rolling nightly release publishes `xd-nightly-android.apk` beside the Linux
 and macOS artifacts. Published stable and nightly APKs require the protected CI
 release key and are checked after building for a valid non-debug signature and
