@@ -49,12 +49,16 @@ read unexpected
         let chat = store
             .new_chat(&json!({"folder":folder["id"],"backend":backend}))
             .unwrap();
-        let (_, event) = store
+        let _ = store
             .set_option(
                 &json!({"chat":chat["id"],"option":"model","backend":backend,"value":model}),
             )
             .unwrap();
-        assert_eq!(event["content"], format!("Switched to {label}"));
+        let messages = store.messages(&json!({"chat":chat["id"]})).unwrap();
+        assert_eq!(
+            messages["messages"][0]["content"],
+            format!("Switched to {label}")
+        );
         assert_eq!(
             store.chat(chat["id"].as_str().unwrap()).unwrap()["model"],
             model
