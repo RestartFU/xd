@@ -24,9 +24,21 @@ struct Cache {
     models: Vec<Model>,
 }
 
+static CODEX: OnceLock<Mutex<Cache>> = OnceLock::new();
+static CLAUDE: OnceLock<Mutex<Cache>> = OnceLock::new();
+
+pub(crate) fn cached_models(backend: &str) -> Vec<Model> {
+    let cache = match backend {
+        "codex" => CODEX.get(),
+        "claude" => CLAUDE.get(),
+        _ => None,
+    };
+    cache
+        .and_then(|cache| cache.try_lock().ok().map(|cache| cache.models.clone()))
+        .unwrap_or_default()
+}
+
 pub(crate) fn models(backend: &str) -> Vec<Model> {
-    static CODEX: OnceLock<Mutex<Cache>> = OnceLock::new();
-    static CLAUDE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let cache = match backend {
         "codex" => &CODEX,
         "claude" => &CLAUDE,
@@ -266,7 +278,7 @@ mod tests {
     fn probes_claude_without_sending_a_prompt() {
         let mut command = std::process::Command::new("sh");
         command.args(["-c", r#"read request
-case "$request" in *control_request*initialize*) ;; *) exit 1;; esac
+case "$request" in *initialize*) ;; *) exit 1;; esac
 printf '%s\n' '{"type":"control_response","response":{"request_id":"xd-models","response":{"models":[{"value":"opus","resolvedModel":"next-opus","displayName":"Next Opus"}]}}}'
 read unexpected
 "#]);

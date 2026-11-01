@@ -4496,6 +4496,9 @@ fn default_model(backend: &str) -> &'static str {
 fn validate_model(backend: &str, model: &str) -> Result<(), StorageError> {
     validate_backend(backend)?;
     if backend_models(backend).iter().any(|known| known.0 == model)
+        || crate::model_catalog::cached_models(backend)
+            .iter()
+            .any(|known| known.id == model)
         || crate::model_catalog::models(backend)
             .iter()
             .any(|known| known.id == model)
@@ -4516,7 +4519,7 @@ fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)]
 }
 
 fn model_label(backend: &str, model: &str) -> String {
-    if let Some(known) = crate::model_catalog::models(backend)
+    if let Some(known) = crate::model_catalog::cached_models(backend)
         .iter()
         .find(|known| known.id == model)
     {
