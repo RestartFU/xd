@@ -122,7 +122,17 @@ internal class ConnectionActor(
     val events: SharedFlow<SequencedEvent> = _events.asSharedFlow()
 
     init {
-        scope.launch { run() }
+        scope.launch {
+            try {
+                run()
+            } finally {
+                closeCurrent(DisconnectedException("Connection actor stopped"))
+            }
+        }.invokeOnCompletion {
+            // Release a reader waiting on a full mailbox, even if the actor
+            // was cancelled before its coroutine started.
+            mailbox.cancel()
+        }
     }
 
     fun poke() {
@@ -531,23 +541,8 @@ internal class ConnectionActor(
                 sendToMailbox(Message.SocketConnected(thisGeneration))
             }
 
-            override fun onBytes(chunk: ByteArray) {
-                if (
-                    mailbox.trySend(
-                        Message.SocketBytes(thisGeneration, chunk.copyOf()),
-                    ).isFailure
-                ) {
-                    created.close()
-                    sendToMailbox(
-                        Message.SocketClosed(
-                            thisGeneration,
-                            SocketFailure(
-                                SocketFailureKind.IO,
-                                "Inbound protocol buffer overflow",
-                            ),
-                        ),
-                    )
-                }
+            override suspend fun onBytes(chunk: ByteArray) {
+                mailbox.send(Message.SocketBytes(thisGeneration, chunk.copyOf()))
             }
 
             override fun onClosed(reason: SocketFailure?) {

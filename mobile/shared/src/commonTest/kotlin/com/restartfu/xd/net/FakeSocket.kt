@@ -41,12 +41,12 @@ internal class FakeSocket : PlatformSocket {
         listener?.onConnected()
     }
 
-    fun receive(vararg lines: String) {
+    suspend fun receive(vararg lines: String) {
         val bytes = lines.joinToString(separator = "\n", postfix = "\n").encodeToByteArray()
         listener?.onBytes(bytes)
     }
 
-    fun receiveReadinessTreeReply(requestId: Long = 1) {
+    suspend fun receiveReadinessTreeReply(requestId: Long = 1) {
         receive("""{"ok":true,"folders":[],"chats":[],"_xd_request":$requestId}""")
     }
 

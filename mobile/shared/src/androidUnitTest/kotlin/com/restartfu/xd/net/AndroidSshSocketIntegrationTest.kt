@@ -163,7 +163,7 @@ class AndroidSshSocketIntegrationTest {
         @Volatile private var failure: SocketFailure? = null
 
         override fun onConnected() { connected.countDown() }
-        override fun onBytes(bytes: ByteArray) { synchronized(output) { output.write(bytes) } }
+        override suspend fun onBytes(bytes: ByteArray) { synchronized(output) { output.write(bytes) } }
         override fun onClosed(reason: SocketFailure?) { failure = reason; closed.countDown() }
 
         fun awaitConnectedOrFail() {

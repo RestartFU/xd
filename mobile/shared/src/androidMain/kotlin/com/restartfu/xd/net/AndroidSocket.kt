@@ -25,6 +25,7 @@ import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import kotlinx.coroutines.runBlocking
 
 public class AndroidSshSocketFactory(
     private val connectTimeoutMillis: Int = 10_000,
@@ -197,7 +198,7 @@ internal class AndroidSshSocket(
         while (!closed.get()) {
             val count = input.read(buffer)
             if (count < 0) return
-            if (count > 0) listener?.onBytes(buffer.copyOf(count))
+            if (count > 0) runBlocking { listener?.onBytes(buffer.copyOf(count)) }
         }
     }
 
