@@ -299,39 +299,7 @@ jobs:
           docker system prune -af >/dev/null
           df -h /
 
-      - name: Check Android signing credentials
-        id: android_signing
-        env:
-          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
-          XD_ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
-          XD_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
-          XD_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          credentials=(
-            "$ANDROID_RELEASE_KEYSTORE_BASE64"
-            "$XD_ANDROID_STORE_PASSWORD"
-            "$XD_ANDROID_KEY_ALIAS"
-            "$XD_ANDROID_KEY_PASSWORD"
-          )
-          present=0
-          for credential in "${credentials[@]}"; do
-            if [[ -n "$credential" ]]; then
-              ((present += 1))
-            fi
-          done
-          if (( present == 0 )); then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Android signing secrets are absent; omitting the Android artifact."
-          elif (( present != ${#credentials[@]} )); then
-            echo "::error::Android signing secrets are only partially configured."
-            exit 1
-          else
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Build the Android APK
-        if: steps.android_signing.outputs.available == 'true'
         env:
           ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
           XD_MOBILE_RELEASE: 1
@@ -353,17 +321,20 @@ jobs:
             --secret id=android_key_alias,env=XD_ANDROID_KEY_ALIAS \
             --secret id=android_key_password,env=XD_ANDROID_KEY_PASSWORD
 
+      - name: Remove the signing keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/xd-android-release.p12"
+
       - name: Name it for the release
-        if: steps.android_signing.outputs.available == 'true'
         run: |
           set -euo pipefail
           mv dist/mobile/xd-mobile-release.apk xd-android.apk
           sha256sum xd-android.apk > xd-android.apk.sha256
 
       - uses: actions/upload-artifact@v4
-        if: steps.android_signing.outputs.available == 'true'
         with:
           name: android
+          if-no-files-found: error
           path: |
             xd-android.apk
             xd-android.apk.sha256
@@ -402,28 +373,11 @@ jobs:
             xd-macos-*.zip.sha256
             xd-windows-x86_64.zip
             xd-windows-x86_64.zip.sha256
+            xd-android.apk
+            xd-android.apk.sha256
             scripts/install.sh
             scripts/install-macos.sh
           )
-          if [[ -f xd-android.apk ]]; then
-            assets+=(xd-android.apk xd-android.apk.sha256)
-            android_notes=$(cat <<'EOF'
-          Android:
-
-          Download `xd-android.apk` from this release. Android connects
-          directly to the xd daemon using a pairing invite and pinned TLS.
-          The host must be reachable over LAN, Tailscale, or a server address.
-          EOF
-            )
-          else
-            android_notes=$(cat <<'EOF'
-          Android:
-
-          No Android APK is published because protected signing credentials are
-          not configured for this repository.
-          EOF
-            )
-          fi
 
           notes=$(cat <<EOF
           Native chat UI with streaming responses, approvals, assistant settings,
@@ -448,7 +402,11 @@ jobs:
           Local sessions require WSL with git and tmux installed. The included
           README covers setup; the browser uses Microsoft's WebView2 Runtime.
 
-          $android_notes
+          Android:
+
+          Download \`xd-android.apk\` from this release. Android connects
+          directly to the xd daemon using a pairing invite and pinned TLS.
+          The host must be reachable over LAN, Tailscale, or a server address.
 
           Linux and macOS are self-contained.
           EOF
