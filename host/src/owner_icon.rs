@@ -11,7 +11,6 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -20,7 +19,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 
-use crate::EventBus;
+use crate::{EventBus, storage::run_git_noninteractive};
 
 /// A remote is re-read this often, so a repository that gains an `origin`
 /// gets its avatar without a host restart.
@@ -229,23 +228,19 @@ fn describe_icon(answer: &mut Value, icon: Option<&Icon>, retry: bool) {
     }
 }
 
-/// The `origin` remote of a repository, read without touching the network.
+/// The `origin` remote of a repository, read without touching the network and
+/// under the same bounds as every other git call the host makes, so a stuck
+/// repository cannot hold up the connection that asked for the tree.
 fn origin_url(directory: &Path) -> Option<String> {
     if !directory.is_dir() {
         return None;
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(directory)
-        .args(["remote", "get-url", "origin"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
+    let (status, stdout, _) =
+        run_git_noninteractive(directory, &["remote", "get-url", "origin"]).ok()?;
+    if !status.success() {
         return None;
     }
-    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let url = String::from_utf8_lossy(&stdout).trim().to_owned();
     (!url.is_empty()).then_some(url)
 }
 
@@ -326,7 +321,10 @@ fn fetch_avatar(agent: &ureq::Agent, owner: &str) -> Result<Option<Icon>, String
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        process::{Command, Stdio},
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use super::*;
 

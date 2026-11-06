@@ -4901,6 +4901,16 @@ fn run_git(
     run_git_with_env(workdir, arguments, &[])
 }
 
+/// Runs git in a directory with nothing to prompt for, under the shared
+/// output and time bounds, so no caller can hang a connection on a stuck
+/// repository.
+pub(crate) fn run_git_noninteractive(
+    workdir: &Path,
+    arguments: &[&str],
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+    run_git_with_env(workdir, arguments, &noninteractive_git_environment())
+}
+
 fn run_git_with_env(
     workdir: &Path,
     arguments: &[&str],
