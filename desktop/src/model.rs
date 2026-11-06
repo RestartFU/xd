@@ -16,6 +16,18 @@ use crate::{
 
 const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+/// An owner avatar the host fetched, ready to draw. The formats are the two
+/// GitHub serves; anything else keeps the folder icon.
+pub fn owner_icon(mime: &str, data: &str) -> Option<Arc<Image>> {
+    let format = match mime {
+        "image/png" => ImageFormat::Png,
+        "image/jpeg" => ImageFormat::Jpeg,
+        _ => return None,
+    };
+    let bytes = STANDARD.decode(data).ok()?;
+    (!bytes.is_empty()).then(|| Arc::new(Image::from_bytes(format, bytes)))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub name: String,
@@ -57,6 +69,11 @@ pub struct Folder {
     pub name: String,
     #[serde(default)]
     pub parent: Option<String>,
+    /// The GitHub organization or user behind the folder's `origin` remote,
+    /// whose avatar stands in for the folder icon. Absent when the host finds
+    /// no GitHub remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1383,6 +1400,7 @@ impl AppModel {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
                 parent: None,
+                owner: None,
             }],
             chats: vec![
                 ChatSummary {
@@ -1750,6 +1768,36 @@ mod tests {
             model.live_text,
             "Claude already streamed this and this is newer"
         );
+    }
+
+    #[test]
+    fn tree_folders_carry_the_account_behind_them() {
+        let mut model = AppModel::default();
+
+        model
+            .apply_tree(&json!({
+                "folders": [
+                    {"id": "owned", "name": "xd", "owner": "RestartFU"},
+                    {"id": "plain", "name": "Notes"}
+                ],
+                "chats": []
+            }))
+            .unwrap();
+
+        assert_eq!(model.folders[0].owner.as_deref(), Some("RestartFU"));
+        assert_eq!(model.folders[1].owner, None);
+    }
+
+    #[test]
+    fn owner_avatars_decode_only_the_formats_github_serves() {
+        // A one-pixel PNG: enough to decode, nothing to look at.
+        const AVATAR: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+
+        assert!(owner_icon("image/png", AVATAR).is_some());
+        assert!(owner_icon("image/jpeg", AVATAR).is_some());
+        assert!(owner_icon("image/svg+xml", AVATAR).is_none());
+        assert!(owner_icon("image/png", "not base64 ~~").is_none());
+        assert!(owner_icon("image/png", "").is_none());
     }
 
     #[test]

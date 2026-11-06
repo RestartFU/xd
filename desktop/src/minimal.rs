@@ -72,6 +72,9 @@ impl Default for MinimalRoute {
 pub(crate) struct ProjectCard {
     pub(crate) id: String,
     pub(crate) name: String,
+    /// The account whose avatar stands for this project, when the host named
+    /// one for its folder.
+    pub(crate) owner: Option<String>,
     pub(crate) sessions: usize,
     pub(crate) working: usize,
 }
@@ -95,6 +98,7 @@ pub(crate) fn project_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<Pr
             ProjectCard {
                 id: folder.id.clone(),
                 name: folder.name.clone(),
+                owner: folder.owner.clone(),
                 sessions: project_chats.clone().count(),
                 working: project_chats
                     .filter(|chat| chat.working || chat.terminal_working)
@@ -214,6 +218,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             parent: None,
+            owner: None,
         }
     }
 
@@ -227,6 +232,17 @@ mod tests {
             working,
             terminal_working: false,
         }
+    }
+
+    #[test]
+    fn project_cards_carry_the_owner_behind_the_workspace() {
+        let mut owned = folder("one", "Compiler");
+        owned.owner = Some("RestartFU".into());
+
+        let cards = project_cards(&[owned, folder("two", "Website")], &[]);
+
+        assert_eq!(cards[0].owner.as_deref(), Some("RestartFU"));
+        assert_eq!(cards[1].owner, None);
     }
 
     #[test]
@@ -244,12 +260,14 @@ mod tests {
                 ProjectCard {
                     id: "one".into(),
                     name: "Compiler".into(),
+                    owner: None,
                     sessions: 2,
                     working: 1,
                 },
                 ProjectCard {
                     id: "two".into(),
                     name: "Website".into(),
+                    owner: None,
                     sessions: 1,
                     working: 0,
                 },

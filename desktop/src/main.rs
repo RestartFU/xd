@@ -24,12 +24,12 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, AssetSource, Bounds, ClipboardItem, Context, CursorStyle, Decorations,
-    Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, KeyBinding, ListAlignment,
+    Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, Image, KeyBinding, ListAlignment,
     ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render, ResizeEdge,
     ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer, TitlebarOptions,
     WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowOptions, canvas, div, list, point, prelude::*, px, rgb, rgba, size,
-    svg,
+    WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*, px, rgb, rgba,
+    size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -459,6 +459,19 @@ fn icon(path: &'static str, size: f32, color: u32) -> gpui::AnyElement {
         .flex_none()
         .text_color(rgb(color))
         .into_any_element()
+}
+
+/// A workspace's mark: the avatar of the account that owns it, and the folder
+/// icon when there is no owner or no avatar to draw.
+fn workspace_icon(avatar: Option<Arc<Image>>, size: f32, color: u32) -> gpui::AnyElement {
+    match avatar {
+        Some(avatar) => img(avatar)
+            .size(px(size))
+            .flex_none()
+            .rounded(px(size / 4.0))
+            .into_any_element(),
+        None => icon(FOLDER_ICON, size, color),
+    }
 }
 
 struct PaneTooltip {
@@ -1621,6 +1634,12 @@ struct XdDesktop {
     workflow_statuses: Arc<HashMap<String, Value>>,
     workflow_pending: Arc<HashSet<String>>,
     workflow_ticking: HashSet<String>,
+    /// Avatars for the accounts behind the workspaces, by owner login. A
+    /// recorded `None` is an owner the host found no avatar for, which keeps
+    /// the folder icon without asking again.
+    owner_icons: HashMap<String, Option<Arc<Image>>>,
+    /// Owners already asked about, so one avatar is fetched once per host.
+    owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
     live_render_scheduled: Option<u64>,
     window_settings_generation: u64,
@@ -2143,6 +2162,8 @@ impl XdDesktop {
             source_build_generation: 0,
             workflow_statuses: Arc::new(HashMap::new()),
             workflow_pending: Arc::new(HashSet::new()),
+            owner_icons: HashMap::new(),
+            owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
             live_render_scheduled: None,
@@ -2333,6 +2354,7 @@ impl XdDesktop {
                 | RequestKind::Messages { .. }
                 | RequestKind::Shortcuts { .. }
                 | RequestKind::WorkflowStatus { .. }
+                | RequestKind::OwnerIcon { .. }
                 | RequestKind::ImageRead { .. }
                 | RequestKind::Send { .. }
                 | RequestKind::QueueMutation { .. }
@@ -2400,6 +2422,7 @@ impl XdDesktop {
                 | "queued"
                 | "shortcuts-changed"
                 | "workflow-status"
+                | "owner-icon"
                 | "terminal-opened"
                 | "terminal-activity"
                 | "terminal-output"
@@ -2475,6 +2498,7 @@ impl XdDesktop {
         self.cancel_queue_edit(cx);
         Arc::make_mut(&mut self.workflow_statuses).clear();
         Arc::make_mut(&mut self.workflow_pending).clear();
+        self.owner_icons_requested.clear();
         self.minimal_route = MinimalRoute::default();
         self.pending_minimal_session = None;
         self.request_agent_catalog();
@@ -2702,6 +2726,9 @@ impl XdDesktop {
                     self.transcript_refresh_pending = false;
                     self.pending_speech = None;
                     Arc::make_mut(&mut self.workflow_pending).clear();
+                    // Answers in flight are lost with the connection; a
+                    // reconnect asks again for the avatars still unknown.
+                    self.owner_icons_requested.clear();
                     self.speech_output.stop();
                     self.restore_pending_send(cx);
                     if let Some(diff) = &mut self.diff_panel {
@@ -3003,6 +3030,7 @@ impl XdDesktop {
                     .retain(|(endpoint, _), _| *endpoint != ChatEndpoint::Local);
                 self.pending_speech = None;
                 Arc::make_mut(&mut self.workflow_pending).clear();
+                self.owner_icons_requested.clear();
                 self.speech_output.stop();
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
@@ -3112,6 +3140,7 @@ impl XdDesktop {
                     | RequestKind::RenameDevice { .. }
                     | RequestKind::RevokeDevice { .. }
                     | RequestKind::WorkflowStatus { .. }
+                    | RequestKind::OwnerIcon { .. }
                     | RequestKind::ImageRead { .. }
                     | RequestKind::Shortcuts { .. }
                     | RequestKind::SetShortcuts { .. }
@@ -3683,6 +3712,11 @@ impl XdDesktop {
                 self.reconcile_minimal_navigation(cx);
                 self.prime_terminal_cache(self.active_endpoint);
                 self.prune_browser_panes(self.active_endpoint, cx);
+                self.request_owner_icons();
+            }
+            RequestKind::OwnerIcon { owner } => {
+                let owner = owner.clone();
+                self.record_owner_icon(owner, &value);
             }
             RequestKind::AgentCatalog => {
                 if let Err(error) = self.model.apply_agent_catalog(&value) {
@@ -4957,6 +4991,11 @@ impl XdDesktop {
                     Arc::make_mut(&mut self.workflow_statuses).insert(marker.clone(), body.clone());
                     self.invalidate_workflow_rows(&marker);
                     self.schedule_workflow_refresh(marker, cx);
+                }
+            }
+            "owner-icon" => {
+                if let Some(owner) = body.get("owner").and_then(Value::as_str).map(str::to_owned) {
+                    self.record_owner_icon(owner, &body);
                 }
             }
             "terminal-opened" | "terminal-output" | "terminal-resized" | "terminal-closed" => {}
@@ -8067,6 +8106,51 @@ impl XdDesktop {
         }
     }
 
+    /// Asks the host for the avatar of every account behind a workspace it
+    /// has not answered for yet.
+    fn request_owner_icons(&mut self) {
+        let owners = self
+            .model
+            .folders
+            .iter()
+            .filter_map(|folder| folder.owner.clone())
+            .filter(|owner| {
+                !self.owner_icons.contains_key(owner) && !self.owner_icons_requested.contains(owner)
+            })
+            .collect::<HashSet<_>>();
+        for owner in owners {
+            self.owner_icons_requested.insert(owner.clone());
+            let requested = self
+                .active_host()
+                .ok_or_else(|| "The xd host is offline.".to_owned())
+                .and_then(|host| host.owner_icon(&owner));
+            if requested.is_err() {
+                // The folder keeps its icon; a reconnect asks again.
+                self.owner_icons_requested.remove(&owner);
+            }
+        }
+    }
+
+    /// Records what the host knows about an owner's avatar. A reply or event
+    /// without an image means there is none to draw.
+    fn record_owner_icon(&mut self, owner: String, body: &Value) {
+        if body.get("pending").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        let icon = body
+            .get("mime")
+            .and_then(Value::as_str)
+            .zip(body.get("data").and_then(Value::as_str))
+            .and_then(|(mime, data)| xd_desktop::model::owner_icon(mime, data));
+        self.owner_icons.insert(owner, icon);
+    }
+
+    /// The avatar to draw for a workspace, absent until the host answers for
+    /// its owner and when that owner has none.
+    fn owner_avatar(&self, owner: Option<&str>) -> Option<Arc<Image>> {
+        self.owner_icons.get(owner?).cloned().flatten()
+    }
+
     fn request_workflow_statuses(&mut self) {
         let markers = self
             .model
@@ -10152,8 +10236,8 @@ impl XdDesktop {
                             colors.faint,
                         )),
                 )
-                .child(icon(
-                    FOLDER_ICON,
+                .child(workspace_icon(
+                    self.owner_avatar(project.owner.as_deref()),
                     13.0,
                     if current { colors.muted } else { colors.faint },
                 ))
@@ -12019,11 +12103,12 @@ impl XdDesktop {
                 .child("Loading transcript…")
                 .into_any_element()
         } else if transcript_empty {
-            let project = self
+            let folder = self
                 .selected_minimal_project_id()
-                .and_then(|id| self.model.folders.iter().find(|folder| folder.id == id))
-                .map(|folder| folder.name.clone())
-                .unwrap_or_default();
+                .and_then(|id| self.model.folders.iter().find(|folder| folder.id == id));
+            let project = folder.map(|folder| folder.name.clone()).unwrap_or_default();
+            let project_avatar =
+                self.owner_avatar(folder.and_then(|folder| folder.owner.as_deref()));
             div()
                 .w_full()
                 .min_h(px(140.0))
@@ -12042,7 +12127,7 @@ impl XdDesktop {
                         .gap_2()
                         .text_size(px(12.0))
                         .text_color(rgb(colors.muted))
-                        .child(icon(FOLDER_ICON, 14.0, colors.muted))
+                        .child(workspace_icon(project_avatar, 14.0, colors.muted))
                         .child(project),
                 )
                 .child(
@@ -15923,6 +16008,55 @@ mod tests {
     }
 
     #[gpui::test]
+    fn owner_avatars_stand_in_for_the_folder_icon_once_the_host_answers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A one-pixel PNG: enough to decode, nothing to look at.
+        const AVATAR: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.owner_avatar(Some("RestartFU")).is_none());
+            assert!(desktop.owner_avatar(None).is_none());
+
+            desktop.record_owner_icon(
+                "RestartFU".into(),
+                &serde_json::json!({"ok": true, "owner": "RestartFU", "pending": true}),
+            );
+            assert!(
+                !desktop.owner_icons.contains_key("RestartFU"),
+                "a pending fetch is not an answer"
+            );
+
+            desktop.record_owner_icon(
+                "RestartFU".into(),
+                &serde_json::json!({
+                    "ok": true, "owner": "RestartFU", "mime": "image/png", "data": AVATAR
+                }),
+            );
+            assert!(desktop.owner_avatar(Some("RestartFU")).is_some());
+
+            desktop.record_owner_icon(
+                "plain".into(),
+                &serde_json::json!({"ok": true, "owner": "plain"}),
+            );
+            assert!(desktop.owner_avatar(Some("plain")).is_none());
+            assert!(
+                desktop.owner_icons.contains_key("plain"),
+                "an account without an avatar is still answered, and is not asked again"
+            );
+
+            desktop.record_owner_icon(
+                "odd".into(),
+                &serde_json::json!({
+                    "ok": true, "owner": "odd", "mime": "image/tiff", "data": AVATAR
+                }),
+            );
+            assert!(desktop.owner_avatar(Some("odd")).is_none());
+        });
+    }
+
+    #[gpui::test]
     fn catalog_groups_chats_and_restores_the_sessions_active_tab(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, _| {
@@ -16895,6 +17029,7 @@ mod tests {
                 id: "link-project".into(),
                 name: "Links".into(),
                 parent: None,
+                owner: None,
             }];
             desktop.minimal_route = MinimalRoute::Cli {
                 project_id: "link-project".into(),
@@ -17153,11 +17288,13 @@ mod tests {
                     id: "a".into(),
                     name: "A".into(),
                     parent: None,
+                    owner: None,
                 },
                 Folder {
                     id: "b".into(),
                     name: "B".into(),
                     parent: None,
+                    owner: None,
                 },
             ];
             desktop.minimal_route = MinimalRoute::Cli {
@@ -18388,6 +18525,7 @@ mod tests {
                 id: "folder-1".into(),
                 name: "Renamed workspace".into(),
                 parent: None,
+                owner: None,
             }],
             chats: vec![xd_desktop::model::ChatSummary {
                 id: "chat-1".into(),
@@ -19516,6 +19654,7 @@ mod tests {
                 id: "folder-remote".into(),
                 parent: None,
                 name: "Remote".into(),
+                owner: None,
             }];
             desktop.collapsed_folders.retain(|folder_id| {
                 desktop

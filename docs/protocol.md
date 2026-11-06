@@ -127,7 +127,7 @@ restarts, but unused codes and pending backend requests do not.
 {
   "ok": true,
   "folders": [
-    {"id":"folder-1","name":"Project"},
+    {"id":"folder-1","name":"Project","owner":"RestartFU"},
     {"id":"folder-2","name":"Child","parent":"folder-1"}
   ],
   "chats": [
@@ -164,6 +164,12 @@ restarts, but unused codes and pending backend requests do not.
 
 `parent` is absent for root folders. Arrays are complete snapshots. Clients
 must tolerate a child appearing before its parent and treat ids as opaque.
+
+`owner` is the GitHub organization or user behind the folder's `origin` remote,
+read from the folder's working directory on the host and absent when it has no
+GitHub remote. It names the account whose avatar a client fetches with
+`owner-icon` to stand in for a folder icon; it is not an identity or an
+authorization, and a client that ignores it loses nothing but the avatar.
 
 A folder contains persistent workspace sessions, each containing independent
 chats. Each chat's `session` names its session; the matching `sessions` entry
@@ -305,6 +311,7 @@ boundary, not an event cursor.
 | `agent-clis` | none | detected assistant versions |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
+| `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, or `pending: true` while the host fetches, or neither when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
 | `image-read` | absolute host `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only host-created remote pastes |
 | `search` | `query` | matching stored messages |
@@ -664,6 +671,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |
 | `terminal-output`, `terminal-closed` | `terminal`, … | Shared pty; output is base64. |
 | `auth`, `agent-auth-changed` | … | Assistant authentication state. |
+| `owner-icon` | `owner`, optional `mime` and base64 `data` | A pending `owner-icon` fetch finished. Without `mime` and `data` the account has no avatar; keep the folder icon. |
 
 ### Tagged questions
 

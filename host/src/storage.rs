@@ -850,6 +850,13 @@ impl StateStore {
         resolve_chat_workdir(&database, &self.workspace_root, &owner).map(PathBuf::from)
     }
 
+    /// The directory a workspace folder works in: its own or an inherited
+    /// repository setting, else the folder itself.
+    pub fn folder_workdir(&self, folder_id: &str) -> Result<String, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        resolve_workdir(&database, &self.workspace_root, folder_id, None, None)
+    }
+
     pub fn list_directory(&self, request: &Value) -> Result<Value, StorageError> {
         let path = optional_string(request, "path")?
             .filter(|path| !path.is_empty())
