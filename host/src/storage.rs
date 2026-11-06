@@ -850,6 +850,13 @@ impl StateStore {
         resolve_chat_workdir(&database, &self.workspace_root, &owner).map(PathBuf::from)
     }
 
+    /// The directory a workspace folder works in: its own or an inherited
+    /// repository setting, else the folder itself.
+    pub fn folder_workdir(&self, folder_id: &str) -> Result<String, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        resolve_workdir(&database, &self.workspace_root, folder_id, None, None)
+    }
+
     pub fn list_directory(&self, request: &Value) -> Result<Value, StorageError> {
         let path = optional_string(request, "path")?
             .filter(|path| !path.is_empty())
@@ -4892,6 +4899,16 @@ fn run_git(
     arguments: &[&str],
 ) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
     run_git_with_env(workdir, arguments, &[])
+}
+
+/// Runs git in a directory with nothing to prompt for, under the shared
+/// output and time bounds, so no caller can hang a connection on a stuck
+/// repository.
+pub(crate) fn run_git_noninteractive(
+    workdir: &Path,
+    arguments: &[&str],
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), StorageError> {
+    run_git_with_env(workdir, arguments, &noninteractive_git_environment())
 }
 
 fn run_git_with_env(

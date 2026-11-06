@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -23,6 +23,7 @@ mod codex_app;
 mod git_draft;
 mod local_socket;
 mod model_catalog;
+mod owner_icon;
 mod pairing;
 mod private_fs;
 mod repository_monitor;
@@ -49,6 +50,7 @@ use auth::AuthManager;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
 use local_socket::UnixStream;
+use owner_icon::OwnerIcons;
 use pairing::{PairingService, Transport, generate_token, token_hash};
 use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
@@ -72,6 +74,7 @@ pub struct Engine {
     auth: AuthManager,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
+    owner_icons: Arc<OwnerIcons>,
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     session_resources: Mutex<()>,
@@ -131,6 +134,7 @@ impl Engine {
             auth: AuthManager::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
+            owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources: Mutex::new(()),
@@ -173,6 +177,7 @@ impl Engine {
             auth,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
+            owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources: Mutex::new(()),
@@ -379,6 +384,10 @@ impl Engine {
             Some("reorder-queue") => self.event_mutation(|store| store.reorder_queue(&request)),
             Some("steer-queue") => self.steer_queue(&request),
             Some("workflow-status") => self.workflow_status(owner, &request),
+            Some("owner-icon") => self
+                .owner_icons
+                .icon(owner, &request)
+                .unwrap_or_else(error_reply),
             Some("terminal-list") => self.terminal_list(&request),
             Some("terminal-open") => self.terminal_open(&request),
             Some("terminal-input") => self.terminals.input(&request).unwrap_or_else(error_reply),
@@ -589,8 +598,32 @@ impl Engine {
             overlay_terminal_working(&mut tree, &activity.working_chats);
             tree["terminal_activity_epoch"] = Value::String(activity.epoch);
             tree["terminal_activity_revision"] = activity.revision.into();
+            self.overlay_folder_owners(&mut tree);
         }
         tree
+    }
+
+    /// Names the GitHub account behind each workspace, so a client can show
+    /// its avatar in place of a folder icon.
+    fn overlay_folder_owners(&self, tree: &mut Value) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let Some(folders) = tree.get_mut("folders").and_then(Value::as_array_mut) else {
+            return;
+        };
+        for folder in folders {
+            let Some(directory) = folder
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| store.folder_workdir(id).ok())
+            else {
+                continue;
+            };
+            if let Some(owner) = self.owner_icons.owner(Path::new(&directory)) {
+                folder["owner"] = Value::String(owner);
+            }
+        }
     }
 
     fn compat_repository_file(&self, request: &Value, action: &str) -> Value {
@@ -1078,6 +1111,7 @@ impl Engine {
         let url = url.to_owned();
         let store = store.clone();
         let events = self.events.clone();
+        let owner_icons = self.owner_icons.clone();
         events.publish(json!({
             "event": "folder-clone",
             "folder": folder_id.clone(),
@@ -1087,6 +1121,9 @@ impl Engine {
         thread::spawn(move || {
             let result = clone_repository(&url, &destination)
                 .and_then(|_| store.finish_folder_clone(&folder_id, &destination));
+            // The workspace was an empty directory when the tree last looked;
+            // read its remote again now that the repository is there.
+            owner_icons.forget(&destination);
             let mut event = json!({
                 "event": "folder-clone",
                 "folder": folder_id,
@@ -1926,6 +1963,57 @@ mod tests {
     }
 
     #[test]
+    fn tree_names_the_github_owner_behind_a_workspace() {
+        use std::process::Command;
+
+        let root = test_directory();
+        let workspaces = root.join("Workspaces");
+        let store = StateStore::open(root.join("chats.db"), workspaces.clone()).unwrap();
+        let engine = Engine::with_store(store);
+        engine.dispatch(json!({"op": "new-folder", "name": "Plain"}));
+        engine.dispatch(json!({"op": "new-folder", "name": "Project"}));
+        let repository = workspaces.join("Project");
+        assert!(
+            Command::new("git")
+                .arg("init")
+                .arg(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args([
+                    "-C",
+                    repository.to_str().unwrap(),
+                    "remote",
+                    "add",
+                    "origin",
+                    "git@github.com:RestartFU/xd.git",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let tree = engine.dispatch(json!({"op": "tree"}));
+        let folders = tree["folders"].as_array().unwrap();
+        let owned = folders
+            .iter()
+            .find(|folder| folder["name"] == "Project")
+            .unwrap();
+        let plain = folders
+            .iter()
+            .find(|folder| folder["name"] == "Plain")
+            .unwrap();
+        assert_eq!(owned["owner"], "RestartFU");
+        assert_eq!(plain.get("owner"), None);
+
+        drop(engine);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn legacy_repository_operations_are_compatibility_aliases() {
         use std::process::Command;
 
@@ -2223,6 +2311,18 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 8);
         assert_eq!(reply["error"], "Invalid workflow run marker.");
+    }
+
+    #[test]
+    fn owner_icon_is_dispatched_and_validates_the_login_before_networking() {
+        let reply = dispatch(json!({
+            "op": "owner-icon",
+            "owner": "not a login",
+            "_xd_request": 9
+        }));
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["_xd_request"], 9);
+        assert_eq!(reply["error"], "owner-icon needs a GitHub owner login.");
     }
 
     #[test]

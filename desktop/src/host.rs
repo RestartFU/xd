@@ -77,6 +77,9 @@ pub enum RequestKind {
     WorkflowStatus {
         marker: String,
     },
+    OwnerIcon {
+        owner: String,
+    },
     DiffRead {
         chat_id: String,
         read: String,
@@ -582,6 +585,18 @@ impl HostHandle {
                 marker: marker.to_owned(),
             },
             json!({"op": "workflow-status", "text": marker}),
+        )
+    }
+
+    /// Asks for the avatar of the account behind a workspace. The host answers
+    /// from its cache, or reports the fetch as pending and sends an
+    /// `owner-icon` event when it lands.
+    pub fn owner_icon(&self, owner: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::OwnerIcon {
+                owner: owner.to_owned(),
+            },
+            json!({"op": "owner-icon", "owner": owner}),
         )
     }
 
