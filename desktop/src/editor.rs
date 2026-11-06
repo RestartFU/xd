@@ -4,7 +4,7 @@ use gpui::{
     App, AvailableSpace, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, ElementId,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     GlobalElementId, ImageFormat, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
+    MouseUpEvent, PaintQuad, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style, TextRun,
     UTF16Selection, Window, actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -67,6 +67,16 @@ pub struct FileEditor {
     syntax_language: Option<String>,
     syntax_spans: Vec<CodeSpan>,
     line_ranges: Vec<Range<usize>>,
+    /// The scroll of the box this editor is painted in, so a message taller
+    /// than the composer scrolls inside it instead of spilling past its border.
+    scroll: ScrollHandle,
+    /// Set whenever the caret moves, so the next frame scrolls it back into
+    /// view. Only then: a wheel scroll away from the caret must stick.
+    scroll_to_caret: bool,
+    /// The widest the text may be laid out, when the box this editor fills has
+    /// a maximum width of its own. Layout measures this element against the
+    /// space its whole column has, which is wider than that box.
+    wrap_width: Option<Pixels>,
     colors: ThemeColors,
 }
 
@@ -105,8 +115,29 @@ impl FileEditor {
             syntax_language: None,
             syntax_spans: Vec::new(),
             line_ranges: vec![0..0],
+            scroll: ScrollHandle::new(),
+            scroll_to_caret: false,
+            wrap_width: None,
             colors: ThemePreset::Dark.colors(),
         }
+    }
+
+    /// The scroll state of the box that paints this editor, for the container
+    /// that bounds its height: the editor itself keeps the caret inside it.
+    pub fn scroll_handle(&self) -> ScrollHandle {
+        self.scroll.clone()
+    }
+
+    /// Cap how wide the text may be laid out, for a box that is narrower than
+    /// the space layout measures this editor against. Text still wraps to less
+    /// than this whenever the box itself is narrower.
+    pub fn set_wrap_width(&mut self, width: Pixels) {
+        self.wrap_width = Some(width);
+    }
+
+    /// The width to wrap and paint text at inside `available`.
+    fn text_width(&self, available: Pixels) -> Pixels {
+        text_width(self.wrap_width, available)
     }
 
     pub fn set_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
@@ -138,6 +169,7 @@ impl FileEditor {
         self.selected_range = end..end;
         self.selection_reversed = false;
         self.marked_range = None;
+        self.scroll_to_caret = true;
         cx.notify();
     }
 
@@ -159,7 +191,8 @@ impl FileEditor {
         self.refresh_syntax();
     }
 
-    fn changed(&self, cx: &mut Context<Self>) {
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        self.scroll_to_caret = true;
         cx.emit(EditorEvent::Changed(self.content.to_string()));
         cx.notify();
     }
@@ -386,10 +419,12 @@ impl FileEditor {
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
+        self.scroll_to_caret = true;
         cx.notify();
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.scroll_to_caret = true;
         if self.selection_reversed {
             self.selected_range.start = offset;
         } else {
@@ -669,7 +704,7 @@ impl Element for EditorElement {
             let layout = window.request_measured_layout(
                 style,
                 move |known_dimensions, available_space, window, cx| {
-                    let width = known_dimensions
+                    let available = known_dimensions
                         .width
                         .or(match available_space.width {
                             AvailableSpace::Definite(width) => Some(width),
@@ -677,6 +712,7 @@ impl Element for EditorElement {
                         })
                         .unwrap_or(px(1.));
                     let input = input.read(cx);
+                    let width = input.text_width(available);
                     let rows = visual_line_ranges(&input, width, &text_style, window)
                         .len()
                         .max(1);
@@ -702,8 +738,9 @@ impl Element for EditorElement {
         let input = self.input.read(cx);
         let font_size = px(13.);
         let style = window.text_style();
+        let text_width = input.text_width(bounds.size.width);
         let ranges = if input.composer {
-            visual_line_ranges(&input, bounds.size.width, &style, window)
+            visual_line_ranges(&input, text_width, &style, window)
         } else {
             input.line_ranges.clone()
         };
@@ -717,6 +754,15 @@ impl Element for EditorElement {
         let mut selection = Vec::new();
         let cursor_offset = input.cursor_offset();
         let mut cursor = None;
+        // The row the caret is painted on, which is the last row that owns the
+        // offset: a caret at a soft wrap sits at the start of the new row.
+        let caret_row = input.composer.then(|| {
+            ranges
+                .iter()
+                .rposition(|range| cursor_offset >= range.start && cursor_offset <= range.end)
+                .unwrap_or(0)
+        });
+        let follow_caret = input.scroll_to_caret;
         let gutter_width = if input.composer {
             px(0.0)
         } else {
@@ -741,7 +787,7 @@ impl Element for EditorElement {
                     bounds.top() + px(index as f32 * FileEditor::LINE_HEIGHT),
                 ),
                 size(
-                    (bounds.size.width - gutter_width).max(px(1.0)),
+                    (text_width - gutter_width).max(px(1.0)),
                     px(FileEditor::LINE_HEIGHT),
                 ),
             );
@@ -800,6 +846,25 @@ impl Element for EditorElement {
                 bounds: line_bounds,
                 line_number,
             });
+        }
+        if follow_caret {
+            let scroll = self.input.read(cx).scroll.clone();
+            self.input
+                .update(cx, |input, _| input.scroll_to_caret = false);
+            let offset = scroll.offset();
+            let scrolled = caret_row.map_or(offset.y, |row| {
+                caret_scroll(
+                    offset.y,
+                    bounds.top() + px(row as f32 * FileEditor::LINE_HEIGHT),
+                    window.content_mask().bounds,
+                )
+            });
+            if scrolled != offset.y {
+                scroll.set_offset(point(offset.x, scrolled));
+                // The box read its scroll before this element laid out, so the
+                // caret only lands inside it on the frame after this one.
+                window.refresh();
+            }
         }
         PrepaintState {
             lines,
@@ -1123,6 +1188,28 @@ fn line_wrap_offset(line: &gpui::WrappedLine, boundary: gpui::WrapBoundary) -> u
     line.runs()[boundary.run_ix].glyphs[boundary.glyph_ix].index
 }
 
+/// How wide text may be laid out given the space layout offers and the cap of
+/// the box it is painted in. An editor without a cap uses what it is offered;
+/// one with a cap never exceeds it, and still shrinks for a narrower box.
+fn text_width(cap: Option<Pixels>, available: Pixels) -> Pixels {
+    cap.map_or(available, |cap| available.min(cap)).max(px(1.))
+}
+
+/// How far the box must be scrolled for the caret's row to stay inside it:
+/// down when the row falls past the bottom, up when it sits above the top, and
+/// left alone while it is already in view. gpui counts a box scrolled towards
+/// the end of its content as a negative offset.
+fn caret_scroll(current: Pixels, row_top: Pixels, viewport: Bounds<Pixels>) -> Pixels {
+    let row_bottom = row_top + px(FileEditor::LINE_HEIGHT);
+    if row_bottom > viewport.bottom() {
+        current - (row_bottom - viewport.bottom())
+    } else if row_top < viewport.top() {
+        current + (viewport.top() - row_top)
+    } else {
+        current
+    }
+}
+
 /// The lines close enough to the clip to be worth shaping this frame.
 ///
 /// The editor element stays as tall as the whole document so the ordinary
@@ -1176,6 +1263,35 @@ mod tests {
             vec![10..16, 16..24, 24..30],
         );
         assert_eq!(soft_wrapped_ranges(4..9, &[]), vec![4..9]);
+    }
+
+    #[test]
+    fn the_composer_wraps_to_its_box_not_to_the_column_measured_against() {
+        // The chat column offers more width than the composer box can take.
+        assert_eq!(text_width(Some(px(626.)), px(842.)), px(626.));
+        // A box narrower than the cap still wraps to the box.
+        assert_eq!(text_width(Some(px(626.)), px(300.)), px(300.));
+        // A file editor has no cap and fills what it is given.
+        assert_eq!(text_width(None, px(842.)), px(842.));
+        // Shaping needs a positive width even in a collapsed box.
+        assert_eq!(text_width(Some(px(626.)), px(0.)), px(1.));
+    }
+
+    #[test]
+    fn the_composer_scrolls_only_far_enough_to_show_the_caret() {
+        // A ten-row box, with the document already scrolled two rows up.
+        let viewport = Bounds::from_corners(point(px(0.), px(100.)), point(px(300.), px(300.)));
+        let row = |index: f32| px(100.) - px(40.) + px(index * FileEditor::LINE_HEIGHT);
+
+        // A caret in view leaves the scroll alone.
+        assert_eq!(caret_scroll(px(-40.), row(5.), viewport), px(-40.));
+        // The last visible row counts as in view.
+        assert_eq!(caret_scroll(px(-40.), row(11.), viewport), px(-40.));
+        // A caret below the box scrolls it just past that row.
+        assert_eq!(caret_scroll(px(-40.), row(13.), viewport), px(-80.));
+        // A caret above the box scrolls back up to it, never further.
+        assert_eq!(caret_scroll(px(-40.), row(0.), viewport), px(0.));
+        assert_eq!(caret_scroll(px(-40.), row(1.), viewport), px(-20.));
     }
 
     #[test]
