@@ -43,10 +43,10 @@ pub struct ThemeColors {
     pub selection: u32,
     /// Modal backdrop, as `0xRRGGBBAA`.
     pub backdrop: u32,
-    /// Translucent window chrome, as `0xRRGGBBAA`.
-    pub chrome_glass: u32,
-    pub sidebar_glass: u32,
-    pub composer_glass: u32,
+    /// Title bars, the chat tab row, and the settings panel.
+    pub chrome: u32,
+    /// The message composer.
+    pub composer: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -96,9 +96,8 @@ impl ThemePreset {
                 diff_removed: 0x462c30,
                 selection: 0xffffff35,
                 backdrop: 0x000000b3,
-                chrome_glass: 0x292929d9,
-                sidebar_glass: 0x202020df,
-                composer_glass: 0x303030e8,
+                chrome: 0x292929,
+                composer: 0x303030,
             },
             Self::Light => ThemeColors {
                 background: 0xfafafa,
@@ -125,9 +124,8 @@ impl ThemePreset {
                 diff_removed: 0xfcebeb,
                 selection: 0x20202030,
                 backdrop: 0x18181b66,
-                chrome_glass: 0xf1f1f1dc,
-                sidebar_glass: 0xe4e4e4dc,
-                composer_glass: 0xffffffd9,
+                chrome: 0xf1f1f1,
+                composer: 0xffffff,
             },
         }
     }

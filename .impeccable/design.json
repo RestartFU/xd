@@ -364,49 +364,34 @@
           "oklch(95.00% 0.00000 0.00 / 0.702)"
         ]
       },
-      "dark-chrome-glass": {
+      "dark-chrome": {
         "role": "neutral",
-        "displayName": "Dark Chrome Glass",
+        "displayName": "Dark Chrome",
         "theme": "dark",
         "tonalRamp": [
-          "oklch(15.00% 0.00000 0.00 / 0.851)",
-          "oklch(26.43% 0.00000 0.00 / 0.851)",
-          "oklch(37.86% 0.00000 0.00 / 0.851)",
-          "oklch(49.29% 0.00000 0.00 / 0.851)",
-          "oklch(60.71% 0.00000 0.00 / 0.851)",
-          "oklch(72.14% 0.00000 0.00 / 0.851)",
-          "oklch(83.57% 0.00000 0.00 / 0.851)",
-          "oklch(95.00% 0.00000 0.00 / 0.851)"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "dark-sidebar-glass": {
+      "dark-composer": {
         "role": "neutral",
-        "displayName": "Dark Sidebar Glass",
+        "displayName": "Dark Composer",
         "theme": "dark",
         "tonalRamp": [
-          "oklch(15.00% 0.00000 0.00 / 0.875)",
-          "oklch(26.43% 0.00000 0.00 / 0.875)",
-          "oklch(37.86% 0.00000 0.00 / 0.875)",
-          "oklch(49.29% 0.00000 0.00 / 0.875)",
-          "oklch(60.71% 0.00000 0.00 / 0.875)",
-          "oklch(72.14% 0.00000 0.00 / 0.875)",
-          "oklch(83.57% 0.00000 0.00 / 0.875)",
-          "oklch(95.00% 0.00000 0.00 / 0.875)"
-        ]
-      },
-      "dark-composer-glass": {
-        "role": "neutral",
-        "displayName": "Dark Composer Glass",
-        "theme": "dark",
-        "tonalRamp": [
-          "oklch(15.00% 0.00000 0.00 / 0.910)",
-          "oklch(26.43% 0.00000 0.00 / 0.910)",
-          "oklch(37.86% 0.00000 0.00 / 0.910)",
-          "oklch(49.29% 0.00000 0.00 / 0.910)",
-          "oklch(60.71% 0.00000 0.00 / 0.910)",
-          "oklch(72.14% 0.00000 0.00 / 0.910)",
-          "oklch(83.57% 0.00000 0.00 / 0.910)",
-          "oklch(95.00% 0.00000 0.00 / 0.910)"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
       "light-background": {
@@ -769,49 +754,34 @@
           "oklch(95.00% 0.00586 285.89 / 0.400)"
         ]
       },
-      "light-chrome-glass": {
+      "light-chrome": {
         "role": "neutral",
-        "displayName": "Light Chrome Glass",
+        "displayName": "Light Chrome",
         "theme": "light",
         "tonalRamp": [
-          "oklch(15.00% 0.00000 0.00 / 0.863)",
-          "oklch(26.43% 0.00000 0.00 / 0.863)",
-          "oklch(37.86% 0.00000 0.00 / 0.863)",
-          "oklch(49.29% 0.00000 0.00 / 0.863)",
-          "oklch(60.71% 0.00000 0.00 / 0.863)",
-          "oklch(72.14% 0.00000 0.00 / 0.863)",
-          "oklch(83.57% 0.00000 0.00 / 0.863)",
-          "oklch(95.00% 0.00000 0.00 / 0.863)"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       },
-      "light-sidebar-glass": {
+      "light-composer": {
         "role": "neutral",
-        "displayName": "Light Sidebar Glass",
+        "displayName": "Light Composer",
         "theme": "light",
         "tonalRamp": [
-          "oklch(15.00% 0.00000 0.00 / 0.863)",
-          "oklch(26.43% 0.00000 0.00 / 0.863)",
-          "oklch(37.86% 0.00000 0.00 / 0.863)",
-          "oklch(49.29% 0.00000 0.00 / 0.863)",
-          "oklch(60.71% 0.00000 0.00 / 0.863)",
-          "oklch(72.14% 0.00000 0.00 / 0.863)",
-          "oklch(83.57% 0.00000 0.00 / 0.863)",
-          "oklch(95.00% 0.00000 0.00 / 0.863)"
-        ]
-      },
-      "light-composer-glass": {
-        "role": "neutral",
-        "displayName": "Light Composer Glass",
-        "theme": "light",
-        "tonalRamp": [
-          "oklch(15.00% 0.00000 0.00 / 0.851)",
-          "oklch(26.43% 0.00000 0.00 / 0.851)",
-          "oklch(37.86% 0.00000 0.00 / 0.851)",
-          "oklch(49.29% 0.00000 0.00 / 0.851)",
-          "oklch(60.71% 0.00000 0.00 / 0.851)",
-          "oklch(72.14% 0.00000 0.00 / 0.851)",
-          "oklch(83.57% 0.00000 0.00 / 0.851)",
-          "oklch(95.00% 0.00000 0.00 / 0.851)"
+          "oklch(15.00% 0.00000 0.00)",
+          "oklch(26.43% 0.00000 0.00)",
+          "oklch(37.86% 0.00000 0.00)",
+          "oklch(49.29% 0.00000 0.00)",
+          "oklch(60.71% 0.00000 0.00)",
+          "oklch(72.14% 0.00000 0.00)",
+          "oklch(83.57% 0.00000 0.00)",
+          "oklch(95.00% 0.00000 0.00)"
         ]
       }
     },
@@ -837,8 +807,8 @@
       "desktopMinimum": "760\u00d7560px",
       "androidMinTouch": "48dp"
     },
-    "nativeGlass": {
-      "desktop": "Compositor blur request with semantic RGBA chrome; opaque reading surfaces.",
+    "nativeSurface": {
+      "desktop": "Opaque native window with semantic opaque chrome and reading surfaces; no compositor blur.",
       "android": "Opaque layered Material surfaces and restrained outlines; no compositor blur."
     }
   },
@@ -873,7 +843,7 @@
       "refersTo": "chat-tab",
       "description": "Independent conversations within a workspace.",
       "html": "<div class=\"ds-tabs\"><button class=\"ds-tab is-active\">Implementation</button><button class=\"ds-tab\">Review</button></div>",
-      "css": ".ds-tabs{display:flex;gap:4px;padding:6px;background:#292929d9}.ds-tab{font:500 12px Inter,sans-serif;cursor:pointer;height:30px;padding:0 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:#b1b1b1}.ds-tab.is-active{border-color:#383838;background:#373737;color:#f1f1f1}.ds-tab:hover{background:#333333}.ds-tab:focus-visible{outline:2px solid #858585}"
+      "css": ".ds-tabs{display:flex;gap:4px;padding:6px;background:#292929}.ds-tab{font:500 12px Inter,sans-serif;cursor:pointer;height:30px;padding:0 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:#b1b1b1}.ds-tab.is-active{border-color:#383838;background:#373737;color:#f1f1f1}.ds-tab:hover{background:#333333}.ds-tab:focus-visible{outline:2px solid #858585}"
     },
     {
       "name": "Composer",
@@ -881,7 +851,7 @@
       "refersTo": "composer",
       "description": "A clear editing surface with stable text contrast.",
       "html": "<label class=\"ds-composer\"><textarea placeholder=\"Ask anything, or describe a task\u2026\"></textarea></label>",
-      "css": ".ds-composer{display:block;padding:12px;border:1px solid #383838;border-radius:16px;background:#303030e8}.ds-composer textarea{width:100%;min-height:64px;resize:vertical;border:0;background:transparent;color:#f1f1f1;font:400 14px Inter,sans-serif}.ds-composer textarea::placeholder{color:#b1b1b1}.ds-composer:focus-within{border-color:#858585}.ds-composer textarea:focus{outline:0}"
+      "css": ".ds-composer{display:block;padding:12px;border:1px solid #383838;border-radius:16px;background:#303030}.ds-composer textarea{width:100%;min-height:64px;resize:vertical;border:0;background:transparent;color:#f1f1f1;font:400 14px Inter,sans-serif}.ds-composer textarea::placeholder{color:#b1b1b1}.ds-composer:focus-within{border-color:#858585}.ds-composer textarea:focus{outline:0}"
     },
     {
       "name": "Status",
@@ -900,7 +870,7 @@
   ],
   "narrative": {
     "northStar": "A Clear Workspace",
-    "overview": "xd uses neutral charcoal and clear glass to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.\n\nDark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Desktop translucency belongs to chrome and the composer; text, code and tool output keep a stable reading background. Android carries the same palette and hierarchy through native Material 3 layouts.",
+    "overview": "xd uses neutral charcoal to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.\n\nDark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Every desktop surface is opaque, so the wallpaper and other windows never show through the app. Android carries the same palette and hierarchy through native Material 3 layouts.",
     "keyCharacteristics": [
       "Two themes: Dark and Light. Retired saved names load as Dark.",
       "Inter for prose and controls; JetBrains Mono for code and terminal text.",
@@ -915,13 +885,14 @@
       "Do center the empty-state context and heading over the composer, allowing natural text height.",
       "Do preserve independent chat histories, drafts and agent settings when switching tabs.",
       "Do retain native window, keyboard, touch and system inset behavior.",
-      "Do keep opaque reading surfaces beneath prose, code and terminal output."
+      "Do keep every window surface opaque, including chrome, the sidebar and the composer."
     ],
     "donts": [
       "Don't restore the retired red rules, bone palette or card-catalog metaphor.",
       "Don't make closing a chat tab delete its conversation.",
       "Don't use fake Mac window controls on other platforms.",
-      "Don't depend on translucency or color alone to identify selection or status.",
+      "Don't let the desktop or other windows show through the app.",
+      "Don't depend on color alone to identify selection or status.",
       "Don't scale desktop layouts into phone thumbnails; use native responsive structure."
     ]
   }

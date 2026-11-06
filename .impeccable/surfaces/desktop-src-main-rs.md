@@ -11,7 +11,7 @@ Mode: Operate. Scope: the native working UI on desktop and Android. Users organi
 
 ## Direction contract
 
-The user selected a T3 Code-like workspace, neutral charcoal with clear glass, a neutral silver Light theme, and real window controls without decorative Mac traffic lights. This replaces the former card-catalog visual world. `DESIGN.md` records the implemented tokens and platform differences.
+The user selected a T3 Code-like workspace, neutral charcoal, a neutral silver Light theme, opaque surfaces, and real window controls without decorative Mac traffic lights. This replaces the former card-catalog visual world. `DESIGN.md` records the implemented tokens and platform differences.
 
 Desktop uses a compact project/session sidebar and a generous conversation column. Separate chat tabs sit below the session header. Context and empty-state text are centered above a naturally sized composer. Settings has section navigation. Files, Changes, Browser and Terminal stay accessible alongside the conversation.
 

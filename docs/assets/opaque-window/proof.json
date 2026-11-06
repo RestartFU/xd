@@ -1,0 +1,67 @@
+{
+  "before_base": "825793e",
+  "before_state": "Installed xd 0.2.2 (825793e), unmodified.",
+  "environment": "Nested Weston 15 over Xvfb with a pixman renderer, lavapipe Vulkan, a throwaway HOME and a high-contrast checker wallpaper that makes bleed-through visible.",
+  "captures": [
+    {
+      "surface": "Desktop project sidebar",
+      "theme": "dark",
+      "viewport": [
+        1600,
+        1000
+      ],
+      "before": "desktop-sidebar-dark-before.png",
+      "after": "desktop-sidebar-dark-after.png"
+    },
+    {
+      "surface": "Desktop chat, title bar, tab row and composer",
+      "theme": "dark",
+      "viewport": [
+        1600,
+        1000
+      ],
+      "before": "desktop-chat-dark-before.png",
+      "after": "desktop-chat-dark-after.png"
+    },
+    {
+      "surface": "Desktop settings panel",
+      "theme": "dark",
+      "viewport": [
+        1600,
+        1000
+      ],
+      "before": "desktop-settings-dark-before.png",
+      "after": "desktop-settings-dark-after.png"
+    },
+    {
+      "surface": "Desktop project sidebar",
+      "theme": "light",
+      "viewport": [
+        1600,
+        1000
+      ],
+      "before": "desktop-sidebar-light-before.png",
+      "after": "desktop-sidebar-light-after.png"
+    },
+    {
+      "surface": "Desktop chat, title bar, tab row and composer",
+      "theme": "light",
+      "viewport": [
+        1600,
+        1000
+      ],
+      "before": "desktop-chat-light-before.png",
+      "after": "desktop-chat-light-after.png"
+    },
+    {
+      "surface": "Desktop settings panel",
+      "theme": "light",
+      "viewport": [
+        1600,
+        1000
+      ],
+      "before": "desktop-settings-light-before.png",
+      "after": "desktop-settings-light-after.png"
+    }
+  ]
+}

@@ -71,6 +71,8 @@ fn default_theme_controls_remain_readable_on_every_surface() {
             ("sidebar", colors.sidebar),
             ("surface", colors.surface),
             ("surface_high", colors.surface_high),
+            ("chrome", colors.chrome),
+            ("composer", colors.composer),
         ] {
             assert!(
                 contrast(colors.text, background) >= 7.0,
@@ -84,6 +86,21 @@ fn default_theme_controls_remain_readable_on_every_surface() {
                 contrast(colors.accent_ink, background) >= 4.5,
                 "{preset:?} accent ink on {role}"
             );
+        }
+    }
+}
+
+#[test]
+fn window_surfaces_are_opaque_rgb_roles() {
+    for preset in ThemePreset::ALL {
+        let colors = preset.colors();
+        for (role, color) in [
+            ("background", colors.background),
+            ("sidebar", colors.sidebar),
+            ("chrome", colors.chrome),
+            ("composer", colors.composer),
+        ] {
+            assert!(color <= 0xff_ffff, "{preset:?} {role} carries alpha");
         }
     }
 }

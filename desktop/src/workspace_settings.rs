@@ -75,7 +75,7 @@ impl XdDesktop {
             .id("workspace-settings-navigation")
             .flex_none()
             .p(px(10.0))
-            .bg(rgba(colors.sidebar_glass))
+            .bg(rgb(colors.sidebar))
             .flex()
             .when(!compact, |nav| {
                 nav.w(px(176.0))
@@ -737,7 +737,7 @@ impl XdDesktop {
                     .flex_col()
                     .rounded(px(16.0))
                     .overflow_hidden()
-                    .bg(rgba(colors.chrome_glass))
+                    .bg(rgb(colors.chrome))
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
