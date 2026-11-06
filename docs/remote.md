@@ -23,6 +23,17 @@ address can be used while the listener accepts connections on all interfaces.
 The selected port must be reachable; this release does not provide a relay or
 NAT traversal service.
 
+## Switch between hosts
+
+The connection status in the title bar connects to the remembered host using its
+saved device token, without a new pairing code. While the connection is down,
+pressing it retries immediately. It opens **Pair with a host** only when no host
+is remembered or the remembered host has refused this device.
+
+**Settings → Devices → Disconnect** returns to the local host. The remote keeps
+running and stays remembered, so the status can reconnect to it later. **Connect**
+in the same section pairs with a different host.
+
 ## Shared sessions
 
 ```text
