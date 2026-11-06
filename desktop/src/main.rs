@@ -8132,9 +8132,15 @@ impl XdDesktop {
     }
 
     /// Records what the host knows about an owner's avatar. A reply or event
-    /// without an image means there is none to draw.
+    /// without an image means there is none to draw, unless the host reports
+    /// the fetch as worth retrying: then the next tree asks again, and the
+    /// host's own cooldown keeps that from reaching GitHub every time.
     fn record_owner_icon(&mut self, owner: String, body: &Value) {
         if body.get("pending").and_then(Value::as_bool) == Some(true) {
+            return;
+        }
+        if body.get("retry").and_then(Value::as_bool) == Some(true) {
+            self.owner_icons_requested.remove(&owner);
             return;
         }
         let icon = body
@@ -16035,6 +16041,15 @@ mod tests {
                 }),
             );
             assert!(desktop.owner_avatar(Some("RestartFU")).is_some());
+
+            desktop.record_owner_icon(
+                "failed".into(),
+                &serde_json::json!({"ok": true, "owner": "failed", "retry": true}),
+            );
+            assert!(
+                !desktop.owner_icons.contains_key("failed"),
+                "a failed fetch is not an answer, and is asked about again"
+            );
 
             desktop.record_owner_icon(
                 "plain".into(),

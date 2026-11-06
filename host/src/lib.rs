@@ -74,7 +74,7 @@ pub struct Engine {
     auth: AuthManager,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
-    owner_icons: OwnerIcons,
+    owner_icons: Arc<OwnerIcons>,
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     session_resources: Mutex<()>,
@@ -134,7 +134,7 @@ impl Engine {
             auth: AuthManager::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
-            owner_icons: OwnerIcons::new(events.clone()),
+            owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources: Mutex::new(()),
@@ -177,7 +177,7 @@ impl Engine {
             auth,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
-            owner_icons: OwnerIcons::new(events.clone()),
+            owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
             session_resources: Mutex::new(()),
@@ -1111,6 +1111,7 @@ impl Engine {
         let url = url.to_owned();
         let store = store.clone();
         let events = self.events.clone();
+        let owner_icons = self.owner_icons.clone();
         events.publish(json!({
             "event": "folder-clone",
             "folder": folder_id.clone(),
@@ -1120,6 +1121,9 @@ impl Engine {
         thread::spawn(move || {
             let result = clone_repository(&url, &destination)
                 .and_then(|_| store.finish_folder_clone(&folder_id, &destination));
+            // The workspace was an empty directory when the tree last looked;
+            // read its remote again now that the repository is there.
+            owner_icons.forget(&destination);
             let mut event = json!({
                 "event": "folder-clone",
                 "folder": folder_id,

@@ -311,7 +311,7 @@ boundary, not an event cursor.
 | `agent-clis` | none | detected assistant versions |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
-| `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, or `pending: true` while the host fetches, or neither when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
+| `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, `pending: true` while the host fetches, `retry: true` when the last fetch failed, or none of these when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
 | `image-read` | absolute host `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only host-created remote pastes |
 | `search` | `query` | matching stored messages |
@@ -671,7 +671,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |
 | `terminal-output`, `terminal-closed` | `terminal`, … | Shared pty; output is base64. |
 | `auth`, `agent-auth-changed` | … | Assistant authentication state. |
-| `owner-icon` | `owner`, optional `mime` and base64 `data` | A pending `owner-icon` fetch finished. Without `mime` and `data` the account has no avatar; keep the folder icon. |
+| `owner-icon` | `owner`, optional `mime` and base64 `data`, optional `retry` | A pending `owner-icon` fetch finished. Without `mime` and `data` the account has no avatar; keep the folder icon. With `retry` the fetch failed instead, so ask again later; the host answers from a short cooldown rather than refetching each time. |
 
 ### Tagged questions
 

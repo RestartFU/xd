@@ -47,6 +47,9 @@ struct IconEntry {
     icon: Option<Icon>,
     fetched_at: Instant,
     ttl: Duration,
+    /// The fetch failed rather than finding no avatar, so this answer is
+    /// worth asking about again once the cooldown passes.
+    retry: bool,
 }
 
 pub(crate) struct OwnerIcons {
@@ -115,7 +118,7 @@ impl OwnerIcons {
             .get(&owner)
             .filter(|entry| now.saturating_duration_since(entry.fetched_at) < entry.ttl)
         {
-            return Ok(icon_reply(&owner, entry.icon.as_ref()));
+            return Ok(icon_reply(&owner, entry.icon.as_ref(), entry.retry));
         }
         self.start_fetch(subscriber, owner.clone())?;
         Ok(json!({"ok": true, "owner": owner, "pending": true}))
@@ -142,11 +145,11 @@ impl OwnerIcons {
             .name("xd-owner-icon".into())
             .spawn(move || {
                 let fetched = fetcher(&worker_owner);
-                let (icon, ttl) = match fetched {
-                    Ok(icon) => (icon, ICON_TTL),
+                let (icon, ttl, retry) = match fetched {
+                    Ok(icon) => (icon, ICON_TTL, false),
                     Err(error) => {
                         eprintln!("xd-host: cannot read the {worker_owner} avatar: {error}");
-                        (None, FAILURE_TTL)
+                        (None, FAILURE_TTL, true)
                     }
                 };
                 if let Ok(mut icons) = icons.lock() {
@@ -156,6 +159,7 @@ impl OwnerIcons {
                             icon: icon.clone(),
                             fetched_at: Instant::now(),
                             ttl,
+                            retry,
                         },
                     );
                 }
@@ -164,7 +168,7 @@ impl OwnerIcons {
                     .ok()
                     .and_then(|mut inflight| inflight.remove(&worker_owner))
                     .unwrap_or_default();
-                let event = icon_event(&worker_owner, icon.as_ref());
+                let event = icon_event(&worker_owner, icon.as_ref(), retry);
                 for subscriber in waiting {
                     events.publish_to(subscriber, event.clone());
                 }
@@ -178,36 +182,51 @@ impl OwnerIcons {
         Ok(())
     }
 
+    /// Forgets what a directory's remote was, so a repository that has just
+    /// arrived -- a finished clone -- is read again rather than kept nameless
+    /// until the cache expires.
+    pub(crate) fn forget(&self, directory: &Path) {
+        if let Ok(mut remotes) = self.remotes.lock() {
+            remotes.remove(directory);
+        }
+    }
+
     /// Caches an avatar so a test does not reach the network.
     #[cfg(test)]
-    fn remember(&self, owner: &str, icon: Option<Icon>) {
+    fn remember(&self, owner: &str, icon: Option<Icon>, retry: bool) {
         self.icons.lock().expect("icon cache").insert(
             owner.to_owned(),
             IconEntry {
                 icon,
                 fetched_at: Instant::now(),
                 ttl: ICON_TTL,
+                retry,
             },
         );
     }
 }
 
-fn icon_reply(owner: &str, icon: Option<&Icon>) -> Value {
+fn icon_reply(owner: &str, icon: Option<&Icon>, retry: bool) -> Value {
     let mut reply = json!({"ok": true, "owner": owner});
-    if let Some(icon) = icon {
-        reply["mime"] = Value::String(icon.mime.clone());
-        reply["data"] = Value::String(icon.data.clone());
-    }
+    describe_icon(&mut reply, icon, retry);
     reply
 }
 
-fn icon_event(owner: &str, icon: Option<&Icon>) -> Value {
+fn icon_event(owner: &str, icon: Option<&Icon>, retry: bool) -> Value {
     let mut event = json!({"event": "owner-icon", "owner": owner});
-    if let Some(icon) = icon {
-        event["mime"] = Value::String(icon.mime.clone());
-        event["data"] = Value::String(icon.data.clone());
-    }
+    describe_icon(&mut event, icon, retry);
     event
+}
+
+/// An answer carries the avatar, or says the fetch failed and is worth
+/// asking about again. Neither means the account simply has no avatar.
+fn describe_icon(answer: &mut Value, icon: Option<&Icon>, retry: bool) {
+    if let Some(icon) = icon {
+        answer["mime"] = Value::String(icon.mime.clone());
+        answer["data"] = Value::String(icon.data.clone());
+    } else if retry {
+        answer["retry"] = Value::Bool(true);
+    }
 }
 
 /// The `origin` remote of a repository, read without touching the network.
@@ -361,6 +380,7 @@ mod tests {
                 mime: "image/png".into(),
                 data: "aGk=".into(),
             }),
+            false,
         );
         assert_eq!(
             icons.icon(0, &json!({"owner": "RestartFU"})).unwrap(),
@@ -371,11 +391,55 @@ mod tests {
     #[test]
     fn a_cached_miss_answers_without_an_image() {
         let icons = icons();
-        icons.remember("RestartFU", None);
+        icons.remember("RestartFU", None, false);
         assert_eq!(
             icons.icon(0, &json!({"owner": "RestartFU"})).unwrap(),
             json!({"ok": true, "owner": "RestartFU"})
         );
+    }
+
+    #[test]
+    fn a_failed_fetch_is_answered_as_worth_asking_again() {
+        let icons = icons();
+        icons.remember("RestartFU", None, true);
+        assert_eq!(
+            icons.icon(0, &json!({"owner": "RestartFU"})).unwrap(),
+            json!({"ok": true, "owner": "RestartFU", "retry": true})
+        );
+    }
+
+    #[test]
+    fn a_directory_is_read_again_once_its_repository_arrives() {
+        let directory = std::env::temp_dir().join(format!("xd-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        let icons = icons();
+        assert_eq!(icons.owner(&directory), None);
+
+        let git = |arguments: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&directory)
+                    .args(arguments)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .expect("git")
+                    .success()
+            );
+        };
+        git(&["init"]);
+        git(&["remote", "add", "origin", "git@github.com:RestartFU/xd.git"]);
+
+        assert_eq!(
+            icons.owner(&directory),
+            None,
+            "the cached answer stands until the directory is forgotten"
+        );
+        icons.forget(&directory);
+        assert_eq!(icons.owner(&directory).as_deref(), Some("RestartFU"));
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
