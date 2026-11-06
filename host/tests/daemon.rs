@@ -596,13 +596,8 @@ impl StaleDaemon {
         fs::write(&installer, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&installer, fs::Permissions::from_mode(0o755)).unwrap();
         let host = libexec.join("xd-host");
-        // A Linux copy can hit ETXTBSY while another test forks. On macOS, resolving
-        // a hard link can return another link's path, so it needs a real copy.
-        if cfg!(target_os = "macos") {
-            fs::copy(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
-        } else {
-            fs::hard_link(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
-        }
+        // A link cannot hit ETXTBSY from a copy still open during another fork.
+        fs::hard_link(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
         fs::canonicalize(host).unwrap()
     }
     fn bridge(&self, host: &Path) -> Child {

@@ -404,7 +404,9 @@ fn request(stream: &mut UnixStream, mut body: Value) -> io::Result<Value> {
         }
         let frame: Value = serde_json::from_str(&line)?;
         if frame["_xd_request"] == 0 {
-            stream.set_read_timeout(None)?;
+            // A restarting daemon can close right after replying, and macOS then
+            // rejects socket options with EINVAL. The reply is already in hand.
+            let _ = stream.set_read_timeout(None);
             return Ok(frame);
         }
     }
