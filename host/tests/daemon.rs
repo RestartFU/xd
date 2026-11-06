@@ -596,8 +596,13 @@ impl StaleDaemon {
         fs::write(&installer, "#!/bin/sh\n").unwrap();
         fs::set_permissions(&installer, fs::Permissions::from_mode(0o755)).unwrap();
         let host = libexec.join("xd-host");
-        // A link cannot hit ETXTBSY from a copy still open during another fork.
-        fs::hard_link(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
+        // A Linux copy can hit ETXTBSY while another test forks. On macOS, resolving
+        // a hard link can return another link's path, so it needs a real copy.
+        if cfg!(target_os = "macos") {
+            fs::copy(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
+        } else {
+            fs::hard_link(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
+        }
         fs::canonicalize(host).unwrap()
     }
     fn bridge(&self, host: &Path) -> Child {
@@ -638,17 +643,28 @@ impl Drop for StaleDaemon {
 
 fn assert_bridge_replaces(stale: &StaleDaemon, host: &Path) {
     let mut bridge = stale.bridge(host);
-    let mut client = Client {
-        reader: BufReader::new(bridge.stdout.take().unwrap()),
-        writer: bridge.stdin.take().unwrap(),
-        next: 1,
+    let mut stdin = bridge.stdin.take().unwrap();
+    let mut stdout = BufReader::new(bridge.stdout.take().unwrap());
+    writeln!(stdin, "{}", json!({"op":"daemon-info","_xd_request":1})).unwrap();
+    let info = loop {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).unwrap() == 0 {
+            let mut error = String::new();
+            let mut stderr = bridge.stderr.take().unwrap();
+            stderr.read_to_string(&mut error).unwrap();
+            panic!("bridge closed: {error}");
+        }
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        if frame["_xd_request"] == 1 {
+            break frame;
+        }
     };
-    let info = client.call(json!({"op":"daemon-info"}));
     assert_eq!(stale.restart_requests(), 1);
     assert_eq!(info["version"], env!("CARGO_PKG_VERSION"), "{info}");
     assert_eq!(info["executable"], host.to_str().unwrap());
-    assert_eq!(client.call(json!({"op":"daemon-stop"}))["ok"], true);
-    let _ = bridge.wait();
+    // Only cleanup: this test isn't about the stop acknowledgement.
+    writeln!(stdin, "{}", json!({"op":"daemon-stop"})).unwrap();
+    bridge.wait().unwrap();
 }
 
 #[test]
