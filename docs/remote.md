@@ -70,9 +70,12 @@ xd-host daemon-status --data "$HOME/.local/share/xd"
 xd-host daemon-stop --data "$HOME/.local/share/xd"
 ```
 
-The daemon checks the connected bridge's build identity. If an older build is
-still running after an update, stop it before reconnecting. Its log is
-`DATA/daemon.log`. Stopping the daemon interrupts work on every connected device.
+The bridge checks the daemon's build identity. If an installed update left the
+previous build running, the next bridge asks it to restart into the new one. A
+daemon with active chats or terminals refuses, and clients retry until it is
+idle. Development builds and other installs never restart it; stop it yourself
+in those cases. Its log is `DATA/daemon.log`. Stopping the daemon interrupts work
+on every connected device.
 
 The integrated browser runs on the client machine. For remote previews use a
 reachable host URL; `localhost` still refers to the client displaying xd.
