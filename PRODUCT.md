@@ -37,7 +37,7 @@ xd does not ship its own model or agent. It wraps the user's own CLIs, authentic
 ## Brand Commitments
 
 - The name is lowercase `xd`. There is an existing app icon in `desktop/assets/icons`.
-- The approved direction is a T3 Code-like workspace with neutral charcoal and clear glass, plus a neutral silver Light theme. Preserve real platform window controls without decorative traffic lights (confirmed 2026-10-30).
+- The approved direction is a T3 Code-like workspace with neutral charcoal, plus a neutral silver Light theme. Preserve real platform window controls without decorative traffic lights (confirmed 2026-10-30). The window and its surfaces are opaque; the earlier clear-glass treatment was removed because seeing behind the app was unwanted (confirmed 2026-11-06).
 
 ## Evidence on Hand
 

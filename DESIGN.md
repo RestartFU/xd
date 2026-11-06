@@ -26,9 +26,8 @@ colors:
   dark-diff-removed: "#462c30"
   dark-selection: "#ffffff35"
   dark-backdrop: "#000000b3"
-  dark-chrome-glass: "#292929d9"
-  dark-sidebar-glass: "#202020df"
-  dark-composer-glass: "#303030e8"
+  dark-chrome: "#292929"
+  dark-composer: "#303030"
   light-background: "#fafafa"
   light-sidebar: "#e4e4e4"
   light-surface: "#ffffff"
@@ -53,9 +52,8 @@ colors:
   light-diff-removed: "#fcebeb"
   light-selection: "#20202030"
   light-backdrop: "#18181b66"
-  light-chrome-glass: "#f1f1f1dc"
-  light-sidebar-glass: "#e4e4e4dc"
-  light-composer-glass: "#ffffffd9"
+  light-chrome: "#f1f1f1"
+  light-composer: "#ffffff"
 typography:
   display:
     fontFamily: "Inter"
@@ -111,7 +109,7 @@ components:
     rounded: "{rounded.tab}"
     height: "30px"
   composer:
-    backgroundColor: "{colors.dark-composer-glass}"
+    backgroundColor: "{colors.dark-composer}"
     textColor: "{colors.dark-text}"
     rounded: "{rounded.composer}"
     width: "736px"
@@ -122,9 +120,9 @@ components:
 
 **Creative North Star: "A Clear Workspace"**
 
-xd uses neutral charcoal and clear glass to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.
+xd uses neutral charcoal to frame a generous conversation area. Projects contain sessions; each session contains separate chat tabs sharing one workspace. The sidebar stays compact, chat controls sit beside the conversation, and workspace tools remain available alongside it.
 
-Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Desktop translucency belongs to chrome and the composer; text, code and tool output keep a stable reading background. Android carries the same palette and hierarchy through native Material 3 layouts.
+Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome and white reading surfaces. Every desktop surface is opaque, so the wallpaper and other windows never show through the app. Android carries the same palette and hierarchy through native Material 3 layouts.
 
 **Key Characteristics:**
 
@@ -136,7 +134,7 @@ Dark uses charcoal surfaces and silver actions. Light uses neutral silver chrome
 
 ## Colors
 
-The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-` and `light-` prefixes. `selection`, `backdrop` and the three glass roles include alpha as `#RRGGBBAA`; other values are opaque.
+The normative desktop values above come from `desktop/src/theme.rs`. Roles pair by the `dark-` and `light-` prefixes. `selection` and `backdrop` include alpha as `#RRGGBBAA`; other values are opaque.
 
 Neutral surfaces distinguish canvas, sidebar, panels, hover and selection. Primary actions use a silver fill with dark ink in Dark, and charcoal with white ink in Light. Links and focus stay neutral. Working is green, waiting is amber, and destructive actions are rose. Status also has text or an icon.
 
@@ -158,7 +156,7 @@ Android uses bottom navigation outside an open chat on compact screens and a nav
 
 ## Elevation & Depth
 
-Desktop requests a blurred native window background and uses translucent title, sidebar and composer roles. The compositor determines the final blur; unsupported environments retain the neutral tonal hierarchy. Native OS decorations remain responsible for window controls where provided. Reading surfaces stay opaque, and floating menus and dialogs retain their existing shadows.
+Desktop requests an opaque native window and paints the title, sidebar, composer and reading surfaces with opaque roles; nothing behind the window shows through. Only text selection and the modal backdrop use alpha, and they blend over the app itself. Native OS decorations remain responsible for window controls where provided. Floating menus and dialogs retain their existing shadows.
 
 Android expresses the material through opaque layered neutral surfaces and restrained outlines, without compositor blur. It retains native dialogs, ripples and navigation behavior.
 
@@ -172,7 +170,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 **Chat tabs.** Each tab has an agent mark and title. Add creates another chat sharing the workspace. Close hides a tab without deleting history; Reopen on desktop and All chats on Android restore it. Phone tabs omit inline close buttons; All chats contains Close chat. Explicit rename and confirmed delete remain separate actions. Desktop keeps the final visible chat open. Android can hide all tabs and shows a saved-chats state with reopen and create actions.
 
-**Composer.** A bordered translucent desktop surface, or opaque Material surface on Android, holds the editor, attachments, agent options and send action. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft.
+**Composer.** A bordered opaque surface, using Material on Android, holds the editor, attachments, agent options and send action. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft.
 
 **Workspace tools.** Files, Changes, Browser and Terminal retain session scope across sibling chat switches. Agent history, options, approvals and drafts retain chat scope. Hosts without grouped-session support remain usable with singleton sessions and show an update message when adding a sibling chat.
 
@@ -196,5 +194,6 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 - Don't restore the retired red rules, bone palette or card-catalog metaphor.
 - Don't make closing a chat tab delete its conversation.
 - Don't use fake Mac window controls on other platforms.
-- Don't depend on translucency or color alone to identify selection or status.
+- Don't let the desktop or other windows show through the app.
+- Don't depend on color alone to identify selection or status.
 - Don't scale desktop layouts into phone thumbnails; use native responsive structure.

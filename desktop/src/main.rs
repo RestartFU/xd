@@ -5846,7 +5846,7 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap_1()
-            .bg(rgba(colors.chrome_glass))
+            .bg(rgb(colors.chrome))
             .border_b_1()
             .border_color(rgb(colors.border))
             .child(
@@ -9565,7 +9565,7 @@ impl XdDesktop {
             } else {
                 16.0
             }))
-            .bg(rgba(colors.chrome_glass))
+            .bg(rgb(colors.chrome))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
@@ -9722,7 +9722,7 @@ impl XdDesktop {
             .flex()
             .items_center()
             .gap(px(10.0))
-            .bg(rgba(colors.chrome_glass))
+            .bg(rgb(colors.chrome))
             .child(
                 div()
                     .min_w_0()
@@ -10233,7 +10233,7 @@ impl XdDesktop {
             .flex_col()
             .border_r_1()
             .border_color(rgb(colors.border))
-            .bg(rgba(colors.sidebar_glass))
+            .bg(rgb(colors.sidebar))
             .child(
                 div()
                     .h(px(40.0))
@@ -12563,7 +12563,7 @@ impl XdDesktop {
                     } else {
                         colors.border
                     }))
-                    .bg(rgba(colors.composer_glass))
+                    .bg(rgb(colors.composer))
                     .shadow_md()
                     .on_click(cx.listener(|this, _, window, cx| {
                         let focus = this.composer_input.read(cx).focus_handle(cx);
@@ -14977,7 +14977,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .key_context("XdDesktop")
-            .bg(rgba((colors.background << 8) | 0xd9))
+            .bg(rgb(colors.background))
             .font_family(UI_FONT)
             .on_mouse_down(
                 MouseButton::Left,
@@ -16652,6 +16652,7 @@ mod tests {
             .expect("desktop window options")
             .1;
         assert!(startup.contains("appears_transparent: true"));
+        assert!(startup.contains("window_background: WindowBackgroundAppearance::Opaque"));
         assert!(startup.contains("traffic_light_position: cfg!(target_os = \"macos\")"));
     }
 
@@ -19759,7 +19760,7 @@ fn main() {
                     window_bounds: Some(window_bounds),
                     is_resizable: true,
                     window_min_size: Some(size(px(760.0), px(560.0))),
-                    window_background: WindowBackgroundAppearance::Blurred,
+                    window_background: WindowBackgroundAppearance::Opaque,
                     titlebar: Some(TitlebarOptions {
                         title: Some("xd".into()),
                         appears_transparent: true,
