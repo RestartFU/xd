@@ -4782,7 +4782,10 @@ fn git_repository_root(workdir: &str) -> Result<PathBuf, StorageError> {
 }
 
 fn valid_git_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    matches!(value.len(), 40 | 64)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        // Git reports the all-zero null object id for an unborn HEAD, which names no commit.
+        && value.bytes().any(|byte| byte != b'0')
 }
 
 fn source_worktree<'a>(worktrees: &'a [GitWorktree], root: &Path) -> Option<&'a GitWorktree> {
@@ -8853,6 +8856,62 @@ mod tests {
         let oid = "0123456789abcdef0123456789abcdef01234567";
         assert_eq!(worktree_start_revision(None, Some(oid)).unwrap(), oid);
         assert!(worktree_start_revision(None, None).is_err());
+    }
+
+    #[test]
+    fn the_null_object_id_is_not_a_usable_commit() {
+        let null_oid = "0000000000000000000000000000000000000000";
+        assert!(!valid_git_oid(null_oid));
+        assert!(!valid_git_oid(&"0".repeat(64)));
+        assert!(valid_git_oid("0123456789abcdef0123456789abcdef01234567"));
+        assert!(worktree_start_revision(None, Some(null_oid)).is_err());
+        assert!(worktree_start_revision(Some(null_oid), None).is_err());
+    }
+
+    #[test]
+    fn new_worktrees_report_a_clear_error_when_the_repository_has_no_commit() {
+        let fixture = Fixture::new();
+        let repository = fixture.workspaces.join("Unborn");
+        fs::create_dir_all(&repository).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "--initial-branch", "main", "."])
+                .current_dir(&repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        database
+            .execute(
+                "INSERT INTO workspace_folders \
+                 (id, root_path, relative_path, repo, shortcuts) VALUES ('unborn', ?, 'Unborn', ?, '[]')",
+                params![
+                    fixture.workspaces.to_string_lossy(),
+                    repository.to_string_lossy()
+                ],
+            )
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let sources = store
+            .new_chat_sources(&json!({"folder": "unborn"}))
+            .unwrap();
+        assert_eq!(sources["branches"], json!([]));
+
+        let error = store
+            .new_chat(&json!({
+                "folder": "unborn",
+                "title": "New Chat",
+                "worktree": {"kind": "new"},
+            }))
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(!message.contains("0000000000000000"), "{message}");
+        assert!(message.contains("no commit"), "{message}");
     }
 
     #[test]
