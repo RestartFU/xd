@@ -12242,6 +12242,16 @@ impl XdDesktop {
                 )
         });
         let composer_focus = self.composer_input.read(cx).focus_handle(cx);
+        let composer_scroll = self.composer_input.read(cx).scroll_handle();
+        // How wide the composer box can get, and how much of that its text has
+        // left once the shell's border and padding and the box's own padding
+        // are taken off each side. Layout hands the editor the space the chat
+        // column has, not the width of the box it is painted in, so a message
+        // would otherwise wrap to the window instead of to the composer.
+        let composer_width = px(if empty_ready { 660.0 } else { 736.0 });
+        let composer_text_width = composer_width - px(2.0 * (8.0 + 1.0 + 8.0));
+        self.composer_input
+            .update(cx, |editor, _| editor.set_wrap_width(composer_text_width));
         let metadata_ready = !self.model.backend.is_empty();
         let can_send = self.model.connected
             && metadata_ready
@@ -12548,7 +12558,7 @@ impl XdDesktop {
                     .id("native-composer-shell")
                     .debug_selector(|| "chat-composer".into())
                     .w_full()
-                    .max_w(px(if empty_ready { 660.0 } else { 736.0 }))
+                    .max_w(composer_width)
                     .mb(px(16.0))
                     .pt(px(10.0))
                     .pb(px(8.0))
@@ -12577,6 +12587,10 @@ impl XdDesktop {
                             .px(px(8.0))
                             .py_1()
                             .text_size(px(14.0))
+                            // A message past the tenth line scrolls inside the
+                            // composer; without this it paints over the chat.
+                            .overflow_y_scroll()
+                            .track_scroll(&composer_scroll)
                             .track_focus(&composer_focus)
                             .when(metadata_ready, |editor| {
                                 editor.child(self.composer_input.clone())
