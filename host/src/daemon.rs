@@ -260,13 +260,11 @@ fn connect(options: &HostOptions, start: bool) -> io::Result<UnixStream> {
 pub(super) fn bridge(options: HostOptions) -> Result<(), String> {
     let mut stream = connect(&options, true).map_err(|e| e.to_string())?;
     let mut info = rpc(&mut stream, "daemon-info").map_err(|e| e.to_string())?;
+    // A restart keeps the daemon's arguments, so it cannot fix this mismatch.
+    check_workspaces(&options, &info)?;
     if !matches_this_build(&info) {
         (stream, info) = replace_stale_daemon(&options, stream, &info)?;
-    }
-    let expected = fs::canonicalize(&options.workspaces)
-        .map_err(|_| "The running daemon uses a different workspace directory.".to_owned())?;
-    if info["workspaces"].as_str() != expected.to_str() {
-        return Err("This database is already served with a different workspace directory. Stop that daemon before changing its workspace root.".into());
+        check_workspaces(&options, &info)?;
     }
     let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
     let close = stream.try_clone().map_err(|e| e.to_string())?;
@@ -279,6 +277,14 @@ pub(super) fn bridge(options: HostOptions) -> Result<(), String> {
         .map_err(|e| e.to_string());
     let _ = close.shutdown(Shutdown::Both);
     result
+}
+fn check_workspaces(options: &HostOptions, info: &Value) -> Result<(), String> {
+    let expected = fs::canonicalize(&options.workspaces)
+        .map_err(|_| "The running daemon uses a different workspace directory.".to_owned())?;
+    if info["workspaces"].as_str() != expected.to_str() {
+        return Err("This database is already served with a different workspace directory. Stop that daemon before changing its workspace root.".into());
+    }
+    Ok(())
 }
 fn matches_this_build(info: &Value) -> bool {
     info["protocol"] == 2
@@ -334,16 +340,36 @@ fn replace_stale_daemon(
 }
 /// Restarting only helps when the daemon re-executes the binary running here.
 /// Development builds and other installs sharing this data must not disturb it.
-/// Daemons from before `executable` was reported are always the same install,
-/// because each installed channel has its own data directory.
 fn restarts_into_this_host(info: &Value, status: &Value) -> bool {
     let Some(host) = xd_host::installed_host_executable() else {
         return false;
     };
-    status["supported"] == true
-        && info["executable"]
-            .as_str()
-            .is_none_or(|daemon| Some(daemon) == host.to_str())
+    let same_host = match info["executable"].as_str() {
+        Some(daemon) => Some(daemon) == host.to_str(),
+        // Older daemons don't report it. Their command line still names the
+        // path they were started from, even after an update replaces that file.
+        None => info["pid"]
+            .as_u64()
+            .and_then(process_command)
+            .is_some_and(|command| command.starts_with(&format!("{} daemon ", host.display()))),
+    };
+    status["supported"] == true && same_host
+}
+#[cfg(target_os = "linux")]
+fn process_command(pid: u64) -> Option<String> {
+    let command = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(String::from_utf8_lossy(&command).replace('\0', " "))
+}
+#[cfg(not(target_os = "linux"))]
+fn process_command(pid: u64) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 fn stop_command(options: &HostOptions) -> String {
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
