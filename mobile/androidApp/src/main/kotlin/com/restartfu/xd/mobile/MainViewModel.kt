@@ -10,6 +10,7 @@ import com.restartfu.xd.XdClient
 import com.restartfu.xd.credentials.SshAuthentication
 import com.restartfu.xd.credentials.SshConnection
 import com.restartfu.xd.credentials.SshHostKey
+import com.restartfu.xd.credentials.parsePairingInvitation
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.protocol.BackendReply
@@ -90,19 +91,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val hostError: StateFlow<String?> = _hostError.asStateFlow()
     val hostBusy: StateFlow<Boolean> = _updating.asStateFlow()
 
-    fun connectPairing(invitation: String) {
+    fun connectPairing(address: String, pairingCode: String) {
         try {
-            require(invitation.length <= 4096) { "Pairing code is too long" }
-            val encoded = invitation.trim().removePrefix("xd1:")
-            require(invitation.trim().startsWith("xd1:")) { "Paste the full pairing code copied from the host" }
-            val value = org.json.JSONObject(java.util.Base64.getUrlDecoder().decode(encoded).decodeToString())
-            fun text(key: String) = value.getString(key)
-            val fingerprint = text("fingerprint")
-            require(fingerprint.length == 64 && fingerprint.all { it in "0123456789abcdefABCDEF" }) { "Invalid certificate fingerprint" }
+            val invitation = parsePairingInvitation(address, pairingCode)
+            val fingerprint = invitation.fingerprint
             val pin = fingerprint.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
             startConnection(SshConnection(
-                host = text("host"), port = text("port").toInt(), username = android.os.Build.MODEL.take(100),
-                authentication = SshAuthentication.Paired(fingerprint = fingerprint, code = text("code")),
+                host = invitation.host, port = invitation.port, username = android.os.Build.MODEL.take(100),
+                authentication = SshAuthentication.Paired(fingerprint = fingerprint, code = invitation.code),
                 hostKey = SshHostKey("TLS-SHA256", pin, fingerprint),
             ))
         } catch (error: Throwable) { _error.value = error.message ?: "Invalid pairing code" }

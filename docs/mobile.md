@@ -8,9 +8,9 @@ Android ── pinned TLS + device token ── xd daemon
 
 ## Connection and credentials
 
-Open **Settings → Pair a device** on the host, choose its reachable LAN or
-Tailscale address, and paste the full invitation into Android's pairing screen.
-The invitation pins the exact host certificate before authentication. A one-use,
+Open **Settings → Pair a device** on the host and copy its pairing code. On
+Android's pairing screen, enter a LAN or Tailscale address that reaches the host
+and paste the code. The code pins the exact host certificate before authentication. A one-use,
 five-minute code exchanges for a remembered device token. Revocation or a
 certificate change stops reconnect attempts and requires fresh pairing.
 

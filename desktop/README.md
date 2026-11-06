@@ -19,7 +19,8 @@ and leaves work running.
   Unix socket and automatically starts the daemon if needed.
 - Remote desktop and Android connect directly to the daemon's TLS listener.
   Settings → **Pair a device** starts the listener, creates a one-use code,
-  and copies an invitation containing the endpoint and certificate fingerprint.
+  and copies a pairing code containing the certificate fingerprint. The other
+  device supplies the address.
 - Codex, Claude Code, and JCode sessions open in native chat. Legacy terminal
   chats and their saved history are deleted automatically when the database opens.
   Their worktrees are retained.

@@ -39,7 +39,8 @@ import com.restartfu.xd.net.Link
 
 @Composable
 internal fun ConnectScreen(model: MainViewModel) {
-    var invitation by remember { mutableStateOf("") }
+    var address by remember { mutableStateOf("") }
+    var pairingCode by remember { mutableStateOf("") }
     val connecting by model.connecting.collectAsStateWithLifecycle()
     val error by model.error.collectAsStateWithLifecycle()
     Column(
@@ -48,12 +49,14 @@ internal fun ConnectScreen(model: MainViewModel) {
     ) {
         Text("Pair with xd", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(12.dp))
-        Text("On your host, open Settings → Pair a device. Copy its pairing code here. Both devices need access to the host's LAN or Tailscale address.")
+        Text("On your host, open Settings → Pair a device. Copy its pairing code here, and enter a LAN or Tailscale address that reaches the host.")
         Spacer(Modifier.height(24.dp))
-        OutlinedTextField(value = invitation, onValueChange = { invitation = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Pairing code") }, enabled = !connecting)
+        OutlinedTextField(value = address, onValueChange = { address = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Host address") }, singleLine = true, enabled = !connecting)
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(value = pairingCode, onValueChange = { pairingCode = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Pairing code") }, enabled = !connecting)
         Spacer(Modifier.height(12.dp))
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        Button(onClick = { model.connectPairing(invitation) }, enabled = !connecting && invitation.trim().startsWith("xd1:"), modifier = Modifier.fillMaxWidth()) {
+        Button(onClick = { model.connectPairing(address, pairingCode) }, enabled = !connecting && address.isNotBlank() && pairingCode.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
             if (connecting) CircularProgressIndicator() else Text("Pair and connect")
         }
     }

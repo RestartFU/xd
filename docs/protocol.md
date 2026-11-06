@@ -93,9 +93,12 @@ Local connections authenticate through the user-owned 0600 Unix socket in a
 `pair` or `hello` before any workspace request or event is allowed.
 
 A local `peer-pairing` request starts the remote listener and returns `host`,
-`port`, `code`, `fingerprint`, and `expires_in:300`. The copied invitation is
-`xd1:` followed by unpadded base64url JSON containing those first four fields.
-The code is one-use, expires in five minutes, and accepts at most ten guesses.
+`port`, `code`, `fingerprint`, and `expires_in:300`. The pairing code clients
+copy is `xd2:<code>:<pin>`, where `pin` is the certificate's SHA-256 in unpadded
+base64url. It holds no address: the person pairing enters a reachable `host` or
+`host:port`, and the port defaults to 4001. Clients remove whitespace from a
+pasted code before reading it. The code is one-use, expires in five minutes, and
+accepts at most ten guesses.
 
 ```json
 {"op":"pair","code":"ABCD-EFGH","name":"Laptop"}
@@ -104,7 +107,7 @@ The code is one-use, expires in five minutes, and accepts at most ten guesses.
 {"ok":true,"device":"Laptop","version":1}
 ```
 
-The client verifies the invitation's SHA-256 leaf-certificate fingerprint before
+The client verifies the pairing code's SHA-256 leaf-certificate fingerprint before
 sending either secret. Authentication replies precede event fan-out. Tokens are
 stored hashed on the host. `devices`, `rename-device`, `revoke-device`,
 `peer-pairing`, and `daemon-stop` are local-only. Revocation disconnects every

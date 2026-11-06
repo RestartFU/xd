@@ -1378,7 +1378,6 @@ struct DevicesPanel {
 #[derive(Clone, Default)]
 struct SharePanel {
     loading: bool,
-    host: String,
     port: Option<u16>,
     code: String,
     fingerprint: String,
@@ -1430,6 +1429,7 @@ fn persisted_runtime(saved: Option<&str>, remote_key: Option<&str>) -> ChatEndpo
 
 #[derive(Clone, Default)]
 struct RemotePanel {
+    address: String,
     command: String,
     submitting: bool,
     error: Option<String>,
@@ -1542,8 +1542,8 @@ struct XdDesktop {
     secret_name_input: Entity<ComposerInput>,
     secret_value_input: Entity<ComposerInput>,
     device_name_input: Entity<ComposerInput>,
+    remote_address_input: Entity<ComposerInput>,
     remote_pairing_input: Entity<ComposerInput>,
-    share_host_input: Entity<ComposerInput>,
     question_input: Entity<ComposerInput>,
     secret_question_input: Entity<ComposerInput>,
     source_build_input: Entity<ComposerInput>,
@@ -1871,15 +1871,18 @@ impl XdDesktop {
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
-        let share_host_input =
+        let remote_address_input =
             cx.new(|cx| ComposerInput::new(cx, "Host address (LAN or Tailscale)…"));
-        cx.subscribe(&share_host_input, |this, _, event, cx| {
-            if let ComposerEvent::Changed(text) = event {
-                if let Some(panel) = &mut this.share_panel {
-                    panel.host = text.clone();
+        cx.subscribe(&remote_address_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => {
+                if let Some(panel) = &mut this.remote_panel {
+                    panel.address = text.clone();
+                    panel.error = None;
                 }
                 cx.notify();
             }
+            ComposerEvent::Submit => this.connect_remote_machine(cx),
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
         let remote_pairing_input =
@@ -2070,8 +2073,8 @@ impl XdDesktop {
             secret_name_input,
             secret_value_input,
             device_name_input,
+            remote_address_input,
             remote_pairing_input,
-            share_host_input,
             question_input,
             secret_question_input,
             source_build_input,
@@ -3443,7 +3446,6 @@ impl XdDesktop {
                 RequestKind::PeerPairing => {
                     if let Some(panel) = &mut self.share_panel {
                         panel.loading = false;
-                        panel.host.clear();
                         panel.port = None;
                         panel.code.clear();
                         panel.error = Some(
@@ -3791,10 +3793,7 @@ impl XdDesktop {
                 if let Some(panel) = &mut self.share_panel {
                     panel.loading = false;
                     match pairing_details(&value) {
-                        Ok((host, port, code)) => {
-                            self.share_host_input
-                                .update(cx, |input, cx| input.set_text(host.clone(), cx));
-                            panel.host = host;
+                        Ok((port, code)) => {
                             panel.fingerprint = value
                                 .get("fingerprint")
                                 .and_then(Value::as_str)
@@ -3805,7 +3804,6 @@ impl XdDesktop {
                             panel.error = None;
                         }
                         Err(error) => {
-                            panel.host.clear();
                             panel.port = None;
                             panel.code.clear();
                             panel.error = Some(error);
@@ -6028,15 +6026,15 @@ impl XdDesktop {
 
     fn open_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
-        let command = String::new();
         self.remote_panel = Some(RemotePanel {
-            command: command.clone(),
-            submitting: false,
             error: self.remote_error.clone(),
+            ..Default::default()
         });
+        self.remote_address_input
+            .update(cx, |input, cx| input.set_text("", cx));
         self.remote_pairing_input
-            .update(cx, |input, cx| input.set_text(command, cx));
-        let focus = self.remote_pairing_input.read(cx).focus_handle(cx);
+            .update(cx, |input, cx| input.set_text("", cx));
+        let focus = self.remote_address_input.read(cx).focus_handle(cx);
         self.focus_minimal_popup(focus, window, cx);
         cx.notify();
     }
@@ -6068,7 +6066,7 @@ impl XdDesktop {
         if panel.submitting {
             return;
         }
-        let invite = match xd_transport::PairingInvite::parse(&panel.command) {
+        let invite = match xd_transport::PairingInvite::new(&panel.address, &panel.command) {
             Ok(invite) => invite,
             Err(error) => {
                 if let Some(panel) = &mut self.remote_panel {
@@ -13345,8 +13343,8 @@ impl XdDesktop {
             self.secret_name_input.clone(),
             self.secret_value_input.clone(),
             self.device_name_input.clone(),
+            self.remote_address_input.clone(),
             self.remote_pairing_input.clone(),
-            self.share_host_input.clone(),
             self.question_input.clone(),
             self.secret_question_input.clone(),
             self.source_build_input.clone(),
@@ -13506,17 +13504,16 @@ impl XdDesktop {
             .minimal_theme_open
             .then(|| self.render_workspace_settings(colors, window, cx));
         let share_overlay = self.share_panel.clone().map(|panel| {
-            let invite = xd_transport::PairingInvite { host: panel.host.clone(), port: panel.port.unwrap_or(0), fingerprint: panel.fingerprint.clone(), code: panel.code.clone() };
-            let can_copy = !panel.loading && xd_transport::validate_endpoint(&invite.host, invite.port, &invite.fingerprint).is_ok();
+            let pairing_code = xd_transport::PairingCode { code: panel.code.clone(), fingerprint: panel.fingerprint.clone() }.encode().ok().filter(|_| !panel.loading);
+            let can_copy = pairing_code.is_some();
             div().occlude().absolute().inset_0().flex().items_center().justify_center().bg(rgba(colors.backdrop)).child(
                 div().w(px(480.0)).p_5().flex().flex_col().gap_3().rounded_xl().bg(rgb(colors.surface)).text_color(rgb(colors.text))
                 .child(div().text_size(px(16.0)).child("Pair a device"))
-                .child(div().text_sm().text_color(rgb(colors.muted)).child("Choose a reachable LAN or Tailscale address. Copy this code to the other device within five minutes. Each code can be used once."))
-                .child(div().h(px(36.0)).px_3().flex().items_center().bg(rgb(colors.background)).child(self.share_host_input.clone()))
+                .child(div().text_sm().text_color(rgb(colors.muted)).child("Copy this code to the other device within five minutes, then enter a LAN or Tailscale address that reaches this host. Each code can be used once."))
                 .child(if panel.loading { "Starting listener…".to_owned() } else { format!("Port {} · {}", panel.port.unwrap_or(0), panel.code) })
                 .when_some(panel.error, |card, error| card.child(div().text_sm().text_color(rgb(colors.danger)).child(error)))
                 .child(div().flex().gap_3()
-                    .child(ui_button("copy-pairing-code", if can_copy { ButtonKind::Primary } else { ButtonKind::Secondary }, colors).on_click(cx.listener(move |_, _, _, cx| { if can_copy { cx.write_to_clipboard(ClipboardItem::new_string(invite.encode())); } })).child("Copy pairing code"))
+                    .child(ui_button("copy-pairing-code", if can_copy { ButtonKind::Primary } else { ButtonKind::Secondary }, colors).on_click(cx.listener(move |_, _, _, cx| { if let Some(code) = &pairing_code { cx.write_to_clipboard(ClipboardItem::new_string(code.clone())); } })).child("Copy pairing code"))
                     .child(ui_button("refresh-pairing-code", ButtonKind::Secondary, colors).on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; } if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
                     .child(div().flex_1())
                     .child(ui_button("close-pairing", ButtonKind::Ghost, colors).on_click(cx.listener(|this, _, _, cx| { this.share_panel = None; cx.notify(); })).child("Close")))
@@ -13949,7 +13946,7 @@ impl XdDesktop {
         });
         let remote_overlay = self.remote_panel.clone().map(|panel| {
             let can_connect =
-                !panel.submitting && xd_transport::PairingInvite::parse(panel.command.trim()).is_ok();
+                !panel.submitting && xd_transport::PairingInvite::new(&panel.address, &panel.command).is_ok();
             div()
                 .occlude()
                 .absolute()
@@ -13984,8 +13981,20 @@ impl XdDesktop {
                                 .text_sm()
                                 .text_color(rgb(colors.muted))
                                 .child(
-                                    "On the host, open Settings → Pair a device and copy its pairing code. Paste it here to connect directly.",
+                                    "On the host, open Settings → Pair a device and copy its pairing code. Enter an address that reaches the host, then paste the code to connect directly.",
                                 ),
+                        )
+                        .child(
+                            div()
+                                .h(px(36.0))
+                                .px_3()
+                                .flex()
+                                .items_center()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .bg(rgb(colors.background))
+                                .child(self.remote_address_input.clone()),
                         )
                         .child(
                             div()
@@ -15765,12 +15774,7 @@ fn new_session_worktree_state(value: &Value) -> (Vec<Worktree>, bool, Option<New
     (worktrees, can_create, selected)
 }
 
-fn pairing_details(value: &Value) -> Result<(String, u16, String), String> {
-    let host = value
-        .get("host")
-        .and_then(Value::as_str)
-        .filter(|host| !host.is_empty())
-        .ok_or_else(|| "The host returned an invalid pairing address.".to_owned())?;
+fn pairing_details(value: &Value) -> Result<(u16, String), String> {
     let port = value
         .get("port")
         .and_then(Value::as_u64)
@@ -15782,7 +15786,7 @@ fn pairing_details(value: &Value) -> Result<(String, u16, String), String> {
         .and_then(Value::as_str)
         .filter(|code| !code.is_empty())
         .ok_or_else(|| "The host returned an invalid pairing code.".to_owned())?;
-    Ok((host.to_owned(), port, code.to_owned()))
+    Ok((port, code.to_owned()))
 }
 
 fn scoped_element_id(scope: &str, index: usize) -> u64 {
@@ -16892,6 +16896,7 @@ mod tests {
             .0;
 
         assert!(overlay.contains("Pair with a host"));
+        assert!(overlay.contains("self.remote_address_input.clone()"));
         assert!(overlay.contains("self.remote_pairing_input.clone()"));
         assert!(!overlay.contains("Pairing code"));
         assert!(!overlay.contains("remote_port_input"));
@@ -18453,7 +18458,7 @@ mod tests {
                 "code": "ABCD-EFGH"
             }))
             .unwrap(),
-            ("192.168.1.10".into(), 4001, "ABCD-EFGH".into())
+            (4001, "ABCD-EFGH".into())
         );
         assert!(pairing_details(&serde_json::json!({"port": 0})).is_err());
         assert!(

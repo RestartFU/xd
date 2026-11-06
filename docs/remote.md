@@ -6,19 +6,20 @@ directly over TLS; SSH is not part of the normal connection flow.
 ## Pair a device
 
 1. Open xd on the host and choose **Settings → Pair a device**.
-2. Set the host address to a reachable LAN, Tailscale, or server address.
-3. Copy the full pairing code and paste it into **Pair with a host** on the
-   remote desktop or Android app.
+2. Copy the full pairing code.
+3. In **Pair with a host** on the remote desktop or Android app, enter a
+   reachable LAN, Tailscale, or server address and paste the code.
 
-The invitation includes the host address, port, one-use code, and SHA-256
-certificate fingerprint. It expires after five minutes. The client verifies
+The address is `host` or `host:port`, and the port defaults to 4001. The pairing
+code holds the one-use code and the SHA-256 certificate fingerprint, but no
+address, so you choose the route. It expires after five minutes. The client verifies
 that certificate before sending the code, receives a device token, and remembers
-it for subsequent connections. **New code** replaces the current invitation.
+it for subsequent connections. **New code** replaces the current code.
 
 The listener starts only when local pairing is requested, normally on port
 4001. Its bind address and port are persisted and restored when the daemon
-restarts. The copied address can differ from the bind address, so a Tailscale
-address can be shared while the listener accepts connections on all interfaces.
+restarts. The address you enter can differ from the bind address, so a Tailscale
+address can be used while the listener accepts connections on all interfaces.
 The selected port must be reachable; this release does not provide a relay or
 NAT traversal service.
 

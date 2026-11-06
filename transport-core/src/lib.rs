@@ -39,8 +39,66 @@ impl std::fmt::Debug for RemoteCredentials {
     }
 }
 
+/// The port a host's remote listener normally uses.
+pub const DEFAULT_PAIRING_PORT: u16 = 4001;
+
+/// What a host hands out: `xd2:<one-use code>:<base64url certificate SHA-256>`.
+///
+/// The address is left out on purpose, because only the person pairing knows
+/// which route reaches the host. The certificate pin has to stay: it is what
+/// lets a client verify the host before sending it the one-use code.
+// Intentionally no Debug: pairing codes contain secrets.
+#[derive(Clone)]
+pub struct PairingCode {
+    pub code: String,
+    pub fingerprint: String,
+}
+
+impl PairingCode {
+    pub fn encode(&self) -> Result<String, String> {
+        validate_pin(&self.fingerprint)?;
+        validate_code(&self.code)?;
+        let pin = (0..self.fingerprint.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&self.fingerprint[index..index + 2], 16))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "Invalid host certificate fingerprint.")?;
+        Ok(format!("xd2:{}:{}", self.code, URL_SAFE_NO_PAD.encode(pin)))
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        if text.len() > 4096 {
+            return Err("Pairing code is too long.".into());
+        }
+        // Long codes can pick up line breaks when copied out of a terminal.
+        let text: String = text.split_whitespace().collect();
+        if text.starts_with("xd1:") {
+            return Err(
+                "This pairing code is from an older version of xd. Update the host and create a new code."
+                    .into(),
+            );
+        }
+        let (code, pin) = text
+            .strip_prefix("xd2:")
+            .ok_or("Paste the full pairing code copied from the host.")?
+            .split_once(':')
+            .ok_or("Invalid pairing code.")?;
+        let pin = URL_SAFE_NO_PAD
+            .decode(pin)
+            .map_err(|_| "Invalid pairing code.")?;
+        if pin.len() != 32 {
+            return Err("Invalid pairing code.".into());
+        }
+        validate_code(code)?;
+        Ok(Self {
+            code: code.to_owned(),
+            fingerprint: pin.iter().map(|byte| format!("{byte:02x}")).collect(),
+        })
+    }
+}
+
 // Intentionally no Debug: invitations and credentials contain secrets.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct PairingInvite {
     pub host: String,
     pub port: u16,
@@ -49,33 +107,53 @@ pub struct PairingInvite {
 }
 
 impl PairingInvite {
-    pub fn encode(&self) -> String {
-        format!(
-            "xd1:{}",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(self).expect("invitation JSON"))
-        )
-    }
-    pub fn parse(text: &str) -> Result<Self, String> {
-        if text.len() > 4096 {
-            return Err("Pairing code is too long.".into());
-        }
-        let bytes = URL_SAFE_NO_PAD
-            .decode(
-                text.trim()
-                    .strip_prefix("xd1:")
-                    .ok_or("Paste the full pairing code copied from the host.")?,
-            )
-            .map_err(|_| "Invalid pairing code.")?;
-        let invite: Self = serde_json::from_slice(&bytes).map_err(|_| "Invalid pairing code.")?;
-        validate_endpoint(&invite.host, invite.port, &invite.fingerprint)?;
-        if invite.code.is_empty() || invite.code.len() > 64 {
-            return Err("Invalid pairing code.".into());
-        }
-        Ok(invite)
+    /// Combines the address the user chose with the code from the host.
+    pub fn new(address: &str, pairing_code: &str) -> Result<Self, String> {
+        let (host, port) = parse_address(address)?;
+        let PairingCode { code, fingerprint } = PairingCode::parse(pairing_code)?;
+        Ok(Self {
+            host,
+            port,
+            fingerprint,
+            code,
+        })
     }
 }
 
+/// Reads `host`, `host:port`, an IPv6 literal, or `[ipv6]:port`.
+pub fn parse_address(address: &str) -> Result<(String, u16), String> {
+    let address = address.trim();
+    if address.is_empty() {
+        return Err("Enter the host's LAN or Tailscale address.".into());
+    }
+    let invalid = || "Invalid host address or port.".to_owned();
+    let (host, port) = if let Some(bracketed) = address.strip_prefix('[') {
+        let (host, rest) = bracketed.split_once(']').ok_or_else(invalid)?;
+        let port = (!rest.is_empty())
+            .then(|| rest.strip_prefix(':').ok_or_else(invalid))
+            .transpose()?;
+        (host, port)
+    } else {
+        match address.split_once(':') {
+            Some((host, port)) if !port.contains(':') => (host, Some(port)),
+            // No colon at all, or an unbracketed IPv6 literal.
+            _ => (address, None),
+        }
+    };
+    let port = match port {
+        Some(port) => port.parse().map_err(|_| invalid())?,
+        None => DEFAULT_PAIRING_PORT,
+    };
+    validate_address(host, port)?;
+    Ok((host.to_owned(), port))
+}
+
 pub fn validate_endpoint(host: &str, port: u16, pin: &str) -> Result<(), String> {
+    validate_address(host, port)?;
+    validate_pin(pin)
+}
+
+fn validate_address(host: &str, port: u16) -> Result<(), String> {
     if host.trim().is_empty()
         || host.len() > 253
         || host.chars().any(char::is_whitespace)
@@ -83,8 +161,19 @@ pub fn validate_endpoint(host: &str, port: u16, pin: &str) -> Result<(), String>
     {
         return Err("Invalid host address or port.".into());
     }
+    Ok(())
+}
+
+fn validate_pin(pin: &str) -> Result<(), String> {
     if pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Invalid host certificate fingerprint.".into());
+    }
+    Ok(())
+}
+
+fn validate_code(code: &str) -> Result<(), String> {
+    if code.is_empty() || code.len() > 64 || code.contains(':') {
+        return Err("Invalid pairing code.".into());
     }
     Ok(())
 }
@@ -367,18 +456,99 @@ fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn invitations_validate_identity_and_endpoint() {
-        let invite = PairingInvite {
-            host: "100.64.0.1".into(),
-            port: 4001,
-            fingerprint: "ab".repeat(32),
+    fn sample_code() -> PairingCode {
+        PairingCode {
             code: "ABCD-EFGH".into(),
-        };
-        let parsed = PairingInvite::parse(&invite.encode()).unwrap();
-        assert_eq!(parsed.host, invite.host);
-        assert_eq!(parsed.fingerprint, invite.fingerprint);
-        assert!(PairingInvite::parse("ABCD-EFGH").is_err());
+            fingerprint: "ab".repeat(32),
+        }
+    }
+
+    #[test]
+    fn pairing_codes_carry_the_pin_but_no_address() {
+        let encoded = sample_code().encode().unwrap();
+        assert_eq!(
+            encoded,
+            "xd2:ABCD-EFGH:q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s"
+        );
+        let parsed = PairingCode::parse(&encoded).unwrap();
+        assert_eq!(parsed.code, "ABCD-EFGH");
+        assert_eq!(parsed.fingerprint, "ab".repeat(32));
+    }
+
+    #[test]
+    fn pairing_codes_survive_line_wrapping() {
+        let encoded = sample_code().encode().unwrap();
+        let (start, end) = encoded.split_at(20);
+        let parsed = PairingCode::parse(&format!("  {start}\n{end}\n")).unwrap();
+        assert_eq!(parsed.fingerprint, "ab".repeat(32));
+    }
+
+    #[test]
+    fn malformed_pairing_codes_are_rejected() {
+        for text in [
+            "",
+            "ABCD-EFGH",
+            "xd2:ABCD-EFGH",
+            "xd2::q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s",
+            "xd2:ABCD-EFGH:q6ur",
+            "xd2:ABCD-EFGH:not base64!",
+        ] {
+            assert!(PairingCode::parse(text).is_err(), "{text:?}");
+        }
+        assert!(
+            PairingCode::parse("xd1:eyJob3N0IjoiYSJ9")
+                .err()
+                .unwrap()
+                .contains("older version")
+        );
+        let mut bad_pin = sample_code();
+        bad_pin.fingerprint = "zz".repeat(32);
+        assert!(bad_pin.encode().is_err());
+    }
+
+    #[test]
+    fn addresses_default_to_the_pairing_port() {
+        for (text, host, port) in [
+            ("100.64.0.1", "100.64.0.1", 4001),
+            (" 100.64.0.1:4444 ", "100.64.0.1", 4444),
+            ("vps.tailnet.ts.net", "vps.tailnet.ts.net", 4001),
+            ("vps:9", "vps", 9),
+            ("fd7a:115c::1", "fd7a:115c::1", 4001),
+            ("[fd7a:115c::1]", "fd7a:115c::1", 4001),
+            ("[fd7a:115c::1]:4444", "fd7a:115c::1", 4444),
+        ] {
+            assert_eq!(
+                parse_address(text).unwrap(),
+                (host.to_owned(), port),
+                "{text}"
+            );
+        }
+        for text in [
+            "",
+            "   ",
+            "host:0",
+            "host:70000",
+            "host:port",
+            "a b",
+            "[::1",
+            "[::1]4001",
+            "[]:4001",
+            ":4001",
+        ] {
+            assert!(parse_address(text).is_err(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn invites_combine_the_chosen_address_with_the_code() {
+        let code = sample_code().encode().unwrap();
+        let invite = PairingInvite::new("100.64.0.1", &code).unwrap();
+        assert_eq!(invite.host, "100.64.0.1");
+        assert_eq!(invite.port, DEFAULT_PAIRING_PORT);
+        assert_eq!(invite.code, "ABCD-EFGH");
+        assert_eq!(invite.fingerprint, "ab".repeat(32));
+        assert!(PairingInvite::new("", &code).is_err());
+        assert!(PairingInvite::new("100.64.0.1", "ABCD-EFGH").is_err());
         assert!(validate_endpoint("host", 0, &invite.fingerprint).is_err());
         assert!(validate_endpoint("host", 4001, "").is_err());
     }
