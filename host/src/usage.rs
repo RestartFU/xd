@@ -1420,6 +1420,10 @@ fn scan_source(
         scan.scanned_files += 1;
     }
     scan.skipped_files = unread;
+    // Skipped records leave the totals short, which the page says out loud.
+    if scan.malformed_records > 0 {
+        scan.status = "partial";
+    }
     if unread > 0 {
         scan.status = "partial";
         scan.message = Some(format!(
@@ -3472,6 +3476,27 @@ read e; case "$e" in *consume*) echo '{"id":2,"result":{"outcome":"reset"}}';; e
         assert_eq!(summary["pricing"]["status"], "cached");
         assert_eq!(*fetches.lock().unwrap(), 1);
 
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn skipped_records_mark_their_source_partial() {
+        let directory = temporary_directory("malformed");
+        let now = instant(now_ms()).to_rfc3339();
+        write_transcript(
+            &directory.join("codex/sessions/r.jsonl"),
+            &[
+                json!({"timestamp":now,"type":"turn_context","payload":{"model":"gpt-5.5"}}),
+                token_count_line(&now, usage(10, 0, 1, 0), usage(10, 0, 1, 0)),
+                // Counters that jump without anything to explain the gap.
+                token_count_line(&now, usage(5, 0, 1, 0), usage(50, 0, 9, 0)),
+            ],
+        );
+        let usage_service = service(&directory, Arc::new(Mutex::new(0)));
+        let summary = usage_service.shared.summary(7, Tz::UTC, false, now_ms());
+        assert_eq!(summary["sources"][0]["status"], "partial");
+        assert_eq!(summary["sources"][0]["malformed_records"], 1);
+        assert_eq!(summary["sources"][1]["status"], "missing");
         fs::remove_dir_all(directory).ok();
     }
 
