@@ -2613,8 +2613,10 @@ impl UsageService {
                 Ok(outcome) => {
                     json!({"event":"usage-reset-credit", "provider":"codex", "outcome":outcome, "idempotency_key":key})
                 }
+                // The key names the attempt even on failure, so a client
+                // waiting on a newer attempt cannot take this answer for its own.
                 Err(error) => {
-                    json!({"event":"usage-reset-credit", "provider":"codex", "error":error})
+                    json!({"event":"usage-reset-credit", "provider":"codex", "error":error, "idempotency_key":key})
                 }
             };
             events.publish_to(owner, event);
@@ -2631,11 +2633,13 @@ impl UsageService {
         let settings = self.shared.read_prices();
         let mut reply = settings.to_value();
         reply["ok"] = json!(true);
+        // Tells clients that leaving `aliases` out of set-usage-prices keeps them.
+        reply["aliases_optional"] = json!(true);
         Ok(reply)
     }
 
     pub(crate) fn set_prices(&self, request: &Value) -> Result<Value, String> {
-        let settings = PriceSettings::from_value(request)?;
+        let mut settings = PriceSettings::from_value(request)?;
         let directory = self
             .shared
             .data_directory
@@ -2646,9 +2650,15 @@ impl UsageService {
             .prices
             .lock()
             .map_err(|_| "Usage prices are unavailable.")?;
+        // A client editing only prices leaves the model mappings as they are
+        // now, read under the same lock, so it cannot revert another client's.
+        if request.get("aliases").is_none() {
+            settings.aliases = self.shared.read_prices().aliases;
+        }
         write_private_atomic(&directory.join(PRICES_FILE), &settings.to_value())?;
         let mut reply = settings.to_value();
         reply["ok"] = json!(true);
+        reply["aliases_optional"] = json!(true);
         Ok(reply)
     }
 }
@@ -3603,6 +3613,17 @@ read e; case "$e" in *consume*) echo '{"id":2,"result":{"outcome":"reset"}}';; e
             usage_service.prices().unwrap()["prices"]["m"]["output"],
             2.0
         );
+        // Leaving out the mappings keeps them; sending an empty set clears them.
+        let kept = usage_service
+            .set_prices(&json!({"prices": {"m": {"input": 3, "output": 4}}}))
+            .unwrap();
+        assert_eq!(kept["prices"]["m"]["input"], 3.0);
+        assert_eq!(kept["aliases"]["n"], "m");
+        let cleared = usage_service
+            .set_prices(&json!({"prices": {}, "aliases": {}}))
+            .unwrap();
+        assert_eq!(cleared["aliases"], json!({}));
+        assert_eq!(usage_service.prices().unwrap()["aliases_optional"], true);
         fs::remove_dir_all(directory).ok();
     }
 

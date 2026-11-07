@@ -89,6 +89,28 @@ class RepliesTest {
     }
 
     @Test
+    fun usageSummaryAndLimitsParseTheHostsShapes() {
+        val summary = WireJson.decodeFromJsonElement(
+            UsageSummaryReply.serializer(),
+            WireJson.parseToJsonElement(
+                """{"read_at_ms":1,"time_zone":"UTC","resolution":"hour","window_label":"Past 24h","periods":[{"key":"2026-11-07T10:00:00Z","label":"10:00","tooltip":"1 hour ago"}],"buckets":[{"day":"2026-11-07","hour_start":"2026-11-07T10:00:00Z","provider":"codex","model":"gpt","totals":{"uncached_input":10,"cached_input":5,"cache_creation":0,"output":3,"reasoning":1},"cost_usd":0.25,"cache_savings_usd":0.0,"category_cost_usd":null,"cost_source":"modelPriced","records":2,"unpriced_records":0,"unpriced_tokens":0}],"sessions":{"codex":2},"sources":[],"pricing":{}}""",
+            ),
+        )
+        assertEquals("2026-11-07T10:00:00Z", summary.buckets.single().period)
+        assertEquals(18L, summary.buckets.single().totals.all)
+        assertEquals(2, summary.sessions["codex"])
+        val accounts = WireJson.decodeFromJsonElement(
+            kotlinx.serialization.builtins.ListSerializer(UsageAccountReply.serializer()),
+            WireJson.parseToJsonElement(
+                """[{"provider":"codex","account_key":"abc","plan":"Pro","checked_at_ms":1,"windows":[{"id":"primary","kind":"session","label":"5 hours","used_percent":42.5,"resets_at_ms":2,"resets_at_label":"in 2 hours","window_duration_mins":300}],"reset_credits":{"available_count":1,"next_expires_at_ms":null}},{"provider":"claude","checked_at_ms":1,"windows":[],"unavailable":{"reason":"signed-out","message":"Sign in to read limits."}}]""",
+            ),
+        )
+        assertEquals(42.5, accounts.first().windows.single().usedPercent)
+        assertEquals(1, accounts.first().resetCredits!!.availableCount)
+        assertEquals("Sign in to read limits.", accounts.last().unavailable!!.message)
+    }
+
+    @Test
     fun settlementMembersAreOptional() {
         val legacy = WireJson.parseToJsonElement(
             """{"ok":true,"folders":[],"chats":[],"sessions":[{"id":"s","folder":"p","title":"W","chats":[]}]}""",
