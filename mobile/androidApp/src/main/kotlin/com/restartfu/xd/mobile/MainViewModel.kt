@@ -13,6 +13,7 @@ import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.parsePairingInvitation
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
+import com.restartfu.xd.protocol.AgentAuthProviderReply
 import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.net.Link
@@ -205,6 +206,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 wasUp = up
             }
         }
+        // A code belongs to one sign-in: once that ends, whether or not its
+        // dialog is open, the code goes, and the next attempt starts with none.
+        viewModelScope.launch {
+            client.agentAuth.collect {
+                _signInDrafts.update { drafts -> drafts.filter { (name, draft) -> draft.sending || signInLive(name, draft) } }
+            }
+        }
         // Per-host state belongs to the host it came from.
         viewModelScope.launch {
             client.sessionGeneration.collect {
@@ -283,38 +291,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun signIn(provider: String) =
         accountsAction("Could not start signing in") { client.agentAuthAction(Ops.AuthAction.START, provider) }
 
-    fun editSignInInput(provider: String, text: String) {
+    fun editSignInInput(provider: AgentAuthProviderReply, text: String) {
+        val attempt = provider.signInAttempt()
         _signInDrafts.update { drafts ->
-            val draft = drafts[provider] ?: SignInDraft()
-            if (draft.sending) drafts else drafts + (provider to draft.copy(text = text))
+            val draft = drafts[provider.provider]?.takeIf { it.attempt == attempt } ?: SignInDraft(attempt = attempt)
+            if (draft.sending) drafts else drafts + (provider.provider to draft.copy(text = text))
         }
     }
 
-    /** A code belongs to one sign-in; once that ends, the next starts with none. */
-    fun endSignInInput(provider: String) {
-        _signInDrafts.update { drafts ->
-            val draft = drafts[provider] ?: return@update drafts
-            if (draft.sending) drafts + (provider to draft.copy(text = "")) else drafts - provider
-        }
-    }
+    /** Whether [draft] still belongs to the sign-in the host is running for [provider]. */
+    private fun signInLive(provider: String, draft: SignInDraft): Boolean =
+        client.agentAuth.value?.get(provider)
+            ?.let { it.state == "signing-in" && it.signInAttempt() == draft.attempt } == true
 
     /** Sends the typed code, keeping it until the host takes it, so a failure can be sent again. */
-    fun sendSignInInput(provider: String) {
-        val draft = _signInDrafts.value[provider] ?: return
+    fun sendSignInInput(provider: AgentAuthProviderReply) {
+        val attempt = provider.signInAttempt()
+        val draft = _signInDrafts.value[provider.provider]?.takeIf { it.attempt == attempt } ?: return
         val sent = draft.text.trim()
         if (draft.sending || sent.isEmpty()) return
-        _signInDrafts.update { it + (provider to draft.copy(sending = true)) }
+        val name = provider.provider
+        _signInDrafts.update { it + (name to draft.copy(sending = true)) }
         val generation = client.sessionGeneration.value
         accountsAction(
             "Could not send that",
             done = { taken ->
                 // Forgotten with its host meanwhile: the drafts now are another host's.
                 if (generation == client.sessionGeneration.value) _signInDrafts.update { drafts ->
-                    val current = drafts[provider] ?: return@update drafts
-                    drafts + (provider to if (taken) SignInDraft() else current.copy(sending = false))
+                    val current = drafts[name]?.takeIf { it.attempt == attempt } ?: return@update drafts
+                    // A failed code is kept to send again, while its sign-in lasts.
+                    if (taken || !signInLive(name, current)) drafts - name
+                    else drafts + (name to current.copy(sending = false))
                 }
             },
-        ) { client.agentAuthAction(Ops.AuthAction.INPUT, provider, sent) }
+        ) { client.agentAuthAction(Ops.AuthAction.INPUT, name, sent) }
     }
 
     fun cancelSignIn(provider: String) =
@@ -1408,4 +1418,10 @@ class ChatViewModel(
 private const val QUEUE_CHANGED = "The queue changed on another device. Open the message again."
 
 /** A sign-in code being typed, and whether it has been sent and not yet answered. */
-data class SignInDraft(val text: String = "", val sending: Boolean = false)
+data class SignInDraft(val text: String = "", val sending: Boolean = false, val attempt: String = "")
+
+/**
+ * Tells one sign-in attempt from the next: each has its own sign-in page
+ * address or device code, so a code typed for one never reaches another.
+ */
+internal fun AgentAuthProviderReply.signInAttempt(): String = "${loginUrl.orEmpty()}\n${deviceCode.orEmpty()}"

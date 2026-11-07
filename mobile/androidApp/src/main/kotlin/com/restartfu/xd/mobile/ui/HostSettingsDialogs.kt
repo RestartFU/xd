@@ -41,6 +41,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.SignInDraft
+import com.restartfu.xd.mobile.signInAttempt
 import com.restartfu.xd.protocol.AgentAuthProviderReply
 import com.restartfu.xd.protocol.AgentCliProviderReply
 import com.restartfu.xd.protocol.Ops
@@ -115,10 +116,8 @@ private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
     val openLink = rememberLinkOpener()
     val signingIn = provider.state == "signing-in"
     val drafts by model.signInDrafts.collectAsStateWithLifecycle()
-    val draft = drafts[provider.provider] ?: SignInDraft()
+    val draft = drafts[provider.provider]?.takeIf { it.attempt == provider.signInAttempt() } ?: SignInDraft()
     val sending = draft.sending
-    // A code belongs to one sign-in; another attempt starts with none.
-    LaunchedEffect(signingIn) { if (!signingIn) model.endSignInInput(provider.provider) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 8.dp)) {
@@ -148,7 +147,7 @@ private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = draft.text,
-                        onValueChange = { model.editSignInInput(provider.provider, it) },
+                        onValueChange = { model.editSignInInput(provider, it) },
                         modifier = Modifier.weight(1f),
                         placeholder = { Text("Code from the sign-in page") },
                         singleLine = true,
@@ -156,7 +155,7 @@ private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
                     )
                     TextButton(
                         // Kept until the host takes it, so a failure can be sent again.
-                        onClick = { model.sendSignInInput(provider.provider) },
+                        onClick = { model.sendSignInInput(provider) },
                         enabled = draft.text.isNotBlank() && !sending,
                     ) { Text(if (sending) "Sending…" else "Send") }
                 }
@@ -179,11 +178,12 @@ private fun CliRow(cli: AgentCliProviderReply, model: MainViewModel) {
         Column(Modifier.weight(1f).padding(end = 8.dp)) {
             Text(cli.displayName, fontWeight = FontWeight.SemiBold)
             Text(
+                // A failure or update in progress is said before a missing version.
                 when {
-                    cli.version == null -> "Not installed"
-                    cli.state == "updating" -> "Updating ${cli.version}…"
-                    cli.state == "updated" -> "Updated to ${cli.version}"
                     cli.state == "failed" -> cli.detail ?: "The update failed"
+                    cli.state == "updating" -> cli.version?.let { "Updating $it…" } ?: "Updating…"
+                    cli.state == "updated" -> cli.version?.let { "Updated to $it" } ?: "Updated"
+                    cli.version == null -> "Not installed"
                     cli.available && cli.latest != null -> "${cli.version} · ${cli.latest} available"
                     else -> cli.version.orEmpty()
                 },
