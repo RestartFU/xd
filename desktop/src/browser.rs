@@ -99,6 +99,9 @@ enum TabEvent {
     Navigated(String),
     Updated,
     Open(String),
+    /// The page closed itself, which closes its tab.
+    #[cfg(target_os = "linux")]
+    Closed,
 }
 
 enum NativeEvent {
@@ -124,6 +127,9 @@ enum NativeEvent {
     /// A page asked for a file: Chromium has no dialog of its own on Linux.
     #[cfg(target_os = "linux")]
     FileDialog(chromium::FileDialog),
+    /// The page closed itself, so there is no browser left in its tab.
+    #[cfg(target_os = "linux")]
+    Closed,
 }
 
 #[derive(Default)]
@@ -494,6 +500,8 @@ impl BrowserPane {
                 }
                 TabEvent::Updated => {}
                 TabEvent::Open(url) => pane.add_tab(Some(url.clone()), window, cx),
+                #[cfg(target_os = "linux")]
+                TabEvent::Closed => pane.close_tab(index, window, cx),
             }
             cx.notify();
         })
@@ -1028,6 +1036,11 @@ impl BrowserTab {
             #[cfg(target_os = "linux")]
             NativeEvent::FileDialog(dialog) => {
                 dialog.show(cx);
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            NativeEvent::Closed => {
+                cx.emit(TabEvent::Closed);
                 return;
             }
             // This arrives several times a second, so it must only redraw when

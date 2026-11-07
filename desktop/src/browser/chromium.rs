@@ -443,8 +443,13 @@ wrap_life_span_handler! {
             let mut shared = lock(&self.shared);
             shared.browser = None;
             shared.browser_gone = true;
-            if let Some(closed) = shared.closed.take() {
-                let _ = closed.send(());
+            match shared.closed.take() {
+                Some(closed) => {
+                    let _ = closed.send(());
+                }
+                // xd did not ask for this: the page closed itself, with
+                // `window.close()`. Close its tab, as a browser would.
+                None => self.events.send(NativeEvent::Closed),
             }
             if shared.release_pending {
                 release_windows(&mut shared);
