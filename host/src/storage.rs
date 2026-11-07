@@ -849,6 +849,12 @@ impl StateStore {
                         .as_deref()
                         .is_none_or(|selected| model.as_deref() == Some(selected))
             });
+        // Read under the same lock as the queue above, so the two agree.
+        let transaction_queue_revision: i64 = database.query_row(
+            "SELECT queue_revision FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get(0),
+        )?;
         let mut response = json!({
             "ok": true,
             "title": row.1,
@@ -862,6 +868,7 @@ impl StateStore {
             "plan": row.7,
             "fast": row.2 == "codex" && row.8,
             "queue": queue,
+            "queue_revision": transaction_queue_revision,
             "draft": row.12,
             "draft_attachments": attachments,
             "draft_revision": row.14,
@@ -1628,9 +1635,10 @@ impl StateStore {
                     chat_id
                 ],
             )?;
+            let revision = bump_queue_revision(&transaction, chat_id)?;
             transaction.commit()?;
             message.keep();
-            let event = queued_event(chat_id, &queue);
+            let event = queued_event(chat_id, &queue, revision);
             return Ok(SendDisposition::Queued {
                 reply: json!({"ok": true, "queued": true}),
                 event,
@@ -2174,6 +2182,11 @@ impl StateStore {
              partial_reply_label = NULL, unrecorded_request = NULL, updated_at = ? WHERE id = ?",
             params![encoded, next_text.is_some(), now_seconds(), chat_id],
         )?;
+        let revision = if next_text.is_some() {
+            Some(bump_queue_revision(&transaction, chat_id)?)
+        } else {
+            None
+        };
         let last_message_id = transaction.query_row(
             "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?",
             [chat_id],
@@ -2187,7 +2200,7 @@ impl StateStore {
         Ok(TurnFinish {
             last_message_id,
             next,
-            queue_event: next_text.map(|_| queued_event(chat_id, &queue)),
+            queue_event: revision.map(|revision| queued_event(chat_id, &queue, revision)),
         })
     }
 
@@ -4554,11 +4567,8 @@ impl StateStore {
         // The text the client saw there, when it sends one, so a queue another
         // device changed meanwhile loses nothing it did not mean to drop.
         let expected = optional_string(request, "text")?.map(str::to_owned);
-        let seen = seen_queue(request)?;
-        self.mutate_queue(chat_id, move |queue| match index {
-            _ if seen.as_ref().is_some_and(|seen| seen != queue) => Err(
-                StorageError::InvalidRequest("That queued message changed; try again.".into()),
-            ),
+        let revision = queue_revision(request)?;
+        self.mutate_queue_at(chat_id, revision, move |queue| match index {
             Some(index)
                 if expected.as_ref().is_some_and(|text| {
                     usize::try_from(index)
@@ -4593,11 +4603,9 @@ impl StateStore {
             .filter(|index| *index >= 0)
             .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
             as usize;
-        let seen = seen_queue(request)?;
-        self.mutate_queue(chat_id, move |queue| {
-            if seen.as_ref().is_some_and(|seen| seen != queue)
-                || queue.get(index) != Some(&old_text)
-            {
+        let revision = queue_revision(request)?;
+        self.mutate_queue_at(chat_id, revision, move |queue| {
+            if queue.get(index) != Some(&old_text) {
                 return Err(StorageError::InvalidRequest(
                     "That queued message changed; try again.".into(),
                 ));
@@ -4624,12 +4632,9 @@ impl StateStore {
             .get("after")
             .and_then(Value::as_bool)
             .ok_or_else(|| StorageError::InvalidRequest(message.into()))?;
-        let seen = seen_queue(request)?;
-        self.mutate_queue(chat_id, move |queue| {
-            if seen.as_ref().is_some_and(|seen| seen != queue)
-                || queue.get(source) != Some(&source_text)
-                || queue.get(anchor) != Some(&anchor_text)
-            {
+        let revision = queue_revision(request)?;
+        self.mutate_queue_at(chat_id, revision, move |queue| {
+            if queue.get(source) != Some(&source_text) || queue.get(anchor) != Some(&anchor_text) {
                 return Err(StorageError::InvalidRequest(
                     "That queued message changed; try again.".into(),
                 ));
@@ -4654,9 +4659,9 @@ impl StateStore {
             .filter(|index| *index >= 0)
             .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
             as usize;
-        let seen = seen_queue(request)?;
-        self.mutate_queue(chat_id, move |queue| {
-            if seen.as_ref().is_some_and(|seen| seen != queue) || queue.get(index) != Some(&text) {
+        let revision = queue_revision(request)?;
+        self.mutate_queue_at(chat_id, revision, move |queue| {
+            if queue.get(index) != Some(&text) {
                 return Err(StorageError::InvalidRequest(
                     "That queued message changed; try again.".into(),
                 ));
@@ -4703,16 +4708,32 @@ impl StateStore {
         chat_id: &str,
         mutate: impl FnOnce(&mut Vec<String>) -> Result<bool, StorageError>,
     ) -> Result<(Value, Value), StorageError> {
+        self.mutate_queue_at(chat_id, None, mutate)
+    }
+
+    /// Changes a chat's queue, refusing if [expected] names a revision other
+    /// than the current one.
+    fn mutate_queue_at(
+        &self,
+        chat_id: &str,
+        expected: Option<i64>,
+        mutate: impl FnOnce(&mut Vec<String>) -> Result<bool, StorageError>,
+    ) -> Result<(Value, Value), StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let stored = transaction
+        let (stored, mut revision) = transaction
             .query_row(
-                "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
+                "SELECT COALESCE(queued, ''), queue_revision FROM chats WHERE id = ?",
                 [chat_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        if expected.is_some_and(|expected| expected != revision) {
+            return Err(StorageError::InvalidRequest(
+                "That queued message changed; try again.".into(),
+            ));
+        }
         let mut queue = queue_from_column(Some(&stored));
         if mutate(&mut queue)? {
             let encoded = if queue.is_empty() {
@@ -4729,6 +4750,7 @@ impl StateStore {
             if changed != 1 {
                 return Err(StorageError::NoChat(chat_id.into()));
             }
+            revision = bump_queue_revision(&transaction, chat_id)?;
         }
         transaction.commit()?;
 
@@ -4736,6 +4758,7 @@ impl StateStore {
             "event": "queued",
             "chat": chat_id,
             "queue": queue,
+            "queue_revision": revision,
         });
         if let Some(first) = event["queue"].as_array().and_then(|queue| queue.first()) {
             event["text"] = first.clone();
@@ -5241,6 +5264,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     }
     if !columns.contains("unrecorded_request") {
         database.execute("ALTER TABLE chats ADD COLUMN unrecorded_request TEXT", [])?;
+    }
+    if !columns.contains("queue_revision") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN queue_revision INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -7949,8 +7978,9 @@ fn stop_orphaned_agents(transaction: &rusqlite::Transaction<'_>) -> Result<(), r
     Ok(())
 }
 
-fn queued_event(chat_id: &str, queue: &[String]) -> Value {
-    let mut event = json!({"event": "queued", "chat": chat_id, "queue": queue});
+fn queued_event(chat_id: &str, queue: &[String], revision: i64) -> Value {
+    let mut event =
+        json!({"event": "queued", "chat": chat_id, "queue": queue, "queue_revision": revision});
     if let Some(first) = queue.first() {
         event["text"] = Value::String(first.clone());
     }
@@ -8037,23 +8067,37 @@ fn message_from_page_row(row: &Row<'_>) -> rusqlite::Result<Value> {
     Ok(message)
 }
 
-/// The whole queue a client saw, when it sends one. Queued messages have no
-/// identity but their place and texts can repeat, so this is what tells two
-/// equal messages apart: a change made meanwhile refuses the request.
-fn seen_queue(request: &Value) -> Result<Option<Vec<String>>, StorageError> {
-    let Some(value) = request.get("queue") else {
-        return Ok(None);
-    };
-    value
-        .as_array()
-        .and_then(|items| {
-            items
-                .iter()
-                .map(|item| item.as_str().map(str::to_owned))
-                .collect::<Option<Vec<_>>>()
-        })
-        .map(Some)
-        .ok_or_else(|| StorageError::InvalidRequest("queue must be an array of messages.".into()))
+/// The queue revision a client saw, when it sends one. Queued messages have
+/// no identity but their place and texts can repeat, so this is what tells
+/// two equal messages apart: any change made since, even one that left the
+/// same texts behind, refuses the request.
+fn queue_revision(request: &Value) -> Result<Option<i64>, StorageError> {
+    match request.get("queue_revision") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .filter(|revision| *revision >= 0)
+            .map(Some)
+            .ok_or_else(|| {
+                StorageError::InvalidRequest("queue_revision must be a non-negative number.".into())
+            }),
+    }
+}
+
+/// Counts a change to a chat's queue and answers the new revision.
+fn bump_queue_revision(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+) -> Result<i64, StorageError> {
+    transaction.execute(
+        "UPDATE chats SET queue_revision = queue_revision + 1 WHERE id = ?",
+        [chat_id],
+    )?;
+    Ok(transaction.query_row(
+        "SELECT queue_revision FROM chats WHERE id = ?",
+        [chat_id],
+        |row| row.get(0),
+    )?)
 }
 
 fn optional_string<'a>(request: &'a Value, key: &str) -> Result<Option<&'a str>, StorageError> {
@@ -10494,7 +10538,8 @@ mod tests {
         assert_eq!(
             event,
             json!({
-                "event": "queued", "chat": "chat-1", "queue": ["first"], "text": "first"
+                "event": "queued", "chat": "chat-1", "queue": ["first"], "text": "first",
+                "queue_revision": 1
             })
         );
         store
@@ -10584,17 +10629,19 @@ mod tests {
                 .is_err(),
             "a drop naming the text it saw refuses a different message"
         );
+        let revision = store.chat("chat-1").unwrap()["queue_revision"]
+            .as_i64()
+            .unwrap();
         assert!(
             store
-                .drop_queue(
-                    &json!({"chat": "chat-1", "index": 0, "text": "edited", "queue": ["edited"]})
-                )
+                .drop_queue(&json!({"chat": "chat-1", "index": 0, "text": "edited", "queue_revision": revision - 1}))
                 .is_err(),
-            "a drop naming the queue it saw refuses a queue that changed"
+            "a drop naming an older queue revision is refused, whatever the texts"
         );
         let (_, event) = store
-            .drop_queue(&json!({"chat": "chat-1", "index": 0, "text": "edited", "queue": ["edited", "first"]}))
+            .drop_queue(&json!({"chat": "chat-1", "index": 0, "text": "edited", "queue_revision": revision}))
             .unwrap();
+        assert_eq!(event["queue_revision"], revision + 1);
         assert_eq!(event["queue"], json!(["first"]));
         let (_, event) = store.drop_queue(&json!({"chat": "chat-1"})).unwrap();
         assert_eq!(event["queue"], json!([]));

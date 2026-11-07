@@ -149,15 +149,15 @@ public object Ops {
      * what the client saw there; the host refuses if another message now holds
      * that place. Hosts that predate the check ignore it.
      */
-    public fun dropQueue(chatId: String, index: Int?, text: String? = null, seen: List<String>? = null): JsonObject = buildJsonObject {
+    public fun dropQueue(chatId: String, index: Int?, text: String? = null, revision: Long? = null): JsonObject = buildJsonObject {
         put("op", "drop-queue")
         put("chat", chatId)
         if (index != null) {
             require(index >= 0) { "Queue index must not be negative" }
             put("index", index)
             if (text != null) put("text", text)
-            // The whole queue as seen: equal texts are only told apart by it.
-            if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
+            // The queue revision as seen: equal texts are only told apart by it.
+            if (revision != null) put("queue_revision", revision)
         }
     }
 
@@ -172,11 +172,11 @@ public object Ops {
         index: Int,
         oldText: String,
         text: String,
-        seen: List<String>? = null,
+        revision: Long? = null,
     ): JsonObject = buildJsonObject {
         require(index >= 0) { "Queue index must not be negative" }
         require(text.isNotEmpty()) { "Edited text must not be empty" }
-        if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
+        if (revision != null) put("queue_revision", revision)
         put("op", "edit-queue")
         put("chat", chatId)
         put("index", index)
@@ -197,10 +197,10 @@ public object Ops {
         chatId: String,
         index: Int,
         text: String,
-        seen: List<String>? = null,
+        revision: Long? = null,
     ): JsonObject = buildJsonObject {
         require(index >= 0) { "Queue index must not be negative" }
-        if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
+        if (revision != null) put("queue_revision", revision)
         put("op", "steer-queue")
         put("chat", chatId)
         put("index", index)
@@ -322,10 +322,10 @@ public object Ops {
         anchor: Int,
         anchorText: String,
         after: Boolean,
-        seen: List<String>? = null,
+        revision: Long? = null,
     ): JsonObject = buildJsonObject {
         require(source >= 0 && anchor >= 0) { "Queue indexes must not be negative" }
-        if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
+        if (revision != null) put("queue_revision", revision)
         put("op", "reorder-queue")
         put("chat", chatId)
         put("source", source)

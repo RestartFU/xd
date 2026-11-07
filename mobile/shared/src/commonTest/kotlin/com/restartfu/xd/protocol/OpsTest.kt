@@ -99,9 +99,8 @@ class OpsTest {
         assertFalse("text" in Ops.dropQueue("chat", 2))
         assertEquals("second", Ops.dropQueue("chat", 2, "second").getValue("text").jsonPrimitive.content)
         assertFalse("text" in Ops.dropQueue("chat", null, "ignored"))
-        val seen = Ops.dropQueue("chat", 0, "repeat", listOf("repeat", "repeat"))
-        assertEquals(2, seen["queue"]!!.jsonArray.size)
-        assertFalse("queue" in Ops.dropQueue("chat", 0, "repeat"))
+        assertEquals(7, Ops.dropQueue("chat", 0, "repeat", 7)["queue_revision"]!!.jsonPrimitive.int)
+        assertFalse("queue_revision" in Ops.dropQueue("chat", 0, "repeat"))
     }
 
     @Test

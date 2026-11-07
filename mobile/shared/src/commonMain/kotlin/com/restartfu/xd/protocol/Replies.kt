@@ -106,6 +106,7 @@ public data class ChatReply(
     val fast: Boolean = false,
     val queued: String? = null,
     val queue: List<String> = emptyList(),
+    @SerialName("queue_revision") val queueRevision: Long? = null,
     val draft: String = "",
     @SerialName("draft_revision")
     val draftRevision: Long = 0,

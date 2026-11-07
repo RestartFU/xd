@@ -49,6 +49,8 @@ public data class ChatState(
     val plan: Boolean = false,
     val fast: Boolean = false,
     val queue: List<String> = emptyList(),
+    /** The host's count of changes to [queue]; null from hosts that keep none. */
+    val queueRevision: Long? = null,
     val draft: String = "",
     val draftRevision: Long = 0,
     val draftAttachments: List<PngAttachment> = emptyList(),

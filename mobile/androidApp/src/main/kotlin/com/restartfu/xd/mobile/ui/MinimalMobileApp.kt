@@ -178,6 +178,7 @@ internal fun MinimalMobileApp(
     var renameChat by remember { mutableStateOf<ChatSummary?>(null) }
     var deleteChat by remember { mutableStateOf<ChatSummary?>(null) }
     val deleting by model.deletingChat.collectAsStateWithLifecycle()
+    val renamingChats by model.renamingChat.collectAsStateWithLifecycle()
     var renamingSession by remember { mutableStateOf<MinimalSession?>(null) }
     var deletingSession by remember { mutableStateOf<MinimalSession?>(null) }
     var renamingProject by remember { mutableStateOf<MinimalProject?>(null) }
@@ -371,6 +372,8 @@ internal fun MinimalMobileApp(
             title = "Rename session",
             target = "session:${session.id}",
             initial = session.title,
+            // An older host's session is renamed as its chat, one at a time.
+            busy = !session.grouped && renamingChats,
             onDismiss = { renamingSession = null },
             onConfirm = { name ->
                 renamingSession = null
@@ -384,6 +387,7 @@ internal fun MinimalMobileApp(
     deletingSession?.let { session ->
         ConfirmDeleteDialog(
             title = "Delete session?",
+            busy = !session.grouped && deleting,
             text = "This permanently removes ${session.title} and all its chats from xd. Project files are kept.",
             confirm = "Delete session",
             onDismiss = { deletingSession = null },
@@ -1710,6 +1714,8 @@ private fun NameDialog(
     target: String,
     initial: String,
     validate: (String) -> String? = { null },
+    /** An earlier change is still out and would make this one do nothing. */
+    busy: Boolean = false,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
@@ -1732,7 +1738,7 @@ private fun NameDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(cleaned) }, enabled = cleaned.isNotEmpty() && error == null) {
+            TextButton(onClick = { onConfirm(cleaned) }, enabled = !busy && cleaned.isNotEmpty() && error == null) {
                 Text("Rename")
             }
         },
@@ -1751,6 +1757,7 @@ private fun ConfirmDeleteDialog(
     title: String,
     text: String,
     confirm: String,
+    busy: Boolean = false,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -1759,7 +1766,7 @@ private fun ConfirmDeleteDialog(
         title = { Text(title) },
         text = { Text(text) },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text(confirm, color = MaterialTheme.colorScheme.error) }
+            TextButton(onClick = onConfirm, enabled = !busy) { Text(confirm, color = MaterialTheme.colorScheme.error) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )

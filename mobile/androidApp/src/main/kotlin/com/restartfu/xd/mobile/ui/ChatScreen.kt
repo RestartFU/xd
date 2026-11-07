@@ -90,6 +90,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.AndroidSpeechSpeaker
 import com.restartfu.xd.mobile.ChatViewModel
+import com.restartfu.xd.mobile.OpenedQueue
 import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.MobileSettings
@@ -471,11 +472,11 @@ private fun Composer(
     val attachmentError by model.attachmentError.collectAsStateWithLifecycle()
     // The queue as it was when a message was opened: actions apply to that
     // queue only, and the dialog closes if another device changes it.
-    var editing by remember { mutableStateOf<Triple<Int, String, List<String>>?>(null) }
+    var editing by remember { mutableStateOf<Triple<Int, String, OpenedQueue>?>(null) }
     val queueNotice by model.queueNotice.collectAsStateWithLifecycle()
     LaunchedEffect(state.queue) {
         val opened = editing ?: return@LaunchedEffect
-        if (state.queue != opened.third) {
+        if (state.queue != opened.third.messages) {
             editing = null
             model.queueChanged()
         }
@@ -485,6 +486,7 @@ private fun Composer(
     val queueBusy by model.queueBusy.collectAsStateWithLifecycle()
     editing?.let { (index, original, opened) ->
         QueuedMessageDialog(
+            identity = "${state.chatId}|${opened.revision}|${opened.messages.size}|$index",
             original = original,
             busy = queueBusy || steering,
             working = state.working,
@@ -651,7 +653,7 @@ private fun Composer(
                         // Tapping opens the controls rather than dropping:
                         // discarding a queued message on a stray tap, with no
                         // undo, is not a good trade for one less tap.
-                        onClick = { editing = Triple(index, queued, state.queue) },
+                        onClick = { editing = Triple(index, queued, OpenedQueue(state.queue, state.queueRevision)) },
                         label = {
                             Text(
                                 queued,
@@ -790,6 +792,8 @@ private fun Composer(
  */
 @Composable
 private fun QueuedMessageDialog(
+    /** Which message this is: its chat, queue revision, and place. */
+    identity: String,
     original: String,
     /** A queue action is still out; actions wait for it rather than being dropped. */
     busy: Boolean,
@@ -802,7 +806,10 @@ private fun QueuedMessageDialog(
     onSteer: (String) -> Unit,
     onDrop: () -> Unit,
 ) {
-    var text by rememberSaveable(original) { mutableStateOf(original) }
+    // Saved with the message it edits: a draft restored after rotation is used
+    // only for the same message in the same queue, never for another one.
+    var saved by rememberSaveable(stateSaver = QueueDraftSaver) { mutableStateOf(identity to original) }
+    val text = if (saved.first == identity) saved.second else original
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -811,7 +818,7 @@ private fun QueuedMessageDialog(
             Column {
                 OutlinedTextField(
                     value = text,
-                    onValueChange = { text = it },
+                    onValueChange = { saved = identity to it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Message") },
                     minLines = 2,
@@ -1240,3 +1247,8 @@ private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, 
         }
     }
 }
+
+private val QueueDraftSaver = androidx.compose.runtime.saveable.listSaver<Pair<String, String>, String>(
+    save = { listOf(it.first, it.second) },
+    restore = { Pair(it[0], it[1]) },
+)

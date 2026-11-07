@@ -64,7 +64,7 @@ public sealed interface TranscriptInput {
     ) : TranscriptInput
     public data object Changed : TranscriptInput
     public data class Commands(val commands: List<String>) : TranscriptInput
-    public data class Queued(val messages: List<String>) : TranscriptInput
+    public data class Queued(val messages: List<String>, val revision: Long? = null) : TranscriptInput
     public data class Draft(
         val text: String,
         val revision: Long,
@@ -213,7 +213,7 @@ public object TranscriptMachine {
             state.copy(commands = input.commands),
         )
         is TranscriptInput.Queued -> TranscriptTransition(
-            state.copy(queue = input.messages, pendingUser = null),
+            state.copy(queue = input.messages, queueRevision = input.revision, pendingUser = null),
         )
         is TranscriptInput.Draft -> if (input.revision <= state.draftRevision) {
             TranscriptTransition(state)
@@ -333,6 +333,7 @@ public object TranscriptMachine {
                 plan = chat.plan,
                 fast = chat.fast,
                 queue = chat.queue,
+                queueRevision = chat.queueRevision,
                 draft = chat.draft,
                 draftRevision = chat.draftRevision,
                 draftAttachments = chat.draftAttachments.map {

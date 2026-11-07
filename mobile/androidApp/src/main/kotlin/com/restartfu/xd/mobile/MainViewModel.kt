@@ -76,6 +76,9 @@ data class SettledNotice(
     val generation: Long = 0,
 )
 
+/** The queue as a queued message was opened on, and the host's revision of it. */
+data class OpenedQueue(val messages: List<String>, val revision: Long?)
+
 data class CreatedDirectSession(
     val projectId: String,
     val chatId: String,
@@ -115,6 +118,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _createdDirectSession.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
+    val renamingChat: StateFlow<Boolean> = _renamingChat.asStateFlow()
     private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
     private var settledSerial = 0L
     val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
@@ -868,10 +872,10 @@ class ChatViewModel(
         _catalogError.value = null
     }
 
-    fun editQueued(index: Int, oldText: String, text: String, opened: List<String>) {
-        if (!sameQueue(state.value.queue, opened)) return
+    fun editQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
+        if (!sameQueue(state.value.queue, opened.messages)) return
         launchGuarded(_droppingQueued) {
-            session.editQueued(index, oldText, text, opened)
+            session.editQueued(index, oldText, text, opened.revision)
         }
     }
 
@@ -888,15 +892,20 @@ class ChatViewModel(
      * the turn to change or the queue to shrink rather than reporting success
      * while the old one is still winding down.
      */
-    fun steerQueued(index: Int, oldText: String, text: String, opened: List<String>) {
+    fun steerQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
         val before = state.value
-        if (!sameQueue(before.queue, opened)) return
+        if (!sameQueue(before.queue, opened.messages)) return
         launchGuarded(_steering) {
             // Each step names the queue it expects, so a message another device
             // moved or dropped meanwhile is never mistaken for an equal one.
-            if (text != oldText) session.editQueued(index, oldText, text, opened)
-            val edited = opened.toMutableList().also { it[index] = text }
-            session.steerQueued(index, text, edited)
+            // An edit the host accepts against a revision raises it by exactly one.
+            val revision = if (text != oldText) {
+                session.editQueued(index, oldText, text, opened.revision)
+                opened.revision?.plus(1)
+            } else {
+                opened.revision
+            }
+            session.steerQueued(index, text, revision)
             withTimeoutOrNull(CANCEL_EVENT_TIMEOUT_MILLIS) {
                 state.first {
                     !it.working ||
@@ -912,18 +921,19 @@ class ChatViewModel(
      * both texts, so a queue another device just changed is refused instead
      * of being shuffled wrongly.
      */
-    fun moveQueued(index: Int, text: String, up: Boolean, opened: List<String>) {
+    fun moveQueued(index: Int, text: String, up: Boolean, opened: OpenedQueue) {
         val queue = state.value.queue
         // Queued messages have no identity but their place, and texts can
-        // repeat, so an action applies only to the queue it was opened on.
-        if (!sameQueue(queue, opened)) return
+        // repeat, so an action applies only to the queue it was opened on,
+        // which the host checks by revision.
+        if (!sameQueue(queue, opened.messages)) return
         val anchor = if (up) index - 1 else index + 1
         if (queue.getOrNull(index) != text || anchor !in queue.indices) return
         // Swapping two equal messages changes nothing, and the queue would never
         // look changed for the wait below to end.
         if (queue[anchor] == text) return
         launchGuarded(_droppingQueued) {
-            session.reorderQueued(index, text, anchor, queue[anchor], after = !up, seen = opened)
+            session.reorderQueued(index, text, anchor, queue[anchor], after = !up, revision = opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != queue }
             }
@@ -936,11 +946,11 @@ class ChatViewModel(
         launchGuarded(_sending) { session.resumeTurn() }
     }
 
-    fun dropQueued(index: Int, text: String, opened: List<String>) {
+    fun dropQueued(index: Int, text: String, opened: OpenedQueue) {
         val before = state.value.queue
-        if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
+        if (!sameQueue(before, opened.messages) || before.getOrNull(index) != text) return
         launchGuarded(_droppingQueued) {
-            session.dropQueued(index, text, opened)
+            session.dropQueued(index, text, opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }
