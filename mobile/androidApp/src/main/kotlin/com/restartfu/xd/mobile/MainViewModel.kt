@@ -151,6 +151,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _chatTitles = MutableStateFlow<ChatTitleSettingsReply?>(null)
     private val _chatTitlesError = MutableStateFlow<String?>(null)
     private val _catalog = MutableStateFlow<List<BackendReply>>(emptyList())
+    private val _catalogError = MutableStateFlow<String?>(null)
+    private var catalogReads = 0L
+    /** Why the models could not be listed; the last list stays meanwhile. */
+    val hostCatalogError: StateFlow<String?> = _catalogError.asStateFlow()
     val chatTitles: StateFlow<ChatTitleSettingsReply?> = _chatTitles.asStateFlow()
     val chatTitlesError: StateFlow<String?> = _chatTitlesError.asStateFlow()
     /** Each assistant's models, for choosing a title model. */
@@ -191,6 +195,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _chatTitles.value = null
                 _chatTitlesError.value = null
                 _catalog.value = emptyList()
+                _catalogError.value = null
+                catalogReads++
                 chatTitleRequests++
                 chatTitlesWanted = false
             }
@@ -260,13 +266,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loadChatTitles() {
         chatTitlesWanted = true
         chatTitleRequest("Could not read the chat title settings") { client.chatTitleSettings() }
+        val read = ++catalogReads
+        _catalogError.value = null
         viewModelScope.launch {
-            _catalog.value = try {
-                client.agentCatalog()
+            try {
+                val catalog = client.agentCatalog()
+                if (read == catalogReads) _catalog.value = catalog
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                emptyList()
+                if (read == catalogReads) _catalogError.value = error.message ?: "Could not list the models"
             }
         }
     }

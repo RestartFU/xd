@@ -232,9 +232,10 @@ internal fun AgentSecretsDialog(
                                     modifier = Modifier.weight(0.55f),
                                     placeholder = { Text("Keep value") },
                                     singleLine = true,
+                                    enabled = !saving,
                                     visualTransformation = PasswordVisualTransformation(),
                                 )
-                                TextButton(onClick = { removed = removed + name }) { Text("Remove") }
+                                TextButton(onClick = { removed = removed + name }, enabled = !saving) { Text("Remove") }
                             }
                         }
                         added.forEachIndexed { index, (name, value) ->
@@ -245,6 +246,7 @@ internal fun AgentSecretsDialog(
                                     modifier = Modifier.weight(0.45f),
                                     placeholder = { Text("NAME") },
                                     singleLine = true,
+                                    enabled = !saving,
                                     isError = name.isNotBlank() && !SECRET_NAME.matches(name.trim()),
                                 )
                                 OutlinedTextField(
@@ -253,12 +255,14 @@ internal fun AgentSecretsDialog(
                                     modifier = Modifier.weight(0.55f),
                                     placeholder = { Text("Value") },
                                     singleLine = true,
+                                    enabled = !saving,
                                     visualTransformation = PasswordVisualTransformation(),
                                 )
-                                TextButton(onClick = { added = added.filterIndexed { at, _ -> at != index } }) { Text("Remove") }
+                                TextButton(onClick = { added = added.filterIndexed { at, _ -> at != index } }, enabled = !saving) { Text("Remove") }
                             }
                         }
-                        TextButton(onClick = { added = added + ("" to "") }) { Text("Add secret") }
+                        // Locked while saving: the request carries what was there when Save was pressed.
+                        TextButton(onClick = { added = added + ("" to "") }, enabled = !saving) { Text("Add secret") }
                     }
                 }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
@@ -378,6 +382,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
     val settings by model.chatTitles.collectAsStateWithLifecycle()
     val error by model.chatTitlesError.collectAsStateWithLifecycle()
     val catalog by model.hostCatalog.collectAsStateWithLifecycle()
+    val catalogError by model.hostCatalogError.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { model.loadChatTitles() }
     val current = settings
     if (current == null) {
@@ -399,6 +404,17 @@ internal fun ChatTitleSettings(model: MainViewModel) {
             )
         }
         Switch(checked = current.enabled, onCheckedChange = model::setChatTitlesEnabled)
+    }
+    if (current.enabled && catalog.isEmpty() && catalogError != null) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                catalogError.orEmpty(),
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = model::loadChatTitles) { Text("Try again") }
+        }
     }
     if (current.enabled) {
         listOf("codex" to "Codex title model", "claude" to "Claude title model").forEach { (backend, label) ->
