@@ -3442,9 +3442,22 @@ impl StateStore {
                 ));
             }
         };
+        // Last among its new siblings, decided here so a folder another
+        // client adds meanwhile cannot end up after it.
+        let to_end = match request.get("end") {
+            None | Some(Value::Null) => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| StorageError::InvalidRequest("end must be true or false".into()))?,
+        };
         if before_id.is_some() && after_id.is_some() {
             return Err(StorageError::InvalidRequest(
                 "Choose either a workspace before or after which to move.".into(),
+            ));
+        }
+        if to_end && (before_id.is_some() || after_id.is_some()) {
+            return Err(StorageError::InvalidRequest(
+                "Choose either the end or an ordering anchor.".into(),
             ));
         }
         if requested_parent_id.is_some() && (before_id.is_some() || after_id.is_some()) {
@@ -3547,6 +3560,8 @@ impl StateStore {
                 anchor_id,
                 place_after,
             )?;
+        } else if to_end {
+            move_workspace_to_end(&database, root.as_ref(), folder_id)?;
         }
         Ok(json!({"ok": true}))
     }
@@ -5499,6 +5514,22 @@ fn relocate_workspace_subtree(
         )?;
     }
     transaction.commit()?;
+    Ok(())
+}
+
+/// Sorts a folder after every other one, which puts it last among its
+/// siblings: the sidebar orders siblings by their place in this one list.
+fn move_workspace_to_end(
+    database: &Connection,
+    root: &str,
+    folder_id: &str,
+) -> Result<(), StorageError> {
+    database.execute(
+        "UPDATE workspace_folders SET updated_at = ?, sort_order = \
+           (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM workspace_folders WHERE root_path = ?) \
+         WHERE root_path = ? AND id = ?",
+        params![now_seconds(), root, root, folder_id],
+    )?;
     Ok(())
 }
 
@@ -10069,6 +10100,41 @@ mod tests {
             .move_folder(&json!({"folder": notes, "before": clients, "expect_parent": null}))
             .unwrap();
         assert!(fixture.workspaces.join("notes").is_dir());
+    }
+
+    #[test]
+    fn a_move_to_the_end_lands_after_every_sibling_the_host_has() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let id = |reply: Value| reply["id"].as_str().unwrap().to_owned();
+        let clients = id(store
+            .new_folder(&json!({"name": "Clients", "group": true}))
+            .unwrap());
+        let web = id(store
+            .new_folder(&json!({"name": "web", "parent": clients}))
+            .unwrap());
+        // Added by another client after the drop line showed Clients last.
+        let late = id(store.new_folder(&json!({"name": "late"})).unwrap());
+
+        store
+            .move_folder(&json!({"folder": web, "end": true}))
+            .unwrap();
+        assert!(fixture.workspaces.join("web").is_dir());
+        let tops = store.tree().unwrap()["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|folder| folder.get("parent").is_none())
+            .map(|folder| folder["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(tops, vec![clients.clone(), late.clone(), web.clone()]);
+
+        for request in [
+            json!({"folder": late, "end": true, "after": clients}),
+            json!({"folder": late, "end": "yes"}),
+        ] {
+            store.move_folder(&request).unwrap_err();
+        }
     }
 
     #[test]

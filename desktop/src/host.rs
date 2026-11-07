@@ -998,6 +998,26 @@ impl HostHandle {
         self.place_folder_beside(folder_id, anchor_id, after, Err(expect_parent))
     }
 
+    /// Moves a folder into `parent_id` (`None`: the top level) and last among
+    /// what is there, which the host decides when it handles the request.
+    pub fn move_folder_to_end(
+        &self,
+        folder_id: &str,
+        parent_id: Option<&str>,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "move-folder", "folder": folder_id, "end": true});
+        if let Some(parent_id) = parent_id {
+            body["parent"] = Value::String(parent_id.to_owned());
+        }
+        self.send(
+            RequestKind::MoveFolder {
+                folder_id: folder_id.to_owned(),
+                parent_id: parent_id.map(str::to_owned),
+            },
+            body,
+        )
+    }
+
     /// `placement` is `Ok(())` to keep the parent, or the parent the anchor
     /// is expected in for a move.
     fn place_folder_beside(
@@ -2598,6 +2618,7 @@ mod tests {
                 ("before", false, true),
                 ("after", true, true),
                 ("after", true, false),
+                ("end", true, false),
             ] {
                 let mut request = String::new();
                 BufReader::new(stream.try_clone().unwrap())
@@ -2606,9 +2627,19 @@ mod tests {
                 let request: Value = serde_json::from_str(&request).unwrap();
                 assert_eq!(request["op"], "move-folder");
                 assert_eq!(request["folder"], "folder-1");
+                assert_eq!(request.get("parent"), None);
+                if field == "end" {
+                    // Last at the top level, with no anchor to go stale.
+                    assert_eq!(request["end"], true);
+                    assert_eq!(request.get("before"), None);
+                    assert_eq!(request.get("after"), None);
+                    assert_eq!(request.get("expect_parent"), None);
+                    let request_id = request["_xd_request"].as_u64().unwrap();
+                    writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+                    continue;
+                }
                 assert_eq!(request[field], "folder-2");
                 assert_eq!(request.get(if after { "before" } else { "after" }), None);
-                assert_eq!(request.get("parent"), None);
                 if keep_parent {
                     assert_eq!(request["keep_parent"], true);
                     assert_eq!(request.get("expect_parent"), None);
@@ -2638,6 +2669,14 @@ mod tests {
         }
         host.move_folder_beside("folder-1", "folder-2", true, Some("folder-3"))
             .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::MoveFolder { folder_id, parent_id: None },
+                ..
+            } if folder_id == "folder-1"
+        ));
+        host.move_folder_to_end("folder-1", None).unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
             HostUpdate::Reply {

@@ -8938,6 +8938,26 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// Moves a project dropped below the list to the end of the top level.
+    /// The host picks the end when it moves it, so a row added meanwhile
+    /// does not end up after it.
+    fn move_project_to_top_level_end(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if !self.model.folder_reorder_supported
+            || !self.model.folder_groups_supported
+            || project_to_top_level_end(&self.model.folders, project_id).is_none()
+        {
+            return;
+        }
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.move_folder_to_end(project_id, None));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
     /// Moves a dropped project or folder into the folder it was dropped on,
     /// and opens that folder so it stays in view.
     fn move_project_into_from_drop(&mut self, drop: ProjectMoveInto, cx: &mut Context<Self>) {
@@ -12843,11 +12863,13 @@ impl XdDesktop {
                                 })
                                 .on_drop(cx.listener(
                                     move |this, drag: &ProjectDragPayload, _, cx| {
-                                        if let Some(reorder) = project_to_top_level_end(
-                                            &drop_folders,
-                                            &drag.project_id,
-                                        ) {
-                                            this.reorder_project_from_drop(reorder, cx);
+                                        if project_to_top_level_end(&drop_folders, &drag.project_id)
+                                            .is_some()
+                                        {
+                                            this.move_project_to_top_level_end(
+                                                &drag.project_id,
+                                                cx,
+                                            );
                                         }
                                     },
                                 )),
@@ -23681,6 +23703,26 @@ Binary files /dev/null and b/image.png differ\n";
             assert!(
                 desktop.model.connection_error.is_some(),
                 "sent, with no host"
+            );
+
+            // Below the list: b comes out to the end of the top level.
+            desktop.model.connection_error = None;
+            desktop.model.folder_groups_supported = false;
+            desktop.move_project_to_top_level_end("b", cx);
+            assert!(
+                desktop.model.connection_error.is_none(),
+                "older host: not sent"
+            );
+            desktop.model.folder_groups_supported = true;
+            desktop.move_project_to_top_level_end("c", cx);
+            assert!(
+                desktop.model.connection_error.is_none(),
+                "already last: not sent"
+            );
+            desktop.move_project_to_top_level_end("b", cx);
+            assert!(
+                desktop.model.connection_error.is_some(),
+                "end move sent, with no host"
             );
         });
     }
