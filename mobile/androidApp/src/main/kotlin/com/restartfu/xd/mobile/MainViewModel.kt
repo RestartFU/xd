@@ -116,22 +116,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
     private var settledSerial = 0L
     val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
-    private val _autoSettle = MutableStateFlow<AutoSettleSettingsReply?>(null)
     private val _autoSettleError = MutableStateFlow<String?>(null)
     private var autoSettleRequests = 0L
-    val autoSettle: StateFlow<AutoSettleSettingsReply?> = _autoSettle.asStateFlow()
+
+    /** The connected host's rules; the client keeps them current and clears them on forgetting. */
+    val autoSettle: StateFlow<AutoSettleSettingsReply?> = client.autoSettleSettings
     val autoSettleError: StateFlow<String?> = _autoSettleError.asStateFlow()
 
     init {
-        // The host broadcasts every change to the rules, from any device.
+        // A failure belongs to the host it came from.
         viewModelScope.launch {
-            client.autoSettleSettings.collect { broadcast ->
-                if (broadcast != null) {
-                    // It is newer than any answer still on its way.
-                    autoSettleRequests++
-                    _autoSettle.value = broadcast
-                    _autoSettleError.value = null
-                }
+            client.sessionGeneration.collect {
+                autoSettleRequests++
+                _autoSettleError.value = null
             }
         }
     }
@@ -415,7 +412,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadAutoSettle() = autoSettleRequest("Could not read the auto-settle rules") {
-        client.autoSettleSettings()
+        client.loadAutoSettleSettings()
     }
 
     /** Changes one auto-settle rule; the host answers with all of them. */
@@ -424,14 +421,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             client.setAutoSettleSettings(afterDays = afterDays, onMerge = onMerge)
         }
 
-    /** Only the newest request's answer is shown, so quick taps cannot land out of order. */
-    private fun autoSettleRequest(failure: String, request: suspend () -> AutoSettleSettingsReply) {
+    /**
+     * The rules themselves arrive through [autoSettle]; this only reports
+     * whether the newest request failed, so an older failure cannot cover a
+     * later success.
+     */
+    private fun autoSettleRequest(failure: String, request: suspend () -> Unit) {
         val serial = ++autoSettleRequests
         _autoSettleError.value = null
         viewModelScope.launch {
             try {
-                val reply = request()
-                if (serial == autoSettleRequests) _autoSettle.value = reply
+                request()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {

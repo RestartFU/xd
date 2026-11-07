@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.getAndUpdate
@@ -68,13 +69,29 @@ public class XdClient(
     private val unreadTerminalOwners = MutableStateFlow<Set<String>>(emptySet())
     private val terminalBusy = MutableStateFlow<Set<String>>(emptySet())
     private val visibleChat = MutableStateFlow<String?>(null)
-    private val _autoSettleSettings = MutableStateFlow<AutoSettleSettingsReply?>(null)
+    private val autoSettleState = MutableStateFlow<SequencedRules?>(null)
 
     /**
-     * The host's auto-settle rules as last broadcast. Another device changing
-     * them arrives here, so an open Settings screen never edits stale values.
+     * The host's auto-settle rules, newest first by the host's own ordering:
+     * an answer to this device's request and a broadcast of another device's
+     * change can arrive in either order, and the later one in the host's
+     * sequence wins. Null until read, and again after forgetting the host.
      */
-    public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> = _autoSettleSettings.asStateFlow()
+    public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> =
+        autoSettleState.map { it?.rules }.stateIn(scope, SharingStarted.Eagerly, null)
+
+    private data class SequencedRules(val sequence: Long, val generation: Long, val rules: AutoSettleSettingsReply)
+
+    private fun offerAutoSettle(sequence: Long, generation: Long, rules: AutoSettleSettingsReply) {
+        autoSettleState.update { current ->
+            when {
+                generation != _sessionGeneration.value -> current
+                current == null || current.generation != generation || sequence >= current.sequence ->
+                    SequencedRules(sequence, generation, rules)
+                else -> current
+            }
+        }
+    }
 
     /** Chats with an approval or question waiting on the user, across every chat. */
     public val waitingChats: StateFlow<Set<String>> = _waitingChats.asStateFlow()
@@ -160,8 +177,9 @@ public class XdClient(
                 val eventName =
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
                 if (eventName == "auto-settle-settings") {
+                    val generation = _sessionGeneration.value
                     runCatching { event.value.decodeReply<AutoSettleSettingsReply>() }
-                        .onSuccess { _autoSettleSettings.value = it }
+                        .onSuccess { offerAutoSettle(event.sequence, generation, it) }
                 }
                 if (eventName == "tree") {
                     requestTreeRefresh()
@@ -215,8 +233,8 @@ public class XdClient(
         unreadTerminalOwners.value = emptySet()
         terminalBusy.value = emptySet()
         visibleChat.value = null
-        _autoSettleSettings.value = null
         _sessionGeneration.update { it + 1 }
+        autoSettleState.value = null
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -339,19 +357,25 @@ public class XdClient(
         requestTreeRefresh()
     }
 
-    public suspend fun autoSettleSettings(): AutoSettleSettingsReply {
-        val value = actor.call(Ops.autoSettleSettings())
-        return actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+    /** Reads the rules into [autoSettleSettings]. */
+    public suspend fun loadAutoSettleSettings() {
+        autoSettleCall(Ops.autoSettleSettings())
     }
 
-    /** Changes only the rules given and answers with all of them. */
+    /** Changes only the rules given; [autoSettleSettings] then holds all of them. */
     public suspend fun setAutoSettleSettings(
         afterDays: Ops.AfterDays? = null,
         onMerge: Boolean? = null,
         keepPullRequests: Boolean? = null,
-    ): AutoSettleSettingsReply {
-        val value = actor.call(Ops.setAutoSettleSettings(afterDays, onMerge, keepPullRequests))
-        return actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+    ) {
+        autoSettleCall(Ops.setAutoSettleSettings(afterDays, onMerge, keepPullRequests))
+    }
+
+    private suspend fun autoSettleCall(request: kotlinx.serialization.json.JsonObject) {
+        val generation = _sessionGeneration.value
+        val reply = actor.callSequenced(request)
+        val rules = actor.decodeReply(reply.value) { it.decodeReply<AutoSettleSettingsReply>() }
+        offerAutoSettle(reply.sequence, generation, rules)
     }
 
     public suspend fun renameFolder(folderId: String, name: String) {
