@@ -1444,6 +1444,7 @@ struct Bucket {
     speed_premium_usd: f64,
     records: u64,
     unpriced_records: u64,
+    unpriced_tokens: u64,
     provider_reported_records: u64,
 }
 
@@ -1575,7 +1576,16 @@ fn aggregate(
                 bucket.cache_savings_usd += cache_savings_usd(rates, &overrides, record);
                 bucket.records += 1;
                 match priced.cost_source {
-                    CostSource::Unpriced => bucket.unpriced_records += 1,
+                    CostSource::Unpriced => {
+                        bucket.unpriced_records += 1;
+                        let totals = &record.totals;
+                        bucket.unpriced_tokens = bucket
+                            .unpriced_tokens
+                            .saturating_add(totals.uncached_input)
+                            .saturating_add(totals.cached_input)
+                            .saturating_add(totals.cache_creation)
+                            .saturating_add(totals.output);
+                    }
                     CostSource::ProviderReported => bucket.provider_reported_records += 1,
                     CostSource::ModelPriced => {}
                 }
@@ -1624,6 +1634,7 @@ fn aggregate(
                 "cost_source": cost_source,
                 "records": bucket.records,
                 "unpriced_records": bucket.unpriced_records,
+                "unpriced_tokens": bucket.unpriced_tokens,
             })
         })
         .collect();
@@ -3001,6 +3012,39 @@ mod tests {
         assert_eq!(buckets[0]["model"], "claude-opus-5-5");
         assert_eq!(buckets[1]["records"], 1, "the repeated key is counted once");
         assert_eq!(sessions["claude"], 1);
+    }
+
+    #[test]
+    fn unpriced_tokens_are_counted_rather_than_estimated() {
+        let at = |text: &str| {
+            DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_millis()
+        };
+        let window = UsageWindow::new(7, Tz::UTC, at("2026-11-07T15:30:00Z"));
+        let when = at("2026-11-07T01:00:00Z");
+        let tokens = |output| Totals {
+            output,
+            ..Totals::default()
+        };
+        let scans = [scan_of(vec![
+            UsageRecord {
+                timestamp_ms: when,
+                ..record("unlisted", tokens(100), Speed::Standard, Some(1.0))
+            },
+            UsageRecord {
+                timestamp_ms: when,
+                ..record("unlisted", tokens(900), Speed::Standard, None)
+            },
+        ])];
+        let (buckets, _) = aggregate(
+            &scans,
+            &window,
+            &RateTable::new(),
+            &PriceSettings::default(),
+        );
+        assert_eq!(buckets[0]["unpriced_records"], 1);
+        assert_eq!(buckets[0]["unpriced_tokens"], 900);
     }
 
     #[test]

@@ -75,6 +75,8 @@ pub struct Bucket {
     pub speed_premium_usd: f64,
     pub records: u64,
     pub unpriced_records: u64,
+    /// Absent from hosts that predate the count.
+    pub unpriced_tokens: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +153,7 @@ impl Summary {
                     speed_premium_usd: number(&bucket["speed_premium_usd"]),
                     records: count(&bucket["records"]),
                     unpriced_records: count(&bucket["unpriced_records"]),
+                    unpriced_tokens: bucket["unpriced_tokens"].as_u64(),
                 }
             })
             .collect();
@@ -398,7 +401,9 @@ pub fn merge(
             model.tokens.add(&bucket.totals);
             model.records += bucket.records;
             model.unpriced_records += bucket.unpriced_records;
-            if bucket.records > 0 {
+            if let Some(unpriced) = bucket.unpriced_tokens {
+                model.unpriced_tokens += unpriced as f64;
+            } else if bucket.records > 0 {
                 model.unpriced_tokens +=
                     tokens as f64 * bucket.unpriced_records as f64 / bucket.records as f64;
             }
@@ -1412,6 +1417,20 @@ mod tests {
         assert_eq!(local.share(ChartMetric::Cost), None);
         assert_eq!(local.cost_per_million(), None);
         assert!(sort_models_by_tokens(&merged.models)[0].model == "gpt");
+    }
+
+    #[test]
+    fn unpriced_tokens_use_the_hosts_count_when_it_has_one() {
+        let mut counted = summary();
+        counted.buckets[0].unpriced_tokens = Some(900);
+        let merged = merge(&[("Local", &counted)], &[], |_| true);
+        let opus = merged
+            .models
+            .iter()
+            .find(|model| model.model == "opus")
+            .unwrap();
+        assert_eq!(opus.unpriced_tokens, 900.0);
+        assert!((opus.cost_per_million().unwrap() - 2.0 / 100.0 * 1e6).abs() < 1e-6);
     }
 
     #[test]
