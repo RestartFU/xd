@@ -206,6 +206,16 @@ pub(crate) struct WorktreeNameSpec {
     pub effort: String,
 }
 
+/// Why a send continues a turn instead of saying something new.
+#[derive(Clone, Copy)]
+pub(crate) enum Continuation {
+    /// The host's doing after a restart, valid until this user message is
+    /// no longer the chat's latest.
+    AfterRestart(i64),
+    /// The user pressed resume, valid while the chat's latest turn is resumable.
+    Resume,
+}
+
 /// A chat a restart cut off, and the user message it was working on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatToResume {
@@ -1517,13 +1527,20 @@ impl StateStore {
         request: &Value,
         last_message: i64,
     ) -> Result<SendDisposition, StorageError> {
-        self.prepare_send_inner(request, Some(last_message))
+        self.prepare_send_inner(request, Some(Continuation::AfterRestart(last_message)))
+    }
+
+    /// Sends the message the resume button stands for, unless the turn it would
+    /// continue is no longer the chat's latest. Refusing here rather than
+    /// beforehand means no turn can slip in between the check and the send.
+    pub fn prepare_resume(&self, request: &Value) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, Some(Continuation::Resume))
     }
 
     fn prepare_send_inner(
         &self,
         request: &Value,
-        continues: Option<i64>,
+        continues: Option<Continuation>,
     ) -> Result<SendDisposition, StorageError> {
         let chat_id = required_string(
             request,
@@ -1548,17 +1565,32 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-        if let Some(last_message) = continues {
-            let latest = transaction.query_row(
-                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
-                [chat_id],
-                |row| row.get::<_, i64>(0),
-            )?;
-            if working || latest != last_message {
-                return Err(StorageError::InvalidRequest(
-                    "This chat has already continued.".into(),
-                ));
+        match continues {
+            Some(Continuation::AfterRestart(last_message)) => {
+                let latest = transaction.query_row(
+                    "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
+                    [chat_id],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                if working || latest != last_message {
+                    return Err(StorageError::InvalidRequest(
+                        "This chat has already continued.".into(),
+                    ));
+                }
             }
+            Some(Continuation::Resume) => {
+                let resumable = transaction.query_row(
+                    "SELECT turn_resumable FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if working || !resumable {
+                    return Err(StorageError::InvalidRequest(
+                        "This chat can no longer be resumed.".into(),
+                    ));
+                }
+            }
+            None => {}
         }
         if working {
             let stored = transaction.query_row(
@@ -1585,10 +1617,10 @@ impl StateStore {
                 event,
             });
         }
-        // A continuation is the host's doing, not the user speaking again, so it
-        // keeps the time settling compares a finished pull request against.
-        let user_message_at = continues
-            .is_some()
+        // A restart's continuation is the host's doing, not the user speaking
+        // again, so it keeps the time settling compares a finished pull request
+        // against. Pressing resume is the user speaking.
+        let user_message_at = matches!(continues, Some(Continuation::AfterRestart(_)))
             .then(|| {
                 transaction.query_row(
                     "SELECT last_user_message_at FROM chats WHERE id = ?",
@@ -2142,28 +2174,6 @@ impl StateStore {
             [chat_id],
         )?;
         Ok(())
-    }
-
-    /// The user message a cut-short turn was answering, for sending the message
-    /// that continues it. `None` when the chat's latest turn is not resumable.
-    pub fn resumable_turn(&self, chat_id: &str) -> Result<Option<i64>, StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let resumable = database
-            .query_row(
-                "SELECT turn_resumable FROM chats WHERE id = ?",
-                [chat_id],
-                |row| row.get::<_, bool>(0),
-            )
-            .optional()?
-            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-        if !resumable {
-            return Ok(None);
-        }
-        Ok(Some(database.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
-            [chat_id],
-            |row| row.get(0),
-        )?))
     }
 
     /// The chats a restart cut off, once each. They stay in the database until
@@ -9863,6 +9873,7 @@ mod tests {
                 .prepare_send(&json!({"chat": "chat", "text": text}))
                 .unwrap()
         };
+        let continuation = json!({"chat": "chat", "text": CONTINUE_PROMPT});
 
         send("first");
         send("queued");
@@ -9870,23 +9881,65 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_some());
         assert!(!resumable());
-        assert_eq!(store.resumable_turn("chat").unwrap(), None);
+        let refused = store.prepare_resume(&continuation);
+        assert!(matches!(refused, Err(StorageError::InvalidRequest(_))));
 
         store.mark_turn_resumable("chat").unwrap();
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_none());
         assert!(resumable());
-        let latest: i64 = store.messages(&json!({"chat": "chat"})).unwrap()["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|message| message["role"] == "user")
-            .filter_map(|message| message["id"].as_i64())
-            .max()
-            .unwrap();
-        assert_eq!(store.resumable_turn("chat").unwrap(), Some(latest));
+    }
+
+    #[test]
+    fn resuming_needs_the_cut_short_turn_to_still_be_the_latest() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let continuation = json!({"chat": "chat", "text": CONTINUE_PROMPT});
+        let refused = |store: &StateStore| {
+            matches!(
+                store.prepare_resume(&continuation),
+                Err(StorageError::InvalidRequest(_))
+            )
+        };
+        let spoken_at = || -> i64 {
+            database
+                .query_row(
+                    "SELECT last_user_message_at FROM chats WHERE id = 'chat'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert!(refused(&store));
+        assert!(matches!(
+            store.prepare_send(&json!({"chat": "chat", "text": "first"})),
+            Ok(SendDisposition::Start { .. })
+        ));
+        store.mark_turn_resumable("chat").unwrap();
+        store.finish_turn("chat", true, None, 1, false).unwrap();
+
+        // Claude reporting back moves the chat on without a new user message.
         assert!(store.begin_background_turn("chat").unwrap());
-        assert!(!resumable());
+        assert_eq!(store.chat("chat").unwrap()["resumable"], false);
+        assert!(refused(&store));
+        store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(refused(&store));
+
+        store.mark_turn_resumable("chat").unwrap();
+        let before = spoken_at();
+        thread::sleep(Duration::from_millis(2));
+        assert!(matches!(
+            store.prepare_resume(&continuation),
+            Ok(SendDisposition::Start { .. })
+        ));
+        assert_eq!(store.chat("chat").unwrap()["resumable"], false);
+        assert!(refused(&store));
+        // Unlike a restart's continuation, this counts as the user speaking.
+        assert!(spoken_at() > before);
     }
 
     #[test]

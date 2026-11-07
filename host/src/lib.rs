@@ -65,7 +65,7 @@ use self_update::SelfUpdate;
 pub use self_update::installed_host_executable;
 use settlement::AutoSettler;
 pub use storage::ChatToResume;
-use storage::SendDisposition;
+use storage::{Continuation, SendDisposition};
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
@@ -478,7 +478,7 @@ impl Engine {
             {
                 let reply = self.send_message_inner(
                     &json!({"op": "send", "chat": chat_id, "text": storage::RESUME_PROMPT}),
-                    Some(last_message),
+                    Some(Continuation::AfterRestart(last_message)),
                 );
                 if reply["ok"] == true {
                     self.events
@@ -1327,20 +1327,13 @@ impl Engine {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
         };
-        let Some(store) = self.store.as_ref() else {
-            return error_reply("Rust host state storage is not configured.");
-        };
-        match store.resumable_turn(chat_id) {
-            Ok(Some(last_message)) => self.send_message_inner(
-                &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
-                Some(last_message),
-            ),
-            Ok(None) => error_reply("This chat can no longer be resumed."),
-            Err(error) => error_reply(error),
-        }
+        self.send_message_inner(
+            &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
+            Some(Continuation::Resume),
+        )
     }
 
-    fn send_message_inner(&self, request: &Value, continues: Option<i64>) -> Value {
+    fn send_message_inner(&self, request: &Value, continues: Option<Continuation>) -> Value {
         let chat_id = match required_string(request, "chat", "send needs a chat id") {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
@@ -1381,7 +1374,10 @@ impl Engine {
         };
         let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false);
         let prepared = match continues {
-            Some(last_message) => store.prepare_continuation(&request, last_message),
+            Some(Continuation::AfterRestart(last_message)) => {
+                store.prepare_continuation(&request, last_message)
+            }
+            Some(Continuation::Resume) => store.prepare_resume(&request),
             None => store.prepare_send(&request),
         };
         if resumes && prepared.is_ok() {
