@@ -173,8 +173,15 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
         match listener.accept() {
             Ok((stream, _)) if clients.len() < MAX_CLIENTS => {
                 // Accepted sockets inherit nonblocking mode on macOS.
-                stream.set_nonblocking(false)?;
-                stream.set_write_timeout(Some(Duration::from_secs(15)))?;
+                // macOS also refuses socket options once the peer has closed.
+                // That ends this connection only, never the daemon.
+                if stream
+                    .set_nonblocking(false)
+                    .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(15))))
+                    .is_err()
+                {
+                    continue;
+                }
                 let engine = engine.clone();
                 clients.push(thread::spawn(move || {
                     let _ = serve_daemon_connection(stream, engine, false);
@@ -184,6 +191,8 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(20))
             }
+            // A client that gave up while waiting to be accepted.
+            Err(error) if error.kind() == io::ErrorKind::ConnectionAborted => {}
             Err(error) => return Err(error),
         }
     }

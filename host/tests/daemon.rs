@@ -327,6 +327,18 @@ fn reports_assistant_updates_and_refuses_unknown_requests() {
 }
 
 #[test]
+fn a_client_that_leaves_at_once_does_not_stop_the_daemon() {
+    let daemon = Daemon::start();
+    for _ in 0..20 {
+        drop(UnixStream::connect(&daemon.socket).unwrap());
+    }
+    // Long enough for the accept loop to reach every closed connection.
+    thread::sleep(Duration::from_millis(200));
+    let reply = daemon.client().call(json!({"op":"ping"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+}
+
+#[test]
 fn a_restart_continues_cut_off_turns_only_when_asked() {
     let continued = |client: &mut Client<UnixStream, UnixStream>, chat: &str| {
         client.call(json!({"op":"messages", "chat":chat}))["messages"]
