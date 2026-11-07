@@ -472,7 +472,8 @@ private fun Composer(
     val attachmentError by model.attachmentError.collectAsStateWithLifecycle()
     // The queue as it was when a message was opened: actions apply to that
     // queue only, and the dialog closes if another device changes it.
-    var editing by remember { mutableStateOf<Triple<Int, String, OpenedQueue>?>(null) }
+    // Saved, so an open queued message survives rotating the phone.
+    var editing by rememberSaveable(stateSaver = OpenedMessageSaver) { mutableStateOf<Triple<Int, String, OpenedQueue>?>(null) }
     val queueNotice by model.queueNotice.collectAsStateWithLifecycle()
     LaunchedEffect(state.queue, state.queueRevision) {
         val opened = editing ?: return@LaunchedEffect
@@ -1254,4 +1255,17 @@ private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, 
 private val QueueDraftSaver = androidx.compose.runtime.saveable.listSaver<Pair<String, String>, String>(
     save = { listOf(it.first, it.second) },
     restore = { Pair(it[0], it[1]) },
+)
+
+/** The open queued message: its place, text, and the queue and revision it was opened on. */
+private val OpenedMessageSaver = androidx.compose.runtime.saveable.listSaver<Triple<Int, String, OpenedQueue>?, String>(
+    save = { opened ->
+        opened?.let { (index, text, queue) ->
+            listOf(index.toString(), text, queue.revision?.toString().orEmpty()) + queue.messages
+        } ?: emptyList()
+    },
+    restore = { saved ->
+        if (saved.size < 3) null
+        else Triple(saved[0].toInt(), saved[1], OpenedQueue(saved.drop(3), saved[2].toLongOrNull()))
+    },
 )

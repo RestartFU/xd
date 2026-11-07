@@ -122,32 +122,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
     private var settledSerial = 0L
     val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
-    private val _autoSettleError = MutableStateFlow<String?>(null)
-    private var autoSettleRequests = 0L
     /** Auto-settle requests still waiting on the host, including reads a broadcast started. */
     val autoSettleBusy: StateFlow<Int> = client.autoSettleInFlight
 
     /** The connected host's rules; the client keeps them current and clears them on forgetting. */
     val autoSettle: StateFlow<AutoSettleSettingsReply?> = client.autoSettleSettings
-    val autoSettleError: StateFlow<String?> = _autoSettleError.asStateFlow()
+    /** The client orders failures and answers by request, so a superseded failure never shows. */
+    val autoSettleError: StateFlow<String?> = client.autoSettleError
     val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
 
     init {
-        // Every failed rules request marks them stale, and only an answer to a
-        // newer request clears that, so the stale mark turning off is the
-        // ordered sign that a failure is old news, equal rules included.
-        viewModelScope.launch {
-            var wasStale = client.autoSettleStale.value
-            client.autoSettleStale.collect { stale ->
-                if (wasStale && !stale) _autoSettleError.value = null
-                wasStale = stale
-            }
-        }
-        // A failure belongs to the host it came from.
         viewModelScope.launch {
             client.sessionGeneration.collect {
-                autoSettleRequests++
-                _autoSettleError.value = null
                 // An Undo offered for another host must not reach this one.
                 _settledNotice.value = null
             }
@@ -458,16 +444,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * whether the newest request failed, so an older failure cannot cover a
      * later success.
      */
+    /** The client records the outcome, in request order, through [autoSettleError]. */
     private fun autoSettleRequest(failure: String, request: suspend () -> Unit) {
-        val serial = ++autoSettleRequests
-        _autoSettleError.value = null
         viewModelScope.launch {
             try {
                 request()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (serial == autoSettleRequests) _autoSettleError.value = error.message ?: failure
+                // Already reported by the client as $failure, unless superseded.
             }
         }
     }

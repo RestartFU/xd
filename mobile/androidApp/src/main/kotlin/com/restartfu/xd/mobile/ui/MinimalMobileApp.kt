@@ -179,9 +179,10 @@ internal fun MinimalMobileApp(
     var deleteChat by remember { mutableStateOf<ChatSummary?>(null) }
     val deleting by model.deletingChat.collectAsStateWithLifecycle()
     val renamingChats by model.renamingChat.collectAsStateWithLifecycle()
-    var renamingSession by remember { mutableStateOf<MinimalSession?>(null) }
+    // Saved by id, so a rename in progress survives rotating the phone.
+    var renamingSessionId by rememberSaveable { mutableStateOf<String?>(null) }
     var deletingSession by remember { mutableStateOf<MinimalSession?>(null) }
-    var renamingProject by remember { mutableStateOf<MinimalProject?>(null) }
+    var renamingProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var deletingProject by remember { mutableStateOf<MinimalProject?>(null) }
     val settledNotice by model.settledNotice.collectAsStateWithLifecycle()
     val sessionActions = SessionActions(
@@ -189,7 +190,7 @@ internal fun MinimalMobileApp(
         settle = { model.settleSession(it.id, it.title) },
         unsettle = { model.unsettleSession(it.id) },
         setAutoSettle = { session, enabled -> model.setSessionAutoSettle(session.id, enabled) },
-        rename = { renamingSession = it },
+        rename = { renamingSessionId = it.id },
         delete = { deletingSession = it },
     )
     val projects = tree.minimalProjects()
@@ -329,7 +330,7 @@ internal fun MinimalMobileApp(
                     else -> MinimalProjectsHome(
                         model, settings, link, projects, tree.loading, tree.error, showSessions, showTerminal,
                         actions = sessionActions,
-                        onRenameProject = { renamingProject = it },
+                        onRenameProject = { renamingProjectId = it.id },
                         onDeleteProject = { deletingProject = it },
                         open = { _, session ->
                             activeSessionId = session.id
@@ -367,16 +368,16 @@ internal fun MinimalMobileApp(
             onRemove = { id -> model.removeShortcut(editor.opening, id) },
         )
     }
-    renamingSession?.let { session ->
+    sessions.firstOrNull { it.id == renamingSessionId }?.let { session ->
         NameDialog(
             title = "Rename session",
             target = "session:${session.id}",
             initial = session.title,
             // An older host's session is renamed as its chat, one at a time.
             busy = !session.grouped && renamingChats,
-            onDismiss = { renamingSession = null },
+            onDismiss = { renamingSessionId = null },
             onConfirm = { name ->
-                renamingSession = null
+                renamingSessionId = null
                 if (name != session.title) {
                     // An older host's "session" is a single chat under the chat's own id.
                     if (session.grouped) model.renameSession(session.id, name) else model.renameChat(session.id, name)
@@ -398,15 +399,15 @@ internal fun MinimalMobileApp(
             },
         )
     }
-    renamingProject?.let { project ->
+    projects.firstOrNull { it.id == renamingProjectId }?.let { project ->
         NameDialog(
             title = "Rename project",
             target = "project:${project.id}",
             initial = project.name,
             validate = ::projectNameError,
-            onDismiss = { renamingProject = null },
+            onDismiss = { renamingProjectId = null },
             onConfirm = { name ->
-                renamingProject = null
+                renamingProjectId = null
                 if (name != project.name) model.renameProject(project.id, name)
             },
         )

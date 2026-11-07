@@ -81,6 +81,14 @@ public class XdClient(
     /** The newest request that failed, and the newest whose answer was shown. */
     private var autoSettleFailedCall = 0L
     private var autoSettleAppliedCall = 0L
+    private val _autoSettleError = MutableStateFlow<String?>(null)
+
+    /**
+     * Why the newest rules request failed, in the same request order as the
+     * stale mark: an answer to a newer request clears it, and a failure
+     * superseded by one never shows.
+     */
+    public val autoSettleError: StateFlow<String?> = _autoSettleError.asStateFlow()
 
     /**
      * The rules shown may be out of date: the host said they changed and the
@@ -264,6 +272,7 @@ public class XdClient(
         _autoSettleStale.value = false
         autoSettleFailedCall = 0
         autoSettleAppliedCall = 0
+        _autoSettleError.value = null
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -425,7 +434,11 @@ public class XdClient(
                 // possibly old until a newer request's answer is shown.
                 if (generation == _sessionGeneration.value) {
                     autoSettleFailedCall = maxOf(autoSettleFailedCall, call)
-                    if (call > autoSettleAppliedCall) _autoSettleStale.value = true
+                    if (call > autoSettleAppliedCall) {
+                        _autoSettleStale.value = true
+                        // A background read's failure is told by the stale mark alone.
+                        if (!background) _autoSettleError.value = error.message ?: "The host did not answer"
+                    }
                 }
                 if (!background) throw error
                 return
@@ -434,7 +447,10 @@ public class XdClient(
             if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
                 _autoSettleSettings.value = rules
                 autoSettleAppliedCall = maxOf(autoSettleAppliedCall, call)
-                if (call > autoSettleFailedCall) _autoSettleStale.value = false
+                if (call > autoSettleFailedCall) {
+                    _autoSettleStale.value = false
+                    _autoSettleError.value = null
+                }
             }
         } finally {
             _autoSettleInFlight.update { it - 1 }
