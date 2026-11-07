@@ -802,7 +802,9 @@ To reorder, send `before` or `after` with the id of another folder instead of
 `parent`. The order is saved and every client sees it in the next `tree`. The
 folder also takes that folder's parent, so anchoring on a folder with a different
 parent moves it on disk. Send `keep_parent: true` to refuse that move and report
-an error instead. Older hosts ignore this field.
+an error instead. A host that honors this field adds a top-level
+`"folder_reorder":true` to `tree`; older hosts ignore the field and would move the
+folder, so don't offer reordering without it.
 
 ## Events
 

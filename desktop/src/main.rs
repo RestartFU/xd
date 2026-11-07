@@ -8434,6 +8434,9 @@ impl XdDesktop {
         target_id: &str,
         cx: &mut Context<Self>,
     ) {
+        if !self.model.folder_reorder_supported {
+            return;
+        }
         let Some(reorder) = project_reorder_for_drop(&self.model.folders, project_id, target_id)
         else {
             return;
@@ -11554,11 +11557,13 @@ impl XdDesktop {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_drawer(toggle_project.clone(), current, cx);
                 }))
-                .on_drag(drag_payload, move |drag, position, _, cx| {
-                    cx.new(|_| ProjectDragPreview {
-                        title: drag.title.clone(),
-                        position,
-                        colors,
+                .when(self.model.folder_reorder_supported, |header| {
+                    header.on_drag(drag_payload, move |drag, position, _, cx| {
+                        cx.new(|_| ProjectDragPreview {
+                            title: drag.title.clone(),
+                            position,
+                            colors,
+                        })
                     })
                 })
                 .on_mouse_down(
@@ -21125,6 +21130,15 @@ mod tests {
             desktop.host = None;
             desktop.remote_host = None;
             desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.model.connection_error = None;
+
+            // An older host could move the folder on disk, so nothing is sent.
+            desktop.model.folder_reorder_supported = false;
+            desktop.reorder_project_from_drop("c", "a", cx);
+            assert_eq!(order(desktop), ["a", "b", "c"]);
+            assert!(desktop.model.connection_error.is_none());
+
+            desktop.model.folder_reorder_supported = true;
             desktop.reorder_project_from_drop("c", "a", cx);
             assert_eq!(order(desktop), ["a", "b", "c"]);
             assert!(desktop.model.connection_error.is_some());

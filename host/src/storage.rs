@@ -730,6 +730,7 @@ impl StateStore {
             "chats": chats,
             "sessions": sessions,
             "settlement": true,
+            "folder_reorder": true,
         }))
     }
 
@@ -8920,6 +8921,7 @@ mod tests {
     fn keep_parent_refuses_a_reorder_that_would_move_the_folder_on_disk() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.tree().unwrap()["folder_reorder"], true);
         let sibling = store.new_folder(&json!({"name": "Sibling"})).unwrap()["id"]
             .as_str()
             .unwrap()
