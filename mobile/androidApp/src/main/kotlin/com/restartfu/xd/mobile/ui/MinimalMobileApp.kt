@@ -1477,6 +1477,8 @@ internal data class NewSessionPlaces(
     val branches: List<BranchSourceReply>,
     val pullRequests: List<PullRequestSourceReply>,
     val pullRequestError: String?,
+    /** Why branches and pull requests could not be listed at all. */
+    val sourcesError: String? = null,
 ) {
     /**
      * A choice restored from before a rotation, matched against what the host
@@ -1487,10 +1489,14 @@ internal data class NewSessionPlaces(
         null -> default
         Ops.NewSessionWorktree.New -> if (canCreateWorktree) choice else default
         is Ops.NewSessionWorktree.Existing -> if (worktrees.any { it.path == choice.path }) choice else default
-        is Ops.NewSessionWorktree.Branch -> branches.firstOrNull { it.reference == choice.reference }
-            ?.let { Ops.NewSessionWorktree.Branch(it.reference, it.oid) } ?: default
-        is Ops.NewSessionWorktree.PullRequest -> pullRequests.firstOrNull { it.number == choice.number }
-            ?.let { Ops.NewSessionWorktree.PullRequest(it.number, it.oid) } ?: default
+        // A failed listing says nothing about whether the choice still exists,
+        // so it is kept, and the host checks its commit again on creating.
+        is Ops.NewSessionWorktree.Branch -> if (sourcesError != null) choice else
+            branches.firstOrNull { it.reference == choice.reference }
+                ?.let { Ops.NewSessionWorktree.Branch(it.reference, it.oid) } ?: default
+        is Ops.NewSessionWorktree.PullRequest -> if (sourcesError != null) choice else
+            pullRequests.firstOrNull { it.number == choice.number }
+                ?.let { Ops.NewSessionWorktree.PullRequest(it.number, it.oid) } ?: default
     }
 
     /** The checkout in use, else the project's own, as the desktop picks. */
@@ -1503,9 +1509,10 @@ internal data class NewSessionPlaces(
             val settings = async { client.folderSettings(folderId) }
             // Branches and pull requests are extras: a project without Git, or a
             // host without them, still offers its checkouts.
-            val sources = async { runCatching { client.newChatSources(folderId) }.getOrNull() }
+            val sources = async { runCatching { client.newChatSources(folderId) } }
             val folder = settings.await()
-            val found = sources.await()
+            val listed = sources.await()
+            val found = listed.getOrNull()
             val worktrees = folder.worktrees.ifEmpty {
                 listOfNotNull(folder.effectiveWorkdir?.takeIf(String::isNotBlank)?.let {
                     WorktreeReply(path = it, detached = false, main = true, current = true)
@@ -1517,6 +1524,7 @@ internal data class NewSessionPlaces(
                 branches = found?.branches.orEmpty(),
                 pullRequests = found?.pullRequests.orEmpty(),
                 pullRequestError = found?.pullRequestError,
+                sourcesError = listed.exceptionOrNull()?.let { it.message ?: "Could not list branches and pull requests" },
             )
         }
     }
@@ -1605,6 +1613,13 @@ private fun WorkspacePicker(
                                 mono = true,
                             )
                         }
+                }
+                places.sourcesError?.let {
+                    Text(
+                        "Branches and pull requests could not be listed: $it",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
                 places.pullRequestError?.let {
                     Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)

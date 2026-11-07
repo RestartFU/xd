@@ -191,7 +191,9 @@ internal fun ChatScreen(
     // A sibling chat's turn shares the checkout, so the whole session counts,
     // and so does a branch switched under an idle session.
     val busy = state.working || sessionWorking
-    LaunchedEffect(state.chatId, busy, branch) {
+    // And so does a pull request another device made: the host reports it.
+    val gitChanges by model.gitChanges.collectAsStateWithLifecycle()
+    LaunchedEffect(state.chatId, busy, branch, gitChanges) {
         // While a turn runs the branch may still move, so only forget a stale link.
         model.refreshPullRequest(branch, fetch = !busy)
     }

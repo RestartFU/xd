@@ -985,6 +985,9 @@ class ChatViewModel(
     /** The pull request of the branch this chat works on, for the session header. */
     val pullRequest: StateFlow<String?> = _pullRequest.asStateFlow()
 
+    /** Bumped when the host reports a Git change to this chat's checkout. */
+    val gitChanges: StateFlow<Long> = session.gitChanges
+
     /**
      * Asks GitHub, through the host, whether the checked-out branch has a pull
      * request. A failure on the same branch leaves the last answer.

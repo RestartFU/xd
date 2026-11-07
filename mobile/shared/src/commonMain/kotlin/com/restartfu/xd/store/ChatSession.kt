@@ -45,6 +45,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -64,6 +65,9 @@ public class ChatSession internal constructor(
     private val release: () -> Unit,
 ) : AutoCloseable {
     public val state: StateFlow<ChatState> = core.state
+
+    /** Counts Git changes the host reported for this chat's checkout. */
+    public val gitChanges: StateFlow<Long> = core.gitChanges
     /** Complete assistant `<speak>` blocks from this live turn. */
     public val speech: Flow<String> = core.speech
     private var closed = false
@@ -445,6 +449,8 @@ internal class ChatSessionCore(
      * surface as one.
      */
     private var gitStateRequests = 0L
+    private val _gitChanges = MutableStateFlow(0L)
+    val gitChanges: StateFlow<Long> = _gitChanges.asStateFlow()
 
     /**
      * Sends `git-state` and waits for the event carrying its correlation
@@ -577,6 +583,9 @@ internal class ChatSessionCore(
                 apply(TranscriptInput.Record(messageId, text, turnId, turnSequence), arrivalGate)
             }
             "changed" -> apply(TranscriptInput.Changed, event.sequence)
+            // A commit, push, or pull request made anywhere: what depends on
+            // the checkout, such as its pull request, is looked up again.
+            "git-action-finished", "repository-changed" -> _gitChanges.update { it + 1 }
             "shortcuts-changed" -> apply(TranscriptInput.Changed, event.sequence)
             "commands" -> {
                 val commands = value.requiredStringArray("commands") ?: return
