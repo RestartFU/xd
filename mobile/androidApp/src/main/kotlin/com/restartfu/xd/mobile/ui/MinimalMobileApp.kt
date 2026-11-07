@@ -293,7 +293,7 @@ internal fun MinimalMobileApp(
                         val usage: UsageViewModel = viewModel(
                             key = "usage",
                             viewModelStoreOwner = stores.usage(),
-                            factory = UsageViewModel.Factory(model.client),
+                            factory = UsageViewModel.Factory(model.client, settings),
                         )
                         UsageContent(usage)
                     }

@@ -38,6 +38,25 @@ public class MobileSettings(context: Context) {
         _resumeChats.value = enabled
     }
 
+    /**
+     * The key of [accountKey]'s unsettled Codex reset attempt. Kept on disk
+     * until the host settles it, so a retry after the app was killed settles
+     * the same attempt instead of spending another credit.
+     */
+    public fun resetAttempt(accountKey: String): String? =
+        preferences.getString(KEY_RESET_ATTEMPT + accountKey, null)
+
+    /** Written before the request is sent, synchronously, so it cannot be lost. */
+    public fun saveResetAttempt(accountKey: String, attempt: String) {
+        preferences.edit().putString(KEY_RESET_ATTEMPT + accountKey, attempt).commit()
+    }
+
+    public fun clearResetAttempt(accountKey: String, attempt: String) {
+        if (resetAttempt(accountKey) == attempt) {
+            preferences.edit().remove(KEY_RESET_ATTEMPT + accountKey).apply()
+        }
+    }
+
     private val _theme = MutableStateFlow(
         MinimalThemePreset.fromKey(preferences.getString(KEY_THEME, null)),
     )
@@ -74,5 +93,6 @@ public class MobileSettings(context: Context) {
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
         const val KEY_RESUME_CHATS = "resume_chats"
+        const val KEY_RESET_ATTEMPT = "usage_reset_attempt:"
     }
 }

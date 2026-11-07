@@ -33,18 +33,15 @@ data class UsageState(
  * The host's Usage page: cost and tokens over a window, and each account's
  * subscription limits, as the desktop's Usage page reads them.
  */
-class UsageViewModel(private val client: XdClient) : ViewModel() {
+class UsageViewModel(
+    private val client: XdClient,
+    private val settings: MobileSettings,
+) : ViewModel() {
     private val _state = MutableStateFlow(UsageState())
     val state: StateFlow<UsageState> = _state.asStateFlow()
     private var summaryReads = 0L
     private var limitReads = 0L
 
-    /**
-     * Each account's unsettled reset attempt, kept until the host settles it,
-     * so retrying after a dropped answer cannot spend a second credit, even
-     * after another account was used in between, as the desktop keeps them.
-     */
-    private val pendingResets = mutableMapOf<String, String>()
 
     init {
         refresh()
@@ -118,12 +115,16 @@ class UsageViewModel(private val client: XdClient) : ViewModel() {
     /** Spends one banked Codex reset credit. The caller has asked the user first. */
     fun useResetCredit(accountKey: String) {
         if (_state.value.resetting) return
-        val attempt = pendingResets.getOrPut(accountKey) { UUID.randomUUID().toString() }
+        // Each account's unsettled attempt is kept on disk until the host
+        // settles it, so retrying after a lost answer, another account, or the
+        // app being killed cannot spend a second credit, as the desktop keeps them.
+        val attempt = settings.resetAttempt(accountKey)
+            ?: UUID.randomUUID().toString().also { settings.saveResetAttempt(accountKey, it) }
         _state.update { it.copy(resetting = true, resetMessage = null) }
         viewModelScope.launch {
             try {
                 val outcome = client.consumeResetCredit(accountKey, attempt)
-                pendingResets.remove(accountKey, attempt)
+                settings.clearResetAttempt(accountKey, attempt)
                 _state.update { it.copy(resetting = false, resetMessage = resetOutcome(outcome)) }
                 readLimits()
             } catch (error: CancellationException) {
@@ -143,9 +144,12 @@ class UsageViewModel(private val client: XdClient) : ViewModel() {
         return saved
     }
 
-    class Factory(private val client: XdClient) : androidx.lifecycle.ViewModelProvider.Factory {
+    class Factory(
+        private val client: XdClient,
+        private val settings: MobileSettings,
+    ) : androidx.lifecycle.ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = UsageViewModel(client) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = UsageViewModel(client, settings) as T
     }
 }
 
