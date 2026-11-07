@@ -7,7 +7,6 @@
 //! applied once it exists.
 
 use std::{
-    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
@@ -81,11 +80,8 @@ fn check_sandbox() -> Result<(), String> {
     if unsafe { libc::geteuid() } == 0 {
         return Err("The browser cannot run as root. Run xd as your own user to use it.".into());
     }
+    // xd ships no SUID sandbox helper, so user namespaces are the only way in.
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    let helper_ready = executable
-        .with_file_name("chrome-sandbox")
-        .metadata()
-        .is_ok_and(|helper| helper.uid() == 0 && helper.mode() & 0o4000 != 0);
     let namespaces_ready = std::process::Command::new(&executable)
         .env(USER_NAMESPACE_PROBE, "1")
         .stdin(std::process::Stdio::null())
@@ -93,7 +89,7 @@ fn check_sandbox() -> Result<(), String> {
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
-    if helper_ready || namespaces_ready {
+    if namespaces_ready {
         return Ok(());
     }
     Err(SANDBOX_UNAVAILABLE.into())
@@ -639,7 +635,7 @@ wrap_download_handler! {
         fn on_before_download(
             &self,
             _browser: Option<&mut Browser>,
-            _download_item: Option<&mut DownloadItem>,
+            download_item: Option<&mut DownloadItem>,
             suggested_name: Option<&CefString>,
             callback: Option<&mut BeforeDownloadCallback>,
         ) -> ::std::os::raw::c_int {
@@ -649,12 +645,43 @@ wrap_download_handler! {
             let name = suggested_name.map(ToString::to_string).unwrap_or_default();
             let directory = downloads_directory();
             let _ = std::fs::create_dir_all(&directory);
-            let path = unused_path(&directory, &name);
+            // Two downloads of the same name could both find it free before
+            // either creates its file, so names stay reserved until done.
+            let mut reserved = RESERVED_DOWNLOADS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let path = unused_path(&directory, &name, |path| {
+                path.exists() || reserved.iter().any(|(_, taken)| taken == path)
+            });
+            if let Some(item) = download_item {
+                reserved.push((item.id(), path.clone()));
+            }
+            drop(reserved);
             callback.cont(Some(&CefString::from(path.to_string_lossy().as_ref())), 0);
             1
         }
+
+        fn on_download_updated(
+            &self,
+            _browser: Option<&mut Browser>,
+            download_item: Option<&mut DownloadItem>,
+            _callback: Option<&mut DownloadItemCallback>,
+        ) {
+            if let Some(item) = download_item
+                && (item.is_complete() != 0 || item.is_canceled() != 0)
+            {
+                let id = item.id();
+                RESERVED_DOWNLOADS
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .retain(|(reserved, _)| *reserved != id);
+            }
+        }
     }
 }
+
+/// Destinations of downloads still in progress, by CEF's download id.
+static RESERVED_DOWNLOADS: Mutex<Vec<(u32, PathBuf)>> = Mutex::new(Vec::new());
 
 /// The user's Downloads directory, as the XDG user-dirs configuration names it.
 fn downloads_directory() -> PathBuf {
@@ -687,7 +714,11 @@ fn xdg_download_dir(dirs: &str, home: &std::path::Path) -> Option<PathBuf> {
 /// `directory/name`, or `name (1)`, `name (2)`, ... before its extension if
 /// that is taken. Only the name's last component is kept, so a page cannot
 /// save outside the directory.
-fn unused_path(directory: &std::path::Path, name: &str) -> PathBuf {
+fn unused_path(
+    directory: &std::path::Path,
+    name: &str,
+    taken: impl Fn(&std::path::Path) -> bool,
+) -> PathBuf {
     let name = std::path::Path::new(name)
         .file_name()
         .and_then(|name| name.to_str())
@@ -709,7 +740,7 @@ fn unused_path(directory: &std::path::Path, name: &str) -> PathBuf {
                 None => stem,
             })
         })
-        .find(|path| !path.exists())
+        .find(|path| !taken(path))
         .unwrap_or_else(|| directory.join(name))
 }
 
@@ -1129,24 +1160,39 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("xd-downloads-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         assert_eq!(
-            unused_path(&directory, "report.csv"),
+            unused_path(&directory, "report.csv", |path| path.exists()),
             directory.join("report.csv")
         );
         std::fs::write(directory.join("report.csv"), "").unwrap();
         std::fs::write(directory.join("report (1).csv"), "").unwrap();
         assert_eq!(
-            unused_path(&directory, "report.csv"),
+            unused_path(&directory, "report.csv", |path| path.exists()),
             directory.join("report (2).csv")
         );
         assert_eq!(
-            unused_path(&directory, "../../etc/passwd"),
+            unused_path(&directory, "../../etc/passwd", |path| path.exists()),
             directory.join("passwd")
         );
-        assert_eq!(unused_path(&directory, ""), directory.join("download"));
         assert_eq!(
-            unused_path(&directory, ".bashrc"),
+            unused_path(&directory, "", |path| path.exists()),
+            directory.join("download")
+        );
+        assert_eq!(
+            unused_path(&directory, ".bashrc", |path| path.exists()),
             directory.join(".bashrc")
         );
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_reserved_download_name_is_not_handed_out_again() {
+        let directory = std::path::Path::new("/nonexistent-xd-downloads");
+        let reserved = [directory.join("a.zip"), directory.join("a (1).zip")];
+        assert_eq!(
+            unused_path(directory, "a.zip", |path| reserved
+                .iter()
+                .any(|taken| taken == path)),
+            directory.join("a (2).zip")
+        );
     }
 }
