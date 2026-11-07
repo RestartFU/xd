@@ -2,12 +2,18 @@
 //!
 //! The native child is above GPUI's drawing surface. Owners must hide it when
 //! showing a modal, changing workspaces, or removing the pane from the tree.
+//!
+//! On Linux, GTK and WebKit's UI side run on their own thread (see
+//! [`gtk_thread`]) so GPUI frames cannot delay page painting or scrolling, and
+//! page work cannot delay GPUI. Every native call goes through
+//! [`NativeBrowser::with_view`], and results return as [`NativeEvent`]s.
 
 use std::{
     cell::{Cell, RefCell},
     env,
     path::PathBuf,
     rc::Rc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -80,6 +86,11 @@ enum NativeEvent {
     TitleReady,
     Open(String),
     Error(String),
+    Navigation {
+        url: Option<String>,
+        can_back: bool,
+        can_forward: bool,
+    },
 }
 
 #[derive(Default)]
@@ -93,7 +104,7 @@ struct PendingTitle {
 #[derive(Clone)]
 struct NativeEvents {
     sender: Sender<NativeEvent>,
-    title: Rc<RefCell<PendingTitle>>,
+    title: Arc<Mutex<PendingTitle>>,
 }
 
 impl NativeEvents {
@@ -102,7 +113,7 @@ impl NativeEvents {
         (
             Self {
                 sender,
-                title: Rc::default(),
+                title: Arc::default(),
             },
             receiver,
         )
@@ -112,8 +123,12 @@ impl NativeEvents {
         let _ = self.sender.try_send(event);
     }
 
+    fn pending_title(&self) -> MutexGuard<'_, PendingTitle> {
+        self.title.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn title_changed(&self, title: String) {
-        let mut pending = self.title.borrow_mut();
+        let mut pending = self.pending_title();
         if pending.latest.as_ref() == Some(&title) {
             return;
         }
@@ -124,12 +139,12 @@ impl NativeEvents {
         pending.queued = true;
         drop(pending);
         if self.sender.try_send(NativeEvent::TitleReady).is_err() {
-            self.title.borrow_mut().queued = false;
+            self.pending_title().queued = false;
         }
     }
 
     fn take_title(&self) -> Option<String> {
-        let mut pending = self.title.borrow_mut();
+        let mut pending = self.pending_title();
         pending.queued = false;
         pending.latest.take()
     }
@@ -142,7 +157,58 @@ thread_local! {
 #[cfg(target_os = "linux")]
 thread_local! {
     static SHARED_GTK_CONTEXT: RefCell<Option<webkit2gtk::WebContext>> = const { RefCell::new(None) };
-    static VISIBLE_GTK_BROWSERS: Cell<usize> = const { Cell::new(0) };
+    static GTK_VIEWS: RefCell<std::collections::HashMap<u64, NativeEntry>> = RefCell::default();
+}
+
+type NativeEntry = (WebView, Rc<RefCell<WebContext>>);
+
+/// The one thread that touches GTK, GDK, and WebKit's UI side on Linux.
+///
+/// WebKit's frames and input wait on this thread, so sharing GPUI's would make
+/// a page stutter whenever the window redraws, such as during a streaming
+/// reply. GDK opens its own X11 connection, independent of GPUI's, and nothing
+/// else in the process uses GLib's default main context.
+#[cfg(target_os = "linux")]
+mod gtk_thread {
+    use std::{sync::OnceLock, thread};
+
+    use async_channel::Sender;
+    use gtk::glib::MainContext;
+
+    type Job = Box<dyn FnOnce() + Send>;
+
+    fn start() -> Option<Sender<Job>> {
+        let (sender, receiver) = async_channel::unbounded::<Job>();
+        thread::Builder::new()
+            .name("xd-gtk".into())
+            .spawn(move || {
+                let context = MainContext::default();
+                // Own the context for the thread's lifetime: GLib only wakes a
+                // blocked iteration for other threads' sources if it has an owner.
+                let Ok(_owner) = context.acquire() else {
+                    return;
+                };
+                context.spawn_local(async move {
+                    while let Ok(job) = receiver.recv().await {
+                        job();
+                    }
+                });
+                loop {
+                    context.iteration(true);
+                }
+            })
+            .ok()?;
+        Some(sender)
+    }
+
+    /// Queue a job, preserving submission order. A job dropped because the
+    /// thread is gone also drops whatever reply channel it captured.
+    pub(super) fn post(job: impl FnOnce() + Send + 'static) {
+        static JOBS: OnceLock<Option<Sender<Job>>> = OnceLock::new();
+        if let Some(jobs) = JOBS.get_or_init(start) {
+            let _ = jobs.try_send(Box::new(job));
+        }
+    }
 }
 
 /// Configure both native toolkits before any threads or windows are created.
@@ -498,10 +564,10 @@ impl BrowserPane {
         } else if tab.display.native_visible.get()
             && let Some(native) = &tab.display.native
         {
-            let _ = native.with_view(|view| {
+            native.with_view(|view| {
                 #[cfg(target_os = "linux")]
                 focus_gtk_webview(&view.webview());
-                view.focus()
+                let _ = view.focus();
             });
         }
     }
@@ -794,14 +860,8 @@ impl BrowserTab {
         let (native, error) = if cfg!(test) {
             (None, None)
         } else {
-            match create_native(window, events.clone(), cx) {
-                Ok((native, context)) => (
-                    Some(Rc::new(NativeBrowser {
-                        view: RefCell::new(Some(native)),
-                        _context: context,
-                    })),
-                    None,
-                ),
+            match NativeBrowser::create(window, events.clone()) {
+                Ok(native) => (Some(Rc::new(native)), None),
                 Err(error) => (None, Some(error)),
             }
         };
@@ -846,7 +906,7 @@ impl BrowserTab {
                 && tab.display.native_visible.get()
                 && let Some(native) = &tab.display.native
             {
-                let _ = native.with_view(|view| {
+                native.with_view(|view| {
                     // GPUI treats FocusOut(Inferior) as deactivation too.
                     // Keep page focus when X moved into this native child.
                     let webview = view.webview();
@@ -876,7 +936,7 @@ impl BrowserTab {
             loop {
                 Timer::after(Duration::from_millis(250)).await;
                 if this
-                    .update(cx, |pane, cx| pane.refresh_navigation(cx))
+                    .update(cx, |pane, _| pane.refresh_navigation())
                     .is_err()
                 {
                     break;
@@ -933,19 +993,20 @@ impl BrowserTab {
             cx.notify();
             return;
         };
-        match native.with_view(|view| view.load_url(&url)) {
-            Some(Ok(())) => {
-                self.error = None;
-                self.start_loading(cx);
-                self.title.clear();
-                self.record_url(url, cx);
-            }
-            Some(Err(error)) => {
-                self.error = Some(format!("Could not open page: {error}"));
-                self.record_url(url, cx);
-            }
-            None => return,
+        if native.is_disposed() {
+            return;
         }
+        let events = self.display.events.clone();
+        let target = url.clone();
+        native.with_view(move |view| {
+            if let Err(error) = view.load_url(&target) {
+                events.send(NativeEvent::Error(format!("Could not open page: {error}")));
+            }
+        });
+        self.error = None;
+        self.start_loading(cx);
+        self.title.clear();
+        self.record_url(url, cx);
         self.refresh_visibility();
         cx.notify();
     }
@@ -998,7 +1059,7 @@ impl BrowserTab {
                     self.load_timed_out = false;
                 }
                 self.record_url(url, cx);
-                self.refresh_navigation(cx);
+                self.refresh_navigation();
             }
             NativeEvent::TitleReady => {
                 let Some(title) = self.display.events.take_title() else {
@@ -1016,27 +1077,45 @@ impl BrowserTab {
                 self.load_timed_out = false;
                 self.error = Some(error);
             }
+            // This arrives several times a second, so it must only redraw when
+            // something changed; it returns before the unconditional notify.
+            NativeEvent::Navigation {
+                url,
+                can_back,
+                can_forward,
+            } => {
+                self.apply_navigation(url, can_back, can_forward, cx);
+                return;
+            }
         }
         self.refresh_visibility();
         cx.notify();
     }
 
-    fn refresh_navigation(&mut self, cx: &mut Context<Self>) {
+    fn refresh_navigation(&mut self) {
         if !self.display.visible.get() {
             return;
         }
         let Some(native) = self.display.native.as_ref() else {
             return;
         };
-        let Some((url, can_back, can_forward)) = native.with_view(|view| {
-            (
-                view.url().ok(),
-                view.can_go_back().unwrap_or(false),
-                view.can_go_forward().unwrap_or(false),
-            )
-        }) else {
-            return;
-        };
+        let events = self.display.events.clone();
+        native.with_view(move |view| {
+            events.send(NativeEvent::Navigation {
+                url: view.url().ok(),
+                can_back: view.can_go_back().unwrap_or(false),
+                can_forward: view.can_go_forward().unwrap_or(false),
+            });
+        });
+    }
+
+    fn apply_navigation(
+        &mut self,
+        url: Option<String>,
+        can_back: bool,
+        can_forward: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.can_back != can_back || self.can_forward != can_forward {
             self.can_back = can_back;
             self.can_forward = can_forward;
@@ -1055,36 +1134,43 @@ impl BrowserTab {
     }
 
     fn history(&mut self, back: bool, cx: &mut Context<Self>) {
-        let result = match &self.display.native {
-            Some(native) if back => native.with_view(WebView::go_back).unwrap_or(Ok(())),
-            Some(native) => native.with_view(WebView::go_forward).unwrap_or(Ok(())),
-            None => Ok(()),
-        };
-        if let Err(error) = result {
-            self.error = Some(error.to_string());
-        } else {
-            self.address_dirty = false;
-            self.error = None;
-            self.loading = false;
-            self.load_timed_out = false;
-            self.loading_generation = self.loading_generation.wrapping_add(1);
-            // Same-document history may have no load events. Keep URL polling
-            // active; a document load's Started event will arm its timeout.
+        if let Some(native) = &self.display.native {
+            let events = self.display.events.clone();
+            native.with_view(move |view| {
+                let result = if back {
+                    view.go_back()
+                } else {
+                    view.go_forward()
+                };
+                if let Err(error) = result {
+                    events.send(NativeEvent::Error(error.to_string()));
+                }
+            });
         }
+        self.address_dirty = false;
+        self.error = None;
+        self.loading = false;
+        self.load_timed_out = false;
+        self.loading_generation = self.loading_generation.wrapping_add(1);
+        // Same-document history may have no load events. Keep URL polling
+        // active; a document load's Started event will arm its timeout.
         self.refresh_visibility();
         cx.notify();
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
         if let Some(native) = &self.display.native {
-            match native.with_view(WebView::reload) {
-                Some(Ok(())) => {
-                    self.start_loading(cx);
-                    self.error = None;
-                }
-                Some(Err(error)) => self.error = Some(error.to_string()),
-                None => return,
+            if native.is_disposed() {
+                return;
             }
+            let events = self.display.events.clone();
+            native.with_view(move |view| {
+                if let Err(error) = view.reload() {
+                    events.send(NativeEvent::Error(error.to_string()));
+                }
+            });
+            self.start_loading(cx);
+            self.error = None;
         }
         self.refresh_visibility();
         cx.notify();
@@ -1312,53 +1398,138 @@ impl TabDisplay {
         if self.native_visible.replace(shown) == shown {
             return;
         }
-        #[cfg(target_os = "linux")]
-        if !shown {
-            let _ = native.with_view(|view| blur_gtk_webview(&view.webview()));
-        }
         self.bounds.set(None);
-        #[cfg(target_os = "linux")]
-        VISIBLE_GTK_BROWSERS.with(|count| {
-            count.set(if shown {
-                count.get() + 1
-            } else {
-                count.get().saturating_sub(1)
-            });
+        let events = self.events.clone();
+        native.with_view(move |view| {
+            #[cfg(target_os = "linux")]
+            if !shown {
+                blur_gtk_webview(&view.webview());
+            }
+            if let Err(error) = view.set_visible(shown) {
+                events.send(NativeEvent::Error(error.to_string()));
+            }
         });
-        if let Some(Err(error)) = native.with_view(|view| view.set_visible(shown)) {
-            self.events.send(NativeEvent::Error(error.to_string()));
-        }
     }
 
     fn shutdown(&self) {
         self.set_visible(false);
         if let Some(native) = &self.native {
-            let view = native.view.borrow_mut().take();
-            #[cfg(target_os = "linux")]
-            if let Some(view) = &view {
-                use gtk::prelude::*;
-                if let Some(window) = register_gtk_browser_window(view) {
-                    // Release GTK's resources before Wry destroys its X11 child.
-                    window.unrealize();
-                }
-            }
-            drop(view);
+            native.dispose();
         }
     }
 }
 
+/// A handle to a native view living on the thread its toolkit requires: GPUI's
+/// on macOS and Windows, [`gtk_thread`] on Linux.
 struct NativeBrowser {
-    view: RefCell<Option<WebView>>,
+    #[cfg(target_os = "linux")]
+    id: u64,
     // Keep the context alive even if a previously painted layout element is
     // still holding the native view after the owning entity is released.
-    _context: Rc<RefCell<WebContext>>,
+    #[cfg(not(target_os = "linux"))]
+    entry: RefCell<Option<NativeEntry>>,
+    disposed: Cell<bool>,
 }
 
 impl NativeBrowser {
-    fn with_view<T>(&self, apply: impl FnOnce(&WebView) -> T) -> Option<T> {
-        self.view.borrow().as_ref().map(apply)
+    fn is_disposed(&self) -> bool {
+        self.disposed.get()
+    }
+
+    /// Apply a call to the view, in submission order. On Linux this returns
+    /// before the call runs, so outcomes must be reported as a [`NativeEvent`].
+    /// `Send` holds on every platform so that shared callers stay portable.
+    fn with_view(&self, apply: impl FnOnce(&WebView) + Send + 'static) {
+        if self.is_disposed() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let id = self.id;
+            gtk_thread::post(move || {
+                GTK_VIEWS.with(|views| {
+                    if let Some((view, _)) = views.borrow().get(&id) {
+                        apply(view);
+                    }
+                });
+            });
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Some((view, _)) = self.entry.borrow().as_ref() {
+            apply(view);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create(window: &Window, events: NativeEvents) -> Result<Self, String> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let _ = window;
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let (reply, created) = std::sync::mpsc::channel();
+        gtk_thread::post(move || {
+            let result = create_linux_native(events).map(|entry| {
+                GTK_VIEWS.with(|views| views.borrow_mut().insert(id, entry));
+            });
+            let _ = reply.send(result);
+        });
+        created
+            .recv_timeout(NATIVE_REPLY_TIMEOUT)
+            .map_err(|_| "The browser did not start. Restart xd to try again.".to_string())??;
+        Ok(Self {
+            id,
+            disposed: Cell::new(false),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn create(window: &Window, events: NativeEvents) -> Result<Self, String> {
+        let parent = NativeParent(
+            HasWindowHandle::window_handle(window)
+                .map_err(|error| error.to_string())?
+                .as_raw(),
+        );
+        Ok(Self {
+            entry: RefCell::new(Some(create_native(parent, events)?)),
+            disposed: Cell::new(false),
+        })
+    }
+
+    /// Destroy the view before returning: callers may be about to destroy the
+    /// parent window, and the X11 child must not outlive it.
+    fn dispose(&self) {
+        if self.disposed.replace(true) {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let id = self.id;
+            let (reply, disposed) = std::sync::mpsc::channel();
+            gtk_thread::post(move || {
+                let entry = GTK_VIEWS.with(|views| views.borrow_mut().remove(&id));
+                if let Some((view, context)) = entry {
+                    use gtk::prelude::*;
+                    if let Some(window) = register_gtk_browser_window(&view) {
+                        // Release GTK's resources before Wry destroys its X11 child.
+                        window.unrealize();
+                    }
+                    drop(view);
+                    drop(context);
+                }
+                let _ = reply.send(());
+            });
+            let _ = disposed.recv_timeout(NATIVE_REPLY_TIMEOUT);
+        }
+        #[cfg(not(target_os = "linux"))]
+        drop(self.entry.borrow_mut().take());
     }
 }
+
+/// How long GPUI waits for the two calls it cannot leave pending. The GTK
+/// thread never waits on GPUI, so reaching this means WebKit itself is stuck.
+#[cfg(target_os = "linux")]
+const NATIVE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 type NativeAllocation = (Bounds<Pixels>, f32, gpui::Point<Pixels>);
 
@@ -1429,12 +1600,11 @@ impl gpui::Element for NativeSurface {
                 )
                 .into(),
             };
-            match self.native.with_view(|view| {
-                let result = if geometry_changed {
-                    view.set_bounds(rect)
-                } else {
-                    Ok(())
-                };
+            let events = self.events.clone();
+            self.native.with_view(move |view| {
+                if geometry_changed && let Err(error) = view.set_bounds(rect) {
+                    events.send(NativeEvent::Error(error.to_string()));
+                }
                 #[cfg(target_os = "windows")]
                 {
                     use wry::WebViewExtWindows;
@@ -1443,14 +1613,8 @@ impl gpui::Element for NativeSurface {
                         let _ = view.controller().NotifyParentWindowPositionChanged();
                     }
                 }
-                result
-            }) {
-                Some(Ok(())) => self.bounds.set(Some(allocation)),
-                Some(Err(error)) => {
-                    self.events.send(NativeEvent::Error(error.to_string()));
-                }
-                None => {}
-            }
+            });
+            self.bounds.set(Some(allocation));
         }
         window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
@@ -1470,11 +1634,13 @@ impl gpui::Element for NativeSurface {
             if phase == DispatchPhase::Capture && !bounds.contains(&event.position) {
                 #[cfg(target_os = "linux")]
                 {
-                    let _ = native.with_view(|view| blur_gtk_webview(&view.webview()));
+                    native.with_view(|view| blur_gtk_webview(&view.webview()));
                     _window.activate_window();
                 }
                 #[cfg(not(target_os = "linux"))]
-                let _ = native.with_view(WebView::focus_parent);
+                native.with_view(|view| {
+                    let _ = view.focus_parent();
+                });
             }
         });
     }
@@ -1490,37 +1656,22 @@ impl HasWindowHandle for NativeParent {
     }
 }
 
-fn create_native(
-    window: &Window,
-    events: NativeEvents,
-    cx: &mut App,
-) -> Result<(WebView, Rc<RefCell<WebContext>>), String> {
-    #[cfg(target_os = "linux")]
-    {
-        if env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
-            return Err(
-                "The integrated browser needs X11 or XWayland. Enable XWayland and restart xd."
-                    .into(),
-            );
-        }
-        gtk::init().map_err(|error| format!("Could not initialize the browser: {error}"))?;
-        ensure_gtk_pump(cx);
+/// Runs on [`gtk_thread`], which is therefore the thread GTK treats as its main.
+#[cfg(target_os = "linux")]
+fn create_linux_native(events: NativeEvents) -> Result<NativeEntry, String> {
+    if env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
+        return Err(
+            "The integrated browser needs X11 or XWayland. Enable XWayland and restart xd.".into(),
+        );
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = cx;
-    #[cfg(target_os = "linux")]
-    let parent = {
-        let _ = window;
-        NativeParent(RawWindowHandle::Xlib(XlibWindowHandle::new(
-            find_x11_parent()? as _,
-        )))
-    };
-    #[cfg(not(target_os = "linux"))]
-    let parent = NativeParent(
-        HasWindowHandle::window_handle(window)
-            .map_err(|error| error.to_string())?
-            .as_raw(),
-    );
+    gtk::init().map_err(|error| format!("Could not initialize the browser: {error}"))?;
+    let parent = NativeParent(RawWindowHandle::Xlib(XlibWindowHandle::new(
+        find_x11_parent()? as _,
+    )));
+    create_native(parent, events)
+}
+
+fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEntry, String> {
     let context = SHARED_BROWSER_CONTEXT.with(|shared| {
         shared
             .borrow_mut()
@@ -1611,8 +1762,8 @@ fn register_gtk_browser_window(view: &WebView) -> Option<gtk::Window> {
     let window = view.webview().toplevel()?.downcast::<gtk::Window>().ok()?;
     if let Some(gdk_window) = window.window() {
         let mut owner = std::ptr::null_mut();
-        // SAFETY: inspect the live GDK window's opaque owner on GTK's main
-        // thread; the pointer is never dereferenced.
+        // SAFETY: inspect the live GDK window's opaque owner on GTK's thread;
+        // the pointer is never dereferenced.
         unsafe {
             gtk::gdk::ffi::gdk_window_get_user_data(gdk_window.as_ptr(), &mut owner);
         }
@@ -1655,7 +1806,7 @@ fn set_gtk_window_focus(window: &gtk::Window, focused: bool) {
     // GDK does not translate foreign-window focus into GtkWindow state.
     // Deliver the standard GTK focus event on interaction, rather than
     // leaving WebKit's document/caret unfocused while keyboard input works.
-    // SAFETY: this event is allocated and freed here on GTK's main thread.
+    // SAFETY: this event is allocated and freed here on GTK's thread.
     // It owns one reference to the live GDK window; GTK handles it synchronously.
     unsafe {
         let event = gtk::gdk::ffi::gdk_event_new(gtk::gdk::ffi::GDK_FOCUS_CHANGE);
@@ -1700,7 +1851,7 @@ fn gtk_browser_keyboard_focus(
     use gtk::prelude::*;
     use x11rb::protocol::xproto::ConnectionExt;
     let window = gtk_browser_toplevel(webview)?.window()?;
-    // SAFETY: borrow the live X11 GDK window on its owning main thread.
+    // SAFETY: borrow the live X11 GDK window on its owning thread.
     let child = u32::try_from(unsafe { gdk_x11_window_get_xid(window.as_ptr()) }).ok()?;
     let (connection, _) = x11rb::connect(None).ok()?;
     let mut focus = connection.get_input_focus().ok()?.reply().ok()?.focus;
@@ -1859,52 +2010,6 @@ fn find_x11_parent() -> Result<u32, String> {
     }
 
     lookup().map_err(|error| format!("Could not embed the browser: {error}"))
-}
-
-#[cfg(target_os = "linux")]
-fn ensure_gtk_pump(cx: &mut App) {
-    use std::time::Instant;
-
-    thread_local! { static RUNNING: Cell<bool> = const { Cell::new(false) }; }
-    if RUNNING.replace(true) {
-        return;
-    }
-    cx.spawn(async move |cx| {
-        let mut pending_work = false;
-        loop {
-            // Use a short catch-up interval after a busy dispatch budget,
-            // then return to normal visible/hidden cadence once GTK is idle.
-            let delay = VISIBLE_GTK_BROWSERS.with(|count| {
-                Duration::from_millis(if count.get() == 0 {
-                    16
-                } else if pending_work {
-                    1
-                } else {
-                    4
-                })
-            });
-            Timer::after(delay).await;
-            match cx.update(|_| {
-                // Bound elapsed time as well as iterations so page work
-                // yields promptly to GPUI input and terminal rendering.
-                let started = Instant::now();
-                for _ in 0..64 {
-                    if !gtk::events_pending() {
-                        break;
-                    }
-                    gtk::main_iteration_do(false);
-                    if started.elapsed() >= Duration::from_millis(2) {
-                        break;
-                    }
-                }
-                gtk::events_pending()
-            }) {
-                Ok(pending) => pending_work = pending,
-                Err(_) => break,
-            }
-        }
-    })
-    .detach();
 }
 
 fn is_browser_url(address: &str) -> bool {
@@ -2302,6 +2407,85 @@ mod tests {
         cx.run_until_parked();
         draw_frames(cx);
         cx.update(|_, cx| assert_selected_visible(pane.read(cx)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gtk_jobs_run_in_order_on_one_dedicated_thread() {
+        let (reply, results) = std::sync::mpsc::channel();
+        for index in 0..1_000 {
+            let reply = reply.clone();
+            gtk_thread::post(move || {
+                let _ = reply.send((index, std::thread::current().id()));
+            });
+        }
+        let received = (0..1_000)
+            .map(|_| results.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect::<Vec<_>>();
+        let gtk = received[0].1;
+        assert_ne!(gtk, std::thread::current().id());
+        for (expected, (index, thread)) in received.into_iter().enumerate() {
+            assert_eq!(index, expected);
+            assert_eq!(thread, gtk);
+        }
+    }
+
+    #[test]
+    fn native_events_can_cross_to_the_gtk_thread() {
+        fn assert_send<T: Send>() {}
+        assert_send::<NativeEvents>();
+    }
+
+    #[gpui::test]
+    fn navigation_polls_update_state_without_overriding_a_pending_load(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserTab::new(
+                None,
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        let poll = |url: &str| NativeEvent::Navigation {
+            url: Some(url.into()),
+            can_back: true,
+            can_forward: false,
+        };
+        pane.update(cx, |pane, cx| {
+            pane.native_event(poll("http://localhost:3000/spa"), cx);
+            assert_eq!(
+                pane.current_url().as_deref(),
+                Some("http://localhost:3000/spa")
+            );
+            assert!(pane.can_back);
+            assert!(!pane.can_forward);
+
+            pane.navigate("http://localhost:3000/next", cx);
+            // Queued before the load began, so it describes the old document.
+            pane.loading = true;
+            pane.native_event(poll("http://localhost:3000/old"), cx);
+            assert_eq!(
+                pane.current_url().as_deref(),
+                Some("http://localhost:3000/next")
+            );
+
+            pane.loading = false;
+            pane.native_event(
+                NativeEvent::Navigation {
+                    url: Some("about:blank".into()),
+                    can_back: false,
+                    can_forward: false,
+                },
+                cx,
+            );
+            assert_eq!(
+                pane.current_url().as_deref(),
+                Some("http://localhost:3000/next")
+            );
+            assert!(!pane.can_back);
+        });
     }
 
     #[test]
