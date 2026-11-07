@@ -1989,10 +1989,10 @@ fn normalize_url(address: &str) -> Result<String, String> {
             && !prefix.contains('.')
             && prefix != "localhost"
             && !prefix.starts_with('[')
-            && !suffix
+            && suffix
                 .split('/')
                 .next()
-                .is_some_and(|port| port.parse::<u16>().is_ok())
+                .is_none_or(|port| port.parse::<u16>().is_err())
         {
             return Err("This browser supports HTTP and HTTPS URLs.".into());
         }

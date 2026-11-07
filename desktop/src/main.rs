@@ -1,4 +1,9 @@
 #![deny(dead_code, unused_imports)]
+// Collapsing these would move a condition into a match guard, where a false one
+// falls through to the later arms instead of doing nothing.
+#![allow(clippy::collapsible_match)]
+// One range in a Vec is what these mean: a single line, or a single link.
+#![allow(clippy::single_range_in_vec_init)]
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
@@ -1562,10 +1567,10 @@ impl TranscriptSnapshot {
             return Some(item);
         }
         live_index = live_index.saturating_sub(self.live_items.len());
-        if let Some(live_text) = self.live_text.as_deref() {
-            if live_index == 0 {
-                return Some(live_text);
-            }
+        if let Some(live_text) = self.live_text.as_deref()
+            && live_index == 0
+        {
+            return Some(live_text);
         }
         None
     }
@@ -2448,6 +2453,8 @@ impl XdDesktop {
             cli_versions_loading: false,
             cli_versions_error: None,
             auth_input_text: String::new(),
+            // A unit struct on Windows only.
+            #[allow(clippy::default_constructed_unit_structs)]
             speech_output: SpeechOutput::default(),
             pending_speech: None,
             host: None,
@@ -3311,11 +3318,11 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        if self.active_endpoint == ChatEndpoint::Local {
-            if !self.switch_active_endpoint(ChatEndpoint::Remote, cx) {
-                cx.notify();
-                return;
-            }
+        if self.active_endpoint == ChatEndpoint::Local
+            && !self.switch_active_endpoint(ChatEndpoint::Remote, cx)
+        {
+            cx.notify();
+            return;
         }
         if self.remote_state == RemoteState::Connected {
             if let Some(host) = &self.remote_host {
@@ -4980,17 +4987,15 @@ impl XdDesktop {
                     .as_ref()
                     .is_some_and(|pending| pending.chat_id == chat_id)
                     && let Some(pending) = self.pending_speech.take()
+                    && self.settings.speech
+                    && let Some(message) = self.model.messages.iter().rev().find(|message| {
+                        message.role == "assistant"
+                            && message.id.is_some()
+                            && message.id != pending.previous_assistant_id
+                    })
+                    && let Some(text) = markdown::spoken_text(&message.content)
                 {
-                    if self.settings.speech
-                        && let Some(message) = self.model.messages.iter().rev().find(|message| {
-                            message.role == "assistant"
-                                && message.id.is_some()
-                                && message.id != pending.previous_assistant_id
-                        })
-                        && let Some(text) = markdown::spoken_text(&message.content)
-                    {
-                        self.speech_output.speak(&text);
-                    }
+                    self.speech_output.speak(&text);
                 }
                 match direction {
                     MessagePageDirection::Tail => {
@@ -5368,10 +5373,10 @@ impl XdDesktop {
                 .chats
                 .iter()
                 .any(|chat| chat.id == chat_id)
-            && !self
+            && self
                 .terminal_panel
                 .as_ref()
-                .is_some_and(|panel| panel.chat_id == chat_id)
+                .is_none_or(|panel| panel.chat_id != chat_id)
             && !self
                 .terminal_panel_cache
                 .contains_key(&(endpoint, chat_id.clone()))
@@ -5583,36 +5588,35 @@ impl XdDesktop {
                 };
                 if !expected.is_empty()
                     && body.get("request").and_then(Value::as_str) == Some(expected.as_str())
+                    && let Some(diff) = &mut self.diff_panel
                 {
-                    if let Some(diff) = &mut self.diff_panel {
-                        diff.action = None;
-                        if body.get("success").and_then(Value::as_bool) == Some(true) {
-                            diff.action_error = None;
-                            let title = body
-                                .get("title")
+                    diff.action = None;
+                    if body.get("success").and_then(Value::as_bool) == Some(true) {
+                        diff.action_error = None;
+                        let title = body
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if kind == "commit" {
+                            self.git_commit_message = title.clone();
+                            self.git_commit_input
+                                .update(cx, |input, cx| input.set_text(title, cx));
+                        } else {
+                            diff.pr_title = Some(title);
+                            diff.pr_body = body
+                                .get("body")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_owned();
-                            if kind == "commit" {
-                                self.git_commit_message = title.clone();
-                                self.git_commit_input
-                                    .update(cx, |input, cx| input.set_text(title, cx));
-                            } else {
-                                diff.pr_title = Some(title);
-                                diff.pr_body = body
-                                    .get("body")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned();
-                            }
-                        } else {
-                            diff.action_error = Some(
-                                body.get("error")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("The assistant could not write a commit message.")
-                                    .to_owned(),
-                            );
                         }
+                    } else {
+                        diff.action_error = Some(
+                            body.get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("The assistant could not write a commit message.")
+                                .to_owned(),
+                        );
                     }
                 }
             }
@@ -5771,10 +5775,10 @@ impl XdDesktop {
     }
 
     fn request_tree(&mut self) {
-        if let Some(host) = self.active_host() {
-            if let Err(error) = host.tree() {
-                self.model.connection_error = Some(error);
-            }
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.tree()
+        {
+            self.model.connection_error = Some(error);
         }
     }
 
@@ -6128,12 +6132,6 @@ impl XdDesktop {
 
     // --- the file tree and its tabs -----------------------------------------
 
-    /// Starts the tree over for the chat now selected.
-    ///
-    /// Open files are dropped with it: their paths are relative to a working
-    /// directory that has just changed, so keeping them would leave tabs
-    /// pointing at files in a repository nobody is looking at.
-
     fn list_tree_directory(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
@@ -6150,10 +6148,6 @@ impl XdDesktop {
         }
         cx.notify();
     }
-
-    /// Opens or closes a folder, fetching its entries the first time.
-
-    /// Brings a file to the front, reading it only if it is not open yet.
 
     fn save_file_tab(&mut self, cx: &mut Context<Self>) {
         let Some(file) = self.open_files.current() else {
@@ -6335,10 +6329,10 @@ impl XdDesktop {
             .entry(key)
             .or_default()
             .push(chat_id.clone());
-        if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
-            if let Some(agent) = AgentCli::from_backend(&next.backend) {
-                self.open_minimal_session(next.folder.clone(), next.id.clone(), agent, window, cx);
-            }
+        if self.model.selected_chat.as_deref() == Some(chat_id.as_str())
+            && let Some(agent) = AgentCli::from_backend(&next.backend)
+        {
+            self.open_minimal_session(next.folder.clone(), next.id.clone(), agent, window, cx);
         }
         let _ = self.settings.save();
         cx.notify();
@@ -7826,10 +7820,10 @@ impl XdDesktop {
             panel.loading = true;
             panel.error = None;
         }
-        if let Some(host) = self.active_host() {
-            if let Err(error) = host.terminal_list(&chat_id) {
-                self.model.connection_error = Some(error);
-            }
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.terminal_list(&chat_id)
+        {
+            self.model.connection_error = Some(error);
         }
         cx.notify();
     }
@@ -8276,13 +8270,12 @@ impl XdDesktop {
                     diff.loading = false;
                     diff.error = Some(error);
                 }
-                if !files_mode {
-                    if let Err(error) = host.git_status(&chat_id, generation)
-                        && let Some(diff) = &mut self.diff_panel
-                    {
-                        diff.status_loading = false;
-                        diff.action_error = Some(error);
-                    }
+                if !files_mode
+                    && let Err(error) = host.git_status(&chat_id, generation)
+                    && let Some(diff) = &mut self.diff_panel
+                {
+                    diff.status_loading = false;
+                    diff.action_error = Some(error);
                 }
             }
             None => {
@@ -8708,10 +8701,10 @@ impl XdDesktop {
     }
 
     fn request_chat(&mut self, chat_id: &str) {
-        if let Some(host) = self.active_host() {
-            if let Err(error) = host.chat(chat_id) {
-                self.model.connection_error = Some(error);
-            }
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.chat(chat_id)
+        {
+            self.model.connection_error = Some(error);
         }
     }
 
@@ -9540,31 +9533,27 @@ impl XdDesktop {
             .iter()
             .find(|p| p["method"] == "item/tool/requestUserInput")
             .cloned()
-        {
-            if let Some(id) = pending["request_id"].as_str() {
-                if let Some(question) =
-                    pending["params"]["questions"]
-                        .as_array()
-                        .and_then(|questions| {
-                            questions.iter().find(|q| {
-                                !self.interaction_answers.contains_key(&format!(
-                                    "{id}/{}",
-                                    q["id"].as_str().unwrap_or_default()
-                                ))
-                            })
+            && let Some(id) = pending["request_id"].as_str()
+            && let Some(question) =
+                pending["params"]["questions"]
+                    .as_array()
+                    .and_then(|questions| {
+                        questions.iter().find(|q| {
+                            !self.interaction_answers.contains_key(&format!(
+                                "{id}/{}",
+                                q["id"].as_str().unwrap_or_default()
+                            ))
                         })
-                {
-                    if let Some(qid) = question["id"].as_str() {
-                        self.answer_interaction(
-                            id.to_owned(),
-                            qid.to_owned(),
-                            self.question_answer.clone(),
-                            cx,
-                        );
-                        return;
-                    }
-                }
-            }
+                    })
+            && let Some(qid) = question["id"].as_str()
+        {
+            self.answer_interaction(
+                id.to_owned(),
+                qid.to_owned(),
+                self.question_answer.clone(),
+                cx,
+            );
+            return;
         }
         self.answer_question(self.question_answer.trim().to_owned(), cx);
     }
@@ -11168,6 +11157,7 @@ impl XdDesktop {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_session_card(
         &mut self,
         colors: ThemeColors,
@@ -13371,6 +13361,7 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_native_message(
         colors: ThemeColors,
         message: &Message,
@@ -13459,9 +13450,11 @@ impl XdDesktop {
         };
         // A reply's images sit among its blocks, where it named them; anyone
         // else's follow the text they were sent with.
-        let attached = (role != "assistant")
-            .then_some(message.image_paths())
-            .unwrap_or_default();
+        let attached = if role != "assistant" {
+            message.image_paths()
+        } else {
+            Default::default()
+        };
         let body = div()
             .w_full()
             .flex()
@@ -13595,10 +13588,9 @@ impl XdDesktop {
 
     fn respond_interaction(&mut self, request_id: String, response: Value, cx: &mut Context<Self>) {
         if let (Some(chat), Some(host)) = (self.model.selected_chat.as_deref(), self.active_host())
+            && let Err(error) = host.respond(chat, &request_id, response)
         {
-            if let Err(error) = host.respond(chat, &request_id, response) {
-                self.model.connection_error = Some(error);
-            }
+            self.model.connection_error = Some(error);
         }
         cx.notify();
     }
@@ -13925,7 +13917,7 @@ impl XdDesktop {
                     let near_start = event.visible_range.start <= 8;
                     let near_end = event.visible_range.end.saturating_add(8) >= event.count;
                     let visible = event.visible_range.clone();
-                    let _ = desktop.update(cx, |this, cx| {
+                    desktop.update(cx, |this, cx| {
                         if this.transcript_visible != visible {
                             this.transcript_visible = visible;
                             cx.notify();
@@ -14352,7 +14344,7 @@ impl XdDesktop {
                 .text_size(px(12.0))
                 .max_w(px(if option == "model" { 240.0 } else { 170.0 }))
                 .min_w_0()
-                .debug_selector(move || format!("native-option-{option}").into())
+                .debug_selector(move || format!("native-option-{option}"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.native_option_open = Some(option);
@@ -15718,7 +15710,8 @@ impl XdDesktop {
                 .when_some(panel.error, |card, error| card.child(div().text_sm().text_color(rgb(colors.danger)).child(error)))
                 .child(div().flex().gap_3()
                     .child(ui_button("copy-pairing-code", if can_copy { ButtonKind::Primary } else { ButtonKind::Secondary }, colors).on_click(cx.listener(move |_, _, _, cx| { if let Some(code) = &pairing_code { cx.write_to_clipboard(ClipboardItem::new_string(code.clone())); } })).child("Copy pairing code"))
-                    .child(ui_button("refresh-pairing-code", ButtonKind::Secondary, colors).on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; } if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
+                    .child(ui_button("refresh-pairing-code", ButtonKind::Secondary, colors).on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; }
+                    if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
                     .child(div().flex_1())
                     .child(ui_button("close-pairing", ButtonKind::Ghost, colors).on_click(cx.listener(|this, _, _, cx| { this.share_panel = None; cx.notify(); })).child("Close")))
             ).into_any_element()
@@ -16072,8 +16065,8 @@ impl XdDesktop {
                                 .text_color(rgb(colors.accent_ink))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(host) = this.active_host() {
-                                        if let Err(error) = host.agent_auth_action(
+                                    if let Some(host) = this.active_host()
+                                        && let Err(error) = host.agent_auth_action(
                                             if signing_in {
                                                 "agent-auth-cancel"
                                             } else {
@@ -16081,9 +16074,9 @@ impl XdDesktop {
                                             },
                                             &id,
                                             None,
-                                        ) {
-                                            this.model.connection_error = Some(error);
-                                        }
+                                        )
+                                    {
+                                        this.model.connection_error = Some(error);
                                     }
                                     cx.notify();
                                 }))
@@ -16417,6 +16410,7 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
+        #[allow(clippy::bind_instead_of_map)]
         let sidebar_rename_overlay = self.sidebar_edit.clone().and_then(|edit| {
             let (heading, cancel_id, save_id) = match &edit.target {
                 SidebarTarget::Folder(_) => (
@@ -17577,9 +17571,6 @@ impl Render for XdDesktop {
     }
 }
 
-/// Highlight the source portion of a diff line while leaving its `+`, `-`, or
-/// context marker in the diff color supplied by the surrounding element.
-
 fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
     const MAX_FILES: usize = 500;
     const MAX_LINES: usize = 1_600;
@@ -17760,9 +17751,6 @@ fn decode_git_path(value: &str) -> Result<String, String> {
     }
     String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
 }
-
-/// The vendor mark for an agent, and the colour it is drawn in. GPUI paints an
-/// SVG as a mask, so the colour lives here rather than in the file.
 
 /// Serves the agent marks compiled into the binary, so a bundle needs no icon
 /// theme on the host.
@@ -18096,9 +18084,6 @@ fn scoped_element_id(scope: &str, index: usize) -> u64 {
     hasher.finish()
 }
 
-/// Flattens the rendered text blocks into the text Ctrl+C should receive and
-/// records where each separately laid-out block lives inside it.
-
 fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
     if !edit.submitting {
         return false;
@@ -18259,7 +18244,276 @@ fn strip_source_build_controls(text: &str) -> String {
     String::from_utf8_lossy(&clean).into_owned()
 }
 
+fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
+    text_system
+        .add_fonts(EMBEDDED_UI_FONTS.into_iter().map(Cow::Borrowed).collect())
+        .map_err(|error| error.to_string())
+}
+
+fn main() {
+    #[cfg(target_os = "windows")]
+    windows::configure_environment();
+    browser::configure_platform();
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| argument == "--version" || argument == "-v")
+    {
+        println!("xd {}", desktop_version());
+        return;
+    }
+    Application::new()
+        .with_assets(EmbeddedIcons)
+        .run(|cx: &mut App| {
+            install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+            cx.bind_keys([
+                KeyBinding::new("ctrl-c", CopyRenderedSelection, Some("XdDesktop")),
+                KeyBinding::new("cmd-c", CopyRenderedSelection, Some("XdDesktop")),
+                KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
+                // No context: the shortcut also works before anything has focus. The
+                // terminal's own ctrl-u is bound deeper, so it still wins there.
+                KeyBinding::new("ctrl-u", ToggleUsage, None),
+                KeyBinding::new("cmd-u", ToggleUsage, None),
+                KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
+                KeyBinding::new("delete", Delete, Some("ComposerInput")),
+                KeyBinding::new("ctrl-backspace", DeleteWord, Some("ComposerInput")),
+                KeyBinding::new("alt-backspace", DeleteWord, Some("ComposerInput")),
+                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("ComposerInput")),
+                KeyBinding::new("alt-delete", DeleteWordForward, Some("ComposerInput")),
+                KeyBinding::new("left", Left, Some("ComposerInput")),
+                KeyBinding::new("right", Right, Some("ComposerInput")),
+                KeyBinding::new("ctrl-left", WordLeft, Some("ComposerInput")),
+                KeyBinding::new("alt-left", WordLeft, Some("ComposerInput")),
+                KeyBinding::new("ctrl-right", WordRight, Some("ComposerInput")),
+                KeyBinding::new("alt-right", WordRight, Some("ComposerInput")),
+                KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
+                KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
+                KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some("ComposerInput")),
+                KeyBinding::new("alt-shift-left", SelectWordLeft, Some("ComposerInput")),
+                KeyBinding::new("ctrl-shift-right", SelectWordRight, Some("ComposerInput")),
+                KeyBinding::new("alt-shift-right", SelectWordRight, Some("ComposerInput")),
+                KeyBinding::new("home", Home, Some("ComposerInput")),
+                KeyBinding::new("end", End, Some("ComposerInput")),
+                KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
+                KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
+                KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
+                KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
+                KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
+                KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
+                KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
+                KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
+                KeyBinding::new("enter", Submit, Some("ComposerInput")),
+                KeyBinding::new(
+                    "ctrl-cmd-space",
+                    ShowCharacterPalette,
+                    Some("ComposerInput"),
+                ),
+                KeyBinding::new("backspace", EditorBackspace, Some("FileEditor")),
+                KeyBinding::new("delete", EditorDelete, Some("FileEditor")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("FileEditor")),
+                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("FileEditor")),
+                KeyBinding::new("ctrl-delete", EditorDeleteWordForward, Some("FileEditor")),
+                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("FileEditor")),
+                KeyBinding::new("left", EditorLeft, Some("FileEditor")),
+                KeyBinding::new("right", EditorRight, Some("FileEditor")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("FileEditor")),
+                KeyBinding::new("alt-left", EditorWordLeft, Some("FileEditor")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("FileEditor")),
+                KeyBinding::new("alt-right", EditorWordRight, Some("FileEditor")),
+                KeyBinding::new("up", EditorUp, Some("FileEditor")),
+                KeyBinding::new("down", EditorDown, Some("FileEditor")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
+                KeyBinding::new("ctrl-shift-left", EditorSelectWordLeft, Some("FileEditor")),
+                KeyBinding::new("alt-shift-left", EditorSelectWordLeft, Some("FileEditor")),
+                KeyBinding::new(
+                    "ctrl-shift-right",
+                    EditorSelectWordRight,
+                    Some("FileEditor"),
+                ),
+                KeyBinding::new("alt-shift-right", EditorSelectWordRight, Some("FileEditor")),
+                KeyBinding::new("home", EditorHome, Some("FileEditor")),
+                KeyBinding::new("end", EditorEnd, Some("FileEditor")),
+                KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
+                KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
+                KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
+                KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
+                KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
+                KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
+                KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
+                KeyBinding::new("tab", EditorTab, Some("FileEditor")),
+                KeyBinding::new("ctrl-s", EditorSave, Some("FileEditor")),
+                KeyBinding::new("cmd-s", EditorSave, Some("FileEditor")),
+                KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
+                KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("MessageEditor")),
+                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("MessageEditor")),
+                KeyBinding::new(
+                    "ctrl-delete",
+                    EditorDeleteWordForward,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("MessageEditor")),
+                KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
+                KeyBinding::new("right", EditorRight, Some("MessageEditor")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("MessageEditor")),
+                KeyBinding::new("alt-left", EditorWordLeft, Some("MessageEditor")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("MessageEditor")),
+                KeyBinding::new("alt-right", EditorWordRight, Some("MessageEditor")),
+                KeyBinding::new("up", EditorUp, Some("MessageEditor")),
+                KeyBinding::new("down", EditorDown, Some("MessageEditor")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
+                KeyBinding::new(
+                    "ctrl-shift-left",
+                    EditorSelectWordLeft,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-left",
+                    EditorSelectWordLeft,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "ctrl-shift-right",
+                    EditorSelectWordRight,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-right",
+                    EditorSelectWordRight,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new("home", EditorHome, Some("MessageEditor")),
+                KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
+                KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),
+                KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
+                KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
+                KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
+                KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
+                KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
+                KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
+                KeyBinding::new("ctrl-enter", EditorSubmitNow, Some("MessageEditor")),
+                KeyBinding::new("cmd-enter", EditorSubmitNow, Some("MessageEditor")),
+                KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
+                KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
+                KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
+                KeyBinding::new("delete", Delete, Some("TerminalInput")),
+                KeyBinding::new("ctrl-backspace", DeleteWord, Some("TerminalInput")),
+                KeyBinding::new("alt-backspace", DeleteWord, Some("TerminalInput")),
+                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("TerminalInput")),
+                KeyBinding::new("alt-delete", DeleteWordForward, Some("TerminalInput")),
+                KeyBinding::new("left", Left, Some("TerminalInput")),
+                KeyBinding::new("right", Right, Some("TerminalInput")),
+                KeyBinding::new("ctrl-left", WordLeft, Some("TerminalInput")),
+                KeyBinding::new("alt-left", WordLeft, Some("TerminalInput")),
+                KeyBinding::new("ctrl-right", WordRight, Some("TerminalInput")),
+                KeyBinding::new("alt-right", WordRight, Some("TerminalInput")),
+                KeyBinding::new("up", Up, Some("TerminalInput")),
+                KeyBinding::new("down", Down, Some("TerminalInput")),
+                KeyBinding::new("pageup", TerminalPageUp, Some("TerminalInput")),
+                KeyBinding::new("pagedown", TerminalPageDown, Some("TerminalInput")),
+                KeyBinding::new("home", Home, Some("TerminalInput")),
+                KeyBinding::new("end", End, Some("TerminalInput")),
+                KeyBinding::new("shift-enter", TerminalControlJ, Some("TerminalInput")),
+                KeyBinding::new("enter", Submit, Some("TerminalInput")),
+                KeyBinding::new("tab", Tab, Some("TerminalInput")),
+                KeyBinding::new("shift-tab", TerminalShiftTab, Some("TerminalInput")),
+                KeyBinding::new("escape", Escape, Some("TerminalInput")),
+                KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
+                KeyBinding::new("ctrl-a", TerminalControlA, Some("TerminalInput")),
+                KeyBinding::new("ctrl-b", TerminalControlB, Some("TerminalInput")),
+                KeyBinding::new("ctrl-d", TerminalEndOfFile, Some("TerminalInput")),
+                KeyBinding::new("ctrl-e", TerminalControlE, Some("TerminalInput")),
+                KeyBinding::new("ctrl-f", TerminalControlF, Some("TerminalInput")),
+                KeyBinding::new("ctrl-g", TerminalControlG, Some("TerminalInput")),
+                KeyBinding::new("ctrl-h", TerminalControlH, Some("TerminalInput")),
+                KeyBinding::new("ctrl-i", TerminalControlI, Some("TerminalInput")),
+                KeyBinding::new("ctrl-j", TerminalControlJ, Some("TerminalInput")),
+                KeyBinding::new("ctrl-k", TerminalControlK, Some("TerminalInput")),
+                KeyBinding::new("ctrl-l", TerminalClearScreen, Some("TerminalInput")),
+                KeyBinding::new("ctrl-m", TerminalControlM, Some("TerminalInput")),
+                KeyBinding::new("ctrl-n", TerminalControlN, Some("TerminalInput")),
+                KeyBinding::new("ctrl-o", TerminalControlO, Some("TerminalInput")),
+                KeyBinding::new("ctrl-p", TerminalControlP, Some("TerminalInput")),
+                KeyBinding::new("ctrl-q", TerminalControlQ, Some("TerminalInput")),
+                KeyBinding::new("ctrl-r", TerminalReverseSearch, Some("TerminalInput")),
+                KeyBinding::new("ctrl-s", TerminalControlS, Some("TerminalInput")),
+                KeyBinding::new("ctrl-t", TerminalControlT, Some("TerminalInput")),
+                KeyBinding::new("ctrl-u", TerminalControlU, Some("TerminalInput")),
+                KeyBinding::new("ctrl-w", TerminalControlW, Some("TerminalInput")),
+                KeyBinding::new("ctrl-x", TerminalControlX, Some("TerminalInput")),
+                KeyBinding::new("ctrl-y", TerminalControlY, Some("TerminalInput")),
+                KeyBinding::new("ctrl-z", TerminalSuspend, Some("TerminalInput")),
+                KeyBinding::new("ctrl-shift-c", Copy, Some("TerminalInput")),
+                KeyBinding::new("ctrl-shift-v", Paste, Some("TerminalInput")),
+                KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
+            ]);
+            let settings = AppSettings::load();
+            let bounds = Bounds::centered(
+                None,
+                size(
+                    px(f32::from(settings.window_width.max(760))),
+                    px(f32::from(settings.window_height.max(560))),
+                ),
+                cx,
+            );
+            let window_bounds = if settings.window_maximized {
+                WindowBounds::Maximized(bounds)
+            } else {
+                WindowBounds::Windowed(bounds)
+            };
+            let desktop_window = cx
+                .open_window(
+                    WindowOptions {
+                        focus: true,
+                        window_bounds: Some(window_bounds),
+                        is_resizable: true,
+                        window_min_size: Some(size(px(760.0), px(560.0))),
+                        window_background: WindowBackgroundAppearance::Opaque,
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("xd".into()),
+                            appears_transparent: true,
+                            traffic_light_position: cfg!(target_os = "macos")
+                                .then(|| point(px(12.0), px(10.0))),
+                        }),
+                        window_decorations: Some(WindowDecorations::Client),
+                        app_id: Some(xd_desktop::channel::app_id()),
+                        ..Default::default()
+                    },
+                    |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
+                )
+                .expect("open xd GPUI window");
+            cx.on_action(move |_: &ToggleUsage, cx| {
+                // The key is being dispatched inside this window's own update.
+                cx.defer(move |cx| {
+                    let _ = desktop_window
+                        .update(cx, |desktop, window, cx| desktop.toggle_usage(window, cx));
+                });
+            });
+            cx.activate(true);
+        });
+}
+
+fn desktop_version() -> String {
+    option_env!("XD_COMMIT")
+        .filter(|commit| !commit.is_empty() && *commit != "development")
+        .map(|commit| {
+            format!(
+                "{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                &commit[..7.min(commit.len())]
+            )
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
+
 #[cfg(test)]
+#[allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 mod tests {
     #[test]
     fn a_patch_names_each_file_once_and_keeps_its_lines() {
@@ -18349,7 +18603,7 @@ Binary files /dev/null and b/image.png differ\n";
         // A one-pixel PNG: enough to decode, nothing to look at.
         const AVATAR: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
 
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             assert!(desktop.owner_avatar(Some("RestartFU")).is_none());
             assert!(desktop.owner_avatar(None).is_none());
@@ -18402,7 +18656,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn catalog_groups_chats_and_restores_the_sessions_active_tab(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop.model = grouped_workspace_fixture();
             desktop.settings.session_chats.clear();
@@ -18423,7 +18677,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn sibling_chat_navigation_preserves_shared_tools_and_clears_the_previous_composer(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model = grouped_workspace_fixture();
             desktop.model.select_chat("implementation");
@@ -18454,7 +18708,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn closing_a_chat_tab_preserves_history_and_can_reopen_it(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.model = grouped_workspace_fixture();
             desktop.model.select_chat("implementation");
@@ -19371,7 +19625,7 @@ Binary files /dev/null and b/image.png differ\n";
             })
         };
 
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             // A closing chat leaves no room, so an undrawn image goes, and what
             // the latest frame drew stays.
@@ -19441,7 +19695,7 @@ Binary files /dev/null and b/image.png differ\n";
             )
         };
 
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
 
         // Only one is taken at a time, and one nobody waits for is passed over.
         let answer_a = answer.clone();
@@ -20026,7 +20280,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn opening_links_preserves_the_chats_open_tabs(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.active_endpoint = ChatEndpoint::Local;
             desktop.set_browser_open(false);
@@ -20085,7 +20339,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn bottom_terminal_and_side_tools_keep_independent_state(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             desktop.show_native_pane(NativePane::Terminal, cx);
@@ -20145,7 +20399,7 @@ Binary files /dev/null and b/image.png differ\n";
         let shell = |id: &str| {
             XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": id})).unwrap()
         };
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             desktop.show_native_pane(NativePane::Terminal, cx);
@@ -20197,7 +20451,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn repository_updates_preserve_hidden_tools_and_file_edits(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop.model.selected_chat = Some("tool-chat".into());
             desktop.minimal_route = MinimalRoute::Cli {
@@ -20231,7 +20485,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn global_side_pane_ignores_the_previous_chats_tools(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update(|window, cx| {
             desktop.update(cx, |desktop, cx| {
                 desktop.model.selected_chat = Some("tool-chat".into());
@@ -20260,7 +20514,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn reopening_bottom_after_last_shell_closed_starts_a_shell(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             let mut panel = XdDesktop::new_terminal_panel("dock-chat".into());
@@ -20277,7 +20531,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn closing_and_readding_files_requests_a_new_listing(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             desktop.native_pane = NativePane::Files;
@@ -20615,7 +20869,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn browser_panes_preserve_each_chats_tabs_toggle_and_settings_visibility(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.active_endpoint = ChatEndpoint::Local;
             desktop.model.folders = vec![
@@ -20737,7 +20991,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn removed_chats_release_their_browser_tabs_without_affecting_other_connections(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.browser_sessions.clear();
             desktop.active_endpoint = ChatEndpoint::Local;
@@ -20997,7 +21251,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn minimal_popup_focus_is_taken_and_restored(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             let terminal_focus = desktop.terminal_input.read(cx).focus_handle(cx);
             window.focus(&terminal_focus);
@@ -21022,7 +21276,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn switching_sessions_uses_native_chat_and_stashes_shell_panes(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![
                 ChatSummary {
@@ -21085,7 +21339,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn failed_draft_persistence_keeps_the_native_chat_selected(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat-a".into());
             desktop.composer = "unsaved".into();
@@ -21106,7 +21360,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn authoritative_tree_reconciliation_stops_removed_chat_processes(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop
                 .terminal_runtime
@@ -21137,7 +21391,7 @@ Binary files /dev/null and b/image.png differ\n";
     #[gpui::test]
     #[cfg(unix)]
     fn deleting_a_chat_stops_only_that_endpoints_terminal_processes(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             for (chat_id, terminal_id) in [
                 ("chat-removed", "terminal-removed"),
@@ -21195,7 +21449,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn session_click_focuses_the_native_composer(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.model.chats = vec![ChatSummary {
                 id: "chat-a".into(),
@@ -21228,7 +21482,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn plain_terminal_events_update_the_active_panel(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
             panel.loading = false;
@@ -21383,7 +21637,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn selecting_a_tree_primed_session_opens_native_chat(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![ChatSummary {
                 id: "chat".into(),
@@ -21420,7 +21674,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn background_terminal_output_keeps_a_cached_session_current(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat-b".into());
             let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
@@ -21518,7 +21772,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn switching_remote_and_back_keeps_the_local_runtime_subscribed(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.settings.remote_ssh_command = Some("ssh dev.example".into());
             desktop.settings.remote_credentials = Some(xd_transport::RemoteCredentials {
@@ -21558,7 +21812,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_remote_status_keeps_a_live_connection(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21576,7 +21830,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_returns_to_the_saved_host_after_disconnecting(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21613,7 +21867,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_retries_now_but_never_races_a_running_attempt(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21638,7 +21892,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_asks_for_pairing_only_when_it_is_needed(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.reconnect_remote(window, cx);
             assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
@@ -21666,7 +21920,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_leaves_a_pairing_in_flight_alone(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21686,7 +21940,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn closing_a_failed_pairing_returns_to_the_saved_host(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21720,7 +21974,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn passive_remote_tree_never_overrides_the_explicit_local_runtime(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.remote_state = RemoteState::Connected;
             desktop.handle_remote_update(
@@ -22107,7 +22361,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn background_turn_start_updates_the_session_board(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("foreground".into());
             desktop.model.chats = vec![
@@ -22157,7 +22411,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn background_terminal_activity_updates_the_session_board(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("foreground".into());
             desktop.model.chats = vec![
@@ -22260,7 +22514,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn closing_one_terminal_preserves_another_terminal_working_state(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![ChatSummary {
                 id: "chat-1".into(),
@@ -22312,7 +22566,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn inactive_endpoint_preserves_other_terminal_activity_on_close(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.inactive_model.chats = vec![ChatSummary {
                 id: "remote-chat".into(),
@@ -23318,7 +23572,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn terminal_list_keeps_a_known_good_screen_when_replay_is_malformed(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat".into());
             let existing = XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({
@@ -23365,7 +23619,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn terminal_list_replays_cold_pending_output_without_duplicates(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat".into());
             let mut panel = XdDesktop::new_terminal_panel("chat".into());
@@ -23440,7 +23694,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn terminal_close_tombstone_prevents_a_stale_list_from_resurrecting_it(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat".into());
             let mut panel = XdDesktop::new_terminal_panel("chat".into());
@@ -23477,7 +23731,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn remote_navigation_state_is_cached_and_reconciled(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop.active_endpoint = ChatEndpoint::Remote;
             desktop.settings.remote_ssh_command = Some("ssh dev.example -p 22".into());
@@ -23525,272 +23779,4 @@ Binary files /dev/null and b/image.png differ\n";
             );
         });
     }
-}
-
-fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
-    text_system
-        .add_fonts(EMBEDDED_UI_FONTS.into_iter().map(Cow::Borrowed).collect())
-        .map_err(|error| error.to_string())
-}
-
-fn main() {
-    #[cfg(target_os = "windows")]
-    windows::configure_environment();
-    browser::configure_platform();
-    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    if arguments
-        .iter()
-        .any(|argument| argument == "--version" || argument == "-v")
-    {
-        println!("xd {}", desktop_version());
-        return;
-    }
-    Application::new()
-        .with_assets(EmbeddedIcons)
-        .run(|cx: &mut App| {
-            install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
-            cx.bind_keys([
-                KeyBinding::new("ctrl-c", CopyRenderedSelection, Some("XdDesktop")),
-                KeyBinding::new("cmd-c", CopyRenderedSelection, Some("XdDesktop")),
-                KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
-                // No context: the shortcut also works before anything has focus. The
-                // terminal's own ctrl-u is bound deeper, so it still wins there.
-                KeyBinding::new("ctrl-u", ToggleUsage, None),
-                KeyBinding::new("cmd-u", ToggleUsage, None),
-                KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
-                KeyBinding::new("delete", Delete, Some("ComposerInput")),
-                KeyBinding::new("ctrl-backspace", DeleteWord, Some("ComposerInput")),
-                KeyBinding::new("alt-backspace", DeleteWord, Some("ComposerInput")),
-                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("ComposerInput")),
-                KeyBinding::new("alt-delete", DeleteWordForward, Some("ComposerInput")),
-                KeyBinding::new("left", Left, Some("ComposerInput")),
-                KeyBinding::new("right", Right, Some("ComposerInput")),
-                KeyBinding::new("ctrl-left", WordLeft, Some("ComposerInput")),
-                KeyBinding::new("alt-left", WordLeft, Some("ComposerInput")),
-                KeyBinding::new("ctrl-right", WordRight, Some("ComposerInput")),
-                KeyBinding::new("alt-right", WordRight, Some("ComposerInput")),
-                KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
-                KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
-                KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some("ComposerInput")),
-                KeyBinding::new("alt-shift-left", SelectWordLeft, Some("ComposerInput")),
-                KeyBinding::new("ctrl-shift-right", SelectWordRight, Some("ComposerInput")),
-                KeyBinding::new("alt-shift-right", SelectWordRight, Some("ComposerInput")),
-                KeyBinding::new("home", Home, Some("ComposerInput")),
-                KeyBinding::new("end", End, Some("ComposerInput")),
-                KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
-                KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
-                KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
-                KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
-                KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
-                KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
-                KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
-                KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
-                KeyBinding::new("enter", Submit, Some("ComposerInput")),
-                KeyBinding::new(
-                    "ctrl-cmd-space",
-                    ShowCharacterPalette,
-                    Some("ComposerInput"),
-                ),
-                KeyBinding::new("backspace", EditorBackspace, Some("FileEditor")),
-                KeyBinding::new("delete", EditorDelete, Some("FileEditor")),
-                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("FileEditor")),
-                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("FileEditor")),
-                KeyBinding::new("ctrl-delete", EditorDeleteWordForward, Some("FileEditor")),
-                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("FileEditor")),
-                KeyBinding::new("left", EditorLeft, Some("FileEditor")),
-                KeyBinding::new("right", EditorRight, Some("FileEditor")),
-                KeyBinding::new("ctrl-left", EditorWordLeft, Some("FileEditor")),
-                KeyBinding::new("alt-left", EditorWordLeft, Some("FileEditor")),
-                KeyBinding::new("ctrl-right", EditorWordRight, Some("FileEditor")),
-                KeyBinding::new("alt-right", EditorWordRight, Some("FileEditor")),
-                KeyBinding::new("up", EditorUp, Some("FileEditor")),
-                KeyBinding::new("down", EditorDown, Some("FileEditor")),
-                KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
-                KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
-                KeyBinding::new("ctrl-shift-left", EditorSelectWordLeft, Some("FileEditor")),
-                KeyBinding::new("alt-shift-left", EditorSelectWordLeft, Some("FileEditor")),
-                KeyBinding::new(
-                    "ctrl-shift-right",
-                    EditorSelectWordRight,
-                    Some("FileEditor"),
-                ),
-                KeyBinding::new("alt-shift-right", EditorSelectWordRight, Some("FileEditor")),
-                KeyBinding::new("home", EditorHome, Some("FileEditor")),
-                KeyBinding::new("end", EditorEnd, Some("FileEditor")),
-                KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
-                KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
-                KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
-                KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
-                KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
-                KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
-                KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
-                KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
-                KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
-                KeyBinding::new("tab", EditorTab, Some("FileEditor")),
-                KeyBinding::new("ctrl-s", EditorSave, Some("FileEditor")),
-                KeyBinding::new("cmd-s", EditorSave, Some("FileEditor")),
-                KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
-                KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
-                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("MessageEditor")),
-                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("MessageEditor")),
-                KeyBinding::new(
-                    "ctrl-delete",
-                    EditorDeleteWordForward,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("MessageEditor")),
-                KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
-                KeyBinding::new("right", EditorRight, Some("MessageEditor")),
-                KeyBinding::new("ctrl-left", EditorWordLeft, Some("MessageEditor")),
-                KeyBinding::new("alt-left", EditorWordLeft, Some("MessageEditor")),
-                KeyBinding::new("ctrl-right", EditorWordRight, Some("MessageEditor")),
-                KeyBinding::new("alt-right", EditorWordRight, Some("MessageEditor")),
-                KeyBinding::new("up", EditorUp, Some("MessageEditor")),
-                KeyBinding::new("down", EditorDown, Some("MessageEditor")),
-                KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
-                KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
-                KeyBinding::new(
-                    "ctrl-shift-left",
-                    EditorSelectWordLeft,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new(
-                    "alt-shift-left",
-                    EditorSelectWordLeft,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new(
-                    "ctrl-shift-right",
-                    EditorSelectWordRight,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new(
-                    "alt-shift-right",
-                    EditorSelectWordRight,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new("home", EditorHome, Some("MessageEditor")),
-                KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
-                KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),
-                KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
-                KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
-                KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
-                KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
-                KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
-                KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
-                KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
-                KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
-                KeyBinding::new("ctrl-enter", EditorSubmitNow, Some("MessageEditor")),
-                KeyBinding::new("cmd-enter", EditorSubmitNow, Some("MessageEditor")),
-                KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
-                KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
-                KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
-                KeyBinding::new("delete", Delete, Some("TerminalInput")),
-                KeyBinding::new("ctrl-backspace", DeleteWord, Some("TerminalInput")),
-                KeyBinding::new("alt-backspace", DeleteWord, Some("TerminalInput")),
-                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("TerminalInput")),
-                KeyBinding::new("alt-delete", DeleteWordForward, Some("TerminalInput")),
-                KeyBinding::new("left", Left, Some("TerminalInput")),
-                KeyBinding::new("right", Right, Some("TerminalInput")),
-                KeyBinding::new("ctrl-left", WordLeft, Some("TerminalInput")),
-                KeyBinding::new("alt-left", WordLeft, Some("TerminalInput")),
-                KeyBinding::new("ctrl-right", WordRight, Some("TerminalInput")),
-                KeyBinding::new("alt-right", WordRight, Some("TerminalInput")),
-                KeyBinding::new("up", Up, Some("TerminalInput")),
-                KeyBinding::new("down", Down, Some("TerminalInput")),
-                KeyBinding::new("pageup", TerminalPageUp, Some("TerminalInput")),
-                KeyBinding::new("pagedown", TerminalPageDown, Some("TerminalInput")),
-                KeyBinding::new("home", Home, Some("TerminalInput")),
-                KeyBinding::new("end", End, Some("TerminalInput")),
-                KeyBinding::new("shift-enter", TerminalControlJ, Some("TerminalInput")),
-                KeyBinding::new("enter", Submit, Some("TerminalInput")),
-                KeyBinding::new("tab", Tab, Some("TerminalInput")),
-                KeyBinding::new("shift-tab", TerminalShiftTab, Some("TerminalInput")),
-                KeyBinding::new("escape", Escape, Some("TerminalInput")),
-                KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
-                KeyBinding::new("ctrl-a", TerminalControlA, Some("TerminalInput")),
-                KeyBinding::new("ctrl-b", TerminalControlB, Some("TerminalInput")),
-                KeyBinding::new("ctrl-d", TerminalEndOfFile, Some("TerminalInput")),
-                KeyBinding::new("ctrl-e", TerminalControlE, Some("TerminalInput")),
-                KeyBinding::new("ctrl-f", TerminalControlF, Some("TerminalInput")),
-                KeyBinding::new("ctrl-g", TerminalControlG, Some("TerminalInput")),
-                KeyBinding::new("ctrl-h", TerminalControlH, Some("TerminalInput")),
-                KeyBinding::new("ctrl-i", TerminalControlI, Some("TerminalInput")),
-                KeyBinding::new("ctrl-j", TerminalControlJ, Some("TerminalInput")),
-                KeyBinding::new("ctrl-k", TerminalControlK, Some("TerminalInput")),
-                KeyBinding::new("ctrl-l", TerminalClearScreen, Some("TerminalInput")),
-                KeyBinding::new("ctrl-m", TerminalControlM, Some("TerminalInput")),
-                KeyBinding::new("ctrl-n", TerminalControlN, Some("TerminalInput")),
-                KeyBinding::new("ctrl-o", TerminalControlO, Some("TerminalInput")),
-                KeyBinding::new("ctrl-p", TerminalControlP, Some("TerminalInput")),
-                KeyBinding::new("ctrl-q", TerminalControlQ, Some("TerminalInput")),
-                KeyBinding::new("ctrl-r", TerminalReverseSearch, Some("TerminalInput")),
-                KeyBinding::new("ctrl-s", TerminalControlS, Some("TerminalInput")),
-                KeyBinding::new("ctrl-t", TerminalControlT, Some("TerminalInput")),
-                KeyBinding::new("ctrl-u", TerminalControlU, Some("TerminalInput")),
-                KeyBinding::new("ctrl-w", TerminalControlW, Some("TerminalInput")),
-                KeyBinding::new("ctrl-x", TerminalControlX, Some("TerminalInput")),
-                KeyBinding::new("ctrl-y", TerminalControlY, Some("TerminalInput")),
-                KeyBinding::new("ctrl-z", TerminalSuspend, Some("TerminalInput")),
-                KeyBinding::new("ctrl-shift-c", Copy, Some("TerminalInput")),
-                KeyBinding::new("ctrl-shift-v", Paste, Some("TerminalInput")),
-                KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
-            ]);
-            let settings = AppSettings::load();
-            let bounds = Bounds::centered(
-                None,
-                size(
-                    px(f32::from(settings.window_width.max(760))),
-                    px(f32::from(settings.window_height.max(560))),
-                ),
-                cx,
-            );
-            let window_bounds = if settings.window_maximized {
-                WindowBounds::Maximized(bounds)
-            } else {
-                WindowBounds::Windowed(bounds)
-            };
-            let desktop_window = cx
-                .open_window(
-                    WindowOptions {
-                        focus: true,
-                        window_bounds: Some(window_bounds),
-                        is_resizable: true,
-                        window_min_size: Some(size(px(760.0), px(560.0))),
-                        window_background: WindowBackgroundAppearance::Opaque,
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("xd".into()),
-                            appears_transparent: true,
-                            traffic_light_position: cfg!(target_os = "macos")
-                                .then(|| point(px(12.0), px(10.0))),
-                        }),
-                        window_decorations: Some(WindowDecorations::Client),
-                        app_id: Some(xd_desktop::channel::app_id().into()),
-                        ..Default::default()
-                    },
-                    |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
-                )
-                .expect("open xd GPUI window");
-            cx.on_action(move |_: &ToggleUsage, cx| {
-                // The key is being dispatched inside this window's own update.
-                cx.defer(move |cx| {
-                    let _ = desktop_window
-                        .update(cx, |desktop, window, cx| desktop.toggle_usage(window, cx));
-                });
-            });
-            cx.activate(true);
-        });
-}
-
-fn desktop_version() -> String {
-    option_env!("XD_COMMIT")
-        .filter(|commit| !commit.is_empty() && *commit != "development")
-        .map(|commit| {
-            format!(
-                "{} ({})",
-                env!("CARGO_PKG_VERSION"),
-                &commit[..7.min(commit.len())]
-            )
-        })
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
 }

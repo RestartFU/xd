@@ -28,8 +28,6 @@ pub struct FileTree {
 }
 
 impl FileTree {
-    /// The tree flattened for a list, parents before their children.
-
     /// Whether this directory's listing has been fetched.
     pub fn is_loaded(&self, path: &str) -> bool {
         self.children.contains_key(path)
@@ -47,10 +45,6 @@ impl FileTree {
         });
         paths
     }
-
-    /// Restores the folders that were open the last time this chat was shown.
-
-    /// A stable snapshot suitable for settings persistence.
 
     /// Restored descendants are fetched as soon as their parent arrives.
     pub fn expanded_unloaded_children(&self, path: &str) -> Vec<String> {
@@ -73,9 +67,6 @@ impl FileTree {
             })
             .collect()
     }
-
-    /// Opens or closes a directory, keeping what was open inside it: a folder
-    /// reopened should look the way it was left, not collapsed to one level.
 
     /// Marks a directory as being listed, which draws its spinner.
     pub fn set_loading(&mut self, path: &str) {
@@ -168,9 +159,6 @@ impl OpenFiles {
         }
         self.active = FileTab::File(path.to_owned());
     }
-
-    /// Closes a tab. Closing the active file returns to the chat; closing a
-    /// background file leaves the current tab alone.
 
     /// Takes a keystroke.
     pub fn edit(&mut self, path: &str, text: String) {

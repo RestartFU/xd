@@ -523,10 +523,7 @@ fn spawn_reader(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut buffer = [0_u8; READ_CHUNK_BYTES];
-        loop {
-            let Ok(count) = reader.read(&mut buffer) else {
-                break;
-            };
+        while let Ok(count) = reader.read(&mut buffer) {
             if count == 0 {
                 break;
             }

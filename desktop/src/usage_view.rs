@@ -1317,6 +1317,7 @@ impl XdDesktop {
         cx.stop_propagation();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn usage_input(
         &mut self,
         placeholder: &'static str,

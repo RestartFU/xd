@@ -723,7 +723,7 @@ impl Element for EditorElement {
                         .unwrap_or(px(1.));
                     let input = input.read(cx);
                     let width = input.text_width(available);
-                    let rows = visual_line_ranges(&input, width, &text_style, window)
+                    let rows = visual_line_ranges(input, width, &text_style, window)
                         .len()
                         .max(1);
                     size(width, px(rows as f32 * FileEditor::LINE_HEIGHT))
@@ -750,7 +750,7 @@ impl Element for EditorElement {
         let style = window.text_style();
         let text_width = input.text_width(bounds.size.width);
         let ranges = if input.composer {
-            visual_line_ranges(&input, text_width, &style, window)
+            visual_line_ranges(input, text_width, &style, window)
         } else {
             input.line_ranges.clone()
         };
@@ -787,7 +787,7 @@ impl Element for EditorElement {
             } else {
                 input.content[range.clone()].to_owned().into()
             };
-            let runs = text_runs(&input, &range, &style, placeholder);
+            let runs = text_runs(input, &range, &style, placeholder);
             let layout = window
                 .text_system()
                 .shape_line(text, font_size, &runs, None);
