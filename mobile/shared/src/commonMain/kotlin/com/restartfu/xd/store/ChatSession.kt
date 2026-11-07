@@ -493,6 +493,13 @@ internal class ChatSessionCore(
         val value = event.value
         val eventName = (value["event"] as? JsonPrimitive)?.contentOrNull
         val eventChat = (value["chat"] as? JsonPrimitive)?.contentOrNull
+        // A commit, push, or pull request made from any chat: another chat may
+        // share its checkout, and events say nothing of which ones do, so what
+        // depends on the checkout, such as its pull request, is looked up again.
+        if (eventName == "git-action-finished" || eventName == "repository-changed") {
+            _gitChanges.update { it + 1 }
+            return
+        }
         if (eventName in CHAT_SCOPED_EVENTS && eventChat == null) return
         if (eventChat != null && eventChat != chatId) return
 
@@ -583,9 +590,6 @@ internal class ChatSessionCore(
                 apply(TranscriptInput.Record(messageId, text, turnId, turnSequence), arrivalGate)
             }
             "changed" -> apply(TranscriptInput.Changed, event.sequence)
-            // A commit, push, or pull request made anywhere: what depends on
-            // the checkout, such as its pull request, is looked up again.
-            "git-action-finished", "repository-changed" -> _gitChanges.update { it + 1 }
             "shortcuts-changed" -> apply(TranscriptInput.Changed, event.sequence)
             "commands" -> {
                 val commands = value.requiredStringArray("commands") ?: return

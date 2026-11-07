@@ -1494,7 +1494,8 @@ internal data class NewSessionPlaces(
         is Ops.NewSessionWorktree.Branch -> if (sourcesError != null) choice else
             branches.firstOrNull { it.reference == choice.reference }
                 ?.let { Ops.NewSessionWorktree.Branch(it.reference, it.oid) } ?: default
-        is Ops.NewSessionWorktree.PullRequest -> if (sourcesError != null) choice else
+        // Pull requests can fail to list on their own, while branches still list.
+        is Ops.NewSessionWorktree.PullRequest -> if (sourcesError != null || pullRequestError != null) choice else
             pullRequests.firstOrNull { it.number == choice.number }
                 ?.let { Ops.NewSessionWorktree.PullRequest(it.number, it.oid) } ?: default
     }
