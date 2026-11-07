@@ -601,6 +601,10 @@ class ChatViewModel(
     private val _draft = MutableStateFlow("")
     private val _attachments = MutableStateFlow(emptyList<Attachment>())
     private val _attachmentError = MutableStateFlow<String?>(null)
+    private val _queueNotice = MutableStateFlow<String?>(null)
+
+    /** Why a queued-message action was not done, shown beside the queue. */
+    val queueNotice: StateFlow<String?> = _queueNotice.asStateFlow()
     val attachments: StateFlow<List<Attachment>> = _attachments.asStateFlow()
     val attachmentError: StateFlow<String?> = _attachmentError.asStateFlow()
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
@@ -891,15 +895,15 @@ class ChatViewModel(
      * both texts, so a queue another device just changed is refused instead
      * of being shuffled wrongly.
      */
-    fun moveQueued(index: Int, text: String, up: Boolean) {
+    fun moveQueued(index: Int, text: String, up: Boolean, opened: List<String>) {
         val queue = state.value.queue
-        // The queue may have changed on another device since the message was
-        // opened, so it is found again by its text; the host checks both texts.
-        val at = queuedAt(queue, index, text) ?: return
-        val anchor = if (up) at - 1 else at + 1
-        if (anchor !in queue.indices) return
+        // Queued messages have no identity but their place, and texts can
+        // repeat, so an action applies only to the queue it was opened on.
+        if (!sameQueue(queue, opened)) return
+        val anchor = if (up) index - 1 else index + 1
+        if (queue.getOrNull(index) != text || anchor !in queue.indices) return
         launchGuarded(_droppingQueued) {
-            session.reorderQueued(at, text, anchor, queue[anchor], after = !up)
+            session.reorderQueued(index, text, anchor, queue[anchor], after = !up)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != queue }
             }
@@ -912,13 +916,11 @@ class ChatViewModel(
         launchGuarded(_sending) { session.resumeTurn() }
     }
 
-    fun dropQueued(index: Int, text: String) {
+    fun dropQueued(index: Int, text: String, opened: List<String>) {
         val before = state.value.queue
-        // Found again by its text if another device changed the queue since it
-        // was opened; already gone means there is nothing left to drop.
-        val at = queuedAt(before, index, text) ?: return
+        if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
         launchGuarded(_droppingQueued) {
-            session.dropQueued(at, text)
+            session.dropQueued(index, text)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }
@@ -929,10 +931,20 @@ class ChatViewModel(
         launchGuarded { session.loadOlder() }
     }
 
-    /** Where [text] sits now: its old [index] if unchanged, else its nearest copy. */
-    private fun queuedAt(queue: List<String>, index: Int, text: String): Int? =
-        if (queue.getOrNull(index) == text) index
-        else queue.indices.filter { queue[it] == text }.minByOrNull { kotlin.math.abs(it - index) }
+    /** False, with a notice saying so, when the queue moved on since a message was opened. */
+    private fun sameQueue(queue: List<String>, opened: List<String>): Boolean {
+        if (queue == opened) {
+            _queueNotice.value = null
+            return true
+        }
+        _queueNotice.value = QUEUE_CHANGED
+        return false
+    }
+
+    /** The queue changed while a message was open, so its dialog closed. */
+    fun queueChanged() {
+        _queueNotice.value = QUEUE_CHANGED
+    }
 
     private fun launchGuarded(
         guard: MutableStateFlow<Boolean>? = null,
@@ -1021,3 +1033,5 @@ class ChatViewModel(
         current[index].png.bytes.contentEquals(synced[index].bytes)
     }
 }
+
+private const val QUEUE_CHANGED = "The queue changed on another device. Open the message again."

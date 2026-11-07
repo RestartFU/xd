@@ -76,8 +76,11 @@ public class XdClient(
     /** Something has asked for the rules on this host, so a reconnect should read them again. */
     private val autoSettleWanted = MutableStateFlow(false)
     private val _autoSettleStale = MutableStateFlow(false)
-    /** Counts every rules request, so only a failure no newer request superseded marks them stale. */
+    /** Numbers every rules request, to order failures and successes. */
     private val autoSettleCalls = MutableStateFlow(0L)
+    /** The newest request that failed, and the newest whose answer was shown. */
+    private var autoSettleFailedCall = 0L
+    private var autoSettleAppliedCall = 0L
 
     /**
      * The rules shown may be out of date: the host said they changed and the
@@ -259,6 +262,8 @@ public class XdClient(
         _autoSettleSettings.value = null
         autoSettleWanted.value = false
         _autoSettleStale.value = false
+        autoSettleFailedCall = 0
+        autoSettleAppliedCall = 0
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -416,16 +421,20 @@ public class XdClient(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (!background) throw error
-                if (generation == _sessionGeneration.value && call == autoSettleCalls.value) {
-                    _autoSettleStale.value = true
+                // Any failure, in the foreground or not, leaves the rules shown
+                // possibly old until a newer request's answer is shown.
+                if (generation == _sessionGeneration.value) {
+                    autoSettleFailedCall = maxOf(autoSettleFailedCall, call)
+                    if (call > autoSettleAppliedCall) _autoSettleStale.value = true
                 }
+                if (!background) throw error
                 return
             }
             // Otherwise the read that broadcast started decides the value.
             if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
                 _autoSettleSettings.value = rules
-                _autoSettleStale.value = false
+                autoSettleAppliedCall = maxOf(autoSettleAppliedCall, call)
+                if (call > autoSettleFailedCall) _autoSettleStale.value = false
             }
         } finally {
             _autoSettleInFlight.update { it - 1 }

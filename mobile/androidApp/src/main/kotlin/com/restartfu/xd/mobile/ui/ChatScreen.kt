@@ -469,9 +469,19 @@ private fun Composer(
     val attachments by model.attachments.collectAsStateWithLifecycle()
     val catalog by model.catalog.collectAsStateWithLifecycle()
     val attachmentError by model.attachmentError.collectAsStateWithLifecycle()
-    var editing by remember { mutableStateOf<Pair<Int, String>?>(null) }
+    // The queue as it was when a message was opened: actions apply to that
+    // queue only, and the dialog closes if another device changes it.
+    var editing by remember { mutableStateOf<Triple<Int, String, List<String>>?>(null) }
+    val queueNotice by model.queueNotice.collectAsStateWithLifecycle()
+    LaunchedEffect(state.queue) {
+        val opened = editing ?: return@LaunchedEffect
+        if (state.queue != opened.third) {
+            editing = null
+            model.queueChanged()
+        }
+    }
 
-    editing?.let { (index, original) ->
+    editing?.let { (index, original, opened) ->
         QueuedMessageDialog(
             original = original,
             working = state.working,
@@ -479,7 +489,7 @@ private fun Composer(
             canMoveDown = index < state.queue.lastIndex,
             onMove = { up ->
                 editing = null
-                model.moveQueued(index, original, up)
+                model.moveQueued(index, original, up, opened)
             },
             onDismiss = { editing = null },
             onSave = { text ->
@@ -492,7 +502,7 @@ private fun Composer(
             },
             onDrop = {
                 editing = null
-                model.dropQueued(index, original)
+                model.dropQueued(index, original, opened)
             },
         )
     }
@@ -625,6 +635,9 @@ private fun Composer(
                 }
             }
         }
+        queueNotice?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
         if (state.queue.isNotEmpty()) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -635,7 +648,7 @@ private fun Composer(
                         // Tapping opens the controls rather than dropping:
                         // discarding a queued message on a stray tap, with no
                         // undo, is not a good trade for one less tap.
-                        onClick = { editing = index to queued },
+                        onClick = { editing = Triple(index, queued, state.queue) },
                         label = {
                             Text(
                                 queued,
