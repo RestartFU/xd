@@ -32,6 +32,8 @@ internal fun HostUpdateDialog(
     val status by model.host.collectAsStateWithLifecycle()
     val error by model.hostError.collectAsStateWithLifecycle()
     val busy by model.hostBusy.collectAsStateWithLifecycle()
+    // Until the host confirms the check, an earlier result is not shown as current.
+    val checkPending by model.hostCheckPending.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) { model.hostUpdate("check") }
     // Checking and installing finish on the host after it answers, so ask
@@ -62,7 +64,7 @@ internal fun HostUpdateDialog(
                 Text(
                     when {
                         error != null -> error.orEmpty()
-                        status == null || state == "checking" ->
+                        status == null || state == "checking" || checkPending ->
                             "Checking for an update…"
                         !supported ->
                             "This machine's installation cannot update itself. " +

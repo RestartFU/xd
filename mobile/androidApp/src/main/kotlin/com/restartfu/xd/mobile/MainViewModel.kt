@@ -414,7 +414,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * device and loses the turn.
      */
     fun hostUpdate(action: String = "status") {
-        if (action == "check") hostCheckPending = true
+        if (action == "check") _hostCheckPending.value = true
         // One request at a time; one asked for meanwhile runs next rather
         // than being dropped, so a reopened dialog's check is not lost.
         if (_updating.value) {
@@ -428,7 +428,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 _host.value = client.hostUpdate(action)
-                if (action == "check") hostCheckPending = false
+                if (action == "check") _hostCheckPending.value = false
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -450,10 +450,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Until one does, following up asks for the check again, since a status
      * read alone would report the old result as up to date.
      */
-    private var hostCheckPending = false
+    private val _hostCheckPending = MutableStateFlow(false)
+    val hostCheckPending: StateFlow<Boolean> = _hostCheckPending.asStateFlow()
 
     /** Asks again about the update in progress, or the check that may not have happened. */
-    fun followHostUpdate() = hostUpdate(if (hostCheckPending) "check" else "status")
+    fun followHostUpdate() = hostUpdate(if (_hostCheckPending.value) "check" else "status")
 
     /** Closing the dialog keeps an unconfirmed check, so reopening still follows it up. */
     fun clearHostUpdate() {

@@ -135,18 +135,18 @@ internal fun RepositoryPickerDialog(
     )
 }
 
-internal fun joinDirectory(parent: String, child: String): String = when {
-    parent.endsWith('/') || parent.endsWith('\\') -> parent + child
-    else -> "$parent/$child"
-}
+// The host runs on Linux, macOS, or WSL, so paths are Unix paths: `/` is the
+// only separator, and a backslash is an ordinary character in a name.
+internal fun joinDirectory(parent: String, child: String): String =
+    if (parent.endsWith('/')) parent + child else "$parent/$child"
 
 internal fun parentDirectory(path: String): String? {
-    if (path.isBlank()) return null
-    val trimmed = path.trimEnd('/', '\\')
+    val trimmed = path.trimEnd('/')
     if (trimmed.isEmpty()) return null
-    val separator = maxOf(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
-    if (separator < 0) return null
-    if (separator == 0) return trimmed.substring(0, 1)
-    if (separator == 2 && trimmed.getOrNull(1) == ':') return trimmed.substring(0, 3)
-    return trimmed.substring(0, separator)
+    val separator = trimmed.lastIndexOf('/')
+    return when {
+        separator < 0 -> null
+        separator == 0 -> "/"
+        else -> trimmed.substring(0, separator)
+    }
 }
