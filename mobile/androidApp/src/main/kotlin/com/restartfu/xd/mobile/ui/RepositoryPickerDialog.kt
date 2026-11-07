@@ -55,6 +55,9 @@ internal fun RepositoryPickerDialog(
         } catch (failure: Throwable) {
             error = failure.message ?: "Could not list that folder"
             entries = emptyList()
+            // Show where it failed, so Up leads to that folder's parent rather
+            // than asking for the same folder again.
+            requestedPath?.let { currentPath = it }
         } finally {
             loading = false
         }
