@@ -1193,6 +1193,7 @@ const CHAT_PULL_REQUEST_LIFETIME: Duration = Duration::from_secs(60);
 #[derive(Default)]
 struct ChatPullRequest {
     requested_at: Option<Instant>,
+    lookups: u64,
     branch: Option<String>,
     url: Option<String>,
 }
@@ -1203,8 +1204,23 @@ impl ChatPullRequest {
             .is_none_or(|at| now.duration_since(at) >= CHAT_PULL_REQUEST_LIFETIME)
     }
 
+    /// Starts a lookup, superseding any still running, and returns its token.
+    fn start_lookup(&mut self, now: Instant) -> String {
+        self.requested_at = Some(now);
+        self.lookups += 1;
+        self.lookup_token()
+    }
+
+    fn lookup_token(&self) -> String {
+        format!("pull-request-{}", self.lookups)
+    }
+
+    /// Lookups overlap and can finish in any order, so only the latest counts.
     /// A failed lookup says nothing, so it keeps the branch's known pull request.
-    fn apply(&mut self, answer: &Value) {
+    fn apply(&mut self, lookup: Option<&str>, answer: &Value) {
+        if lookup != Some(self.lookup_token().as_str()) {
+            return;
+        }
         let Some(branch) = answer.get("branch").and_then(Value::as_str) else {
             return;
         };
@@ -3441,7 +3457,7 @@ impl XdDesktop {
                         let _ = host.agent_catalog();
                         self.request_local_host_state(host);
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
-                            let _ = host.git_state(chat_id, false);
+                            let _ = host.git_state(chat_id, None);
                         }
                     }
                 }
@@ -5550,11 +5566,11 @@ impl XdDesktop {
         if name == "git-state"
             && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
             && let Some(answer) = body.get("pull_request")
+            && let Some(known) = self
+                .chat_pull_requests
+                .get_mut(&(self.active_endpoint, chat_id.to_owned()))
         {
-            self.chat_pull_requests
-                .entry((self.active_endpoint, chat_id.to_owned()))
-                .or_default()
-                .apply(answer);
+            known.apply(body.get("request").and_then(Value::as_str), answer);
         }
         if name == "turn-started" && !self.event_is_active(&body) {
             self.model.apply_event(name, &body);
@@ -8722,11 +8738,8 @@ impl XdDesktop {
             .entry((self.active_endpoint, chat_id.to_owned()))
             .or_default();
         let now = Instant::now();
-        let pull_request = known.lookup_due(now);
-        if pull_request {
-            known.requested_at = Some(now);
-        }
-        host.git_state(chat_id, pull_request)
+        let lookup = known.lookup_due(now).then(|| known.start_lookup(now));
+        host.git_state(chat_id, lookup.as_deref())
     }
 
     fn expire_chat_pull_request(&mut self, chat_id: &str) {
@@ -20034,7 +20047,11 @@ Binary files /dev/null and b/image.png differ\n";
     fn a_failed_lookup_keeps_the_branchs_pull_request_but_not_anothers() {
         let url = "https://github.com/o/r/pull/1";
         let mut known = ChatPullRequest::default();
-        known.apply(&serde_json::json!({"branch": "a", "url": url}));
+        let answer = |known: &mut ChatPullRequest, answer: Value| {
+            let lookup = known.start_lookup(Instant::now());
+            known.apply(Some(&lookup), &answer);
+        };
+        answer(&mut known, serde_json::json!({"branch": "a", "url": url}));
         assert_eq!(known.url_for("a"), Some(url));
         assert_eq!(
             known.url_for("b"),
@@ -20042,17 +20059,40 @@ Binary files /dev/null and b/image.png differ\n";
             "the header moved to another branch"
         );
 
-        known.apply(&serde_json::json!({"branch": "a"}));
+        answer(&mut known, serde_json::json!({"branch": "a"}));
         assert_eq!(known.url_for("a"), Some(url));
 
-        known.apply(&serde_json::json!({"branch": "b"}));
+        answer(&mut known, serde_json::json!({"branch": "b"}));
         assert_eq!(known.url_for("b"), None);
-        known.apply(&serde_json::json!({"branch": "a"}));
+        answer(&mut known, serde_json::json!({"branch": "a"}));
         assert_eq!(known.url_for("a"), None);
 
-        known.apply(&serde_json::json!({"branch": "a", "url": url}));
-        known.apply(&serde_json::json!({"branch": "a", "url": ""}));
+        answer(&mut known, serde_json::json!({"branch": "a", "url": url}));
+        answer(&mut known, serde_json::json!({"branch": "a", "url": ""}));
         assert_eq!(known.url_for("a"), None, "the pull request is gone");
+    }
+
+    #[test]
+    fn a_superseded_lookup_cannot_overwrite_a_newer_answer() {
+        let url = "https://github.com/o/r/pull/1";
+        let now = Instant::now();
+        let mut known = ChatPullRequest::default();
+        let first = known.start_lookup(now);
+        let second = known.start_lookup(now);
+        assert_ne!(first, second);
+
+        // The later lookup found the pull request, then the earlier one, which
+        // ran before it existed, finishes last.
+        known.apply(
+            Some(&second),
+            &serde_json::json!({"branch": "a", "url": url}),
+        );
+        known.apply(Some(&first), &serde_json::json!({"branch": "a", "url": ""}));
+        assert_eq!(known.url_for("a"), Some(url));
+
+        // Nor does an answer nobody here asked for count.
+        known.apply(None, &serde_json::json!({"branch": "a", "url": ""}));
+        assert_eq!(known.url_for("a"), Some(url));
     }
 
     #[test]
@@ -20102,10 +20142,16 @@ Binary files /dev/null and b/image.png differ\n";
                 chat_id: "pr-chat".into(),
                 agent: AgentCli::Codex,
             };
+            let mut known = ChatPullRequest::default();
+            let lookup = known.start_lookup(Instant::now());
+            desktop
+                .chat_pull_requests
+                .insert((ChatEndpoint::Local, "pr-chat".into()), known);
             desktop.handle_event(
                 "git-state",
                 serde_json::json!({
                     "chat": "pr-chat",
+                    "request": lookup,
                     "pull_request": {"branch": "feature", "url": url},
                 }),
                 None,
