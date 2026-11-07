@@ -20,7 +20,7 @@ use crate::{
     EventBus,
     agent::{resolve_claude, resolve_codex},
     background_process::command as background_command,
-    cli_versions::{clean_output, read_limited, read_version},
+    cli_versions::{clean_output, read_version},
 };
 
 const REGISTRY_URL: &str = "https://registry.npmjs.org";
@@ -30,6 +30,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const OUTPUT_LIMIT: usize = 64 * 1024;
 const DETAIL_LIMIT: usize = 400;
 
 type LatestVersion = fn(&str) -> Result<String, String>;
@@ -68,6 +69,8 @@ struct UpdateEntry {
     /// A release this install's updater already declined, for example because
     /// the CLI is pinned or its package manager has not published it yet.
     settled: Option<String>,
+    /// Older releases of a CLI may not have an `update` command yet.
+    updatable: bool,
     state: &'static str,
     detail: Option<String>,
     /// Bumped by every update so a check that began earlier cannot overwrite it.
@@ -210,11 +213,13 @@ impl CliUpdates {
             .and_then(|_| (self.inner.latest_version)(provider.package).ok())
             .filter(|latest| release_in(latest).is_some());
         let installed = version.is_some();
+        let updatable = installed && supports_update_command(&provider.executable);
         self.change(provider.id, |entry| {
             if entry.generation != generation {
                 return;
             }
             entry.version = version;
+            entry.updatable = updatable;
             if !installed {
                 entry.latest = None;
             } else if latest.is_some() {
@@ -246,6 +251,12 @@ impl CliUpdates {
                 .ok_or_else(|| "xd cannot update that assistant.".to_owned())?;
             if entry.state == "updating" || !entry.available() {
                 return Ok(());
+            }
+            if !entry.updatable {
+                return Err(format!(
+                    "This version of {} cannot update itself. Update it the way you installed it.",
+                    provider.display_name
+                ));
             }
             entry.state = "updating";
             entry.detail = None;
@@ -365,6 +376,7 @@ fn snapshot_value(provider: &Provider, entry: &UpdateEntry) -> Value {
         "display_name": provider.display_name,
         "state": entry.state,
         "available": entry.available(),
+        "updatable": entry.updatable,
     });
     if let Some(version) = &entry.version {
         value["version"] = Value::String(version.clone());
@@ -439,6 +451,38 @@ fn latest_package_version(package: &str) -> Result<String, String> {
         .ok_or_else(|| "The package registry returned invalid data.".to_owned())
 }
 
+/// Whether the CLI's help lists an `update` command. Asking first matters: a
+/// release without one can treat the word as a prompt instead of a command.
+fn supports_update_command(executable: &Path) -> bool {
+    let Ok(mut child) = background_command(executable)
+        .arg("--help")
+        .env("DISABLE_AUTOUPDATER", "1")
+        .env("NO_COLOR", "1")
+        .env("TERM", "dumb")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+    else {
+        return false;
+    };
+    let stdout = child.stdout.take().map(drain);
+    let succeeded = wait_with_timeout(&mut child, VERSION_TIMEOUT).is_ok_and(|s| s.success());
+    succeeded && lists_update_command(&collect_output(stdout))
+}
+
+/// Commands sit at a two-space indent. Wrapped descriptions are indented further
+/// and may begin with the same word.
+fn lists_update_command(help: &str) -> bool {
+    help.lines().any(|line| {
+        line.strip_prefix("  ")
+            .filter(|rest| !rest.starts_with(char::is_whitespace))
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_some_and(|name| name.split(['|', ',']).any(|name| name == "update"))
+    })
+}
+
 /// Runs the CLI's updater in its own process group, so a timeout also stops
 /// any package manager it started. Returns the updater's final output.
 fn run_update(executable: &Path, timeout: Duration) -> Result<String, String> {
@@ -455,15 +499,8 @@ fn run_update(executable: &Path, timeout: Duration) -> Result<String, String> {
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
     let status = wait_with_timeout(&mut child, timeout);
-    // A helper the updater left running can hold the pipes open indefinitely.
-    let collect = |output: Option<Receiver<Vec<u8>>>| {
-        output
-            .and_then(|output| output.recv_timeout(OUTPUT_DRAIN_TIMEOUT).ok())
-            .map(|bytes| clean_output(&bytes).trim().to_owned())
-            .unwrap_or_default()
-    };
-    let stdout = collect(stdout);
-    let stderr = collect(stderr);
+    let stdout = collect_output(stdout);
+    let stderr = collect_output(stderr);
     let status = status?;
     let output = if status.success() || stderr.is_empty() {
         stdout
@@ -480,12 +517,37 @@ fn run_update(executable: &Path, timeout: Duration) -> Result<String, String> {
     }
 }
 
+/// Waits only briefly: a helper left running can hold the pipes open for good.
+fn collect_output(output: Option<Receiver<Vec<u8>>>) -> String {
+    output
+        .and_then(|output| output.recv_timeout(OUTPUT_DRAIN_TIMEOUT).ok())
+        .map(|bytes| clean_output(&bytes).trim().to_owned())
+        .unwrap_or_default()
+}
+
 fn drain(stream: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
-        let _ = sender.send(read_limited(stream));
+        let _ = sender.send(read_tail(stream, OUTPUT_LIMIT));
     });
     receiver
+}
+
+/// Reads to the end but keeps only the last `limit` bytes, where a failing
+/// command reports what went wrong.
+fn read_tail(mut stream: impl Read, limit: usize) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    while let Ok(count) = stream.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        output.extend_from_slice(&buffer[..count]);
+        if output.len() > limit {
+            output.drain(..output.len() - limit);
+        }
+    }
+    output
 }
 
 fn wait_with_timeout(
@@ -543,6 +605,16 @@ mod tests {
             let _ = fs::remove_dir_all(&directory);
             fs::create_dir_all(&directory).unwrap();
             let executable = directory.join("assistant");
+            // Every fake lists an `update` command unless it answers --help itself.
+            let script = if script.contains("--help") {
+                script.to_owned()
+            } else {
+                script.replacen(
+                    '\n',
+                    "\nif [ \"$1\" = --help ]; then echo '  update  Update it'; exit 0; fi\n",
+                    1,
+                )
+            };
             fs::write(
                 &executable,
                 script.replace("$DIR", directory.to_str().unwrap()),
@@ -733,6 +805,53 @@ mod tests {
             .perform(Some("install"), Some("assistant"))
             .unwrap();
         assert_eq!(reply["providers"][0]["state"], "idle");
+    }
+
+    #[test]
+    fn a_release_without_an_update_command_is_never_run() {
+        let cli = FakeCli::start(
+            "older",
+            "#!/bin/sh\nif [ \"$1\" = --help ]; then echo '  exec  Run'; exit 0; fi\nif [ \"$1\" = update ]; then touch \"$DIR/ran\"; fi\necho 1.0.0\n",
+            newer,
+            UPDATE_TIMEOUT,
+        );
+        let entry = cli.check();
+        assert_eq!(entry["available"], true);
+        assert_eq!(entry["updatable"], false);
+        let refused = cli
+            .updates
+            .perform(Some("install"), Some("assistant"))
+            .unwrap_err();
+        assert!(refused.contains("cannot update itself"), "{refused}");
+        assert!(!cli.directory.join("ran").exists());
+        assert_eq!(cli.entry()["state"], "idle");
+    }
+
+    #[test]
+    fn finds_the_update_command_in_real_help_layouts() {
+        assert!(lists_update_command(
+            "Commands:\n  update            Update Codex to the latest version\n"
+        ));
+        assert!(lists_update_command(
+            "Commands:\n  update|upgrade   Check for updates and install if\n"
+        ));
+        assert!(!lists_update_command(
+            "Commands:\n  doctor  Check health, then\n          update through the manager\n"
+        ));
+        assert!(!lists_update_command("update  at the margin\n"));
+        assert!(!lists_update_command("  updater  Not the command\n"));
+    }
+
+    #[test]
+    fn captured_output_keeps_its_end() {
+        let output = read_tail(&b"0123456789"[..], 4);
+        assert_eq!(output, b"6789");
+        let long = vec![b'x'; OUTPUT_LIMIT * 2];
+        let mut failing = long.clone();
+        failing.extend_from_slice(b"the reason");
+        let output = read_tail(failing.as_slice(), OUTPUT_LIMIT);
+        assert_eq!(output.len(), OUTPUT_LIMIT);
+        assert!(output.ends_with(b"the reason"));
     }
 
     #[test]

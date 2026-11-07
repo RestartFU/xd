@@ -222,7 +222,7 @@ pub(crate) fn read_version(executable: &Path, timeout: Duration) -> Result<Strin
     parse_version_output(status, &stdout, &stderr)
 }
 
-pub(crate) fn read_limited(mut stream: impl Read) -> Vec<u8> {
+fn read_limited(mut stream: impl Read) -> Vec<u8> {
     let mut output = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {

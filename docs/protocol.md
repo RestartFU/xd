@@ -315,7 +315,7 @@ boundary, not an event cursor.
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
 | `agent-clis` | none | detected assistant versions |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
-| `agent-cli-updates` | optional `action` of `status`, `check`, `install`; `install` requires `provider` | `providers:[{provider,display_name,state,available, optional version, latest, detail}]`; `state` is `idle`, `updating`, `updated`, or `failed`; each change is also sent as an `agent-cli-update` event holding one provider |
+| `agent-cli-updates` | optional `action` of `status`, `check`, `install`; `install` requires `provider` | `providers:[{provider,display_name,state,available,updatable, optional version, latest, detail}]`; `state` is `idle`, `updating`, `updated`, or `failed`; each change is also sent as an `agent-cli-update` event holding one provider |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, `pending: true` while the host fetches, `retry: true` when the last fetch failed, or none of these when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
@@ -603,7 +603,9 @@ are refused there.
 `agent-cli-updates` covers the assistant CLIs a user installed themselves,
 currently Codex and Claude Code. `available` compares the installed version
 with the newest release of the CLI's npm package, and `install` runs the CLI's
-own `update` command so it can follow however the CLI was installed. An updater
+own `update` command so it can follow however the CLI was installed. `updatable`
+is false when the installed release's help lists no such command; `install` is
+then refused and the update has to be done by hand. An updater
 that exits cleanly without changing the version is reported as `failed` and that
 release is no longer offered. `check` runs in the background and answers with the
 last known state; changes arrive as events. Restarting the host is refused while

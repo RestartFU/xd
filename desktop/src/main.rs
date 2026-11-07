@@ -614,6 +614,8 @@ struct CliUpdateStatus {
     #[serde(default)]
     available: bool,
     #[serde(default)]
+    updatable: bool,
+    #[serde(default)]
     detail: Option<String>,
 }
 

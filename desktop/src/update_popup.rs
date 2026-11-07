@@ -52,11 +52,15 @@ impl SelfUpdatePanel {
     fn pending_clis(&self) -> impl Iterator<Item = &CliUpdateStatus> {
         self.clis
             .iter()
-            .filter(|cli| cli.available && cli.state != "updating")
+            .filter(|cli| cli.available && cli.updatable && cli.state != "updating")
     }
 
     fn clis_updating(&self) -> bool {
         self.clis.iter().any(|cli| cli.state == "updating")
+    }
+
+    fn has_manual_update(&self) -> bool {
+        self.clis.iter().any(|cli| cli.available && !cli.updatable)
     }
 
     fn has_pending_update(&self) -> bool {
@@ -70,7 +74,10 @@ impl SelfUpdatePanel {
     /// Whether the catalog footer should offer the popup: there is something to
     /// confirm, something running, or an installed build waiting for a restart.
     pub(super) fn offers_update(&self) -> bool {
-        self.has_pending_update() || self.update_in_progress() || self.app_installed()
+        self.has_pending_update()
+            || self.has_manual_update()
+            || self.update_in_progress()
+            || self.app_installed()
     }
 
     fn update_rows(&self) -> Vec<UpdateRow> {
@@ -123,6 +130,10 @@ impl SelfUpdatePanel {
                                     .clone()
                                     .unwrap_or_else(|| "The update failed.".to_owned()),
                             ),
+                            _ if cli.available && !cli.updatable => Some(
+                                "This version cannot update itself. Update it the way you installed it."
+                                    .to_owned(),
+                            ),
                             _ => None,
                         },
                         failed: cli.state == "failed",
@@ -137,6 +148,8 @@ impl SelfUpdatePanel {
             "Restart xd to run the new version. Close terminal tabs and wait for chats to finish first."
         } else if self.has_pending_update() || self.update_in_progress() {
             "Confirm to install these. Nothing restarts until you choose to."
+        } else if self.has_manual_update() {
+            "xd cannot install this one for you."
         } else {
             "Everything is up to date."
         }
@@ -408,6 +421,7 @@ mod tests {
             version: Some("2.1.319".into()),
             latest: Some("2.1.330".into()),
             available,
+            updatable: true,
             detail: None,
         }
     }
@@ -558,6 +572,27 @@ mod tests {
         let rows = retry.update_rows();
         assert!(rows[0].failed);
         assert_eq!(rows[0].status.as_deref(), Some("no permission"));
+    }
+
+    #[test]
+    fn a_cli_without_an_updater_is_shown_but_not_offered_for_install() {
+        let mut older = cli("idle", true);
+        older.updatable = false;
+        let manual = panel(None, vec![older]);
+        assert!(manual.offers_update());
+        assert!(!manual.has_pending_update());
+        assert_eq!(
+            manual.update_summary(),
+            "xd cannot install this one for you."
+        );
+        let rows = manual.update_rows();
+        assert!(
+            rows[0]
+                .status
+                .as_deref()
+                .unwrap()
+                .contains("cannot update itself")
+        );
     }
 
     #[test]
