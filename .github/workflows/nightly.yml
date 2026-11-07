@@ -122,6 +122,18 @@ jobs:
             payload-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('scripts/build-macos.sh') }}
           restore-keys: payload-${{ runner.os }}-${{ matrix.arch }}-
 
+      # The only place these run: pull requests stop at clippy. One architecture
+      # is enough for tests, and the packaging below still covers the other.
+      - name: Test the native Rust targets
+        if: matrix.arch == 'arm64'
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          brew install tmux
+          cargo test --locked --manifest-path terminal-core/Cargo.toml
+          cargo test --locked --manifest-path desktop/Cargo.toml
+          cargo test --locked --manifest-path host/Cargo.toml
+
       - name: Build and smoke-test the native app bundle
         env:
           PROFILE: nightly

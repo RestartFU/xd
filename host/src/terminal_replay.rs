@@ -235,7 +235,7 @@ mod tests {
             _ => panic!("compacted terminal checkpoint"),
         };
         let mut rebuilt =
-            TerminalScreen::from_checkpoint_bytes(&checkpoint).expect("checkpoint should decode");
+            TerminalScreen::from_checkpoint_bytes(checkpoint).expect("checkpoint should decode");
         assert_eq!(rebuilt.geometry(), (32, 5));
         assert_eq!(
             rebuilt.rendered_with_cursor(),

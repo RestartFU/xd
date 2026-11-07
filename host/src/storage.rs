@@ -247,6 +247,7 @@ pub(crate) struct ChatTitleSpec {
     pub model: String,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum SendDisposition {
     Queued { reply: Value, event: Value },
     Start { reply: Value, turn: TurnSpec },
@@ -1374,12 +1375,12 @@ impl StateStore {
                 changed
             }
             "effort" => {
-                if let Some(effort) = value {
-                    if !effort_supported(&previous.0, effort) {
-                        return Err(StorageError::InvalidRequest(
-                            "That reasoning effort is not available for this assistant.".into(),
-                        ));
-                    }
+                if let Some(effort) = value
+                    && !effort_supported(&previous.0, effort)
+                {
+                    return Err(StorageError::InvalidRequest(
+                        "That reasoning effort is not available for this assistant.".into(),
+                    ));
                 }
                 remember_backend_choice(&transaction, &previous.0, "effort", value)?;
                 transaction.execute(
@@ -5972,15 +5973,15 @@ fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
     let mut prunable = false;
     for token in output.split('\0') {
         if token.is_empty() {
-            if let Some(path) = path.take() {
-                if !prunable {
-                    worktrees.push(GitWorktree {
-                        path,
-                        head: head.take(),
-                        branch: branch.take(),
-                        detached,
-                    });
-                }
+            if let Some(path) = path.take()
+                && !prunable
+            {
+                worktrees.push(GitWorktree {
+                    path,
+                    head: head.take(),
+                    branch: branch.take(),
+                    detached,
+                });
             }
             branch = None;
             head = None;
@@ -6114,8 +6115,7 @@ fn checked_git(
     let detail = detail
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()
+        .rfind(|line| !line.is_empty())
         .unwrap_or("Git could not read repository changes.")
         .trim_start_matches("fatal: ");
     Err(StorageError::InvalidRequest(
@@ -6564,8 +6564,7 @@ pub(crate) fn clone_repository(url: &str, destination: &Path) -> Result<(), Stor
     let detail = stderr
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()
+        .rfind(|line| !line.is_empty())
         .unwrap_or("Git could not clone that repository.")
         .trim_start_matches("fatal: ");
     let truncated = detail.chars().count() > 200;

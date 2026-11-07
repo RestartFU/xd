@@ -1,3 +1,7 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde_json::Value;
+
 const SUBAGENT_PREFIX: &str = "subagent\n";
 const SUBAGENT_RUN_PREFIX: &str = "subagent_run\n";
 const WORKFLOW_PREFIX: &str = "workflow_run\n";
@@ -283,7 +287,11 @@ impl ActivityCard {
         let summary = compact(content, 180, "Used a tool");
         let failure = generic_failure(&summary);
         let detail = compact(content, 4_000, "Used a tool");
-        let detail = (detail != summary).then_some(detail).unwrap_or_default();
+        let detail = if detail != summary {
+            detail
+        } else {
+            String::new()
+        };
         Self {
             kind: if failure {
                 ActivityKind::Failure
@@ -862,6 +870,3 @@ mod tests {
         assert_eq!(ActivityCard::parse("read file").status, "Done");
     }
 }
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use serde_json::Value;

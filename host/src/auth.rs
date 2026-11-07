@@ -585,8 +585,7 @@ fn command_detail(stdout: &[u8], stderr: &[u8], success: bool) -> String {
         .filter_map(|bytes| std::str::from_utf8(bytes).ok())
         .flat_map(str::lines)
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with("WARNING:"))
-        .next_back()
+        .rfind(|line| !line.is_empty() && !line.starts_with("WARNING:"))
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| {
             if success {

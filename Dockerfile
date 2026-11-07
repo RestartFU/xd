@@ -10,7 +10,7 @@ FROM rust:1.95-slim-trixie@sha256:28846ec5a6bcfcddb93f403ba7071bd579787852b2f2ac
 
 ENV PATH="/usr/local/cargo/bin:${PATH}"
 
-RUN rustup component add rustfmt \
+RUN rustup component add rustfmt clippy \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates \
@@ -56,6 +56,21 @@ RUN cargo fmt --check \
  && cargo test --locked \
  && touch /terminal-core-tests-passed
 
+FROM terminal-core-source AS terminal-core-clippy
+
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
+ && touch /terminal-core-clippy-passed
+
+FROM gpui-toolchain AS transport-core-clippy
+
+WORKDIR /src/transport-core
+COPY transport-core/Cargo.toml transport-core/Cargo.lock ./
+COPY transport-core/src ./src
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
+ && touch /transport-core-clippy-passed
+
 FROM gpui-toolchain AS gpui-desktop-source
 
 WORKDIR /src/desktop
@@ -78,6 +93,12 @@ FROM gpui-desktop-source AS gpui-desktop-tests
 RUN cargo fmt --check \
  && cargo test --locked \
  && touch /gpui-tests-passed
+
+FROM gpui-desktop-source AS gpui-desktop-clippy
+
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
+ && touch /gpui-clippy-passed
 
 FROM gpui-desktop-source AS gpui-desktop-release
 
@@ -125,6 +146,14 @@ RUN cargo fmt --check \
  && cargo test --locked \
  && touch /rust-host-tests-passed
 
+FROM rust-host-source AS rust-host-clippy
+
+COPY host/tests ./tests
+
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
+ && touch /rust-host-clippy-passed
+
 FROM rust-host-source AS rust-host-release
 
 ARG COMMIT=development
@@ -138,9 +167,7 @@ FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7
 
 COPY --from=terminal-core-tests /terminal-core-tests-passed /terminal-core-tests-passed
 COPY --from=gpui-desktop-tests /gpui-tests-passed /gpui-tests-passed
-COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /xd-desktop
 COPY --from=rust-host-tests /rust-host-tests-passed /rust-host-tests-passed
-COPY --from=rust-host-release /src/host/target/release/xd-host /xd-host
 
 # --- bundle runtime closure ------------------------------------------------
 FROM debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd AS bundle-tools
@@ -179,6 +206,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Keep the established CI target name, now backed entirely by Rust.
 FROM gpui-desktop-check AS test
+
+# Every crate's formatting and lints: all a pull request waits for. Built only
+# on request, so a lint can't hold up a nightly or a release.
+FROM scratch AS clippy
+
+COPY --from=terminal-core-clippy /terminal-core-clippy-passed /terminal-core-clippy-passed
+COPY --from=transport-core-clippy /transport-core-clippy-passed /transport-core-clippy-passed
+COPY --from=gpui-desktop-clippy /gpui-clippy-passed /gpui-clippy-passed
+COPY --from=rust-host-clippy /rust-host-clippy-passed /rust-host-clippy-passed
 
 # --- assemble redistributable bundle ---------------------------------------
 FROM bundle-tools AS staging

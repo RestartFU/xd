@@ -468,10 +468,7 @@ fn run_installer_process(mut command: Command, allow_running_install: bool) -> R
         thread::spawn(move || {
             let mut kept = Vec::new();
             let mut buffer = [0_u8; 1024];
-            loop {
-                let Ok(count) = stderr.read(&mut buffer) else {
-                    break;
-                };
+            while let Ok(count) = stderr.read(&mut buffer) {
                 if count == 0 {
                     break;
                 }

@@ -64,6 +64,7 @@ Build and test this crate through the repository Dockerfile:
 
 ```sh
 docker build --target gpui-desktop-check .
+docker build --target gpui-desktop-clippy .
 ```
 
 Linux source builds additionally need GTK3 and WebKitGTK 4.1 development
