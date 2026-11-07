@@ -2,8 +2,10 @@
 //! them, by hand or on the host's own schedule.
 //!
 //! The rules run in the daemon so they keep working while every client is
-//! closed. A sweep only ever changes where a session is listed: it stops no
-//! agent process and closes no terminal.
+//! closed. Settling only ever changes where a session is listed: it closes no
+//! terminal, and work an agent is still doing goes on. The same sweep stops
+//! agent processes with nothing left to do; see
+//! [`TurnRuntime::release_idle_agents`].
 
 use std::{
     collections::HashMap,
@@ -205,6 +207,7 @@ impl AutoSettler {
                         Ok(_) => events.publish(json!({"event": "tree"})),
                         Err(error) => eprintln!("xd: automatic settling skipped: {error}"),
                     }
+                    runtime.release_idle_agents();
                 }
             });
         if let Err(error) = spawned {
@@ -969,7 +972,9 @@ mod tests {
         let merged_at = now_seconds() - DAY_SECONDS * 5;
         with_fake_gh(
             &format!(
-                "echo x >> \"$(dirname \"$0\")/calls\"; \
+                // Tests running alongside this one may find this stand-in too,
+                // so only the lookup being counted is counted.
+                "if [ \"$1 $2\" = 'pr view' ]; then echo x >> \"$(dirname \"$0\")/calls\"; fi; \
                  echo '{{\"state\":\"MERGED\",\"finished_at\":{merged_at}}}'"
             ),
             |fixture, _| {

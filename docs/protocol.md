@@ -419,7 +419,10 @@ Each operation requires a session id, replies with `ok`, and broadcasts `tree`.
 `settle-session` moves finished work out of the active list without deleting it.
 It is refused while any member chat is running a turn, has a queued message, or
 is waiting on an approval or question. Settling a settled session keeps its
-original `settled_at`. No agent process stops and no terminal closes.
+original `settled_at`. No terminal closes, and work an agent is still doing goes
+on. The host stops the process of an agent with nothing running, within two
+minutes of settling or after 30 idle minutes in any session, and the next message
+resumes the conversation in a new process.
 
 `unsettle-session` returns a session to the active list and keeps the automatic
 rules away from it until new activity. `set-session-auto-settle` with

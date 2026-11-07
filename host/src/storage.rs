@@ -3741,6 +3741,20 @@ impl StateStore {
         Ok(json!({"ok": true}))
     }
 
+    /// Every chat in a session that is currently settled.
+    pub(crate) fn settled_chats(&self) -> Result<HashSet<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT c.id FROM chats c \
+             JOIN workspace_sessions s ON s.id = c.workspace_session_id \
+             WHERE s.settled_override = 'settled'",
+        )?;
+        let chats = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, rusqlite::Error>>()?;
+        Ok(chats)
+    }
+
     /// Returns a session to the active list and keeps the automatic rules away
     /// from it until new activity hands it back to them.
     pub fn unsettle_session(&self, request: &Value) -> Result<Value, StorageError> {

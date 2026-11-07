@@ -29,6 +29,7 @@ mod model_catalog;
 mod owner_icon;
 mod pairing;
 mod private_fs;
+mod process_tree;
 mod reply_images;
 mod repository_monitor;
 mod runtime;
