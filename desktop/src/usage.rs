@@ -2,7 +2,7 @@
 //! formats they display in, and the chart and limit-pool math. Ported from
 //! T3 Code (MIT, see `data/licenses/t3code-LICENSE`).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -28,7 +28,10 @@ pub struct TokenTotals {
 impl TokenTotals {
     /// Reasoning is a subset of output and must not be added again.
     pub fn total(&self) -> u64 {
-        self.uncached_input + self.cached_input + self.cache_creation + self.output
+        self.uncached_input
+            .saturating_add(self.cached_input)
+            .saturating_add(self.cache_creation)
+            .saturating_add(self.output)
     }
 
     fn add(&mut self, other: &Self) {
@@ -92,6 +95,7 @@ pub struct Source {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Summary {
+    pub read_at_ms: i64,
     pub hourly: bool,
     pub window_label: String,
     pub periods: Vec<Period>,
@@ -151,6 +155,7 @@ impl Summary {
             })
             .collect();
         Some(Self {
+            read_at_ms: value["read_at_ms"].as_i64().unwrap_or(0),
             hourly: value["resolution"] == "hour",
             window_label: text(&value["window_label"]),
             periods: value["periods"]
@@ -300,20 +305,36 @@ pub fn merge(
     keep: impl Fn(&Bucket) -> bool,
 ) -> Merged {
     let mut merged = Merged::default();
-    let mut owners = HashSet::new();
+    let mut owners: HashMap<&str, (usize, (bool, i64))> = HashMap::new();
     let mut providers: BTreeMap<String, ProviderTotals> = BTreeMap::new();
     let mut models: BTreeMap<(String, String), ModelTotals> = BTreeMap::new();
     let mut periods: BTreeMap<String, PeriodTotals> = BTreeMap::new();
     let mut unpriced = 0;
     let mut duplicates = BTreeSet::new();
-    for (label, summary) in environments {
-        let mut dropped = HashSet::new();
+    // Hosts sharing a transcript directory count once: the complete scan, then the newest.
+    for (index, (_, summary)) in environments.iter().enumerate() {
         for source in &summary.sources {
             // A missing directory has no volume, so two of them are not one source.
             if source.status == "missing" {
                 continue;
             }
-            if !owners.insert(source.fingerprint.clone()) {
+            let rank = (source.status == "ok", summary.read_at_ms);
+            let owner = owners
+                .entry(source.fingerprint.as_str())
+                .or_insert((index, rank));
+            if rank > owner.1 {
+                *owner = (index, rank);
+            }
+        }
+    }
+    for (index, (label, summary)) in environments.iter().enumerate() {
+        let mut dropped = HashSet::new();
+        for source in &summary.sources {
+            if source.status != "missing"
+                && owners
+                    .get(source.fingerprint.as_str())
+                    .is_some_and(|owner| owner.0 != index)
+            {
                 dropped.insert(source.provider.as_str());
                 duplicates.insert(format!("{label} {}", provider_label(&source.provider)));
             }
@@ -1432,6 +1453,39 @@ mod tests {
                 .unwrap()
                 .sessions,
             4
+        );
+    }
+
+    #[test]
+    fn a_shared_directory_counts_its_complete_then_newest_scan() {
+        let mut partial = summary();
+        partial.sources[0].status = "partial".into();
+        partial.buckets[0].cost_usd = 1.0;
+        partial.read_at_ms = 50;
+        let mut complete = summary();
+        complete.read_at_ms = 10;
+        let merged = merge(
+            &[("Local", &partial), ("Remote", &complete)],
+            &[],
+            |bucket| bucket.provider == "claude",
+        );
+        assert_eq!(
+            merged.cost_usd, 2.0,
+            "the complete scan wins even though it is older"
+        );
+        assert_eq!(
+            merged.duplicate_sources,
+            ["Local Claude Code", "Remote Codex"]
+        );
+        let mut older = summary();
+        older.buckets[0].cost_usd = 1.0;
+        older.read_at_ms = 5;
+        let merged = merge(&[("Local", &older), ("Remote", &complete)], &[], |bucket| {
+            bucket.provider == "claude"
+        });
+        assert_eq!(
+            merged.cost_usd, 2.0,
+            "between complete scans the newest wins"
         );
     }
 

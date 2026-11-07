@@ -899,8 +899,12 @@ impl XdDesktop {
                     environment.summary_loading = false;
                     let summary = body.get("summary").and_then(Summary::parse);
                     if summary.is_none() {
-                        environment.summary_error =
-                            Some("The host sent an unreadable usage summary.".into());
+                        environment.summary_error = Some(
+                            body.get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("The host sent an unreadable usage summary.")
+                                .to_owned(),
+                        );
                     } else {
                         environment.summary = summary;
                         environment.summary_window = environment.requested_window;
@@ -918,11 +922,13 @@ impl XdDesktop {
                         index,
                         environment_label(index),
                     );
-                    // Freshness is when this answer arrived. Two hosts' own clocks
-                    // can disagree, and a fast one must not outrank a newer report.
+                    // Place each report in this machine's clock by its age. Two hosts'
+                    // clocks can disagree, and a probe can answer long after it read.
                     let received = now_ms();
+                    let host_now = body.get("host_now_ms").and_then(Value::as_i64);
                     for account in &mut accounts {
-                        account.checked_at_ms = received;
+                        let age = host_now.map_or(0, |now| (now - account.checked_at_ms).max(0));
+                        account.checked_at_ms = received - age;
                     }
                     environment.accounts = Some(accounts);
                     self.usage.limits_now = now_ms();
@@ -4398,6 +4404,27 @@ mod tests {
             });
             let accounts = collect_accounts(reports.flatten());
             assert_eq!(accounts[0].windows[0].used_percent, 0.0, "the newer answer wins");
+
+            // A slow probe answers last, but what it says was read a minute ago.
+            std::thread::sleep(Duration::from_millis(2));
+            let mut slow = answer(3, 1_000_000 - 60_000, 100.0);
+            slow.insert("host_now_ms".into(), json!(1_000_000));
+            desktop.usage.environments[1].limits_generation = 3;
+            assert!(desktop.usage_event(1, "usage-limits", &slow));
+            let reports = [0, 1].into_iter().filter_map(|index| {
+                desktop.usage.environments[index].accounts.clone()
+            });
+            let accounts = collect_accounts(reports.flatten());
+            assert_eq!(accounts[0].windows[0].used_percent, 0.0, "age counts, not arrival");
+
+            // A scan that died reports why and ends the wait.
+            desktop.usage.environments[0].summary_generation = 4;
+            desktop.usage.environments[0].summary_loading = true;
+            let died = json!({"generation": 4, "error": "The host could not read usage."});
+            assert!(desktop.usage_event(0, "usage-summary", died.as_object().unwrap()));
+            let environment = &desktop.usage.environments[0];
+            assert!(!environment.summary_loading);
+            assert_eq!(environment.summary_error.as_deref(), Some("The host could not read usage."));
         });
     }
 
