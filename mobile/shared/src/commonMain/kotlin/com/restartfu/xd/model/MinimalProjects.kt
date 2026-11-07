@@ -36,6 +36,12 @@ public data class MinimalSession(
     val autoSettleDisabled: Boolean = false,
 ) {
     val settled: Boolean get() = settledAt != null
+
+    /**
+     * The host groups chats into sessions. Older hosts show each chat as its
+     * own session under the chat's id, so session operations do not apply.
+     */
+    val grouped: Boolean get() = terminalChatId.startsWith("session:")
 }
 
 /** A settled session on the shelf, with the project it belongs to. */

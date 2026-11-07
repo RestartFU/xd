@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
@@ -75,6 +76,8 @@ public class XdClient(
     /** Something has asked for the rules on this host, so a reconnect should read them again. */
     private val autoSettleWanted = MutableStateFlow(false)
     private val _autoSettleStale = MutableStateFlow(false)
+    /** Counts background reads, so only the newest one's failure can mark the rules stale. */
+    private val autoSettleRereads = MutableStateFlow(0L)
 
     /**
      * The rules shown may be out of date: the host said they changed and the
@@ -98,13 +101,16 @@ public class XdClient(
 
     private fun rereadAutoSettle() {
         val generation = _sessionGeneration.value
+        val read = autoSettleRereads.updateAndGet { it + 1 }
         scope.launch {
             try {
                 autoSettleCall(Ops.autoSettleSettings())
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (generation == _sessionGeneration.value) _autoSettleStale.value = true
+                if (generation == _sessionGeneration.value && read == autoSettleRereads.value) {
+                    _autoSettleStale.value = true
+                }
             }
         }
     }

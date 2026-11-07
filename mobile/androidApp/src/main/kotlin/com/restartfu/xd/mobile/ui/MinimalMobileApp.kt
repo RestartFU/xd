@@ -373,7 +373,10 @@ internal fun MinimalMobileApp(
             onDismiss = { renamingSession = null },
             onConfirm = { name ->
                 renamingSession = null
-                if (name != session.title) model.renameSession(session.id, name)
+                if (name != session.title) {
+                    // An older host's "session" is a single chat under the chat's own id.
+                    if (session.grouped) model.renameSession(session.id, name) else model.renameChat(session.id, name)
+                }
             },
         )
     }
@@ -386,7 +389,7 @@ internal fun MinimalMobileApp(
             onConfirm = {
                 deletingSession = null
                 if (session.id == activeSessionId) mobileDestination = MobileDestination.PROJECTS
-                model.deleteSession(session.id)
+                if (session.grouped) model.deleteSession(session.id) else model.deleteChat(session.id)
             },
         )
     }
