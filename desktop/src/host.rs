@@ -981,7 +981,31 @@ impl HostHandle {
         anchor_id: &str,
         after: bool,
     ) -> Result<(), String> {
-        let mut body = json!({"op": "move-folder", "folder": folder_id, "keep_parent": true});
+        self.place_folder_beside(folder_id, anchor_id, after, true)
+    }
+
+    /// Places a folder before or after `anchor_id`, moving it into the
+    /// anchor's parent on disk first when they differ.
+    pub fn move_folder_beside(
+        &self,
+        folder_id: &str,
+        anchor_id: &str,
+        after: bool,
+    ) -> Result<(), String> {
+        self.place_folder_beside(folder_id, anchor_id, after, false)
+    }
+
+    fn place_folder_beside(
+        &self,
+        folder_id: &str,
+        anchor_id: &str,
+        after: bool,
+        keep_parent: bool,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "move-folder", "folder": folder_id});
+        if keep_parent {
+            body["keep_parent"] = Value::Bool(true);
+        }
         body[if after { "after" } else { "before" }] = Value::String(anchor_id.to_owned());
         self.send(
             RequestKind::MoveFolder {
@@ -2562,7 +2586,11 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            for (field, after) in [("before", false), ("after", true)] {
+            for (field, after, keep_parent) in [
+                ("before", false, true),
+                ("after", true, true),
+                ("after", true, false),
+            ] {
                 let mut request = String::new();
                 BufReader::new(stream.try_clone().unwrap())
                     .read_line(&mut request)
@@ -2573,7 +2601,11 @@ mod tests {
                 assert_eq!(request[field], "folder-2");
                 assert_eq!(request.get(if after { "before" } else { "after" }), None);
                 assert_eq!(request.get("parent"), None);
-                assert_eq!(request["keep_parent"], true);
+                if keep_parent {
+                    assert_eq!(request["keep_parent"], true);
+                } else {
+                    assert_eq!(request.get("keep_parent"), None, "a move may change parent");
+                }
                 let request_id = request["_xd_request"].as_u64().unwrap();
                 writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
             }
@@ -2594,6 +2626,15 @@ mod tests {
                 } if folder_id == "folder-1"
             ));
         }
+        host.move_folder_beside("folder-1", "folder-2", true)
+            .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::MoveFolder { folder_id, parent_id: None },
+                ..
+            } if folder_id == "folder-1"
+        ));
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);

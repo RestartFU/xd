@@ -754,6 +754,9 @@ impl StateStore {
             "sessions": sessions,
             "settlement": true,
             "folder_reorder": true,
+            // The host keeps folders of projects; older hosts ignore `group`
+            // and `owner` and would make a project instead.
+            "folder_groups": true,
         }))
     }
 
@@ -9730,6 +9733,7 @@ mod tests {
         );
 
         let tree = store.tree().unwrap();
+        assert_eq!(tree["folder_groups"], true);
         let folder = |wanted: &str| {
             tree["folders"]
                 .as_array()

@@ -484,6 +484,9 @@ pub struct AppModel {
     pub settlement_supported: bool,
     /// The connected host refuses a folder reorder that would move it on disk.
     pub folder_reorder_supported: bool,
+    /// The connected host keeps folders of projects. An older one ignores the
+    /// request and makes a project instead.
+    pub folder_groups_supported: bool,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -547,6 +550,9 @@ struct TreeSnapshot {
     /// hosts leave this out.
     #[serde(default)]
     folder_reorder: bool,
+    /// The host keeps folders of projects; older hosts leave this out.
+    #[serde(default)]
+    folder_groups: bool,
     #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
@@ -800,6 +806,7 @@ impl AppModel {
         self.sessions = snapshot.sessions;
         self.settlement_supported = snapshot.settlement;
         self.folder_reorder_supported = snapshot.folder_reorder;
+        self.folder_groups_supported = snapshot.folder_groups;
         self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
@@ -1598,6 +1605,7 @@ impl AppModel {
         let mut model = Self {
             settlement_supported: true,
             folder_reorder_supported: true,
+            folder_groups_supported: true,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -1762,6 +1770,21 @@ mod tests {
         tree["folder_reorder"] = json!(true);
         model.apply_tree(&tree).unwrap();
         assert!(model.folder_reorder_supported);
+    }
+
+    #[test]
+    fn the_tree_says_whether_the_host_keeps_folders_of_projects() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert!(
+            !model.folder_groups_supported,
+            "an older host leaves it out and would make a project instead"
+        );
+
+        let mut tree = grouped_tree();
+        tree["folder_groups"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.folder_groups_supported);
     }
 
     #[test]
