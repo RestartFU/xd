@@ -8660,7 +8660,8 @@ fn stored_draft_attachments(database: &Connection, chat_id: &str) -> Result<Valu
 }
 
 /// A stored draft without the attachments a message took from it: each one
-/// sent removes one entry with the same name, type, and content. What reached the draft from elsewhere while
+/// sent removes one entry with the same type and content, and for a file the
+/// same name. What reached the draft from elsewhere while
 /// the message was written stays, so no client clears what it never saw.
 fn without_sent(stored: &Value, request: &Value) -> Value {
     let mut left = stored.as_array().cloned().unwrap_or_default();
@@ -8670,11 +8671,14 @@ fn without_sent(stored: &Value, request: &Value) -> Value {
         .into_iter()
         .flatten();
     for attachment in sent {
-        let name = stored_attachment_name(attachment);
+        // A file is known by its name, which the agent sees; an image is
+        // saved under a name of the host's own, and image-only clients such as
+        // the Android app do not keep the one it came with.
+        let name = (attachment["mime"] != PNG_MIME).then(|| stored_attachment_name(attachment));
         let same = |entry: &Value| {
             entry["mime"] == attachment["mime"]
                 && entry["data"] == attachment["data"]
-                && entry["name"].as_str() == Some(name)
+                && name.is_none_or(|name| entry["name"].as_str() == Some(name))
         };
         if let Some(index) = left.iter().position(same) {
             left.remove(index);
@@ -13013,6 +13017,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["draft_files"], json!([]));
+        // An image goes by its content alone, as image-only clients send it
+        // without the name it was synchronized with.
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .set_draft(&json!({"chat": "chat-1", "text": "", "files": true, "attachments": [png("screen.png")]}))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "attachments": [{"mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)}]}))
+            .unwrap();
+        assert_eq!(
+            store.chat("chat-1").unwrap()["draft_attachments"],
+            json!([])
+        );
         // A shortcut sent apart from the draft takes nothing from it.
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         store
