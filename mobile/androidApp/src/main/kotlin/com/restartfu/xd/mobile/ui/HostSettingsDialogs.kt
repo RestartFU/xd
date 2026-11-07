@@ -86,7 +86,7 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        TextButton(onClick = model::loadAccounts) { Text("Try again") }
+                        TextButton(onClick = model::retryAccounts) { Text("Try again") }
                     }
                 }
                 val providers = auth?.values?.sortedBy { it.displayName }
@@ -240,9 +240,9 @@ internal fun AgentSecretsDialog(
             loadError = failure.message ?: "Could not read the secrets"
         }
     }
-    val newNames = added.map { it.first.trim() }
+    val newNames = added.map { it.name.trim() }
     val valid = newNames.all { SECRET_NAME.matches(it) } &&
-        added.all { it.second.isNotEmpty() } &&
+        added.all { it.value.isNotEmpty() } &&
         (names.orEmpty().filterNot { it in removed } + newNames).let { it.toSet().size == it.size }
     AlertDialog(
         onDismissRequest = { if (!saving) close() },
@@ -263,7 +263,9 @@ internal fun AgentSecretsDialog(
                     current == null && error == null -> CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
                     current == null -> TextButton(onClick = { attempt++ }) { Text("Try again") }
                     else -> {
-                        current.filterNot { it in removed }.forEach { name ->
+                        // Rows are keyed, so removing one never moves another's
+                        // field, focus included, onto a neighbour.
+                        current.filterNot { it in removed }.forEach { name -> key(name) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(name, modifier = Modifier.weight(0.45f), fontFamily = XdMonoFamily, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 OutlinedTextField(
@@ -277,12 +279,15 @@ internal fun AgentSecretsDialog(
                                 )
                                 TextButton(onClick = { removed = removed + name }, enabled = !saving) { Text("Remove") }
                             }
-                        }
-                        added.forEachIndexed { index, (name, value) ->
+                        } }
+                        added.forEach { row -> key(row.id) {
+                            val name = row.name
+                            val value = row.value
+                            val update = { changed: AddedSecret -> added = added.map { if (it.id == row.id) changed else it } }
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedTextField(
                                     value = name,
-                                    onValueChange = { text -> added = added.toMutableList().also { it[index] = text to value } },
+                                    onValueChange = { text -> update(row.copy(name = text)) },
                                     modifier = Modifier.weight(0.45f),
                                     placeholder = { Text("NAME") },
                                     singleLine = true,
@@ -291,18 +296,18 @@ internal fun AgentSecretsDialog(
                                 )
                                 OutlinedTextField(
                                     value = value,
-                                    onValueChange = { text -> added = added.toMutableList().also { it[index] = name to text } },
+                                    onValueChange = { text -> update(row.copy(value = text)) },
                                     modifier = Modifier.weight(0.55f),
                                     placeholder = { Text("Value") },
                                     singleLine = true,
                                     enabled = !saving,
                                     visualTransformation = PasswordVisualTransformation(),
                                 )
-                                TextButton(onClick = { added = added.filterIndexed { at, _ -> at != index } }, enabled = !saving) { Text("Remove") }
+                                TextButton(onClick = { added = added.filter { it.id != row.id } }, enabled = !saving) { Text("Remove") }
                             }
-                        }
+                        } }
                         // Locked while saving: the request carries what was there when Save was pressed.
-                        TextButton(onClick = { added = added + ("" to "") }, enabled = !saving) { Text("Add secret") }
+                        TextButton(onClick = { added = added + AddedSecret("", "") }, enabled = !saving) { Text("Add secret") }
                     }
                 }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
@@ -314,7 +319,7 @@ internal fun AgentSecretsDialog(
                     val kept = names.orEmpty().filterNot { it in removed }.map { name ->
                         Ops.SecretEntry(name, replaced[name]?.takeIf(String::isNotEmpty))
                     }
-                    val entries = kept + added.map { (name, value) -> Ops.SecretEntry(name.trim(), value) }
+                    val entries = kept + added.map { Ops.SecretEntry(it.name.trim(), it.value) }
                     editors.run(opening, "Could not save the secrets") { model.client.setAgentSecrets(folderId, entries) }
                 },
                 enabled = names != null && valid && !saving,
@@ -331,8 +336,15 @@ internal class SecretDraft {
     val names = mutableStateOf<List<String>?>(null)
     val removed = mutableStateOf(emptySet<String>())
     val replaced = mutableStateOf(emptyMap<String, String>())
-    val added = mutableStateOf(emptyList<Pair<String, String>>())
+    val added = mutableStateOf(emptyList<AddedSecret>())
 }
+
+/** A secret being added; its [id] stays put while its name is edited. */
+internal data class AddedSecret(
+    val name: String,
+    val value: String,
+    val id: String = java.util.UUID.randomUUID().toString(),
+)
 
 /** One editor's save: whether it is out, how it failed, and whether it landed. */
 internal class EditorSave {

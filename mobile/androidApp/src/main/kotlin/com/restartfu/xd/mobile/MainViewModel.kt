@@ -232,8 +232,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (generation != client.sessionGeneration.value || serial < accountActionSucceeded) return@launch
-                accountActionFailed = maxOf(accountActionFailed, serial)
+                // Nor does it replace a newer action's failure.
+                if (generation != client.sessionGeneration.value || serial < accountActionSucceeded || serial < accountActionFailed) return@launch
+                accountActionFailed = serial
                 _accountsError.value = error.message ?: failure
             }
         }
@@ -247,6 +248,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loadAccounts() {
         viewModelScope.launch { quietly { client.loadAgentAuth() } }
         viewModelScope.launch { quietly { client.agentCliUpdates("status") } }
+    }
+
+    /** Pressed by the person: reads again, and acknowledges a failed action. */
+    fun retryAccounts() {
+        _accountsError.value = null
+        loadAccounts()
     }
 
     private suspend fun quietly(read: suspend () -> Unit) {
@@ -296,8 +303,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 throw error
             } catch (error: Throwable) {
                 if (generation != client.sessionGeneration.value) return@launch
-                if (write && writeSerial > chatTitleWriteSucceeded) {
-                    chatTitleWriteFailed = maxOf(chatTitleWriteFailed, writeSerial)
+                if (write && writeSerial > chatTitleWriteSucceeded && writeSerial > chatTitleWriteFailed) {
+                    chatTitleWriteFailed = writeSerial
                     _chatTitlesWriteError.value = error.message ?: failure
                 }
                 if (serial != chatTitleRequests) return@launch
