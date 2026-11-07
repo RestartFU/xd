@@ -4557,7 +4557,10 @@ impl StateStore {
         self.mutate_queue(chat_id, move |queue| match index {
             Some(index)
                 if expected.as_ref().is_some_and(|text| {
-                    usize::try_from(index).ok().and_then(|index| queue.get(index)) != Some(text)
+                    usize::try_from(index)
+                        .ok()
+                        .and_then(|index| queue.get(index))
+                        != Some(text)
                 }) =>
             {
                 Err(StorageError::InvalidRequest(
