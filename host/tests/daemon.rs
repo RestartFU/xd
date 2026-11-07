@@ -415,6 +415,40 @@ fn a_first_turn_waits_for_the_default_the_assistant_reports() {
 }
 
 #[test]
+fn a_first_turn_leaves_a_remembered_model_the_assistant_has_retired() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let earlier = daemon.chat(&mut client);
+    // Built in, so it is accepted, but the assistant does not offer it.
+    assert_eq!(
+        client.call(json!({"op":"set-option", "chat":earlier, "option":"model",
+            "value":"gpt-5.3-codex-spark"}))["ok"],
+        true
+    );
+    assert_eq!(
+        client.call(json!({"op":"set-option", "chat":earlier, "option":"effort",
+            "value":"high"}))["ok"],
+        true
+    );
+    // The earlier chat's probe has not answered yet, so the pick is not checked.
+    let chat = daemon.chat(&mut client);
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"hello"}))["ok"],
+        true
+    );
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let requests = fs::read_to_string(daemon.root.join("codex.requests")).unwrap();
+    let thread = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|frame| frame["frame"]["method"] == "thread/start")
+        .unwrap();
+    assert_eq!(thread["frame"]["params"]["model"], "cli-default");
+}
+
+#[test]
 fn a_first_turn_waits_for_the_default_effort_of_a_model_already_chosen() {
     let daemon = Daemon::start();
     let mut client = daemon.client();

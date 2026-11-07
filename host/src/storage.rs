@@ -1393,22 +1393,51 @@ impl StateStore {
         Ok((json!({"ok": true}), event))
     }
 
-    /// Waits until a chat with no model or effort yet can resolve the assistant's
-    /// defaults, so that its turn does not run on the built-in ones. Call this
-    /// before taking any lock another chat needs, since discovery can take seconds.
+    /// Settles what a chat's first turn runs on, so that it does not run on a
+    /// built-in default or on a remembered model the assistant has since retired.
+    /// A new chat cannot check either when nothing has been discovered yet.
+    ///
+    /// Call this before taking any lock another chat needs, since discovery can
+    /// take seconds.
     pub fn await_chat_defaults(&self, chat_id: &str) -> Result<(), StorageError> {
-        let unset = {
+        let chat = {
             let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
             database
                 .query_row(
-                    "SELECT backend FROM chats WHERE id = ? AND (model IS NULL OR effort IS NULL)",
+                    "SELECT backend, model, effort, \
+                     (SELECT model FROM agent_backend_choices WHERE backend = chats.backend), \
+                     EXISTS(SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
+                     FROM chats WHERE id = ?",
                     [chat_id],
-                    |row| row.get::<_, String>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, bool>(4)?,
+                        ))
+                    },
                 )
                 .optional()?
         };
-        if let Some(backend) = unset {
-            crate::model_catalog::awaited_default_model(&backend);
+        let Some((backend, model, effort, picked, used)) = chat else {
+            return Ok(());
+        };
+        let on_unused_pick = !used && model.is_some() && model == picked;
+        if model.is_some() && effort.is_some() && !on_unused_pick {
+            return Ok(());
+        }
+        crate::model_catalog::awaited_default_model(&backend);
+        let discovered = crate::model_catalog::cached_models(&backend);
+        if let Some(model) =
+            model.filter(|model| on_unused_pick && !choice_still_offered(&discovered, model))
+        {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            database.execute(
+                "UPDATE chats SET model = NULL WHERE id = ? AND model = ?",
+                params![chat_id, model],
+            )?;
         }
         Ok(())
     }
@@ -4580,10 +4609,7 @@ fn new_chat_model_and_effort(
         .optional()?
         .unwrap_or_default();
     let discovered = crate::model_catalog::cached_models(backend);
-    // An undiscovered catalog says nothing about whether the pick still exists.
-    let picked_model = picked_model.filter(|picked| {
-        discovered.is_empty() || discovered.iter().any(|known| known.id == *picked)
-    });
+    let picked_model = picked_model.filter(|picked| choice_still_offered(&discovered, picked));
     let model = workspace_model
         .or(picked_model)
         .or_else(|| crate::model_catalog::cached_default_model(backend).map(|model| model.id));
@@ -4592,6 +4618,11 @@ fn new_chat_model_and_effort(
     }
     let effort = picked_effort.filter(|effort| effort_supported(backend, effort));
     Ok((model, effort))
+}
+
+/// An undiscovered catalog says nothing about whether a choice still exists.
+fn choice_still_offered(discovered: &[crate::model_catalog::Model], choice: &str) -> bool {
+    discovered.is_empty() || discovered.iter().any(|known| known.id == choice)
 }
 
 fn remember_backend_choice(
