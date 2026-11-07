@@ -1412,7 +1412,15 @@ mod tests {
                 restore: true,
                 optimistic: OptimisticSend::Queued,
             });
-            desktop.model.draft_attachments = vec![since, sent];
+            // The same picture under another name arrived meanwhile too.
+            let png = png(4, 4, |_, _| [1, 2, 3, 255]);
+            let first = Attachment::from_png("first.png", png.clone()).unwrap();
+            let second = Attachment::from_png("second.png", png).unwrap();
+            assert_ne!(first.id, second.id);
+            if let Some(pending) = &mut desktop.pending_send {
+                pending.attachments.push(first.clone());
+            }
+            desktop.model.draft_attachments = vec![since, sent, first, second];
             desktop.restore_pending_send(cx);
             let names = desktop
                 .model
@@ -1420,14 +1428,27 @@ mod tests {
                 .iter()
                 .map(|attachment| attachment.name.as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(names, ["sent.pdf", "since.txt"]);
+            assert_eq!(names, ["sent.pdf", "first.png", "since.txt", "second.png"]);
             assert!(desktop.attachments_dirty);
 
-            // Nothing joins the draft while a send is out.
+            // Nothing joins the draft while a send is out, or its clear is.
             desktop.sending = true;
-            let extra = Attachment::from_file("extra.txt", vec![1]);
-            assert!(desktop.add_attachment(extra).unwrap_err().contains("Wait"));
+            let extra = || Attachment::from_file("extra.txt", vec![1]);
+            assert!(
+                desktop
+                    .add_attachment(extra())
+                    .unwrap_err()
+                    .contains("Wait")
+            );
             desktop.sending = false;
+            desktop.awaiting_sent_clear = true;
+            assert!(
+                desktop
+                    .add_attachment(extra())
+                    .unwrap_err()
+                    .contains("Wait")
+            );
+            desktop.awaiting_sent_clear = false;
 
             // A restored draft keeps to the host's limits.
             let big =

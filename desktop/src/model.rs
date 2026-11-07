@@ -132,11 +132,16 @@ impl Attachment {
             .filter(|&(width, height)| worth_decoding(width, height));
         let length = bytes.len();
         let preview = Arc::new(Image::from_bytes(ImageFormat::Png, bytes));
+        let name = name.into();
+        // The name is part of it, so the same picture attached twice under
+        // two names is two attachments.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&(&name, preview.id()), &mut hasher);
         Ok(Self {
-            name: name.into(),
+            name,
             mime: "image/png".into(),
             data: STANDARD.encode(&preview.bytes),
-            id: preview.id(),
+            id: std::hash::Hasher::finish(&hasher),
             preview: Some(preview),
             size,
             bytes: length,
@@ -154,6 +159,11 @@ impl Attachment {
         }
         let mime = file_mime(&name).to_owned();
         Self::file(name, mime, STANDARD.encode(&bytes), bytes.len())
+    }
+
+    /// The same attachment as the host counts it: name, type, and content.
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.name == other.name && self.mime == other.mime && self.data == other.data
     }
 
     fn file(name: String, mime: String, data: String, bytes: usize) -> Self {

@@ -3358,6 +3358,8 @@ impl XdDesktop {
                 if self.remote_generation != generation {
                     return;
                 }
+                // Its clear will not answer now; the reconnect reloads the draft.
+                self.awaiting_sent_clear = false;
                 self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
                 self.remote_host = None;
                 self.remote_bridge = None;
@@ -3708,6 +3710,8 @@ impl XdDesktop {
                 if self.connection_generation != generation {
                     return;
                 }
+                // Its clear will not answer now; the reconnect reloads the draft.
+                self.awaiting_sent_clear = false;
                 self.terminal_cache_refresh.insert(ChatEndpoint::Local);
                 self.host = None;
                 self.model.connected = false;
@@ -3868,6 +3872,8 @@ impl XdDesktop {
                 }
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
+                // A clear that failed will not answer; attaching opens again.
+                RequestKind::SetDraft { .. } => self.awaiting_sent_clear = false,
                 RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -9790,7 +9796,7 @@ impl XdDesktop {
         let mut attachments = pending.attachments;
         let mut refused = None;
         for attachment in std::mem::take(&mut self.model.draft_attachments) {
-            if attachments.iter().any(|sent| sent.id == attachment.id) {
+            if attachments.iter().any(|sent| sent.same_as(&attachment)) {
                 continue;
             }
             match attachment_fits(&attachments, &attachment) {
@@ -10151,7 +10157,9 @@ impl XdDesktop {
     /// While a send is out the draft may yet get its attachments back, so
     /// nothing joins it until that settles.
     fn add_attachment(&mut self, attachment: Attachment) -> Result<(), String> {
-        if self.sending {
+        // Until the clear after a send returns, the draft may hold files from
+        // elsewhere that this list does not show yet.
+        if self.sending || self.awaiting_sent_clear {
             return Err("Wait for the message to send before attaching more.".into());
         }
         attachment_fits(&self.model.draft_attachments, &attachment)?;
