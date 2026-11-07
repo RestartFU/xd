@@ -13,24 +13,28 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.restartfu.xd.mobile.MAX_SHORTCUTS
 import com.restartfu.xd.mobile.ShortcutEditorState
 
 @Composable
 internal fun ShortcutEditorDialog(
     state: ShortcutEditorState,
     onDismiss: () -> Unit,
-    onSave: (List<String>) -> Unit,
+    onSave: () -> Unit,
+    onRetry: () -> Unit,
+    onText: (id: Long, text: String) -> Unit,
+    onAdd: () -> Unit,
+    onRemove: (id: Long) -> Unit,
 ) {
-    var prompts by remember(state.folderId, state.prompts) {
-        mutableStateOf(state.prompts)
-    }
+    // The draft lives in the editor state, so recreating the activity keeps it
+    // and another opening never sees it.
+    val prompts = state.draft
+    // Locked while saving: the request carries the list as Save found it.
+    val editable = !state.saving
 
     AlertDialog(
         onDismissRequest = { if (!state.saving) onDismiss() },
@@ -44,9 +48,9 @@ internal fun ShortcutEditorDialog(
             ) {
                 Text(
                     if (state.folderId == null) {
-                        "These prompt buttons appear in every workspace on this host."
+                        "These prompt buttons appear in every project on this host."
                     } else {
-                        "These prompt buttons appear in this workspace and its children."
+                        "These prompt buttons appear in this project, after the ones every project shares."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
@@ -57,28 +61,36 @@ internal fun ShortcutEditorDialog(
                     state.error?.let { message ->
                         Text(message, color = MaterialTheme.colorScheme.error)
                     }
-                    prompts.forEachIndexed { index, prompt ->
+                    if (!state.loaded) {
+                        TextButton(onClick = onRetry) { Text("Try again") }
+                        return@Column
+                    }
+                    // Keyed by each prompt's identity, so removing one never moves
+                    // another row's text field, focus included, onto a neighbour.
+                    prompts.forEach { prompt -> key(prompt.id) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             OutlinedTextField(
-                                value = prompt,
+                                value = prompt.text,
                                 onValueChange = { value ->
-                                    prompts = prompts.toMutableList().also { it[index] = value }
+                                    onText(prompt.id, value)
                                 },
                                 modifier = Modifier.weight(1f),
                                 label = { Text("Prompt") },
                                 minLines = 1,
                                 maxLines = 4,
+                                enabled = editable,
                             )
                             TextButton(
                                 onClick = {
-                                    prompts = prompts.filterIndexed { at, _ -> at != index }
+                                    onRemove(prompt.id)
                                 },
+                                enabled = editable,
                             ) { Text("Remove") }
                         }
-                    }
+                    } }
                     TextButton(
-                        onClick = { prompts = prompts + "" },
-                        enabled = prompts.size < 24,
+                        onClick = onAdd,
+                        enabled = editable && prompts.size < MAX_SHORTCUTS,
                     ) { Text("Add prompt") }
                 }
             }
@@ -86,9 +98,9 @@ internal fun ShortcutEditorDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    onSave(prompts.map { it.trim() }.filter { it.isNotEmpty() })
+                    onSave()
                 },
-                enabled = !state.loading && !state.saving,
+                enabled = state.loaded && !state.saving,
             ) { Text(if (state.saving) "Saving…" else "Save") }
         },
         dismissButton = {

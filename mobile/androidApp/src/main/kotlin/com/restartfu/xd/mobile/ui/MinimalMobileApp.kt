@@ -311,10 +311,22 @@ internal fun MinimalMobileApp(
     SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = if (showBottomNavigation) 96.dp else 24.dp))
     }
     if (settingsOpen) {
-        MinimalSettingsDialog(settings, onDismiss = { settingsOpen = false }, onDisconnect = {
+        MinimalSettingsDialog(model, settings, onDismiss = { settingsOpen = false }, onDisconnect = {
             settingsOpen = false
             model.forget()
         })
+    }
+    val shortcutEditor by model.shortcutEditor.collectAsStateWithLifecycle()
+    shortcutEditor?.let { editor ->
+        ShortcutEditorDialog(
+            state = editor,
+            onDismiss = model::closeShortcutEditor,
+            onSave = model::saveShortcuts,
+            onRetry = { model.openShortcutEditor(editor.folderId, editor.title) },
+            onText = { id, text -> model.setShortcutText(editor.opening, id, text) },
+            onAdd = { model.addShortcut(editor.opening) },
+            onRemove = { id -> model.removeShortcut(editor.opening, id) },
+        )
     }
     renameChat?.let { chat ->
         var title by rememberSaveable(chat.id) { mutableStateOf(chat.title) }
@@ -439,6 +451,14 @@ private fun MinimalProjectsHome(
                                 sessions = sessions,
                                 signalOf = signalOf,
                                 open = { session -> open(project, session) },
+                                menu = {
+                                    ProjectMenu(
+                                        project = project,
+                                        onShortcuts = {
+                                            model.openShortcutEditor(project.id, "${project.name} shortcuts")
+                                        },
+                                    )
+                                },
                             )
                         } else {
                             DrawerRow(
@@ -469,6 +489,7 @@ private fun MinimalProjectsHome(
 
     if (createProject) {
         NewProjectDialog(
+            model = model,
             onDismiss = { createProject = false },
             onCreate = { name, repository ->
                 createProject = false
@@ -488,6 +509,7 @@ private fun MinimalProjectsHome(
     }
     if (settingsOpen) {
         MinimalSettingsDialog(
+            model = model,
             settings = settings,
             onDismiss = { settingsOpen = false },
             onDisconnect = {
@@ -554,6 +576,7 @@ private fun MinimalGlobalTerminal(
 
     if (settingsOpen) {
         MinimalSettingsDialog(
+            model = model,
             settings = settings,
             onDismiss = { settingsOpen = false },
             onDisconnect = {
@@ -833,6 +856,7 @@ private fun DrawerRow(
     selected: Boolean,
     signals: List<SessionSignal>,
     onClick: () -> Unit,
+    menu: (@Composable () -> Unit)? = null,
 ) {
     val faint = LocalXdSignals.current.faint
     Row(
@@ -873,6 +897,7 @@ private fun DrawerRow(
             color = faint,
         )
         Spacer(Modifier.weight(1f))
+        menu?.invoke()
         if (!selected) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -891,6 +916,31 @@ private fun DrawerRow(
     }
 }
 
+/** What can be done to a project as a whole, from the "more" button on its open row. */
+@Composable
+private fun ProjectMenu(
+    project: MinimalProject,
+    onShortcuts: () -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }, modifier = Modifier.size(48.dp)) {
+            Icon(
+                painterResource(R.drawable.ic_more),
+                contentDescription = "${project.name} actions",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Prompt shortcuts") },
+                onClick = { open = false; onShortcuts() },
+            )
+        }
+    }
+}
+
 /** The current project, open, with one row per session beneath it. */
 @Composable
 private fun OpenDrawer(
@@ -898,6 +948,7 @@ private fun OpenDrawer(
     sessions: List<MinimalSession>,
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
+    menu: @Composable () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -905,7 +956,7 @@ private fun OpenDrawer(
             .padding(vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {})
+        DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {}, menu = menu)
         if (sessions.isEmpty()) {
             Text(
                 "No sessions yet. Start one with Codex, Claude, or JCode.",
@@ -1087,11 +1138,13 @@ private fun NewSessionDialog(
 
 @Composable
 private fun NewProjectDialog(
+    model: MainViewModel,
     onDismiss: () -> Unit,
     onCreate: (String, String?) -> Unit,
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var repository by rememberSaveable { mutableStateOf("") }
+    var browsing by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New project") },
@@ -1110,32 +1163,65 @@ private fun NewProjectDialog(
                     label = { Text("Repository path (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
+                    trailingIcon = {
+                        IconButton(onClick = { browsing = true }) {
+                            Icon(
+                                painterResource(R.drawable.ic_folder),
+                                contentDescription = "Browse folders on the host",
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    },
                 )
             }
         },
         confirmButton = {
             Button(
-                onClick = { onCreate(name.trim(), repository.trim().ifBlank { null }) },
+                // Sent exactly as chosen: a Unix folder name can end in a space.
+                onClick = { onCreate(name.trim(), repository.takeIf(String::isNotBlank)) },
                 enabled = name.isNotBlank(),
             ) { Text("Create project") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+    if (browsing) {
+        RepositoryPickerDialog(
+            listDirectories = model.client::listDirectories,
+            initialPath = repository,
+            onDismiss = { browsing = false },
+            onChoose = { path ->
+                browsing = false
+                repository = path
+                // A repository usually names its project; keep any name already typed.
+                if (name.isBlank()) name = path.trimEnd('/').substringAfterLast('/')
+            },
+        )
+    }
 }
 
+/**
+ * The app's settings: how it looks and speaks on this phone, and the parts of
+ * the connected host it can manage, as on the desktop's Settings page.
+ */
 @Composable
 private fun MinimalSettingsDialog(
+    model: MainViewModel,
     settings: MobileSettings,
     onDismiss: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val theme by settings.theme.collectAsStateWithLifecycle()
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
+    val speech by settings.speechEnabled.collectAsStateWithLifecycle()
+    var updatingHost by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
                 Text("Appearance", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MinimalThemePreset.entries.forEach { preset ->
@@ -1171,20 +1257,33 @@ private fun MinimalSettingsDialog(
                     }
                 }
                 HorizontalDivider()
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("All permissions", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "Pass the agent's unrestricted command-line flag.",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    Switch(
-                        checked = allPermissions,
-                        onCheckedChange = settings::setAllowAllPermissions,
-                    )
+                SettingSwitch(
+                    title = "Read replies aloud",
+                    detail = "Speaks the parts of a reply the agent marks with <speak> tags.",
+                    checked = speech,
+                    onCheckedChange = settings::setSpeechEnabled,
+                )
+                SettingSwitch(
+                    title = "All permissions",
+                    detail = "Pass the agent's unrestricted command-line flag.",
+                    checked = allPermissions,
+                    onCheckedChange = settings::setAllowAllPermissions,
+                )
+                HorizontalDivider()
+                Text("Host", style = MaterialTheme.typography.titleSmall)
+                SettingAction(
+                    title = "Prompt shortcuts",
+                    detail = "Buttons above the composer in every project on this host.",
+                    action = "Edit",
+                ) {
+                    onDismiss()
+                    model.openShortcutEditor(null, "Prompt shortcuts")
                 }
+                SettingAction(
+                    title = "Host updates",
+                    detail = "Check for a new xd build on the connected machine.",
+                    action = "Check",
+                ) { updatingHost = true }
                 OutlinedButton(onClick = onDisconnect, modifier = Modifier.fillMaxWidth()) {
                     Text("Disconnect remote")
                 }
@@ -1192,6 +1291,49 @@ private fun MinimalSettingsDialog(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
     )
+    if (updatingHost) {
+        HostUpdateDialog(model = model, onDismiss = { updatingHost = false })
+    }
+}
+
+@Composable
+private fun SettingSwitch(
+    title: String,
+    detail: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(
+                detail,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun SettingAction(
+    title: String,
+    detail: String,
+    action: String,
+    onClick: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(
+                detail,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        TextButton(onClick = onClick) { Text(action) }
+    }
 }
 
 private class SessionViewModelOwner : ViewModelStoreOwner {

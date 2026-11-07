@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
@@ -39,7 +40,30 @@ data class ShortcutEditorState(
     val loading: Boolean = true,
     val saving: Boolean = false,
     val error: String? = null,
+    /**
+     * Saving replaces the whole list, so it waits until the current list has
+     * arrived: otherwise a failed load would let Save erase shortcuts nobody saw.
+     */
+    val loaded: Boolean = false,
+    /** Identifies one opening, so a late reply never revives a closed or reopened editor. */
+    val opening: Long = 0,
+    /**
+     * The list being edited. Kept here rather than in the dialog, so it
+     * outlives recreating the activity and belongs to this opening alone.
+     */
+    val draft: List<DraftPrompt> = emptyList(),
+    /** The next row's id; only ever grows, so a removed row's id is never reused. */
+    val nextId: Long = 0,
 )
+
+/**
+ * One prompt in the shortcut editor. The [id] keeps a row's identity while
+ * others are added or removed, so a focused field stays on its own prompt.
+ */
+data class DraftPrompt(val id: Long, val text: String)
+
+/** The most prompt buttons one editor offers. */
+const val MAX_SHORTCUTS = 24
 
 data class CreatedDirectSession(
     val projectId: String,
@@ -62,12 +86,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pendingHostKey = MutableStateFlow<PendingHostKeyConfirmation?>(null)
     private val _privateKeyName = MutableStateFlow<String?>(null)
     private var pendingConnection: SshConnection? = null
+    private var shortcutOpenings = 0L
     private var privateKeyBytes: ByteArray? = null
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
     private val _creatingWorkspace = MutableStateFlow(false)
-    private val _moving = MutableStateFlow(false)
-    private val _createdChat = MutableStateFlow<String?>(null)
     private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
@@ -77,12 +100,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val connecting: StateFlow<Boolean> = _connecting.asStateFlow()
     val pendingHostKey: StateFlow<PendingHostKeyConfirmation?> = _pendingHostKey.asStateFlow()
     val privateKeyName: StateFlow<String?> = _privateKeyName.asStateFlow()
-    val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
-    val moving: StateFlow<Boolean> = _moving.asStateFlow()
     val shortcutEditor: StateFlow<ShortcutEditorState?> = _shortcutEditor.asStateFlow()
     private val _host = MutableStateFlow<HostUpdateReply?>(null)
     private val _hostError = MutableStateFlow<String?>(null)
@@ -220,23 +241,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createChat(folderId: String) {
-        if (_creatingChat.value) return
-        _creatingChat.value = true
-        _error.value = null
-        viewModelScope.launch {
-            try {
-                _createdChat.value = client.createChat(folderId = folderId, title = null)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not create a chat"
-            } finally {
-                _creatingChat.value = false
-            }
-        }
-    }
-
     fun createDirectSession(
         folderId: String,
         title: String,
@@ -292,40 +296,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun moveFolder(folderId: String, parentId: String?) {
-        if (_moving.value) return
-        _moving.value = true
-        _error.value = null
-        viewModelScope.launch {
-            try {
-                client.moveFolder(folderId, parentId)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not move the folder"
-            } finally {
-                _moving.value = false
-            }
-        }
-    }
-
-    fun moveChat(chatId: String, folderId: String) {
-        if (_moving.value) return
-        _moving.value = true
-        _error.value = null
-        viewModelScope.launch {
-            try {
-                client.moveChat(chatId, folderId)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not move the chat"
-            } finally {
-                _moving.value = false
-            }
-        }
-    }
-
     fun deleteChat(chatId: String) {
         if (_deletingChat.value) return
         _deletingChat.value = true
@@ -361,87 +331,143 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openShortcutEditor(folderId: String?, title: String) {
-        val opened = ShortcutEditorState(folderId = folderId, title = title)
+        val opened = ShortcutEditorState(folderId = folderId, title = title, opening = ++shortcutOpenings)
         _shortcutEditor.value = opened
         viewModelScope.launch {
-            try {
+            val update: ShortcutEditorState = try {
                 val reply = client.shortcuts(folderId)
-                if (_shortcutEditor.value?.folderId == folderId) {
-                    _shortcutEditor.value = opened.copy(
-                        prompts = if (folderId == null) reply.global else reply.workspace,
-                        loading = false,
-                    )
-                }
+                val prompts = if (folderId == null) reply.global else reply.workspace
+                opened.copy(
+                    prompts = prompts,
+                    draft = prompts.mapIndexed { index, text -> DraftPrompt(index.toLong(), text) },
+                    nextId = prompts.size.toLong(),
+                    loading = false,
+                    loaded = true,
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (_shortcutEditor.value?.folderId == folderId) {
-                    _shortcutEditor.value = opened.copy(
-                        loading = false,
-                        error = error.message ?: "Could not load shortcuts",
-                    )
-                }
+                opened.copy(loading = false, error = error.message ?: "Could not load shortcuts")
             }
+            _shortcutEditor.update { current -> if (current?.opening == opened.opening) update else current }
         }
+    }
+
+    /**
+     * One change to the open editor's draft, applied to the draft as it is
+     * now rather than to the copy a callback last saw, so quick edits never
+     * undo each other. Ignored while saving, which sends the draft as it was.
+     */
+    private fun changeShortcutDraft(opening: Long, change: (ShortcutEditorState) -> ShortcutEditorState) {
+        _shortcutEditor.update { current ->
+            if (current?.opening == opening && !current.saving) change(current) else current
+        }
+    }
+
+    fun setShortcutText(opening: Long, id: Long, text: String) = changeShortcutDraft(opening) { editor ->
+        editor.copy(draft = editor.draft.map { if (it.id == id) it.copy(text = text) else it })
+    }
+
+    fun addShortcut(opening: Long) = changeShortcutDraft(opening) { editor ->
+        if (editor.draft.size >= MAX_SHORTCUTS) editor
+        else editor.copy(draft = editor.draft + DraftPrompt(editor.nextId, ""), nextId = editor.nextId + 1)
+    }
+
+    fun removeShortcut(opening: Long, id: Long) = changeShortcutDraft(opening) { editor ->
+        editor.copy(draft = editor.draft.filterNot { it.id == id })
     }
 
     fun closeShortcutEditor() {
         _shortcutEditor.value = null
     }
 
-    fun saveShortcuts(prompts: List<String>) {
+    /** Saves the open editor's current draft. */
+    fun saveShortcuts() {
         val editor = _shortcutEditor.value ?: return
-        if (editor.saving) return
-        _shortcutEditor.value = editor.copy(saving = true, error = null)
+        if (editor.saving || !editor.loaded) return
+        val prompts = editor.draft.map { it.text.trim() }.filter { it.isNotEmpty() }
+        val saving = editor.copy(saving = true, error = null)
+        _shortcutEditor.value = saving
         viewModelScope.launch {
             try {
                 client.setShortcuts(editor.folderId, prompts)
-                if (_shortcutEditor.value?.folderId == editor.folderId) {
-                    _shortcutEditor.value = null
-                }
+                _shortcutEditor.update { current -> if (current?.opening == editor.opening) null else current }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (_shortcutEditor.value?.folderId == editor.folderId) {
-                    _shortcutEditor.value = editor.copy(
-                        saving = false,
-                        error = error.message ?: "Could not save shortcuts",
-                    )
+                _shortcutEditor.update { current ->
+                    if (current?.opening == editor.opening) {
+                        saving.copy(saving = false, error = error.message ?: "Could not save shortcuts")
+                    } else {
+                        current
+                    }
                 }
             }
         }
     }
 
     /**
-     * Drives the host update from the tree screen.
+     * Drives the host update from Settings.
      *
      * Install and restart are separate calls because they differ in cost:
      * replacing files is safe while turns run, restarting drops every attached
      * device and loses the turn.
      */
     fun hostUpdate(action: String = "status") {
-        if (_updating.value) return
+        if (action == "check") _hostCheckPending.value = true
+        // One request at a time; one asked for meanwhile runs next rather
+        // than being dropped, so a reopened dialog's check is not lost.
+        if (_updating.value) {
+            // The same check already out answers for both.
+            if (!(action == "check" && runningHostAction == "check")) queuedHostAction = action
+            return
+        }
         _updating.value = true
+        runningHostAction = action
+        // A new attempt replaces the last failure; the dialog shows an error in
+        // place of any status, so a stale one would hide what happened next.
+        _hostError.value = null
         viewModelScope.launch {
             try {
                 _host.value = client.hostUpdate(action)
+                if (action == "check") _hostCheckPending.value = false
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 _hostError.value = error.message ?: "Could not reach the host"
             } finally {
                 _updating.value = false
+                queuedHostAction?.let { next ->
+                    queuedHostAction = null
+                    hostUpdate(next)
+                }
             }
         }
     }
 
+    private var queuedHostAction: String? = null
+    private var runningHostAction: String? = null
+
+    /**
+     * A check was asked for and no answer has confirmed the host took it.
+     * Until one does, following up asks for the check again, since a status
+     * read alone would report the old result as up to date.
+     */
+    private val _hostCheckPending = MutableStateFlow(false)
+    val hostCheckPending: StateFlow<Boolean> = _hostCheckPending.asStateFlow()
+
+    /** Asks again about the update in progress, or the check that may not have happened. */
+    fun followHostUpdate() {
+        // A follow-up never queues behind a request already out: that request's
+        // answer is the follow-up, and queuing would keep checks going forever.
+        if (_updating.value) return
+        hostUpdate(if (_hostCheckPending.value) "check" else "status")
+    }
+
+    /** Closing the dialog keeps an unconfirmed check, so reopening still follows it up. */
     fun clearHostUpdate() {
         _host.value = null
         _hostError.value = null
-    }
-
-    fun consumeCreatedChat(chatId: String) {
-        _createdChat.compareAndSet(chatId, null)
     }
 }
 

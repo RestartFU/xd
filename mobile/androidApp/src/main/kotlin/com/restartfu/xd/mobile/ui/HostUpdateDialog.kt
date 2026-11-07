@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import com.restartfu.xd.mobile.MainViewModel
 
 /**
@@ -31,8 +32,20 @@ internal fun HostUpdateDialog(
     val status by model.host.collectAsStateWithLifecycle()
     val error by model.hostError.collectAsStateWithLifecycle()
     val busy by model.hostBusy.collectAsStateWithLifecycle()
+    // Until the host confirms the check, an earlier result is not shown as current.
+    val checkPending by model.hostCheckPending.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) { model.hostUpdate("check") }
+    // Checking and installing finish on the host after it answers, so ask
+    // again until they do. A failed request is asked about again too: the
+    // host may have taken an install whose answer was lost.
+    val pending = status?.state == "checking" || status?.state == "installing" || error != null
+    LaunchedEffect(pending) {
+        while (pending) {
+            delay(HOST_UPDATE_POLL_MILLIS)
+            model.followHostUpdate()
+        }
+    }
 
     val supported = status?.supported == true
     val state = status?.state ?: "idle"
@@ -51,7 +64,7 @@ internal fun HostUpdateDialog(
                 Text(
                     when {
                         error != null -> error.orEmpty()
-                        status == null || busy && state == "checking" ->
+                        status == null || state == "checking" || checkPending ->
                             "Checking for an update…"
                         !supported ->
                             "This machine's installation cannot update itself. " +
@@ -113,3 +126,5 @@ internal fun HostUpdateDialog(
         },
     )
 }
+
+private const val HOST_UPDATE_POLL_MILLIS = 2_000L
