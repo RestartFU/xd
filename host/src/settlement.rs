@@ -971,7 +971,7 @@ mod tests {
         let merged_at = now_seconds() - DAY_SECONDS * 5;
         with_fake_gh(
             &format!(
-                "case \"$PWD\" in \"$(dirname \"$0\")\"/*) echo x >> \"$(dirname \"$0\")/calls\";; esac; \
+                "case \"$PWD\" in */xd-settlement-test-*) echo x >> \"$(dirname \"$0\")/calls\";; esac; \
                  echo '{{\"state\":\"MERGED\",\"finished_at\":{merged_at}}}'"
             ),
             |fixture, _| {
