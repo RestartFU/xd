@@ -45,6 +45,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.restartfu.xd.mobile.OLDER_HOST_PRICES
 import com.restartfu.xd.mobile.UsageViewModel
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.UsageAccountReply
@@ -343,6 +344,9 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
     // Saved, so rotating keeps unsaved edits; prices are not secret.
     var rows by rememberSaveable(stateSaver = PriceRowsSaver) { mutableStateOf<List<PriceRow>?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
+    // Whether this host keeps its model mappings when a save leaves them out;
+    // without that, saving from here could revert another client's mappings.
+    var hostKeepsAliases by rememberSaveable { mutableStateOf(false) }
     var attempt by remember { mutableStateOf(0) }
     // The save runs in the view model; the editor closes when its own save
     // lands, matched by an opening token that survives the process too.
@@ -362,6 +366,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
         loadError = null
         try {
             val prices = model.prices()
+            hostKeepsAliases = prices.aliasesOptional
             rows = prices.prices.map { (id, price) ->
                 PriceRow(id, price.input.plain(), price.output.plain(), price.cacheRead?.plain().orEmpty(), price.cacheWrite?.plain().orEmpty())
             }
@@ -428,6 +433,9 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                         TextButton(onClick = { rows = current + PriceRow("", "", "", "", "") }, enabled = !saving) { Text("Add model price") }
                     }
                 }
+                if (rows != null && !hostKeepsAliases) {
+                    Text(OLDER_HOST_PRICES, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
@@ -436,7 +444,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                 onClick = {
                     model.savePrices(opening, parsed.orEmpty().associate { (id, price) -> id to checkNotNull(price) })
                 },
-                enabled = valid && !saving,
+                enabled = valid && !saving && hostKeepsAliases,
             ) { Text(if (saving) "Saving…" else "Save changes") }
         },
         dismissButton = { TextButton(onClick = close, enabled = !saving) { Text("Cancel") } },

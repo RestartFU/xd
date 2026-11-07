@@ -177,12 +177,13 @@ class UsageViewModel(
         _state.update { it.copy(pricesSaving = true, pricesError = null) }
         viewModelScope.launch {
             try {
-                // A host that keeps omitted aliases gets none, so another client's
-                // are never reverted; an older one would clear them, so it gets
-                // the ones it holds right now.
-                val current = client.usagePrices()
-                if (current.aliasesOptional) client.setUsagePrices(prices)
-                else client.setUsagePrices(prices, current.aliases)
+                // Aliases are never sent, so another client's are never reverted.
+                // The editor only offers saving on hosts that keep them when
+                // left out; this checks again in case the host changed since.
+                if (!client.usagePrices().aliasesOptional) {
+                    throw IllegalStateException(OLDER_HOST_PRICES)
+                }
+                client.setUsagePrices(prices)
                 _state.update { it.copy(pricesSaving = false, pricesSaved = it.pricesSaved + opening) }
                 readSummary(refresh = false)
             } catch (error: CancellationException) {
@@ -212,6 +213,10 @@ class UsageViewModel(
         override fun <T : ViewModel> create(modelClass: Class<T>): T = UsageViewModel(client, settings) as T
     }
 }
+
+/** Why an older host cannot have its prices edited from the phone. */
+internal const val OLDER_HOST_PRICES =
+    "Update the host to edit prices here: this version would clear its model mappings."
 
 /** The desktop's words for each reset outcome. */
 internal fun resetOutcome(outcome: String): String = when (outcome) {
