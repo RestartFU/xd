@@ -4349,8 +4349,22 @@ impl StateStore {
 
     /// Puts a message at the front of the queue and returns the queue's event.
     pub fn requeue_front(&self, chat_id: &str, text: &str) -> Result<Value, StorageError> {
+        self.requeue_after(chat_id, &[], text)
+    }
+
+    /// Puts a message back at the front of the queue, behind those of `earlier`
+    /// still waiting there. One the user has since dropped or moved holds no place.
+    pub fn requeue_after(
+        &self,
+        chat_id: &str,
+        earlier: &[&str],
+        text: &str,
+    ) -> Result<Value, StorageError> {
         let (_, event) = self.mutate_queue(chat_id, |queue| {
-            queue.insert(0, text.to_owned());
+            let index = earlier.iter().fold(0, |index, message| {
+                index + usize::from(queue.get(index).map(String::as_str) == Some(*message))
+            });
+            queue.insert(index, text.to_owned());
             Ok(true)
         })?;
         Ok(event)
@@ -9712,6 +9726,24 @@ mod tests {
         );
         let event = store.requeue_front("chat-1", "edited").unwrap();
         assert_eq!(event["queue"], json!(["edited", "first"]));
+        let event = store
+            .requeue_after("chat-1", &["edited"], "second")
+            .unwrap();
+        assert_eq!(event["queue"], json!(["edited", "second", "first"]));
+        // One no longer waiting holds no place, wherever it was.
+        let event = store
+            .requeue_after("chat-1", &["dropped", "edited"], "third")
+            .unwrap();
+        assert_eq!(
+            event["queue"],
+            json!(["edited", "third", "second", "first"])
+        );
+        store
+            .take_queued(&json!({"chat": "chat-1", "index": 1, "text": "third"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": "chat-1", "index": 1, "text": "second"}))
+            .unwrap();
         let (_, event) = store
             .drop_queue(&json!({"chat": "chat-1", "index": 0}))
             .unwrap();

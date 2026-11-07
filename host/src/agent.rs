@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     path::PathBuf,
     process::Command,
@@ -48,9 +48,9 @@ pub enum AgentEvent {
     },
     Completed,
     Error(String),
-    /// The agent refused a message sent into the running turn. It has not read
-    /// it, so it goes back to the front of the queue.
-    SteerRejected(String),
+    /// The agent refused a message sent into the running turn, named by the
+    /// number the turn gave it. It has not read it, so it goes back in the queue.
+    SteerRejected(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,12 +135,13 @@ impl AgentParser {
     }
 
     /// The frame that sends `prompt` into the running turn, or `None` when
-    /// this agent cannot take it right now.
-    pub fn steer_frame(&mut self, prompt: &str) -> Option<Value> {
+    /// this agent cannot take it right now. `steer` is the turn's number for this
+    /// message; two can have the same text.
+    pub fn steer_frame(&mut self, steer: u64, prompt: &str) -> Option<Value> {
         match self {
-            Self::AppServer(parser) => parser.steer_request(prompt),
+            Self::AppServer(parser) => parser.steer_request(steer, prompt),
             Self::Claude(parser) => parser
-                .begin_steer()
+                .begin_steer(steer)
                 .then(|| AgentCommand::encode_steer(prompt)),
             Self::Codex(_) | Self::Jcode(_) => None,
         }
@@ -168,6 +169,16 @@ impl AgentParser {
                     Vec::new()
                 }
             }
+            Self::Codex(_) | Self::Jcode(_) => Vec::new(),
+        }
+    }
+
+    /// Steers the agent has not picked up, oldest first. Once the turn is over
+    /// nothing will answer them, so they go back to the user.
+    pub fn take_unread_steers(&mut self) -> Vec<u64> {
+        match self {
+            Self::AppServer(parser) => parser.take_unread_steers(),
+            Self::Claude(parser) => parser.unread_steers.drain(..).collect(),
             Self::Codex(_) | Self::Jcode(_) => Vec::new(),
         }
     }
@@ -594,12 +605,18 @@ pub struct ClaudeParser {
     /// Whether this turn's run has begun. A steer sent before that would be
     /// mistaken for the turn's own start.
     running: bool,
-    /// Steers written that no run has picked up yet. Each one Claude picks up
+    /// Steers written that Claude has not picked up yet. Each one it picks up
     /// ends the run in progress and opens a new run for the same xd turn.
-    steers: u32,
+    unread_steers: VecDeque<u64>,
     /// A run finished by itself while a steer was still unread. If that steer
     /// opens a new run the turn goes on; otherwise this was its end.
     settling: bool,
+    /// A steer was written and Claude has not responded to it yet, so the reply
+    /// in progress is being abandoned.
+    superseded: bool,
+    /// A run was cut short for a steer, and the `init` still to come is the one
+    /// that answers it rather than a sign of another steer picked up.
+    replacement_pending: bool,
 }
 
 /// Whether a rate limit report turns work away, or `None` when it says neither.
@@ -699,7 +716,10 @@ impl ClaudeParser {
             Some("system") if root.get("subtype").and_then(Value::as_str) == Some("init") => {
                 self.running = true;
                 self.settling = false;
-                self.steers = self.steers.saturating_sub(1);
+                self.superseded = false;
+                if !std::mem::take(&mut self.replacement_pending) {
+                    self.unread_steers.pop_front();
+                }
                 let mut events = Vec::new();
                 if let Some(session) = root.get("session_id").and_then(Value::as_str) {
                     events.push(AgentEvent::Session(session.to_owned()));
@@ -719,11 +739,13 @@ impl ClaudeParser {
                 events
             }
             Some("stream_event") => {
+                self.note_replacement_begun();
                 let events = self.stream_event(&root);
                 self.without_superseded_text(events)
             }
             Some("user") => self.user_event(&root),
             Some("assistant") if !self.saw_streamed_text => {
+                self.note_replacement_begun();
                 let events = self.assistant_event(&root);
                 self.without_superseded_text(events)
             }
@@ -732,12 +754,20 @@ impl ClaudeParser {
                 let limit_rejected = std::mem::take(&mut self.limit_rejected);
                 // A steer ends the run it interrupts with one of these, which
                 // is not the end of the turn however it is flagged.
-                if self.steers > 0
+                if !self.unread_steers.is_empty()
                     && root
                         .get("terminal_reason")
                         .and_then(Value::as_str)
                         .is_some_and(|reason| reason.starts_with("aborted_"))
                 {
+                    // It only stops for a steer it has taken, so the message is
+                    // read. There is no limit on what follows: `init` can be held
+                    // back for as long as a forked skill runs, and an agent gone
+                    // quiet from here is no different from any turn doing so.
+                    self.unread_steers.pop_front();
+                    self.replacement_pending = true;
+                    self.superseded = false;
+                    self.settling = false;
                     self.begin_next_run();
                     return events;
                 }
@@ -747,7 +777,7 @@ impl ClaudeParser {
                     .unwrap_or(false);
                 if !failed
                     && !self.saw_text
-                    && self.steers == 0
+                    && !self.superseded
                     && let Some(text) = root.get("result").and_then(Value::as_str)
                     && !text.is_empty()
                 {
@@ -793,7 +823,7 @@ impl ClaudeParser {
                             window: claude_context_window(&root),
                         });
                     }
-                    if self.steers > 0 {
+                    if !self.unread_steers.is_empty() {
                         self.settling = true;
                         self.begin_next_run();
                     } else {
@@ -806,18 +836,29 @@ impl ClaudeParser {
         }
     }
 
-    /// While a steer is unread the reply in progress is being abandoned. Its
-    /// last words must not land after the user's message as part of the answer.
+    /// The last words of an abandoned reply must not land after the user's
+    /// message as part of the answer.
     fn without_superseded_text(&self, mut events: Vec<AgentEvent>) -> Vec<AgentEvent> {
-        if self.steers > 0 {
+        if self.superseded {
             events.retain(|event| !matches!(event, AgentEvent::Text(_) | AgentEvent::TextDelta(_)));
         }
         events
     }
 
-    fn begin_steer(&mut self) -> bool {
+    /// A run ended with a steer unread, and now the agent is talking again: that
+    /// is the steer being answered, even if `init` is held back by a forked skill.
+    fn note_replacement_begun(&mut self) {
+        if std::mem::take(&mut self.settling) {
+            self.unread_steers.pop_front();
+            self.replacement_pending = true;
+            self.superseded = false;
+        }
+    }
+
+    fn begin_steer(&mut self, steer: u64) -> bool {
         if self.running {
-            self.steers += 1;
+            self.unread_steers.push_back(steer);
+            self.superseded = true;
         }
         self.running
     }
@@ -2079,18 +2120,19 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_tools","result":""}"#,
         ] {
             let mut parser = AgentParser::Claude(ClaudeParser::default());
-            assert_eq!(parser.steer_frame("too soon"), None);
+            assert_eq!(parser.steer_frame(9, "too soon"), None);
             parser.feed(init);
             parser.feed(
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":"One"}]}}"#,
             );
 
-            let frame = parser.steer_frame("Instead").unwrap();
+            let frame = parser.steer_frame(1, "Instead").unwrap();
             assert_eq!(frame["priority"], "now");
             assert_eq!(frame["message"]["content"][0]["text"], "Instead");
 
             assert_eq!(parser.feed(aborted), []);
-            assert!(!parser.settling());
+            assert!(!parser.settling(), "`init` may be a long way off");
+            assert_eq!(parser.take_unread_steers(), [] as [u64; 0]);
             parser.feed(init);
             let reply = parser.feed(
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Two"}]}}"#,
@@ -2108,7 +2150,7 @@ mod tests {
         let done = r#"{"type":"result","subtype":"success","terminal_reason":"completed","result":"Done"}"#;
         let mut parser = AgentParser::Claude(ClaudeParser::default());
         parser.feed(init);
-        parser.steer_frame("Instead").unwrap();
+        parser.steer_frame(1, "Instead").unwrap();
 
         assert!(!parser.feed(done).contains(&AgentEvent::Completed));
         assert!(parser.settling());
@@ -2117,13 +2159,17 @@ mod tests {
         assert!(!parser.settling());
         assert!(parser.feed(done).contains(&AgentEvent::Completed));
 
-        // Or nothing ever comes, and the turn was over after all.
+        assert_eq!(parser.take_unread_steers(), [] as [u64; 0]);
+
+        // Or nothing ever comes: the turn was over, and the agent never read it.
         let mut parser = AgentParser::Claude(ClaudeParser::default());
         parser.feed(init);
-        parser.steer_frame("Instead").unwrap();
+        parser.steer_frame(1, "Instead").unwrap();
+        parser.steer_frame(2, "And this").unwrap();
         parser.feed(done);
         assert_eq!(parser.take_settled(), [AgentEvent::Completed]);
         assert!(!parser.settling());
+        assert_eq!(parser.take_unread_steers(), [1, 2]);
     }
 
     #[test]
@@ -2140,13 +2186,89 @@ mod tests {
             parser.feed(&delta("Bridges")),
             [AgentEvent::TextDelta("Bridges".into())]
         );
-        parser.steer_frame("Instead").unwrap();
+        parser.steer_frame(1, "Instead").unwrap();
         assert_eq!(parser.feed(&delta(" are old")), []);
         parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}"#);
         parser.feed(init);
         assert_eq!(
             parser.feed(&delta("Understood")),
             [AgentEvent::TextDelta("Understood".into())]
+        );
+    }
+
+    /// Two steers sent at once each end a run, and only the second run's
+    /// successor is the answer. A new run's text must show even with one unread,
+    /// or the answer to the first is lost if no further abort comes.
+    #[test]
+    fn a_new_run_shows_its_text_while_another_steer_is_unread() {
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Answer"}}}"#;
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let aborted = r#"{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        parser.steer_frame(1, "One").unwrap();
+        parser.steer_frame(2, "Two").unwrap();
+        assert_eq!(parser.feed(delta), []);
+        parser.feed(aborted);
+        parser.feed(init);
+        assert_eq!(parser.feed(delta), [AgentEvent::TextDelta("Answer".into())]);
+        assert_eq!(parser.take_unread_steers(), [2]);
+        parser.steer_frame(2, "Two").unwrap();
+        parser.feed(aborted);
+        parser.feed(init);
+        assert_eq!(parser.take_unread_steers(), [] as [u64; 0]);
+        assert!(!parser.settling());
+    }
+
+    /// The run ended by itself with a steer unread, and the answer arrives with
+    /// its `init` held back. The turn must not end and send the message again.
+    #[test]
+    fn talking_again_after_a_run_ended_means_the_steer_was_read() {
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Answer"}}}"#;
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let done = r#"{"type":"result","terminal_reason":"completed","result":"Answer"}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        parser.steer_frame(1, "One").unwrap();
+        parser.steer_frame(2, "Two").unwrap();
+        parser.feed(done);
+        assert!(parser.settling());
+        assert_eq!(parser.feed(r#"{"type":"rate_limit_event"}"#), []);
+        assert!(parser.settling(), "that says nothing about the steer");
+        assert_eq!(parser.feed(delta), [AgentEvent::TextDelta("Answer".into())]);
+        assert!(!parser.settling());
+        parser.feed(init);
+        assert_eq!(parser.take_unread_steers(), [2]);
+    }
+
+    /// An abort shows a steer was read, so it also ends any wait begun when an
+    /// earlier run finished with that steer unread.
+    #[test]
+    fn an_abort_ends_the_wait_to_see_whether_a_steer_was_read() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        parser.steer_frame(1, "One").unwrap();
+        parser.feed(r#"{"type":"result","terminal_reason":"completed","result":"Done"}"#);
+        assert!(parser.settling());
+        parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_tools"}"#);
+        assert!(!parser.settling());
+    }
+
+    /// A forked skill holds `init` back until it finishes, and its text comes
+    /// first. An abort means the steer was read, so that text is the answer.
+    #[test]
+    fn the_answer_to_a_steer_may_arrive_before_its_init() {
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Answer"}}}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(r#"{"type":"system","subtype":"init","session_id":"s1"}"#);
+        parser.steer_frame(1, "One").unwrap();
+        parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_tools"}"#);
+        assert_eq!(parser.feed(delta), [AgentEvent::TextDelta("Answer".into())]);
+        assert!(
+            parser
+                .feed(r#"{"type":"result","terminal_reason":"completed","result":"Answer"}"#)
+                .contains(&AgentEvent::Completed)
         );
     }
 
@@ -2163,7 +2285,7 @@ mod tests {
     #[test]
     fn agents_without_a_live_process_cannot_be_steered() {
         let mut jcode = AgentParser::new("jcode").unwrap();
-        assert_eq!(jcode.steer_frame("Instead"), None);
+        assert_eq!(jcode.steer_frame(1, "Instead"), None);
         assert!(!jcode.settling());
         assert_eq!(jcode.take_settled(), []);
     }

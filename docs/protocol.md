@@ -579,13 +579,15 @@ index, and redirects the running turn to that message. The reply adds `steered`:
   to (JCode) or it is waiting on an approval or question. The message moves to
   the front of the queue and the turn is stopped.
 
-A message the agent turns out to have refused or never read returns to the front
-of the queue.
+A message the agent refuses or never reads returns to the front of the queue, in
+the order it was sent, and leaves the transcript. If it was never read, the agent's
+process is ended first so the message can't be answered twice. If no turn is left
+when a steer fails, the message starts a new turn instead of waiting in the queue.
 
 A steered message is stored as an ordinary `user` row. While the turn runs it
 arrives as a `tool` event and `items` entry whose text is `steer\n` followed by
-the message. Clients show that as the user's message; the marker is only ever
-seen live, never in `messages`.
+the message, with its stored row in `message_id`. Clients show that as the user's
+message; the marker is only ever seen live, never in `messages`.
 
 ### `cancel`
 

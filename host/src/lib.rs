@@ -1483,12 +1483,45 @@ impl Engine {
                     if let Some(runtime) = &self.runtime {
                         runtime.cancel(chat_id);
                     }
+                    if let Err(error) = self.start_queued_if_idle(chat_id, text) {
+                        return error_reply(error);
+                    }
                 }
                 reply["steered"] = Value::Bool(steered);
                 reply
             }
             Err(error) => error_reply(error),
         }
+    }
+
+    /// The turn a steer was meant for may have ended before it could take it,
+    /// with nothing left to start the message when it does. A turn still ending
+    /// picks the message up from the queue itself.
+    fn start_queued_if_idle(&self, chat_id: &str, text: &str) -> Result<(), String> {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return Ok(());
+        };
+        let chat = store.chat(chat_id).map_err(|error| error.to_string())?;
+        if chat["working"] == true || chat["queue"][0].as_str() != Some(text) {
+            return Ok(());
+        }
+        let (_, event) = store
+            .take_queued(&json!({"chat": chat_id, "index": 0, "text": text}))
+            .map_err(|error| error.to_string())?;
+        self.events.publish(event);
+        match store
+            .prepare_send(&json!({"chat": chat_id, "text": text}))
+            .map_err(|error| error.to_string())?
+        {
+            SendDisposition::Queued { event, .. } => self.events.publish(event),
+            SendDisposition::Start { turn, .. } => {
+                if let Err(error) = runtime.start(turn.clone()) {
+                    let _ = store.abort_turn_start(&turn.chat_id, &error);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn remove_worktree(&self, request: &Value) -> Value {
@@ -2286,12 +2319,31 @@ mod tests {
         (engine, chat)
     }
 
-    /// With no running agent to take it, a steer keeps the message and puts it
-    /// first in line, and refuses a message that is no longer the one the
-    /// client saw.
+    /// The turn is already over, so nothing would start the message later. It
+    /// starts now, ahead of what was queued with it. A message that is no longer
+    /// the one the client saw is refused.
+    #[cfg(unix)]
     #[test]
-    fn a_steer_nothing_can_take_keeps_the_message_first_in_line() {
+    fn a_steer_with_no_turn_left_to_take_it_starts_the_message() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("xd-steer-idle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+read prompt
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+read never
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
         let (engine, chat) = steer_engine(&root);
         let store = engine.store.as_ref().unwrap();
         store
@@ -2311,10 +2363,22 @@ mod tests {
             .dispatch(json!({"op": "steer-queue", "chat": chat, "index": 1, "text": "second"}));
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["steered"], false);
-        assert_eq!(
-            store.chat(&chat).unwrap()["queue"],
-            json!(["second", "first"])
+        let state = store.chat(&chat).unwrap();
+        assert_eq!(state["queue"], json!(["first"]));
+        assert_eq!(state["working"], true);
+        let messages = store.messages(&json!({"chat": chat})).unwrap();
+        assert!(
+            messages["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["role"] == "user" && row["content"] == "second"),
+            "{messages}"
         );
+
+        engine.runtime.as_ref().unwrap().discard_chat(&chat);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
         let _ = std::fs::remove_dir_all(root);
     }
 
