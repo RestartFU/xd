@@ -2,14 +2,11 @@ name: mobile
 
 on:
   pull_request:
+    # Only what these jobs read: they build from mobile/ alone, so a change
+    # anywhere else cannot alter their result.
     paths:
       - 'mobile/**'
-      - 'host/**'
-      - 'terminal-core/**'
-      - 'desktop/src/protocol.rs'
-      - 'docs/protocol.md'
       - 'scripts/mobile-*.sh'
-      - 'Makefile'
       - '.github/workflows/mobile.yml'
   workflow_dispatch:
 
