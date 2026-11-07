@@ -1,11 +1,11 @@
-//! Images attached to a draft: the tiles inside the composer and the full-window
-//! viewer a tile opens. Clicking the image zooms it, the wheel zooms about the
-//! pointer, a drag pans, the arrow keys pan or step through the images, and a
-//! click anywhere outside it closes the viewer.
+//! Images attached to a draft, as tiles inside the composer, and the full-window
+//! viewer that a tile or an image in the transcript opens. Clicking the image
+//! zooms it, the wheel zooms about the pointer, a drag pans, the arrow keys pan or
+//! step through the images, and a click anywhere outside it closes the viewer.
 
 use std::io::Cursor;
 
-use gpui::{ClickEvent, ImageFormat, KeyDownEvent, MouseMoveEvent};
+use gpui::{ClickEvent, ImageFormat, ImageSource, KeyDownEvent, MouseMoveEvent};
 
 use super::*;
 
@@ -66,8 +66,17 @@ fn cover_thumbnail(png: &[u8], side: u32) -> Result<Vec<u8>, image::ImageError> 
 #[derive(Clone)]
 struct PreviewImage {
     name: String,
-    image: Arc<Image>,
+    image: ImageSource,
     size: Option<(u32, u32)>,
+    /// Its path in `message_images`, for an image from the transcript.
+    message_path: Option<String>,
+}
+
+/// What the viewer calls a transcript image, from a path on any host.
+fn image_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -87,8 +96,9 @@ struct ViewerLayout {
     content_height: f32,
 }
 
-/// The images as they were when the viewer opened. Like a dialog over the draft,
-/// it does not change under the reader if another device edits that draft.
+/// The images as they were when the viewer opened: a draft's, or those of the
+/// message holding a transcript image. Like a dialog, it does not change under the
+/// reader if another device edits that draft.
 pub(super) struct ImagePreview {
     chat: String,
     images: Vec<PreviewImage>,
@@ -116,6 +126,17 @@ impl ImagePreview {
 
     fn current(&self) -> Option<&PreviewImage> {
         self.images.get(self.index)
+    }
+
+    /// Whether it draws this transcript image, so eviction has to leave it be.
+    pub(super) fn shows_message_image(&self, path: &str) -> bool {
+        self.images
+            .iter()
+            .any(|image| image.message_path.as_deref() == Some(path))
+    }
+
+    pub(super) fn shows_message_images(&self) -> bool {
+        self.images.iter().any(|image| image.message_path.is_some())
     }
 
     fn max_viewer_height(window_height: f32) -> f32 {
@@ -537,18 +558,71 @@ impl XdDesktop {
             .iter()
             .map(|attachment| PreviewImage {
                 name: attachment.name.clone(),
-                image: attachment.preview.clone(),
+                image: attachment.preview.clone().into(),
                 size: attachment.size,
+                message_path: None,
             })
             .collect::<Vec<_>>();
-        let viewport = window.viewport_size();
-        let window_size = (f32::from(viewport.width), f32::from(viewport.height));
-        self.image_preview = Some(ImagePreview::new(chat, images, index, window_size));
+        self.show_image_preview(chat, images, index, window, cx);
         // Closing goes back to the editor the tile belongs to, whatever the click
         // on the tile did to the focus.
         let composer = self.composer_input.read(cx).focus_handle(cx);
-        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         self.minimal_popup_previous_focus = Some(composer.downgrade());
+    }
+
+    /// Opens an image from the transcript, with the others its message has ready.
+    pub(super) fn open_message_image_preview(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(chat) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let paths = self
+            .transcript_snapshot
+            .messages
+            .iter()
+            .rev()
+            .map(|message| message.image_paths())
+            .find(|paths| paths.contains(&path))
+            .map_or_else(|| vec![path.clone()], <[String]>::to_vec);
+        let mut images = Vec::new();
+        let mut index = None;
+        for message_path in paths {
+            let Some(MessageImageState::Ready(ready)) = self.message_images.get(&message_path)
+            else {
+                continue;
+            };
+            if message_path == path && index.is_none() {
+                index = Some(images.len());
+            }
+            images.push(PreviewImage {
+                name: image_file_name(&message_path).to_owned(),
+                image: ready.image.image.clone().into(),
+                size: Some((ready.image.width, ready.image.height)),
+                message_path: Some(message_path),
+            });
+        }
+        // It may have gone in the moment since the click.
+        if let Some(index) = index {
+            self.show_image_preview(chat, images, index, window, cx);
+        }
+    }
+
+    fn show_image_preview(
+        &mut self,
+        chat: String,
+        images: Vec<PreviewImage>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = window.viewport_size();
+        let window_size = (f32::from(viewport.width), f32::from(viewport.height));
+        self.image_preview = Some(ImagePreview::new(chat, images, index, window_size));
+        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         cx.notify();
     }
 
@@ -821,8 +895,9 @@ mod tests {
             .enumerate()
             .map(|(index, &size)| PreviewImage {
                 name: format!("image-{index}.png"),
-                image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
+                image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())).into(),
                 size: Some(size),
+                message_path: None,
             })
             .collect();
         ImagePreview::new("chat".into(), images, 0, window)
@@ -866,6 +941,15 @@ mod tests {
             let [red, _, blue, _] = decoded.get_pixel(point.0, point.1).0;
             assert!(blue > 200 && red < 55, "{point:?} is {red},{blue}");
         }
+    }
+
+    #[test]
+    fn a_transcript_image_is_called_by_its_file_name() {
+        assert_eq!(image_file_name("/home/me/kept/shot.png"), "shot.png");
+        assert_eq!(image_file_name("C:\\kept\\shot.png"), "shot.png");
+        assert_eq!(image_file_name("shot.png"), "shot.png");
+        assert_eq!(image_file_name("/kept/"), "kept");
+        assert_eq!(image_file_name(""), "");
     }
 
     #[test]
@@ -1490,6 +1574,204 @@ mod tests {
         });
     }
 
+    fn with_transcript_images<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        ready: &[&str],
+        message: &str,
+    ) -> (Entity<XdDesktop>, &'a mut gpui::VisualTestContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model.selected_chat = Some("chat".into());
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(Some(1), "assistant", "[image: /other/z.png]", None),
+                Message::new(Some(2), "assistant", message, None),
+            ]);
+            let images = Arc::make_mut(&mut desktop.message_images);
+            images.insert(
+                "/other/z.png".to_owned(),
+                crate::tests::ready_message_image(0),
+            );
+            for path in ready {
+                images.insert((*path).to_owned(), crate::tests::ready_message_image(0));
+            }
+        });
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        cx.run_until_parked();
+        (desktop, cx)
+    }
+
+    fn open_transcript_image(cx: &mut gpui::VisualTestContext, path: &str) {
+        let target = cx.update(|window, _| window.window_handle());
+        cx.dispatch_action(OpenMessageImage {
+            path: path.into(),
+            window: target,
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_transcript_image_opens_with_the_ready_images_of_its_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = with_transcript_images(
+            cx,
+            &["/kept/a.png", "/kept/c.png"],
+            "[image: /kept/a.png]\n\n[image: /kept/b.png]\n\n[image: /kept/c.png]",
+        );
+
+        open_transcript_image(cx, "/kept/c.png");
+
+        cx.update(|window, cx| {
+            let desktop = desktop.read(cx);
+            assert!(desktop.minimal_popup_is_open());
+            assert!(desktop.minimal_popup_focus.is_focused(window));
+            let preview = desktop.image_preview.as_ref().expect("the viewer is open");
+            // Not /kept/b.png, which isn't ready, nor another message's image.
+            assert_eq!(preview.images.len(), 2);
+            assert_eq!(preview.caption(), "c.png (2/2)");
+        });
+
+        cx.simulate_keystrokes("left");
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| {
+            let preview = desktop.image_preview.as_ref().unwrap();
+            assert_eq!(preview.caption(), "a.png (1/2)");
+        });
+    }
+
+    #[gpui::test]
+    fn a_transcript_image_no_message_names_opens_alone(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = with_transcript_images(cx, &["/kept/a.png"], "No images here.");
+
+        open_transcript_image(cx, "/kept/a.png");
+
+        desktop.read_with(cx, |desktop, _| {
+            let preview = desktop.image_preview.as_ref().expect("the viewer is open");
+            assert_eq!(preview.caption(), "a.png");
+        });
+    }
+
+    #[gpui::test]
+    fn a_transcript_image_that_is_not_ready_does_not_open(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) =
+            with_transcript_images(cx, &[], "[image: /gone.png]\n\n[image: /other/z.png]");
+
+        open_transcript_image(cx, "/gone.png");
+
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.image_preview.is_none());
+            assert!(!desktop.minimal_popup_is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn a_transcript_image_zooms_on_a_click_and_closes_on_one_outside_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = with_transcript_images(cx, &["/kept/a.png"], "[image: /kept/a.png]");
+        open_transcript_image(cx, "/kept/a.png");
+
+        click(cx, "image-preview-viewer");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.image_preview.as_ref().unwrap().zoom, CLICK_ZOOM);
+        });
+
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.image_preview.is_none());
+            assert!(!desktop.minimal_popup_is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn the_viewer_fits_a_transcript_image_inside_the_window(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = with_transcript_images(cx, &[], "[image: /kept/a.png]");
+        // Proportioned differently from the window, so either side could overflow.
+        for (width, height) in [(1200, 800), (800, 1200), (4000, 100), (64, 64)] {
+            desktop.update(cx, |desktop, _| {
+                Arc::make_mut(&mut desktop.message_images).insert(
+                    "/kept/a.png".to_owned(),
+                    MessageImageState::Ready(ReadyImage {
+                        image: MessageImage {
+                            image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                                image::RgbaImage::new(width, height),
+                            )])),
+                            width,
+                            height,
+                        },
+                        drawn: Rc::default(),
+                    }),
+                );
+            });
+            open_transcript_image(cx, "/kept/a.png");
+
+            let viewport = cx.update(|window, _| window.viewport_size());
+            let viewer = cx.debug_bounds("image-preview-viewer").expect("open");
+            assert!(viewer.left() >= px(0.0) && viewer.right() <= viewport.width);
+            assert!(viewer.top() >= px(0.0) && viewer.bottom() <= viewport.height);
+            if width == 64 {
+                assert_eq!(viewer.size, size(px(64.0), px(64.0)), "never enlarged");
+            }
+            desktop.update(cx, |desktop, _| desktop.image_preview = None);
+            cx.run_until_parked();
+        }
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_viewer_before_anything_under_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = with_transcript_images(cx, &["/kept/a.png"], "[image: /kept/a.png]");
+        desktop.update(cx, |desktop, _| desktop.auth_open = true);
+        open_transcript_image(cx, "/kept/a.png");
+
+        cx.dispatch_action(CloseSearch);
+
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.image_preview.is_none());
+            assert!(desktop.auth_open, "only the viewer closes");
+        });
+    }
+
+    #[gpui::test]
+    fn every_image_in_the_viewer_outlives_eviction_and_leaves_with_its_chat(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = with_transcript_images(
+            cx,
+            &["/kept/shown.png", "/kept/next.png"],
+            "[image: /kept/shown.png]\n\n[image: /kept/next.png]",
+        );
+        open_transcript_image(cx, "/kept/shown.png");
+
+        desktop.update(cx, |desktop, cx| {
+            desktop.message_image_frame = 5;
+            desktop.message_images_closing = MESSAGE_IMAGE_BUDGET;
+            Arc::make_mut(&mut desktop.message_images).insert(
+                "/scrolled-away.png".to_owned(),
+                crate::tests::ready_message_image(4),
+            );
+
+            desktop.evict_message_images(cx);
+            assert!(desktop.message_images.contains_key("/kept/shown.png"));
+            assert!(desktop.message_images.contains_key("/kept/next.png"));
+            assert!(!desktop.message_images.contains_key("/scrolled-away.png"));
+
+            desktop.forget_message_images(cx);
+            assert!(desktop.image_preview.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn forgetting_a_chats_images_leaves_a_draft_open_in_the_viewer(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[(800, 400)]);
+        click(cx, "draft-image-0");
+
+        desktop.update(cx, |desktop, cx| desktop.forget_message_images(cx));
+
+        desktop.read_with(cx, |desktop, _| assert!(desktop.image_preview.is_some()));
+    }
+
     #[test]
     fn the_chevron_left_icon_is_embedded() {
         let bytes = EmbeddedIcons
@@ -1503,8 +1785,9 @@ mod tests {
     fn an_image_with_no_readable_size_gets_a_panel_and_does_not_zoom() {
         let images = vec![PreviewImage {
             name: "broken.png".into(),
-            image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
+            image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())).into(),
             size: None,
+            message_path: None,
         }];
         let mut preview = ImagePreview::new("chat".into(), images, 0, (1400.0, 1000.0));
         let layout = preview.layout();
