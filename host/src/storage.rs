@@ -417,6 +417,7 @@ impl StateStore {
         database.pragma_update(None, "foreign_keys", true)?;
         if !flags.contains(OpenFlags::SQLITE_OPEN_READ_ONLY) {
             initialize_schema(&database)?;
+            initialize_generated_worktrees(&database)?;
         }
         Ok(Self {
             database: Mutex::new(database),
@@ -4506,6 +4507,10 @@ impl StateStore {
                 message
             }));
         }
+        transaction.execute(
+            "DELETE FROM generated_worktrees WHERE path = ?",
+            [&selected],
+        )?;
         let changed = transaction.execute(
             "UPDATE chats SET workdir = ?, original_workdir = NULL, new_worktree = 0, updated_at = ? \
              WHERE id = ? AND workdir = ? AND original_workdir = ? \
@@ -4704,6 +4709,64 @@ impl StateStore {
     }
 }
 
+/// Creates the record of worktrees xd generated, which automatic deletion
+/// trusts to tell them from checkouts the user made. Worktrees from before
+/// the record are entered once, when it is created, if they sit exactly where
+/// xd puts the worktrees it makes: `<container>/<repository>/<name>/<repository>`.
+fn initialize_generated_worktrees(database: &Connection) -> Result<(), StorageError> {
+    let exists: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' \
+         AND name = 'generated_worktrees')",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists {
+        return Ok(());
+    }
+    // `branch` is the branch xd checked out there; NULL for a worktree entered
+    // from before the record, which then needs one of xd's own branches.
+    database.execute_batch(
+        "CREATE TABLE generated_worktrees (path TEXT PRIMARY KEY, branch TEXT, \
+           created_at INTEGER NOT NULL);",
+    )?;
+    let containers = {
+        let mut statement = database.prepare("SELECT path FROM worktree_containers")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let workdirs = {
+        let mut statement = database.prepare(
+            "SELECT DISTINCT workdir FROM chats \
+             WHERE workdir IS NOT NULL AND original_workdir IS NOT NULL",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let now = now_seconds();
+    for workdir in workdirs {
+        let path = Path::new(&workdir);
+        let in_layout = path
+            .parent()
+            .and_then(Path::parent)
+            .is_some_and(|repository| {
+                repository.file_name() == path.file_name()
+                    && repository.parent().is_some_and(|container| {
+                        containers.iter().any(|known| Path::new(known) == container)
+                    })
+            });
+        if in_layout {
+            database.execute(
+                "INSERT OR IGNORE INTO generated_worktrees (path, branch, created_at) \
+                 VALUES (?, NULL, ?)",
+                params![workdir, now],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     let has_meta: bool = database.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
@@ -4793,8 +4856,6 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            fast INTEGER NOT NULL DEFAULT 0, claude_mode INTEGER NOT NULL DEFAULT 0); \
          CREATE TABLE IF NOT EXISTS worktree_containers (path TEXT PRIMARY KEY, \
            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); \
-         CREATE TABLE IF NOT EXISTS generated_worktrees (path TEXT PRIMARY KEY, \
-           created_at INTEGER NOT NULL); \
          CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, \
            created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL); \
          CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -5424,8 +5485,8 @@ struct GeneratedWorktree {
 struct KnownWorktrees {
     /// Folders xd generates worktrees in.
     containers: Vec<PathBuf>,
-    /// Worktrees xd recorded generating.
-    generated: HashSet<PathBuf>,
+    /// Worktrees xd recorded generating, with the branch it checked out.
+    generated: HashMap<PathBuf, Option<String>>,
     /// Folders chats outside the session, and project folders, work in.
     elsewhere: HashSet<PathBuf>,
 }
@@ -5444,10 +5505,18 @@ impl KnownWorktrees {
                 .into_iter()
                 .map(PathBuf::from)
                 .collect(),
-            generated: paths("SELECT path FROM generated_worktrees", &[])?
-                .into_iter()
-                .map(PathBuf::from)
-                .collect(),
+            generated: {
+                let mut statement =
+                    database.prepare("SELECT path, branch FROM generated_worktrees")?;
+                statement
+                    .query_map([], |row| {
+                        Ok((
+                            PathBuf::from(row.get::<_, String>(0)?),
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    })?
+                    .collect::<Result<HashMap<_, _>, _>>()?
+            },
             elsewhere: paths(
                 "SELECT workdir FROM chats WHERE workspace_session_id != ?1 AND workdir IS NOT NULL \
                  UNION SELECT original_workdir FROM chats \
@@ -5491,31 +5560,33 @@ fn session_deletable(
     )?)
 }
 
+/// Records a worktree xd has just added, with the branch it checked out.
+/// A path used before keeps no older record.
 fn record_generated_worktree(
     transaction: &rusqlite::Transaction<'_>,
     path: &str,
+    branch: &str,
 ) -> Result<(), StorageError> {
     transaction.execute(
-        "INSERT INTO generated_worktrees (path, created_at) VALUES (?, ?) \
-         ON CONFLICT(path) DO NOTHING",
-        params![path, now_seconds()],
+        "INSERT INTO generated_worktrees (path, branch, created_at) VALUES (?, ?, ?) \
+         ON CONFLICT(path) DO UPDATE SET branch = excluded.branch, \
+           created_at = excluded.created_at",
+        params![path, branch, now_seconds()],
     )?;
     Ok(())
 }
 
-/// Whether xd made this worktree for one of these chats before it recorded
-/// the worktrees it generates: it sits in a generated-worktree folder and
-/// has the branch xd names after the chat that asked for it.
-fn generated_before_records(branch: Option<&str>, chats: &[&str]) -> bool {
-    let Some(name) = branch.and_then(|branch| branch.strip_prefix("xd/")) else {
-        return false;
-    };
-    chats.iter().any(|chat| {
-        name == *chat
-            || name
-                .strip_suffix(&glib_hash(chat))
-                .is_some_and(|slug| slug.ends_with('-'))
-    })
+/// Whether the worktree at a recorded path is still the one xd made there:
+/// it has the branch xd checked out, or, recorded from before xd noted
+/// branches, one of xd's own. A detached HEAD, which only happens inside a
+/// worktree, still counts; [`removable_worktree`] then checks that no commit
+/// would be lost.
+fn still_generated(recorded: &Option<String>, branch: Option<&str>) -> bool {
+    match (recorded, branch) {
+        (Some(recorded), Some(branch)) => recorded == branch,
+        (None, Some(branch)) => branch.starts_with("xd/"),
+        (_, None) => true,
+    }
 }
 
 /// The worktrees that should go with a session: generated by xd, still a
@@ -5527,10 +5598,6 @@ fn generated_worktrees(
     members: &[(String, Option<String>, Option<String>)],
     known: &KnownWorktrees,
 ) -> Result<Result<Vec<GeneratedWorktree>, String>, StorageError> {
-    let chats = members
-        .iter()
-        .map(|(chat, _, _)| chat.as_str())
-        .collect::<Vec<_>>();
     let mut found = Vec::<GeneratedWorktree>::new();
     for (_, workdir, original) in members {
         // A chat that never left its folder's checkout has no worktree of its own.
@@ -5563,9 +5630,11 @@ fn generated_worktrees(
         else {
             continue;
         };
-        let generated = known.generated.contains(&path)
-            || (container.is_some() && generated_before_records(linked.branch.as_deref(), &chats));
-        if !generated {
+        if !known
+            .generated
+            .get(&path)
+            .is_some_and(|recorded| still_generated(recorded, linked.branch.as_deref()))
+        {
             continue;
         }
         if let Err(reason) = removable_worktree(&path)? {
@@ -6392,7 +6461,7 @@ fn create_worktree(
                 }));
             }
             let path = normalize_existing_path(Path::new(target));
-            record_generated_worktree(transaction, &path)?;
+            record_generated_worktree(transaction, &path, &branch)?;
             return Ok(path);
         }
     }

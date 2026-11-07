@@ -525,10 +525,15 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_from_before_xd_kept_records_still_goes_with_its_session() {
+    fn worktrees_from_before_the_record_are_entered_once_by_where_they_sit() {
         let fixture = Fixture::new();
         let worktree = fixture.generated_worktree();
-        fixture.sql("DELETE FROM generated_worktrees");
+        fixture.sql("DROP TABLE generated_worktrees");
+        StateStore::open(
+            fixture.root.join("chats.db"),
+            fixture.root.join("Workspaces"),
+        )
+        .unwrap();
         fixture.enable(1);
         fixture.age(3);
         assert!(matches!(
@@ -536,6 +541,20 @@ mod tests {
             [AutoDeletion::Deleted { worktrees, .. }] if worktrees.len() == 1
         ));
         assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn a_recorded_worktree_on_another_branch_is_left_alone() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        fixture.git(&worktree, &["checkout", "-q", "-b", "elsewhere"]);
+        fixture.enable(1);
+        fixture.age(3);
+        assert!(matches!(
+            fixture.sweep().as_slice(),
+            [AutoDeletion::Deleted { worktrees, .. }] if worktrees.is_empty()
+        ));
+        assert!(worktree.exists(), "it may not be the worktree xd made");
     }
 
     #[test]

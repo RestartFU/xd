@@ -76,6 +76,9 @@ struct TerminalActivityState {
     epoch: String,
     revision: AtomicU64,
     gate: Mutex<()>,
+    /// When terminals closed since the last [`TerminalManager::usage`] were
+    /// last used, by owner, so their use is not lost with them.
+    closed_usage: Mutex<HashMap<String, i64>>,
 }
 
 pub(crate) struct TerminalActivitySnapshot {
@@ -108,6 +111,7 @@ impl TerminalManager {
                 epoch: Uuid::new_v4().to_string(),
                 revision: AtomicU64::new(0),
                 gate: Mutex::new(()),
+                closed_usage: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -463,17 +467,23 @@ impl TerminalManager {
         true
     }
 
-    /// When each open terminal was last used, by owner.
+    /// When each terminal was last used, by owner: those open now, and those
+    /// closed since the last call.
     pub(crate) fn usage(&self) -> Vec<(String, i64)> {
-        self.sessions
+        let mut usage = self
+            .activity
+            .closed_usage
             .lock()
-            .map(|sessions| {
+            .map(|mut closed| closed.drain().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if let Ok(sessions) = self.sessions.lock() {
+            usage.extend(
                 sessions
                     .values()
-                    .map(|session| (session.owner(), session.last_used.load(Ordering::Acquire)))
-                    .collect()
-            })
-            .unwrap_or_default()
+                    .map(|session| (session.owner(), session.last_used.load(Ordering::Acquire))),
+            );
+        }
+        usage
     }
 
     fn owned_by(&self, owners: &HashSet<String>) -> Vec<Arc<TerminalSession>> {
@@ -848,6 +858,11 @@ fn close_session(
         }
     };
     if closed {
+        if let Ok(mut usage) = session.activity.closed_usage.lock() {
+            let used = session.last_used.load(Ordering::Acquire);
+            let entry = usage.entry(session.owner()).or_insert(used);
+            *entry = (*entry).max(used);
+        }
         session.close_resources();
     }
 }
@@ -869,7 +884,10 @@ fn start_reader(
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
-                session.mark_used();
+                // Under the writer's lock, so closing an idle terminal sees it.
+                if let Ok(_writer) = session.writer.lock() {
+                    session.mark_used();
+                }
                 let data = buffer[..count].to_vec();
                 let activity_updates = activity.feed(&data);
                 let replies = queries.feed(&data);

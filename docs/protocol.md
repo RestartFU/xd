@@ -479,8 +479,11 @@ forces. The branch stays in the repository with every commit on it. Ignored
 files in the worktree, such as build output, go with it. The whole session
 stays, and the next sweep tries again, if one of those worktrees has
 uncommitted changes or untracked files, or a detached HEAD whose commits no
-branch or tag holds. A worktree xd did not generate, or one another session
-still uses, is left where it is. If Git refuses a worktree after the session is
+branch or tag holds. A worktree xd did not generate, one now on a different
+branch from the one xd checked out there, or one another session or project
+works in, is left where it is. The host records each worktree it generates;
+worktrees from before that record count when they sit exactly where xd puts its
+own. If Git refuses a worktree after the session is
 deleted, the worktree stays on disk with everything in it. Each deletion
 broadcasts `tree`, and `worktrees-changed` when a worktree went with it.
 
