@@ -369,6 +369,90 @@ impl XdDesktop {
         rows
     }
 
+    /// The connected host's deletion rule, or nothing while it has not said
+    /// what it is: an older host does not have one.
+    fn auto_delete_rows(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(rules) = self.auto_delete else {
+            return Vec::new();
+        };
+        let mut rows = vec![
+            settings_heading("Auto-delete", colors).into_any_element(),
+            settings_row(
+                "workspace-settings-delete-inactive",
+                "Auto-delete inactive sessions",
+                "Delete sessions with no activity for this long, with the worktree xd made for them. Branches and their commits are kept.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_auto_delete(
+                    AutoDeleteRules {
+                        after_days: match rules.after_days {
+                            Some(_) => None,
+                            None => Some(AutoDeleteRules::DEFAULT_AFTER_DAYS),
+                        },
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, rules.after_days.is_some()))
+            .into_any_element(),
+        ];
+        let Some(days) = rules.after_days else {
+            return rows;
+        };
+        let step = |id: &'static str, label: &'static str, longer: bool, cx: &mut Context<Self>| {
+            let to = AutoDeleteRules::step(days, longer);
+            ui_button(id, ButtonKind::Secondary, colors)
+                .w(px(30.0))
+                .px_0()
+                .when(to.is_none(), |button| button.opacity(0.4))
+                .when_some(to, |button, to| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_auto_delete(
+                            AutoDeleteRules {
+                                after_days: Some(to),
+                            },
+                            cx,
+                        );
+                    }))
+                })
+                .child(label)
+        };
+        rows.push(
+            settings_row(
+                "workspace-settings-delete-days",
+                "Days before auto-delete",
+                "A worktree with uncommitted changes keeps its session until you commit or clean it up.",
+                colors,
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(step("delete-days-fewer", "\u{2212}", false, cx))
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .flex()
+                            .justify_center()
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .child(days.to_string()),
+                    )
+                    .child(step("delete-days-more", "+", true, cx)),
+            )
+            .into_any_element(),
+        );
+        rows
+    }
+
     pub(super) fn render_workspace_settings(
         &mut self,
         colors: ThemeColors,
@@ -626,6 +710,7 @@ impl XdDesktop {
                         .child(settings_switch(colors, self.settings.auto_resume_chats)),
                     )
                     .children(self.auto_settle_rows(colors, cx))
+                    .children(self.auto_delete_rows(colors, cx))
                     .child(settings_heading("Updates", colors));
                 let status = self
                     .self_update_panel

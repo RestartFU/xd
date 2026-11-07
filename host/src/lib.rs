@@ -23,6 +23,7 @@ mod chat_title;
 mod cli_updates;
 mod cli_versions;
 mod codex_app;
+mod deletion;
 mod git_draft;
 mod local_socket;
 mod model_catalog;
@@ -433,6 +434,12 @@ impl Engine {
                     .map(|settings| settings.reply())
             }),
             Some("set-auto-settle-settings") => self.set_auto_settle_settings(&request),
+            Some("auto-delete-settings") => self.read(|store| {
+                store
+                    .auto_delete_settings()
+                    .map(|settings| settings.reply())
+            }),
+            Some("set-auto-delete-settings") => self.set_auto_delete_settings(&request),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
             Some("delete-chat") => self.delete_chat(&request),
@@ -1190,15 +1197,121 @@ impl Engine {
 
     /// Starts settling sessions on the host's own schedule. Only the daemon
     /// does this, since it is what outlives the clients.
-    pub fn start_auto_settle(&self) {
+    ///
+    /// The same schedule deletes sessions once the user has chosen a number of
+    /// days for that.
+    pub fn start_auto_settle(self: &Arc<Self>) {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return;
         };
         if let Ok(mut settler) = self.auto_settler.lock() {
             settler.get_or_insert_with(|| {
-                AutoSettler::start(store.clone(), runtime.clone(), self.events.clone())
+                // Weak, since the engine owns the thread that holds this.
+                let engine = Arc::downgrade(self);
+                let mut reported = HashSet::new();
+                AutoSettler::start(
+                    store.clone(),
+                    runtime.clone(),
+                    self.events.clone(),
+                    Box::new(move || {
+                        if let Some(engine) = engine.upgrade() {
+                            engine.auto_delete_sweep(settlement::now_seconds(), &mut reported);
+                        }
+                    }),
+                )
             });
         }
+    }
+
+    fn set_auto_delete_settings(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.set_auto_delete_settings(request) {
+            Ok(settings) => {
+                let reply = settings.reply();
+                let mut event = reply.clone();
+                event["event"] = json!("auto-delete-settings");
+                self.events.publish(event);
+                if let Ok(settler) = self.auto_settler.lock()
+                    && let Some(settler) = settler.as_ref()
+                {
+                    settler.wake();
+                }
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    /// One pass of the deletion rule. A session waits while it has an approval
+    /// or question open or a command running in its terminal, as it would for
+    /// the user. `reported` holds sessions already logged as kept, so a
+    /// worktree with uncommitted work is mentioned once rather than every
+    /// sweep. Returns how many sessions it deleted.
+    fn auto_delete_sweep(&self, now: i64, reported: &mut HashSet<String>) -> usize {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return 0;
+        };
+        let chosen = store
+            .auto_delete_settings()
+            .and_then(|settings| Ok((settings, store.deletion_candidates(now, &settings)?)));
+        let (settings, candidates) = match chosen {
+            Ok(chosen) => chosen,
+            Err(error) => {
+                eprintln!("xd: automatic deletion skipped: {error}");
+                return 0;
+            }
+        };
+        let mut deleted = 0;
+        let mut worktrees_changed = false;
+        for candidate in candidates {
+            let terminal = format!("session:{}", candidate.session);
+            let working = self.terminals.activity_snapshot().working_chats;
+            if working.contains(&terminal)
+                || candidate
+                    .chats
+                    .iter()
+                    .any(|chat| working.contains(chat) || runtime.has_interactions(chat))
+            {
+                continue;
+            }
+            let Ok(_resources) = self.session_resources.lock() else {
+                return deleted;
+            };
+            if let Err(error) = self.terminal_owner(&candidate.session) {
+                eprintln!("xd: automatic deletion skipped: {error}");
+                return deleted;
+            }
+            match store.auto_delete_session(&candidate, &settings) {
+                Ok(deletion::AutoDeletion::Deleted { chats, worktrees }) => {
+                    for chat in &chats {
+                        runtime.discard_chat(chat);
+                    }
+                    self.terminals.kill_chat(&terminal);
+                    reported.remove(&candidate.session);
+                    worktrees_changed |= !worktrees.is_empty();
+                    deleted += 1;
+                }
+                Ok(deletion::AutoDeletion::Changed) => {}
+                Ok(deletion::AutoDeletion::Kept(reason)) => {
+                    if reported.insert(candidate.session.clone()) {
+                        eprintln!(
+                            "xd: keeping idle session {} instead of deleting it: {reason}",
+                            candidate.session
+                        );
+                    }
+                }
+                Err(error) => eprintln!("xd: automatic deletion skipped: {error}"),
+            }
+        }
+        if deleted > 0 {
+            self.events.publish(json!({"event": "tree"}));
+        }
+        if worktrees_changed {
+            self.events.publish(json!({"event": "worktrees-changed"}));
+        }
+        deleted
     }
 
     fn terminal_open(&self, request: &Value) -> Value {
@@ -2186,6 +2299,62 @@ mod tests {
             engine.dispatch(json!({"op": "set-auto-settle-settings", "after_days": 91}))["ok"],
             false
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn auto_delete_is_off_until_chosen_and_waits_for_a_pending_question() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("xd-engine-delete-{}-{id}", std::process::id()));
+        let workspaces = root.join("Workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder, "title": "Task"}));
+        let chat_id = chat["id"].as_str().unwrap();
+        let (sender, events) = sync_channel::<Value>(64);
+        let (connection, _peer) = UnixStream::pair().unwrap();
+        let _subscriber = engine.events.subscribe(sender, connection).unwrap();
+        let later = settlement::now_seconds() + 40 * settlement::DAY_SECONDS;
+        let mut reported = HashSet::new();
+
+        let rule = engine.dispatch(json!({"op": "auto-delete-settings"}));
+        assert_eq!(rule["ok"], true);
+        assert!(rule["after_days"].is_null());
+        assert_eq!(engine.auto_delete_sweep(later, &mut reported), 0);
+
+        for bad in [json!(0), json!(366), json!("30")] {
+            assert_eq!(
+                engine.dispatch(json!({"op": "set-auto-delete-settings", "after_days": bad}))["ok"],
+                false
+            );
+        }
+        let changed = engine.dispatch(json!({"op": "set-auto-delete-settings", "after_days": 30}));
+        assert_eq!(changed["after_days"], 30);
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| event["event"] == "auto-delete-settings" && event["after_days"] == 30)
+        );
+
+        let runtime = engine.runtime.as_ref().unwrap();
+        runtime.hold_interaction_for_test(chat_id);
+        assert_eq!(engine.auto_delete_sweep(later, &mut reported), 0);
+        runtime.discard_chat(chat_id);
+        assert_eq!(
+            engine.auto_delete_sweep(settlement::now_seconds(), &mut reported),
+            0,
+            "not idle long enough yet"
+        );
+
+        assert_eq!(engine.auto_delete_sweep(later, &mut reported), 1);
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "tree")
+        );
+        let tree = engine.dispatch(json!({"op": "tree"}));
+        assert!(tree["chats"].as_array().unwrap().is_empty());
+        assert!(tree["sessions"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

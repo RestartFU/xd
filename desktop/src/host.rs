@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::channel;
 #[cfg(all(test, unix))]
 use crate::local_socket::UnixStream;
-use crate::model::{Attachment, AutoSettleRules};
+use crate::model::{Attachment, AutoDeleteRules, AutoSettleRules};
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
@@ -250,6 +250,8 @@ pub enum RequestKind {
     },
     AutoSettleSettings,
     SetAutoSettleSettings,
+    AutoDeleteSettings,
+    SetAutoDeleteSettings,
     RenameChat {
         chat_id: String,
         title: String,
@@ -1065,6 +1067,20 @@ impl HostHandle {
                 "on_merge": rules.on_merge,
                 "keep_pull_requests": rules.keep_pull_requests,
             }),
+        )
+    }
+
+    pub fn auto_delete_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::AutoDeleteSettings,
+            json!({"op": "auto-delete-settings"}),
+        )
+    }
+
+    pub fn set_auto_delete_settings(&self, rules: AutoDeleteRules) -> Result<(), String> {
+        self.send(
+            RequestKind::SetAutoDeleteSettings,
+            json!({"op": "set-auto-delete-settings", "after_days": rules.after_days}),
         )
     }
 
@@ -2758,6 +2774,8 @@ mod tests {
                 json!({"op":"set-session-auto-settle","session":"workspace-session","enabled":false}),
                 json!({"op":"auto-settle-settings"}),
                 json!({"op":"set-auto-settle-settings","after_days":null,"on_merge":false,"keep_pull_requests":true}),
+                json!({"op":"auto-delete-settings"}),
+                json!({"op":"set-auto-delete-settings","after_days":30}),
             ] {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
@@ -2851,6 +2869,25 @@ mod tests {
             updates.recv_blocking().unwrap(),
             HostUpdate::Reply {
                 kind: RequestKind::SetAutoSettleSettings,
+                ..
+            }
+        ));
+        host.auto_delete_settings().unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::AutoDeleteSettings,
+                ..
+            }
+        ));
+        host.set_auto_delete_settings(AutoDeleteRules {
+            after_days: Some(30),
+        })
+        .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::SetAutoDeleteSettings,
                 ..
             }
         ));

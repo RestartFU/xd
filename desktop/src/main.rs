@@ -50,8 +50,8 @@ use xd_desktop::{
     },
     markdown,
     model::{
-        AppModel, Attachment, AutoSettleRules, ChatSummary, Folder, MAX_MESSAGE_IMAGE_BYTES,
-        Message, MessageImage, MessagePageDirection, ToolView, Worktree,
+        AppModel, Attachment, AutoDeleteRules, AutoSettleRules, ChatSummary, Folder,
+        MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -2032,6 +2032,7 @@ struct XdDesktop {
     settle_advances: HashMap<String, Option<(String, String, AgentCli)>>,
     settled_visible: usize,
     auto_settle: Option<AutoSettleRules>,
+    auto_delete: Option<AutoDeleteRules>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -2625,6 +2626,7 @@ impl XdDesktop {
             settle_advances: HashMap::new(),
             settled_visible: SETTLED_INITIAL_ROWS,
             auto_settle: None,
+            auto_delete: None,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -2953,6 +2955,8 @@ impl XdDesktop {
                 | RequestKind::SetSessionAutoSettle { .. }
                 | RequestKind::AutoSettleSettings
                 | RequestKind::SetAutoSettleSettings
+                | RequestKind::AutoDeleteSettings
+                | RequestKind::SetAutoDeleteSettings
                 | RequestKind::RenameFolder { .. }
                 | RequestKind::MoveFolder { .. }
                 | RequestKind::TrashFolder { .. }
@@ -2981,6 +2985,7 @@ impl XdDesktop {
                 | "workflow-status"
                 | "owner-icon"
                 | "auto-settle-settings"
+                | "auto-delete-settings"
                 | "terminal-opened"
                 | "terminal-activity"
                 | "terminal-output"
@@ -3029,8 +3034,10 @@ impl XdDesktop {
         self.settle_undo = None;
         self.settle_advances.clear();
         self.auto_settle = None;
+        self.auto_delete = None;
         if self.minimal_theme_open {
             self.request_auto_settle_settings();
+            self.request_auto_delete_settings();
         }
         self.model.selected_chat = None;
         self.invalidate_live_render();
@@ -3785,6 +3792,7 @@ impl XdDesktop {
                     | RequestKind::SetShortcuts { .. }
                     | RequestKind::SetChatTitleSettings
                     | RequestKind::AutoSettleSettings
+                    | RequestKind::AutoDeleteSettings
             ) {
                 self.model.connection_error = Some(
                     value
@@ -3806,6 +3814,7 @@ impl XdDesktop {
                     self.settle_advances.remove(session_id);
                 }
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
+                RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
                 RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -5034,6 +5043,9 @@ impl XdDesktop {
             RequestKind::AutoSettleSettings | RequestKind::SetAutoSettleSettings => {
                 self.auto_settle = AutoSettleRules::from_value(&value);
             }
+            RequestKind::AutoDeleteSettings | RequestKind::SetAutoDeleteSettings => {
+                self.auto_delete = AutoDeleteRules::from_value(&value);
+            }
             RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder { .. } => self.request_tree(),
             RequestKind::TrashFolder { .. } => self.request_tree(),
@@ -5702,6 +5714,9 @@ impl XdDesktop {
             }
             "auto-settle-settings" => {
                 self.auto_settle = AutoSettleRules::from_value(&body);
+            }
+            "auto-delete-settings" => {
+                self.auto_delete = AutoDeleteRules::from_value(&body);
             }
             "owner-icon" => {
                 if let Some(owner) = body.get("owner").and_then(Value::as_str).map(str::to_owned) {
@@ -10341,6 +10356,7 @@ impl XdDesktop {
         if self.minimal_theme_open {
             self.request_chat_title_settings();
             self.request_auto_settle_settings();
+            self.request_auto_delete_settings();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.restore_minimal_popup_focus(window);
@@ -11356,6 +11372,28 @@ impl XdDesktop {
             .and_then(|host| host.set_auto_settle_settings(rules));
         match result {
             Ok(()) => self.auto_settle = Some(rules),
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn request_auto_delete_settings(&mut self) {
+        let result = self
+            .active_host()
+            .map(|host| host.auto_delete_settings())
+            .unwrap_or(Ok(()));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn change_auto_delete(&mut self, rules: AutoDeleteRules, cx: &mut Context<Self>) {
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.set_auto_delete_settings(rules));
+        match result {
+            Ok(()) => self.auto_delete = Some(rules),
             Err(error) => self.model.connection_error = Some(error),
         }
         cx.notify();

@@ -53,6 +53,16 @@ process once it has nothing left to do, within two minutes of settling or after 
 idle minutes otherwise, and the next message resumes the conversation. The Android
 app still lists settled sessions with the active ones.
 
+The host can also delete sessions for you. In **Settings → General →
+Auto-delete**, turn on **Auto-delete inactive sessions** and choose how many
+days a session may sit idle; it is off until you do, because deleting can't be
+undone. The session goes with its chats and terminals, and so does the worktree
+xd made for it, but its branch and every commit on it stay in the repository. A
+worktree with uncommitted changes or untracked files keeps its whole session
+until you commit or clean it up. Sessions you've kept out of auto-settle are not
+deleted, and neither is one you brought back from the **Settled** shelf, until
+it sees new activity.
+
 ## Install
 
 Linux x86_64:

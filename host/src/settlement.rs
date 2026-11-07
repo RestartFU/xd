@@ -5,7 +5,8 @@
 //! closed. Settling only ever changes where a session is listed: it closes no
 //! terminal, and work an agent is still doing goes on. The same sweep stops
 //! agent processes with nothing left to do; see
-//! [`TurnRuntime::release_idle_agents`].
+//! [`TurnRuntime::release_idle_agents`], and then deletes what has sat idle
+//! for longer still, when the user asked for that; see [`crate::deletion`].
 
 use std::{
     collections::HashMap,
@@ -25,7 +26,7 @@ use crate::{EventBus, StateStore, runtime::TurnRuntime};
 pub(crate) const DEFAULT_AFTER_DAYS: i64 = 3;
 pub(crate) const MIN_AFTER_DAYS: i64 = 1;
 pub(crate) const MAX_AFTER_DAYS: i64 = 90;
-const DAY_SECONDS: i64 = 24 * 60 * 60;
+pub(crate) const DAY_SECONDS: i64 = 24 * 60 * 60;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// A pull request is looked up over the network, and most sweeps change
 /// nothing about it, so one answer serves several sweeps.
@@ -173,7 +174,7 @@ pub(crate) fn auto_settled_at(
     (candidate.activity_at < now - days * DAY_SECONDS).then_some(candidate.activity_at)
 }
 
-fn now_seconds() -> i64 {
+pub(crate) fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -186,10 +187,13 @@ pub(crate) struct AutoSettler {
 }
 
 impl AutoSettler {
+    /// `after_sweep` runs after each pass of the settling rules, on the same
+    /// thread, so the work that follows settling keeps its schedule.
     pub(crate) fn start(
         store: Arc<StateStore>,
         runtime: TurnRuntime,
         events: Arc<EventBus>,
+        mut after_sweep: Box<dyn FnMut() + Send>,
     ) -> Self {
         let (wake, wakes) = mpsc::channel();
         let spawned = thread::Builder::new()
@@ -207,6 +211,7 @@ impl AutoSettler {
                         Ok(_) => events.publish(json!({"event": "tree"})),
                         Err(error) => eprintln!("xd: automatic settling skipped: {error}"),
                     }
+                    after_sweep();
                     runtime.release_idle_agents();
                 }
             });

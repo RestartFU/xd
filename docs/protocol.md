@@ -453,6 +453,35 @@ sessions the user un-settled. `settled_at` is then when the session went quiet,
 not when the sweep ran. `set-auto-settle-settings` changes only the members it
 names, broadcasts `auto-settle-settings`, and applies at once.
 
+### Deleting idle sessions
+
+```json
+{"op":"auto-delete-settings"}
+{"ok":true,"after_days":null}
+{"op":"set-auto-delete-settings","after_days":30}
+```
+
+`after_days`, from 1 to 365, deletes a session after that many days without
+activity, on the same schedule as the settling rules. It is `null`, and nothing
+is deleted, until a client chooses a number of days. A request without
+`after_days` changes nothing. `set-auto-delete-settings` broadcasts
+`auto-delete-settings` and applies at once.
+
+The rule skips the sessions automatic settling would skip: a member chat is
+running a turn, has a queued message, or is waiting on an approval or question,
+the user un-settled the session, or `set-session-auto-settle` keeps it out of
+the rules. It also waits while a command runs in the session's terminal.
+Settled sessions are deleted like active ones.
+
+Deleting a session closes its terminals, as `delete-session` does, and removes
+the worktree xd generated for it with `git worktree remove`, which never forces.
+The branch stays in the repository with every commit on it. Ignored files in
+the worktree, such as build output, go with it. If the worktree has uncommitted
+changes or untracked files, or Git cannot remove it, the whole session stays and
+the next sweep tries again. A worktree xd did not generate, or one another
+session still uses, is left where it is. Each deletion broadcasts `tree`, and
+`worktrees-changed` when a worktree went with it.
+
 ### Shared session terminals
 
 Use the session's `terminal_chat` value as the `chat` parameter for
@@ -827,6 +856,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | --- | --- | --- |
 | `tree` | — | Workspace tree changed; refetch `tree`. |
 | `auto-settle-settings` | `after_days`, `on_merge`, `keep_pull_requests` | The host's automatic settling rules changed. |
+| `auto-delete-settings` | `after_days` | The host's automatic deletion rule changed. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |
