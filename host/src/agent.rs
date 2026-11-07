@@ -15,6 +15,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     Session(String),
     Rpc(Value),
@@ -974,11 +975,10 @@ impl ClaudeParser {
                 }
                 if matches!(tool.name.as_str(), "TaskCreate" | "TaskList" | "TaskGet")
                     && let Some(id) = tool.id.clone()
+                    && self.completed_task_tools.len() < Self::MAX_COMPLETED_TASK_TOOLS
                 {
-                    if self.completed_task_tools.len() < Self::MAX_COMPLETED_TASK_TOOLS {
-                        self.completed_task_tools.insert(id, tool);
-                        return Vec::new();
-                    }
+                    self.completed_task_tools.insert(id, tool);
+                    return Vec::new();
                 }
                 vec![AgentEvent::Tool(claude_tool_summary(
                     &tool.name,
@@ -1667,12 +1667,16 @@ fn subagent_marker(key: Option<&str>, identity: &str, task: &str) -> String {
     let key = key
         .map(|key| format!("{}\n", compact(key, 120)))
         .unwrap_or_default();
-    let identity = (!identity.trim().is_empty())
-        .then_some(identity)
-        .unwrap_or("Agent");
-    let task = (!task.trim().is_empty())
-        .then_some(task)
-        .unwrap_or("Delegated task");
+    let identity = if !identity.trim().is_empty() {
+        identity
+    } else {
+        "Agent"
+    };
+    let task = if !task.trim().is_empty() {
+        task
+    } else {
+        "Delegated task"
+    };
     format!(
         "subagent\n{key}{}\n{}",
         compact(identity, 80),

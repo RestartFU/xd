@@ -335,10 +335,11 @@ impl Engine {
                     )
                 } else {
                     let reply = self.self_update.perform(action).unwrap_or_else(error_reply);
-                    if action == Some("restart") && reply["ok"] == true {
-                        if let Some(runtime) = &self.runtime {
-                            runtime.shutdown();
-                        }
+                    if action == Some("restart")
+                        && reply["ok"] == true
+                        && let Some(runtime) = &self.runtime
+                    {
+                        runtime.shutdown();
                     }
                     reply
                 }
@@ -651,13 +652,12 @@ impl Engine {
     }
 
     fn clear_authentication_deadline(&self, owner: u64) {
-        if let Ok(subscribers) = self.events.subscribers.lock() {
-            if let Some(connection) = subscribers
+        if let Ok(subscribers) = self.events.subscribers.lock()
+            && let Some(connection) = subscribers
                 .get(&owner)
                 .and_then(|subscriber| subscriber.connection.as_ref())
-            {
-                let _ = connection.set_read_timeout(None);
-            }
+        {
+            let _ = connection.set_read_timeout(None);
         }
     }
 
@@ -754,10 +754,9 @@ impl Engine {
             .map(|request| request.remove("_through_id"));
         if let (Some(runtime), Some(chat)) =
             (&self.runtime, request.get("chat").and_then(Value::as_str))
+            && let Some(live) = runtime.live_turn(chat)
         {
-            if let Some(live) = runtime.live_turn(chat) {
-                request["_through_id"] = json!(live.message_boundary);
-            }
+            request["_through_id"] = json!(live.message_boundary);
         }
         self.read(|store| store.messages(&request))
     }
@@ -1085,10 +1084,10 @@ impl Engine {
                 if let Some(runtime) = &self.runtime {
                     runtime.discard_chat(chat_id);
                 }
-                if reply["session_deleted"] == true {
-                    if let Some(session) = reply["session"].as_str() {
-                        self.terminals.kill_chat(&format!("session:{session}"));
-                    }
+                if reply["session_deleted"] == true
+                    && let Some(session) = reply["session"].as_str()
+                {
+                    self.terminals.kill_chat(&format!("session:{session}"));
                 }
                 self.events.publish(json!({"event": "tree"}));
                 reply
@@ -1826,10 +1825,10 @@ pub fn serve_daemon_connection(
         )
         .map_err(std::io::Error::other)?;
     let events_ready = Arc::new(AtomicBool::new(!remote));
-    if let Ok(mut subscribers) = engine.events.subscribers.lock() {
-        if let Some(client) = subscribers.get_mut(&subscriber) {
-            client.events_ready = Some(events_ready.clone());
-        }
+    if let Ok(mut subscribers) = engine.events.subscribers.lock()
+        && let Some(client) = subscribers.get_mut(&subscriber)
+    {
+        client.events_ready = Some(events_ready.clone());
     }
     let writer_stream = stream.try_clone()?;
     let writer = thread::spawn(move || write_frames(writer_stream, frames));
@@ -1942,16 +1941,13 @@ pub fn serve_stdio(
     let result = read_requests(&mut reader, &engine, subscriber, &outbound);
     engine.unsubscribe(subscriber);
     drop(outbound);
-    if result.is_err() {
-        // A full event queue usually means stdout itself is blocked. Waiting
-        // for that writer here would keep a dead stdio transport alive forever;
-        // returning lets the dedicated host process exit and the client resync.
-        return result;
-    }
-    let writer_result = writer
+    // A full event queue usually means stdout itself is blocked. Waiting for
+    // that writer here would keep a dead stdio transport alive forever;
+    // returning lets the dedicated host process exit and the client resync.
+    result?;
+    writer
         .join()
-        .map_err(|_| std::io::Error::other("host writer panicked"))?;
-    result.and(writer_result)
+        .map_err(|_| std::io::Error::other("host writer panicked"))?
 }
 
 fn read_requests(
@@ -2117,7 +2113,7 @@ mod tests {
         let root = env::temp_dir().join(format!("xd-engine-settle-{}-{id}", std::process::id()));
         let workspaces = root.join("Workspaces");
         std::fs::create_dir_all(&workspaces).unwrap();
-        let store = StateStore::open(&root.join("chats.db"), &workspaces).unwrap();
+        let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
         let engine = Engine::with_store(store);
         let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
         let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder, "title": "Task"}));

@@ -846,10 +846,8 @@ impl TurnRuntime {
                             && !process.progress.ready.load(Ordering::Acquire)
                     })
                 });
-                if starting {
-                    if let Ok(mut child) = child.lock() {
-                        let _ = terminate_agent(&mut child);
-                    }
+                if starting && let Ok(mut child) = child.lock() {
+                    let _ = terminate_agent(&mut child);
                 }
             });
         }
@@ -1134,6 +1132,7 @@ impl TurnRuntime {
     /// A kept process is reused only when the turn wants exactly what it was
     /// started with, and only when it is still alive and not mid-turn. Anything
     /// else takes its place.
+    #[allow(clippy::type_complexity)]
     fn session_for(
         &self,
         chat_id: &str,
@@ -1317,6 +1316,7 @@ impl TurnRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         turn: TurnSpec,
@@ -1547,13 +1547,13 @@ impl TurnRuntime {
                     AgentEvent::InteractionResolved(id) => {
                         let request_id =
                             format!("{}:{turn_id}:{}", self.inner.interaction_epoch, id);
-                        if let Ok(mut interactions) = self.inner.interactions.lock() {
-                            if let Some(pending) = interactions.get_mut(&turn.chat_id) {
-                                pending.requests.remove(&request_id);
-                                pending.revision =
-                                    self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
-                                self.inner.events.publish(json!({"event":"interaction-resolved", "chat":turn.chat_id, "request_id":request_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
-                            }
+                        if let Ok(mut interactions) = self.inner.interactions.lock()
+                            && let Some(pending) = interactions.get_mut(&turn.chat_id)
+                        {
+                            pending.requests.remove(&request_id);
+                            pending.revision =
+                                self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
+                            self.inner.events.publish(json!({"event":"interaction-resolved", "chat":turn.chat_id, "request_id":request_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
                         }
                     }
                     AgentEvent::Session(session) => {
@@ -1933,6 +1933,7 @@ impl TurnRuntime {
         Ok(todos.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
         turn: TurnSpec,
@@ -2158,6 +2159,8 @@ impl TurnRuntime {
 
     /// A background agent's progress while no turn is running: its card is
     /// updated in place, and the chat stays free for the user.
+    // The write below is the condition, so it stays out of a match guard.
+    #[allow(clippy::collapsible_match)]
     fn idle_subagent(&self, chat_id: &str, workdir: &str, patch: SubagentPatch) {
         match self.fold_subagent(chat_id, workdir, patch) {
             Some(RecordWrite::Update {

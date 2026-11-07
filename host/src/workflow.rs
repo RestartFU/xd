@@ -400,10 +400,7 @@ fn resolve_token() -> Option<String> {
 fn read_token_output(mut stream: impl Read) -> Vec<u8> {
     let mut output = Vec::new();
     let mut buffer = [0_u8; 1024];
-    loop {
-        let Ok(count) = stream.read(&mut buffer) else {
-            break;
-        };
+    while let Ok(count) = stream.read(&mut buffer) {
         if count == 0 {
             break;
         }

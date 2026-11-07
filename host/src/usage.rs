@@ -1085,7 +1085,14 @@ fn day_label(day: NaiveDate) -> String {
 
 fn twelve_hour(hour: u32) -> (u32, &'static str) {
     let suffix = if hour < 12 { "AM" } else { "PM" };
-    (if hour % 12 == 0 { 12 } else { hour % 12 }, suffix)
+    (
+        if hour.is_multiple_of(12) {
+            12
+        } else {
+            hour % 12
+        },
+        suffix,
+    )
 }
 
 /// A repeated wall-clock hour during a fall-back transition names its zone so
@@ -1500,6 +1507,7 @@ fn aggregate(
     let aliases = settings.resolved_aliases();
     let mut seen = HashSet::new();
     let mut sessions: BTreeMap<&'static str, HashSet<Arc<str>>> = BTreeMap::new();
+    #[allow(clippy::type_complexity)]
     let mut buckets: BTreeMap<(NaiveDate, Option<i64>, &'static str, Arc<str>), Bucket> =
         BTreeMap::new();
     let shared = sessions_across_files(scans);

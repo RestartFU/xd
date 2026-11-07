@@ -361,10 +361,7 @@ fn read_bounded(mut input: impl Read, limit: usize) -> (Vec<u8>, bool) {
     let mut kept = Vec::new();
     let mut buffer = [0_u8; 4096];
     let mut truncated = false;
-    loop {
-        let Ok(count) = input.read(&mut buffer) else {
-            break;
-        };
+    while let Ok(count) = input.read(&mut buffer) {
         if count == 0 {
             break;
         }

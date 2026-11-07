@@ -811,8 +811,8 @@ fn is_rule(line: &str) -> bool {
 }
 
 fn table(lines: &[&str]) -> Option<(TableBlock, usize)> {
-    let header = split_table_row(*lines.first()?)?;
-    let delimiter = split_table_row(*lines.get(1)?)?;
+    let header = split_table_row(lines.first()?)?;
+    let delimiter = split_table_row(lines.get(1)?)?;
     if header.is_empty()
         || header.len() != delimiter.len()
         || !delimiter.iter().all(|cell| table_delimiter(cell))

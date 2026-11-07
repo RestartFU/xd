@@ -1021,10 +1021,12 @@ impl AppModel {
             }
         } else {
             self.working = snapshot_working;
-            if self.working && self.live_text.is_empty() && self.live_items.is_empty() {
-                if let Some(segment) = body.get("segment").and_then(Value::as_str) {
-                    self.live_text = segment.to_owned();
-                }
+            if self.working
+                && self.live_text.is_empty()
+                && self.live_items.is_empty()
+                && let Some(segment) = body.get("segment").and_then(Value::as_str)
+            {
+                self.live_text = segment.to_owned();
             }
             if !self.working {
                 self.live_text.clear();
@@ -1196,30 +1198,29 @@ impl AppModel {
     pub fn apply_event(&mut self, name: &str, body: &Value) {
         if matches!(name, "turn-started" | "text" | "tool" | "turn-finished")
             && self.event_is_active(body)
-        {
-            if let (Some(id), Some(sequence)) = (
+            && let (Some(id), Some(sequence)) = (
                 body.get("turn_id").and_then(Value::as_u64),
                 body.get("turn_sequence").and_then(Value::as_u64),
-            ) {
-                let epoch = body
-                    .get("turn_epoch")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if epoch != self.turn_epoch {
-                    self.turn_epoch = epoch.to_owned();
-                    self.turn_watermark_id = 0;
-                    self.turn_watermark_sequence = 0;
-                    self.live_items.clear();
-                    self.live_text.clear();
-                }
-                if id < self.turn_watermark_id
-                    || (id == self.turn_watermark_id && sequence <= self.turn_watermark_sequence)
-                {
-                    return;
-                }
-                self.turn_watermark_id = id;
-                self.turn_watermark_sequence = sequence;
+            )
+        {
+            let epoch = body
+                .get("turn_epoch")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if epoch != self.turn_epoch {
+                self.turn_epoch = epoch.to_owned();
+                self.turn_watermark_id = 0;
+                self.turn_watermark_sequence = 0;
+                self.live_items.clear();
+                self.live_text.clear();
             }
+            if id < self.turn_watermark_id
+                || (id == self.turn_watermark_id && sequence <= self.turn_watermark_sequence)
+            {
+                return;
+            }
+            self.turn_watermark_id = id;
+            self.turn_watermark_sequence = sequence;
         }
 
         if matches!(
@@ -2745,9 +2746,11 @@ mod tests {
 
     #[test]
     fn catalog_names_are_scoped_to_the_current_assistant() {
-        let mut model = AppModel::default();
-        model.backend = "codex".into();
-        model.model = Some("shared-id".into());
+        let mut model = AppModel {
+            backend: "codex".into(),
+            model: Some("shared-id".into()),
+            ..Default::default()
+        };
         model.apply_agent_catalog(&json!({"backends":[
             {"id":"claude","name":"Claude Code","default_model":"shared-id","models":[{"id":"shared-id","name":"Other assistant model"}],"efforts":[]},
             {"id":"codex","name":"Codex","default_model":"shared-id","models":[{"id":"shared-id","name":"My team model"}],"efforts":["high"]}

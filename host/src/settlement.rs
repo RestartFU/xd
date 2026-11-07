@@ -449,7 +449,7 @@ mod tests {
             ));
             let workspaces = root.join("Workspaces");
             std::fs::create_dir_all(&workspaces).unwrap();
-            let store = StateStore::open(&root.join("chats.db"), &workspaces).unwrap();
+            let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
             let folder = store.new_folder(&json!({"name": "Project"})).unwrap()["id"].clone();
             let chat = store
                 .new_chat(&json!({"folder": folder, "title": "Task"}))
@@ -657,8 +657,8 @@ mod tests {
         assert_eq!(off.after_days, None);
         assert!(off.keep_pull_requests, "members left out keep their value");
         let reopened = StateStore::open(
-            &fixture.root.join("chats.db"),
-            &fixture.root.join("Workspaces"),
+            fixture.root.join("chats.db"),
+            fixture.root.join("Workspaces"),
         )
         .unwrap();
         assert_eq!(reopened.auto_settle_settings().unwrap(), off);
@@ -1050,8 +1050,8 @@ mod tests {
              ALTER TABLE workspace_sessions DROP COLUMN auto_settle_disabled_at;",
         );
         let reopened = StateStore::open(
-            &fixture.root.join("chats.db"),
-            &fixture.root.join("Workspaces"),
+            fixture.root.join("chats.db"),
+            fixture.root.join("Workspaces"),
         )
         .unwrap();
         assert!(reopened.tree().unwrap()["chats"][0]["settled_at"].is_null());
