@@ -10140,9 +10140,10 @@ impl XdDesktop {
 
     /// Opens the system file picker and attaches what the user chooses.
     fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.selected_chat.is_none() {
+        // What is chosen belongs to this chat, wherever the user goes meanwhile.
+        let Some(chat) = self.model.selected_chat.clone() else {
             return;
-        }
+        };
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -10164,28 +10165,27 @@ impl XdDesktop {
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                window.focus(&composer);
-                this.attach_paths(paths, cx);
+                if this.model.selected_chat.as_deref() == Some(chat.as_str()) {
+                    window.focus(&composer);
+                    this.attach_paths(chat, paths, cx);
+                }
             });
         })
         .detach();
     }
 
-    /// Reads files picked or dropped onto the chat, away from the UI thread,
-    /// and attaches each one the host would take.
-    fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let Some(chat) = self.model.selected_chat.clone() else {
-            return;
-        };
+    /// Reads files picked or dropped onto `chat`, away from the UI thread, and
+    /// attaches each one the host would take. Only as many files and bytes as
+    /// the draft still has room for are read, however many were chosen.
+    fn attach_paths(&mut self, chat: String, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
         }
-        let read = cx.background_spawn(async move {
-            paths
-                .into_iter()
-                .map(|path| read_attachment(&path))
-                .collect::<Vec<_>>()
-        });
+        let draft = &self.model.draft_attachments;
+        let slots = MAX_ATTACHMENTS.saturating_sub(draft.len());
+        let room = MAX_TOTAL_ATTACHMENT_BYTES
+            .saturating_sub(draft.iter().map(|attachment| attachment.bytes).sum());
+        let read = cx.background_spawn(async move { read_attachments(paths, slots, room) });
         cx.spawn(async move |this, cx| {
             let read = read.await;
             let _ = this.update(cx, |this, cx| {
@@ -15343,9 +15343,12 @@ impl XdDesktop {
             .bg(rgb(colors.background))
             // Files dropped anywhere on the chat join the draft.
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let Some(chat) = this.model.selected_chat.clone() else {
+                    return;
+                };
                 let focus = this.composer_input.read(cx).focus_handle(cx);
                 window.focus(&focus);
-                this.attach_paths(paths.paths().to_vec(), cx);
+                this.attach_paths(chat, paths.paths().to_vec(), cx);
             }))
             .child(
                 div()
@@ -18987,9 +18990,36 @@ fn decode_git_path(value: &str) -> Result<String, String> {
     String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
 }
 
-/// One file the user chose to attach, read whole. Only a regular file is
-/// opened, so a FIFO or device cannot stall the read.
-fn read_attachment(path: &Path) -> Result<Attachment, String> {
+/// The files the user chose, read in order until the draft would be full:
+/// `slots` more attachments and `room` more bytes. What is left unread is
+/// refused, so a thousand chosen files cost no more than ten.
+fn read_attachments(
+    paths: Vec<PathBuf>,
+    slots: usize,
+    mut room: usize,
+) -> Vec<Result<Attachment, String>> {
+    let mut read = Vec::new();
+    let mut added = 0;
+    for path in paths {
+        if added >= slots {
+            read.push(Err(format!(
+                "A message can contain at most {MAX_ATTACHMENTS} attachments."
+            )));
+            break;
+        }
+        let attachment = read_attachment(&path, room);
+        if let Ok(attachment) = &attachment {
+            added += 1;
+            room = room.saturating_sub(attachment.bytes);
+        }
+        read.push(attachment);
+    }
+    read
+}
+
+/// One file the user chose to attach, read whole if it is at most `room`
+/// bytes. Only a regular file is opened, so a FIFO or device cannot stall it.
+fn read_attachment(path: &Path, room: usize) -> Result<Attachment, String> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -19001,18 +19031,25 @@ fn read_attachment(path: &Path) -> Result<Attachment, String> {
     if !metadata.is_file() {
         return Err(format!("{name} is not a file."));
     }
+    let too_large = || format!("{name} is larger than 10 MiB.");
+    let over_total = || "Attachments can add up to at most 20 MiB.".to_owned();
     if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
-        return Err(format!("{name} is larger than 10 MiB."));
+        return Err(too_large());
     }
+    if metadata.len() > room as u64 {
+        return Err(over_total());
+    }
+    // The file may have grown since it was measured.
+    let limit = room.min(MAX_ATTACHMENT_BYTES);
     let mut bytes = Vec::new();
     fs::File::open(path)
-        .and_then(|file| {
-            file.take(MAX_ATTACHMENT_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-        })
+        .and_then(|file| file.take(limit as u64 + 1).read_to_end(&mut bytes))
         .map_err(|_| format!("{name} could not be read."))?;
     if bytes.len() > MAX_ATTACHMENT_BYTES {
-        return Err(format!("{name} is larger than 10 MiB."));
+        return Err(too_large());
+    }
+    if bytes.len() > limit {
+        return Err(over_total());
     }
     Ok(Attachment::from_file(name, bytes))
 }

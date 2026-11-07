@@ -12718,9 +12718,46 @@ mod tests {
                 .materialize_terminal_image(&json!({"attachments": [file]}))
                 .is_err()
         );
-        // Nothing a refused message would have written stays behind.
-        let files = fixture.root.join("remote-pasted").join("files");
-        assert!(fs::read_dir(&files).map_or(true, |mut entries| entries.next().is_none()));
+
+        // A file that cannot be written takes the image written before it along.
+        let paste_root = fixture.root.join("remote-pasted");
+        fs::create_dir_all(&paste_root).unwrap();
+        fs::write(paste_root.join("files"), b"in the way").unwrap();
+        assert!(send(json!([png, file])).contains("remote attachment cache"));
+        let left = fs::read_dir(&paste_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(left, ["files"]);
+    }
+
+    #[test]
+    fn an_unkept_message_removes_its_files_and_their_directories() {
+        let root = env::temp_dir().join(format!("xd-materialized-{}", Uuid::new_v4()));
+        let directory = root.join("files").join("one");
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("Report.pdf");
+        fs::write(&file, b"%PDF").unwrap();
+        drop(MaterializedMessage {
+            prompt: String::new(),
+            paths: vec![file.clone()],
+            directories: vec![directory.clone()],
+            keep: false,
+        });
+        assert!(!file.exists() && !directory.exists());
+
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&file, b"%PDF").unwrap();
+        let mut kept = MaterializedMessage {
+            prompt: String::new(),
+            paths: vec![file.clone()],
+            directories: vec![directory],
+            keep: false,
+        };
+        kept.keep();
+        drop(kept);
+        assert!(file.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

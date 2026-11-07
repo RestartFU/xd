@@ -1350,6 +1350,42 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn chosen_files_join_only_the_draft_they_were_chosen_for(cx: &mut gpui::TestAppContext) {
+        let root = std::env::temp_dir().join(format!("xd-attach-chat-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let notes = root.join("notes.txt");
+        fs::write(&notes, b"hello").unwrap();
+        let (desktop, cx) = composer_with_images(cx, &[]);
+
+        desktop.update(cx, |desktop, cx| {
+            desktop.attach_paths("implementation".into(), vec![notes.clone()], cx);
+            // The user moves on before the read finishes.
+            desktop.model.selected_chat = Some("elsewhere".into());
+        });
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.model.draft_attachments.is_empty());
+        });
+
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.selected_chat = Some("implementation".into());
+            desktop.attach_paths("implementation".into(), vec![notes], cx);
+        });
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| {
+            let names = desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["notes.txt"]);
+            assert!(desktop.attachments_dirty);
+        });
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn file_sizes_read_the_way_people_write_them() {
         assert_eq!(file_size_label(812), "812 B");
@@ -1359,32 +1395,56 @@ mod tests {
     }
 
     #[test]
-    fn reading_an_attachment_refuses_folders_and_oversized_files() {
+    fn reading_attachments_refuses_folders_and_stops_once_the_draft_is_full() {
         let root = std::env::temp_dir().join(format!("xd-attach-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let report = root.join("Report.pdf");
         fs::write(&report, b"%PDF-1.7").unwrap();
-        let read = read_attachment(&report).unwrap();
+        let read = read_attachment(&report, MAX_TOTAL_ATTACHMENT_BYTES).unwrap();
         assert_eq!(
             (read.name.as_str(), read.mime.as_str()),
             ("Report.pdf", "application/pdf")
         );
-        assert!(read_attachment(&root).unwrap_err().contains("is a folder"));
+        assert!(read_attachment(&report, 7).unwrap_err().contains("20 MiB"));
+        assert!(
+            read_attachment(&root, MAX_TOTAL_ATTACHMENT_BYTES)
+                .unwrap_err()
+                .contains("is a folder")
+        );
         let large = root.join("large.bin");
         fs::File::create(&large)
             .unwrap()
             .set_len(MAX_ATTACHMENT_BYTES as u64 + 1)
             .unwrap();
         assert!(
-            read_attachment(&large)
+            read_attachment(&large, MAX_TOTAL_ATTACHMENT_BYTES)
                 .unwrap_err()
                 .contains("larger than 10 MiB")
         );
         assert!(
-            read_attachment(&root.join("missing"))
+            read_attachment(&root.join("missing"), MAX_TOTAL_ATTACHMENT_BYTES)
                 .unwrap_err()
                 .contains("could not be read")
         );
+
+        // Two slots: the third file is never opened, and nothing after it.
+        let chosen = vec![
+            report.clone(),
+            root.join("missing"),
+            report.clone(),
+            report,
+            large,
+        ];
+        let read = read_attachments(chosen, 2, MAX_TOTAL_ATTACHMENT_BYTES);
+        assert_eq!(read.len(), 4);
+        assert!(read[0].is_ok() && read[1].is_err() && read[2].is_ok());
+        assert!(read[3].as_ref().unwrap_err().contains("10 attachments"));
+        // The byte budget shrinks with each file read.
+        let small = root.join("small.txt");
+        fs::write(&small, [1; 6]).unwrap();
+        let read = read_attachments(vec![small.clone(), small], 10, 10);
+        assert!(read[0].is_ok());
+        assert!(read[1].as_ref().unwrap_err().contains("20 MiB"));
         fs::remove_dir_all(&root).unwrap();
     }
 
