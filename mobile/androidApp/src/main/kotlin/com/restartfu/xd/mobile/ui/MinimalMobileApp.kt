@@ -1177,7 +1177,8 @@ private fun NewProjectDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onCreate(name.trim(), repository.trim().ifBlank { null }) },
+                // Sent exactly as chosen: a Unix folder name can end in a space.
+                onClick = { onCreate(name.trim(), repository.takeIf(String::isNotBlank)) },
                 enabled = name.isNotBlank(),
             ) { Text("Create project") }
         },

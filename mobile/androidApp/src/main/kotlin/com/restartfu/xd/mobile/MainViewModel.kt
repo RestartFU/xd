@@ -418,10 +418,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // One request at a time; one asked for meanwhile runs next rather
         // than being dropped, so a reopened dialog's check is not lost.
         if (_updating.value) {
-            queuedHostAction = action
+            // The same check already out answers for both.
+            if (!(action == "check" && runningHostAction == "check")) queuedHostAction = action
             return
         }
         _updating.value = true
+        runningHostAction = action
         // A new attempt replaces the last failure; the dialog shows an error in
         // place of any status, so a stale one would hide what happened next.
         _hostError.value = null
@@ -444,6 +446,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private var queuedHostAction: String? = null
+    private var runningHostAction: String? = null
 
     /**
      * A check was asked for and no answer has confirmed the host took it.
@@ -454,7 +457,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val hostCheckPending: StateFlow<Boolean> = _hostCheckPending.asStateFlow()
 
     /** Asks again about the update in progress, or the check that may not have happened. */
-    fun followHostUpdate() = hostUpdate(if (_hostCheckPending.value) "check" else "status")
+    fun followHostUpdate() {
+        // A follow-up never queues behind a request already out: that request's
+        // answer is the follow-up, and queuing would keep checks going forever.
+        if (_updating.value) return
+        hostUpdate(if (_hostCheckPending.value) "check" else "status")
+    }
 
     /** Closing the dialog keeps an unconfirmed check, so reopening still follows it up. */
     fun clearHostUpdate() {
