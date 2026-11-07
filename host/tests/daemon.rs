@@ -25,6 +25,19 @@ struct Daemon {
     child: Child,
 }
 /// Where a daemon's stderr goes, so a failing test can show why it died.
+fn ask_for_an_answer(socket: &Path) -> bool {
+    let Ok(mut socket) = UnixStream::connect(socket) else {
+        return false;
+    };
+    let mut line = String::new();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .is_ok()
+        && writeln!(socket, "{}", json!({"op":"ping"})).is_ok()
+        && BufReader::new(&socket)
+            .read_line(&mut line)
+            .is_ok_and(|read| read > 0)
+}
 fn daemon_log(root: &Path) -> Stdio {
     fs::OpenOptions::new()
         .create(true)
@@ -162,17 +175,13 @@ for line in sys.stdin:
         }
     }
     fn answers(&self) -> bool {
-        let Ok(mut socket) = UnixStream::connect(&self.socket) else {
-            return false;
-        };
-        let mut line = String::new();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .is_ok()
-            && writeln!(socket, "{}", json!({"op":"ping"})).is_ok()
-            && BufReader::new(&socket)
-                .read_line(&mut line)
-                .is_ok_and(|read| read > 0)
+        // Connecting can block, which must not outlast the caller's deadline.
+        let socket = self.socket.clone();
+        let (answered, answer) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = answered.send(ask_for_an_answer(&socket));
+        });
+        answer.recv_timeout(Duration::from_secs(1)).unwrap_or(false)
     }
     fn client(&self) -> Client<UnixStream, UnixStream> {
         let socket = UnixStream::connect(&self.socket).unwrap();
