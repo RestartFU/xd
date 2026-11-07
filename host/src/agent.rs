@@ -767,6 +767,7 @@ impl ClaudeParser {
                     self.unread_steers.pop_front();
                     self.replacement_pending = true;
                     self.superseded = false;
+                    self.settling = false;
                     self.begin_next_run();
                     return events;
                 }
@@ -2238,6 +2239,20 @@ mod tests {
         assert!(!parser.settling());
         parser.feed(init);
         assert_eq!(parser.take_unread_steers(), [2]);
+    }
+
+    /// An abort shows a steer was read, so it also ends any wait begun when an
+    /// earlier run finished with that steer unread.
+    #[test]
+    fn an_abort_ends_the_wait_to_see_whether_a_steer_was_read() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        parser.steer_frame(1, "One").unwrap();
+        parser.feed(r#"{"type":"result","terminal_reason":"completed","result":"Done"}"#);
+        assert!(parser.settling());
+        parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_tools"}"#);
+        assert!(!parser.settling());
     }
 
     /// A forked skill holds `init` back until it finishes, and its text comes

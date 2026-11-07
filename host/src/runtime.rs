@@ -1479,6 +1479,7 @@ impl TurnRuntime {
                     for event in settled {
                         match event {
                             AgentEvent::Completed => completed = true,
+                            AgentEvent::Resumable => cut_short = true,
                             AgentEvent::Error(error) => latest_error = Some(error),
                             _ => {}
                         }
@@ -1777,17 +1778,8 @@ impl TurnRuntime {
         }
 
         // Nothing will answer these now. The process may still read them later,
-        // so it can't stay if they are to be sent again.
+        // so it has to go before they can be sent again.
         let unread_steers = parser.take_unread_steers();
-        for steer in &unread_steers {
-            self.return_steer(
-                &turn.chat_id,
-                &progress,
-                &mut steered,
-                *steer,
-                &mut returned_steers,
-            );
-        }
 
         let was_cancelled = cancelled.load(Ordering::Acquire);
         let success = if keeps_process {
@@ -1811,6 +1803,15 @@ impl TurnRuntime {
                 self.drop_session(&turn.chat_id);
                 source.stranded_steers()
             };
+            for steer in &unread_steers {
+                self.return_steer(
+                    &turn.chat_id,
+                    &progress,
+                    &mut steered,
+                    *steer,
+                    &mut returned_steers,
+                );
+            }
             // These never reached the turn, so they follow everything that did.
             for prompt in &stranded {
                 next_steer += 1;
