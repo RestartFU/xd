@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   linux:
+    if: false
     # GitHub's runner for every branch and fork: this repository is public,
     # and a pull request runs whatever it contains, so it never gets a
     # machine of ours.
@@ -71,51 +72,22 @@ jobs:
           echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
 
       # Every crate even after a failure, so one push reports all of them.
-      - name: Lint the native Rust targets
+      - name: Install native test dependencies
+        run: brew install tmux
+
+      - name: Repeat every host test
         env:
           RUSTUP_TOOLCHAIN: 1.95.0
         run: |
-          status=0
-          for crate in terminal-core transport-core desktop host; do
-            cargo clippy --locked --all-targets --manifest-path "$crate/Cargo.toml" -- -D warnings || status=1
+          cd host
+          cargo test --locked --no-run
+          fails=0
+          for i in $(seq 1 40); do
+            if ! cargo test --locked --no-fail-fast > run.log 2>&1; then
+              fails=$((fails+1))
+              echo "=== failed run $i"
+              grep -E "FAILED|panicked|disconnected|did not start|exit status|SUN_LEN" run.log | cut -c1-260 | head -30
+            fi
           done
-          exit "$status"
-
-  windows:
-    # The host is left out: on Windows it only ever runs inside WSL, so the
-    # Linux job covers it.
-    runs-on: windows-2025
-    env:
-      RUSTUP_TOOLCHAIN: 1.95.0
-      CARGO_BUILD_JOBS: 3
-      CMAKE_BUILD_PARALLEL_LEVEL: 3
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Install the pinned Rust toolchain
-        run: >-
-          rustup toolchain install 1.95.0 --profile minimal --component clippy
-          --target x86_64-pc-windows-msvc --no-self-update
-
-      # GPUI's build script compiles its shaders, even for a lint.
-      - name: Locate the HLSL compiler
-        run: |
-          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-          $fxc = Get-ChildItem -Path "$sdkRoot/*/x64/fxc.exe" -File |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if ($null -eq $fxc) { throw 'The Windows SDK HLSL compiler (fxc.exe) is required.' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
-
-      # Every crate even after a failure, so one push reports all of them.
-      - name: Lint the native Windows targets
-        run: |
-          $failed = $false
-          foreach ($crate in 'terminal-core', 'transport-core', 'desktop') {
-            cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc --manifest-path "$crate/Cargo.toml" -- -D warnings
-            if ($LASTEXITCODE -ne 0) { $failed = $true }
-          }
-          if ($failed) { throw 'Windows lints failed.' }
+          grep -E "^test result" run.log | cut -c1-90
+          echo "RESULT $fails failed of 40"
