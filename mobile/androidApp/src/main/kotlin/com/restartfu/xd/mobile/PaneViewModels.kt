@@ -114,7 +114,15 @@ class DiffViewModel(
             }
             // The status is shown at once; the pull request lookup can take a
             // while, or never answer, and must not hold it back.
-            if (read == gitReads) _state.value = _state.value.copy(git = git)
+            // A link for another branch goes in the same update, never shown beside this one.
+            if (read == gitReads) {
+                _state.value = _state.value.let { current ->
+                    current.copy(
+                        git = git,
+                        pullRequestUrl = current.pullRequestUrl.takeIf { current.pullRequestBranch == git?.branch },
+                    )
+                }
+            }
             val branch = git?.branch
             // The last link is kept only while it is this branch's and GitHub
             // could not say otherwise.
