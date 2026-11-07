@@ -268,7 +268,7 @@ fn github_owner(remote: &str) -> Option<String> {
 
 /// GitHub logins are alphanumeric with inner hyphens. Rejecting anything else
 /// keeps a remote URL out of the avatar request path.
-fn valid_login(owner: &str) -> bool {
+pub(crate) fn valid_login(owner: &str) -> bool {
     !owner.is_empty()
         && owner.len() <= MAX_LOGIN
         && !owner.starts_with('-')

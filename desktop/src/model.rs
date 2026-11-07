@@ -159,6 +159,10 @@ pub struct Folder {
     /// no GitHub remote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+    /// A folder the user made to hold projects, such as one per organization,
+    /// rather than a project that sessions run in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub group: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1599,6 +1603,7 @@ impl AppModel {
                 name: "xd".into(),
                 parent: None,
                 owner: None,
+                group: false,
             }],
             chats: vec![
                 ChatSummary {
@@ -2096,7 +2101,8 @@ mod tests {
             .apply_tree(&json!({
                 "folders": [
                     {"id": "owned", "name": "xd", "owner": "RestartFU"},
-                    {"id": "plain", "name": "Notes"}
+                    {"id": "plain", "name": "Notes"},
+                    {"id": "org", "name": "acme", "owner": "acme", "group": true}
                 ],
                 "chats": []
             }))
@@ -2104,6 +2110,8 @@ mod tests {
 
         assert_eq!(model.folders[0].owner.as_deref(), Some("RestartFU"));
         assert_eq!(model.folders[1].owner, None);
+        assert!(!model.folders[0].group && !model.folders[1].group);
+        assert!(model.folders[2].group);
     }
 
     #[test]
