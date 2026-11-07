@@ -77,7 +77,11 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                 if (error != null || authStale || clisStale) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            error ?: "This may be out of date: the host could not be asked again.",
+                            error ?: if (auth == null) {
+                                "The host could not be asked for its assistant accounts."
+                            } else {
+                                "This may be out of date: the host could not be asked again."
+                            },
                             modifier = Modifier.weight(1f),
                             color = MaterialTheme.colorScheme.error,
                             style = MaterialTheme.typography.bodySmall,
@@ -87,7 +91,7 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                 }
                 val providers = auth?.values?.sortedBy { it.displayName }
                 if (providers == null) {
-                    if (error == null) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
+                    if (error == null && !authStale) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
                 } else {
                     // Keyed, so an entered sign-in code stays with its assistant
                     // when another appears above it.
@@ -456,7 +460,10 @@ internal fun ProjectContextDialog(
 @Composable
 internal fun ChatTitleSettings(model: MainViewModel) {
     val settings by model.chatTitles.collectAsStateWithLifecycle()
-    val error by model.chatTitlesError.collectAsStateWithLifecycle()
+    val readError by model.chatTitlesError.collectAsStateWithLifecycle()
+    val writeError by model.chatTitlesWriteError.collectAsStateWithLifecycle()
+    // A failed change stays shown even after a read brings the settings back.
+    val error = writeError ?: readError
     val catalog by model.hostCatalog.collectAsStateWithLifecycle()
     val catalogError by model.hostCatalogError.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { model.loadChatTitles() }
@@ -467,7 +474,7 @@ internal fun ChatTitleSettings(model: MainViewModel) {
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
-        if (error != null) TextButton(onClick = model::loadChatTitles) { Text("Try again") }
+        if (error != null) TextButton(onClick = model::retryChatTitles) { Text("Try again") }
         return
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -504,7 +511,12 @@ internal fun ChatTitleSettings(model: MainViewModel) {
             }
         }
     }
-    error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+    error?.let {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(it, modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = model::retryChatTitles) { Text("Try again") }
+        }
+    }
 }
 
 @Composable

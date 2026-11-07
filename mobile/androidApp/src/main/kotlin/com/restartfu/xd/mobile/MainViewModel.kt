@@ -159,6 +159,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val hostCatalogError: StateFlow<String?> = _catalogError.asStateFlow()
     val chatTitles: StateFlow<ChatTitleSettingsReply?> = _chatTitles.asStateFlow()
     val chatTitlesError: StateFlow<String?> = _chatTitlesError.asStateFlow()
+    private val _chatTitlesWriteError = MutableStateFlow<String?>(null)
+    /** A change that failed, kept until a newer change succeeds; a read does not clear it. */
+    val chatTitlesWriteError: StateFlow<String?> = _chatTitlesWriteError.asStateFlow()
+    private var chatTitleWrites = 0L
+    private var chatTitleWriteSucceeded = 0L
+    private var chatTitleWriteFailed = 0L
+    private var accountActions = 0L
+    private var accountActionSucceeded = 0L
+    private var accountActionFailed = 0L
     /** Each assistant's models, for choosing a title model. */
     val hostCatalog: StateFlow<List<BackendReply>> = _catalog.asStateFlow()
     private var chatTitleRequests = 0L
@@ -196,6 +205,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _accountsError.value = null
                 _chatTitles.value = null
                 _chatTitlesError.value = null
+                _chatTitlesWriteError.value = null
                 _catalog.value = emptyList()
                 _catalogError.value = null
                 catalogReads++
@@ -205,23 +215,48 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Runs one assistant-account request, reporting a failure in the accounts dialog. */
+    /**
+     * Runs one assistant-account action, reporting a failure in the accounts
+     * dialog until a newer action succeeds. An older failure arriving late, or
+     * one from a host since forgotten, is set aside.
+     */
     private fun accountsAction(failure: String, action: suspend () -> Unit) {
-        _accountsError.value = null
+        val serial = ++accountActions
+        val generation = client.sessionGeneration.value
         viewModelScope.launch {
             try {
                 action()
+                if (generation != client.sessionGeneration.value) return@launch
+                accountActionSucceeded = maxOf(accountActionSucceeded, serial)
+                if (serial > accountActionFailed) _accountsError.value = null
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                if (generation != client.sessionGeneration.value || serial < accountActionSucceeded) return@launch
+                accountActionFailed = maxOf(accountActionFailed, serial)
                 _accountsError.value = error.message ?: failure
             }
         }
     }
 
+    /**
+     * Reads both lists again. A failed read shows as the client's stale flags,
+     * which order failures and answers by request, so a late failure never
+     * hides a newer answer.
+     */
     fun loadAccounts() {
-        accountsAction("Could not read the assistant accounts") { client.loadAgentAuth() }
-        accountsAction("Could not read the assistant tools") { client.agentCliUpdates("status") }
+        viewModelScope.launch { quietly { client.loadAgentAuth() } }
+        viewModelScope.launch { quietly { client.agentCliUpdates("status") } }
+    }
+
+    private suspend fun quietly(read: suspend () -> Unit) {
+        try {
+            read()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            // Reported through the stale flags.
+        }
     }
 
     fun checkCliUpdates() = accountsAction("Could not check for updates") { client.agentCliUpdates("check") }
@@ -238,19 +273,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun cancelSignIn(provider: String) =
         accountsAction("Could not cancel signing in") { client.agentAuthAction(Ops.AuthAction.CANCEL, provider) }
 
-    /** Only the newest request's answer or failure is shown. */
-    private fun chatTitleRequest(failure: String, request: suspend () -> ChatTitleSettingsReply) {
+    /**
+     * Only the newest request's answer, or a read's failure, is shown. A
+     * change's failure is kept apart, until a newer change succeeds, since a
+     * read answering afterwards says nothing of whether the change was made.
+     */
+    private fun chatTitleRequest(failure: String, write: Boolean = false, request: suspend () -> ChatTitleSettingsReply) {
         val serial = ++chatTitleRequests
+        val writeSerial = if (write) ++chatTitleWrites else 0L
+        val generation = client.sessionGeneration.value
         _chatTitlesError.value = null
         viewModelScope.launch {
             try {
                 val reply = request()
+                if (generation != client.sessionGeneration.value) return@launch
+                if (write) {
+                    chatTitleWriteSucceeded = maxOf(chatTitleWriteSucceeded, writeSerial)
+                    if (writeSerial > chatTitleWriteFailed) _chatTitlesWriteError.value = null
+                }
                 if (serial == chatTitleRequests) _chatTitles.value = reply
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                if (generation != client.sessionGeneration.value) return@launch
+                if (write && writeSerial > chatTitleWriteSucceeded) {
+                    chatTitleWriteFailed = maxOf(chatTitleWriteFailed, writeSerial)
+                    _chatTitlesWriteError.value = error.message ?: failure
+                }
                 if (serial != chatTitleRequests) return@launch
-                _chatTitlesError.value = error.message ?: failure
+                if (!write) {
+                    _chatTitlesError.value = error.message ?: failure
+                    return@launch
+                }
                 // An earlier change may have landed even though this one did
                 // not, and its answer was set aside for this one; ask again.
                 try {
@@ -282,12 +336,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Pressed by the person, it also acknowledges a failed change. */
+    fun retryChatTitles() {
+        _chatTitlesWriteError.value = null
+        loadChatTitles()
+    }
+
     fun setChatTitlesEnabled(enabled: Boolean) =
-        chatTitleRequest("Could not change chat titles") { client.setChatTitlesEnabled(enabled) }
+        chatTitleRequest("Could not change chat titles", write = true) { client.setChatTitlesEnabled(enabled) }
 
     /** Null goes back to the host's built-in choice, which follows its default as that changes. */
     fun setChatTitleModel(backend: String, model: String?) =
-        chatTitleRequest("Could not change the title model") { client.setChatTitleModel(backend, model) }
+        chatTitleRequest("Could not change the title model", write = true) { client.setChatTitleModel(backend, model) }
 
     init {
         viewModelScope.launch {
