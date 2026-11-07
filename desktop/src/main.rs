@@ -148,8 +148,16 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-/// Width of the catalog sidebar that holds project drawers and session cards.
-const CATALOG_WIDTH: f32 = 256.0;
+/// Narrowest the catalog sidebar, which holds project drawers and session
+/// cards, can be dragged.
+const CATALOG_MIN_WIDTH: f32 = 220.0;
+/// Widest the catalog sidebar can be dragged.
+const CATALOG_MAX_WIDTH: f32 = 480.0;
+/// Narrower than this, the catalog footer's Update button shows only its icon
+/// so Settings stays inside the catalog.
+const CATALOG_UPDATE_LABEL_MIN_WIDTH: f32 = 256.0;
+/// Width the catalog always leaves for the session beside it.
+const CATALOG_SESSION_MIN_WIDTH: f32 = 384.0;
 /// Every session row shares one height and baseline.
 const CARD_HEIGHT: f32 = 30.0;
 /// How long the sidebar offers to undo a settle.
@@ -180,6 +188,15 @@ fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
     f32::from(requested).clamp(
         280.0,
         (window_width - BROWSER_DIVIDER_WIDTH - 460.0).clamp(280.0, 1000.0),
+    )
+}
+
+/// `room` is the window width left of the browser. The catalog hides once that
+/// drops below 640, so the session keeps its minimum wherever the catalog shows.
+fn catalog_pane_width(requested: u16, room: f32) -> f32 {
+    f32::from(requested).clamp(
+        CATALOG_MIN_WIDTH,
+        (room - CATALOG_SESSION_MIN_WIDTH).clamp(CATALOG_MIN_WIDTH, CATALOG_MAX_WIDTH),
     )
 }
 
@@ -1755,6 +1772,8 @@ struct XdDesktop {
     terminal_panel: Option<TerminalPanel>,
     browser_panes: HashMap<String, Entity<BrowserPane>>,
     browser_drag: Option<(f32, u16)>,
+    /// Drag origin and starting width while resizing the catalog sidebar.
+    catalog_drag: Option<(f32, u16)>,
     browser_restore_focus: bool,
     terminal_runtime: SessionRuntime,
     terminal_panel_cache: HashMap<(ChatEndpoint, String), TerminalPanel>,
@@ -2299,6 +2318,7 @@ impl XdDesktop {
             terminal_panel: None,
             browser_panes: HashMap::new(),
             browser_drag: None,
+            catalog_drag: None,
             browser_restore_focus: false,
             terminal_runtime,
             terminal_panel_cache: HashMap::new(),
@@ -6951,7 +6971,10 @@ impl XdDesktop {
     ) -> Option<Entity<BrowserPane>> {
         let key = self.browser_scope_key();
         let open = self.browser_is_open();
-        let visible = open && !self.browser_occluded_by_popup() && self.browser_drag.is_none();
+        let visible = open
+            && !self.browser_occluded_by_popup()
+            && self.browser_drag.is_none()
+            && self.catalog_drag.is_none();
         for (scope, pane) in &self.browser_panes {
             pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
         }
@@ -7034,13 +7057,27 @@ impl XdDesktop {
             - if self.browser_compacts_sidebar(window) {
                 0.0
             } else {
-                CATALOG_WIDTH
+                self.catalog_width(window)
             }
             - if self.browser_is_open() {
                 browser_pane_width(self.settings.browser_width, width) + BROWSER_DIVIDER_WIDTH
             } else {
                 0.0
             }
+    }
+
+    fn catalog_width(&self, window: &Window) -> f32 {
+        catalog_pane_width(self.settings.catalog_width, self.catalog_room(window))
+    }
+
+    /// Window width left of the browser, shared by the catalog and the session.
+    fn catalog_room(&self, window: &Window) -> f32 {
+        let width = f32::from(window.viewport_size().width);
+        if self.browser_is_open() {
+            width - browser_pane_width(self.settings.browser_width, width)
+        } else {
+            width
+        }
     }
 
     fn browser_compacts_sidebar(&self, window: &Window) -> bool {
@@ -7062,6 +7099,13 @@ impl XdDesktop {
 
     fn finish_browser_resize(&mut self, cx: &mut Context<Self>) {
         if self.browser_drag.take().is_some() {
+            let _ = self.settings.save();
+            cx.notify();
+        }
+    }
+
+    fn finish_catalog_resize(&mut self, cx: &mut Context<Self>) {
+        if self.catalog_drag.take().is_some() {
             let _ = self.settings.save();
             cx.notify();
         }
@@ -10951,6 +10995,7 @@ impl XdDesktop {
     fn render_catalog(
         &mut self,
         colors: ThemeColors,
+        width: f32,
         active_chat_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -11179,14 +11224,18 @@ impl XdDesktop {
 
         div()
             .id("minimal-session-board")
-            .w(px(CATALOG_WIDTH))
+            .w(px(width))
             .h_full()
             .min_h_0()
             .flex_none()
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(colors.border))
+            .border_color(rgb(if self.catalog_drag.is_some() {
+                colors.accent
+            } else {
+                colors.border
+            }))
             .bg(rgb(colors.sidebar))
             .child(
                 div()
@@ -11323,7 +11372,9 @@ impl XdDesktop {
                         footer.child(
                             ui_button("minimal-update", ButtonKind::Secondary, colors)
                                 .child(icon(DOWNLOAD_ICON, 15.0, colors.text))
-                                .child("Update")
+                                .when(width >= CATALOG_UPDATE_LABEL_MIN_WIDTH, |button| {
+                                    button.child("Update")
+                                })
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_update_popup(window, cx)
                                 })),
@@ -14436,8 +14487,33 @@ impl XdDesktop {
             MinimalRoute::Cli { chat_id, .. } => Some(chat_id.clone()),
             _ => None,
         };
+        let catalog_width = self.catalog_width(window);
         let catalog = (!self.browser_compacts_sidebar(window))
-            .then(|| self.render_catalog(colors, active_chat.as_deref(), cx));
+            .then(|| self.render_catalog(colors, catalog_width, active_chat.as_deref(), cx));
+        // Drawn after the session so its whole strip stays grabbable and keeps
+        // the resize cursor over the session's edge as well as the catalog's.
+        let catalog_resize = catalog.is_some().then(|| {
+            div()
+                .id("catalog-resize")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(catalog_width - 5.0))
+                .w(px(9.0))
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.catalog_drag =
+                            Some((f32::from(event.position.x), catalog_width as u16));
+                        for pane in this.browser_panes.values() {
+                            pane.update(cx, |pane, _| pane.set_visible(false));
+                        }
+                        cx.notify();
+                    }),
+                )
+        });
         let toolbar = matches!(&route, MinimalRoute::Cli { .. })
             .then(|| self.render_minimal_context_toolbar(colors, cx));
         let content = match route {
@@ -16157,12 +16233,27 @@ impl XdDesktop {
                             this.finish_browser_resize(cx);
                         }
                     }
+                    if let Some((start_x, start_width)) = this.catalog_drag {
+                        if event.dragging() {
+                            let requested = (f32::from(start_width) + f32::from(event.position.x)
+                                - start_x)
+                                .round()
+                                .clamp(0.0, u16::MAX as f32)
+                                as u16;
+                            this.settings.catalog_width =
+                                catalog_pane_width(requested, this.catalog_room(window)) as u16;
+                            cx.notify();
+                        } else {
+                            this.finish_catalog_resize(cx);
+                        }
+                    }
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_browser_resize(cx);
+                    this.finish_catalog_resize(cx);
                     this.finish_dock_resize(cx);
                 }),
             )
@@ -16170,6 +16261,7 @@ impl XdDesktop {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_browser_resize(cx);
+                    this.finish_catalog_resize(cx);
                     this.finish_dock_resize(cx);
                 }),
             )
@@ -16269,6 +16361,7 @@ impl XdDesktop {
             .child(titlebar)
             .child(
                 div()
+                    .relative()
                     .w_full()
                     .flex_1()
                     .min_h_0()
@@ -16358,7 +16451,8 @@ impl XdDesktop {
                         )
                                     }),
                             ),
-                    ),
+                    )
+                    .when_some(catalog_resize, |row, handle| row.child(handle)),
             )
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
@@ -17852,8 +17946,9 @@ mod tests {
 
         // The catalog footer holds Terminal and Settings.
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
+        let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
         cx.simulate_click(
-            point(px(CATALOG_WIDTH - 50.0), footer_y),
+            point(px(catalog_width - 50.0), footer_y),
             gpui::Modifiers::default(),
         );
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
@@ -18625,6 +18720,115 @@ mod tests {
         assert_eq!(browser_pane_width(u16::MAX, 3000.0), 1000.0);
     }
 
+    #[test]
+    fn catalog_width_keeps_room_for_the_session() {
+        for requested in [0, 200, 256, 480, u16::MAX] {
+            // The window's minimum width, and the least room left of a browser
+            // before the catalog hides.
+            for room in [760.0, 640.0] {
+                let width = catalog_pane_width(requested, room);
+                assert!((CATALOG_MIN_WIDTH..=CATALOG_MAX_WIDTH).contains(&width));
+                assert!(room - width >= CATALOG_SESSION_MIN_WIDTH);
+            }
+        }
+        assert_eq!(catalog_pane_width(256, 640.0), 256.0);
+        assert_eq!(catalog_pane_width(0, 1180.0), CATALOG_MIN_WIDTH);
+        assert_eq!(catalog_pane_width(u16::MAX, 3000.0), CATALOG_MAX_WIDTH);
+    }
+
+    #[gpui::test]
+    fn the_catalog_footer_fits_at_the_narrowest_width_with_an_update(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.catalog_width = CATALOG_MIN_WIDTH as u16;
+            desktop.handle_event(
+                "agent-cli-update",
+                serde_json::json!({"provider":"claude", "display_name":"Claude Code",
+                    "state":"idle", "version":"2.1.319", "latest":"2.1.330", "available":true}),
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // The left of Settings, which an overflowing footer pushes aside.
+        let settings = cx.update(|window, _| {
+            point(
+                px(CATALOG_MIN_WIDTH - 80.0),
+                window.viewport_size().height - px(26.0),
+            )
+        });
+        cx.simulate_click(settings, gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
+    }
+
+    #[gpui::test]
+    fn dragging_the_catalog_edge_resizes_it_within_its_limits(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        cx.update(|_, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.settings.catalog_width = 256;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        let drag = |cx: &mut gpui::VisualTestContext, from: f32, to: f32| {
+            cx.simulate_mouse_down(
+                point(px(from), px(300.0)),
+                MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_move(
+                point(px(to), px(300.0)),
+                Some(MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                point(px(to), px(300.0)),
+                MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.run_until_parked();
+        };
+
+        // The strip reaches over the session's edge as well as the catalog's.
+        drag(cx, 258.0, 322.0);
+        cx.update(|_, cx| {
+            let desktop = desktop.read(cx);
+            assert_eq!(desktop.settings.catalog_width, 320);
+            assert!(desktop.catalog_drag.is_none());
+        });
+        drag(cx, 319.0, 1300.0);
+        cx.update(|_, cx| {
+            assert_eq!(
+                desktop.read(cx).settings.catalog_width,
+                CATALOG_MAX_WIDTH as u16
+            )
+        });
+        drag(cx, 479.0, 0.0);
+        cx.update(|_, cx| {
+            assert_eq!(
+                desktop.read(cx).settings.catalog_width,
+                CATALOG_MIN_WIDTH as u16
+            )
+        });
+
+        // The strip moved with the edge, so the old position no longer grabs it.
+        drag(cx, 300.0, 400.0);
+        cx.update(|_, cx| {
+            assert_eq!(
+                desktop.read(cx).settings.catalog_width,
+                CATALOG_MIN_WIDTH as u16
+            )
+        });
+    }
+
     #[gpui::test]
     fn browser_panes_preserve_each_chats_tabs_toggle_and_settings_visibility(
         cx: &mut gpui::TestAppContext,
@@ -18719,6 +18923,10 @@ mod tests {
             desktop.sync_browser_pane(window, cx);
             assert!(!a.read(cx).is_visible());
             desktop.browser_drag = None;
+            desktop.catalog_drag = Some((100.0, 256));
+            desktop.sync_browser_pane(window, cx);
+            assert!(!a.read(cx).is_visible());
+            desktop.catalog_drag = None;
 
             desktop.settings.remote_ssh_command = Some("ssh remote.example".into());
             desktop.active_endpoint = ChatEndpoint::Remote;
@@ -20662,7 +20870,9 @@ mod tests {
             .split_once("fn render_minimal(")
             .expect("minimal root renderer")
             .1;
-        assert!(root.contains("self.render_catalog(colors, active_chat.as_deref(), cx)"));
+        assert!(
+            root.contains("self.render_catalog(colors, catalog_width, active_chat.as_deref(), cx)")
+        );
         let cli = production
             .split_once("fn render_minimal_cli(")
             .expect("minimal CLI renderer")

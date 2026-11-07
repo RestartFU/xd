@@ -504,11 +504,15 @@ mod tests {
     fn the_footer_button_appears_with_an_update_and_opens_the_popup(cx: &mut gpui::TestAppContext) {
         install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.catalog_width = 256;
+            cx.notify();
+        });
         cx.run_until_parked();
         // Left of Terminal and Settings, where the Update button sits.
-        let button = cx.update(|window, _| {
+        let button = cx.update(|window, cx| {
             point(
-                px(CATALOG_WIDTH - 170.0),
+                px(desktop.read(cx).catalog_width(window) - 170.0),
                 window.viewport_size().height - px(26.0),
             )
         });

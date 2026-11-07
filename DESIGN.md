@@ -148,7 +148,7 @@ Keep the conversation readable at its actual window size. Titles truncate where 
 
 ## Layout
 
-Desktop has a 256px project sidebar, a session header, a separate 43px chat-tab row, and a central conversation. The regular composer and chat measure cap at 736px; an empty conversation centers a 660px composer beneath its context, heading and description. A short transcript starts at the top; longer transcripts retain scrolling and the existing latest-output behavior.
+Desktop has a project sidebar, 256px by default and resizable by dragging its edge, a session header, a separate 43px chat-tab row, and a central conversation. The regular composer and chat measure cap at 736px; an empty conversation centers a 660px composer beneath its context, heading and description. A short transcript starts at the top; longer transcripts retain scrolling and the existing latest-output behavior.
 
 Changes, Files, Browser and Terminal belong to the session workspace. Chat tabs control independent conversations. Desktop settings use a bounded panel up to 900×760px, with section navigation that changes to a horizontal strip in compact windows. The application minimum is 760×560px.
 
