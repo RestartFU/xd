@@ -8428,19 +8428,19 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn reorder_project_from_drop(
-        &mut self,
-        project_id: &str,
-        target_id: &str,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.model.folder_reorder_supported {
+    /// Sends the placement the drop line showed, as long as the two projects
+    /// are still siblings in the latest tree.
+    fn reorder_project_from_drop(&mut self, reorder: ProjectReorder, cx: &mut Context<Self>) {
+        if !self.model.folder_reorder_supported
+            || project_reorder_for_drop(
+                &self.model.folders,
+                &reorder.project_id,
+                &reorder.anchor_id,
+            )
+            .is_none()
+        {
             return;
         }
-        let Some(reorder) = project_reorder_for_drop(&self.model.folders, project_id, target_id)
-        else {
-            return;
-        };
         let result = self
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
@@ -11533,6 +11533,7 @@ impl XdDesktop {
             let can_drop_folders = folders.clone();
             let line_project = project.id.clone();
             let line_folders = folders.clone();
+            let drop_folders = folders.clone();
             let name = div()
                 .min_w_0()
                 .flex_shrink()
@@ -11705,7 +11706,13 @@ impl XdDesktop {
                                 style.border_color(rgb(colors.accent))
                             })
                             .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
-                                this.reorder_project_from_drop(&drag.project_id, &drop_project, cx);
+                                if let Some(reorder) = project_reorder_for_drop(
+                                    &drop_folders,
+                                    &drag.project_id,
+                                    &drop_project,
+                                ) {
+                                    this.reorder_project_from_drop(reorder, cx);
+                                }
                             })),
                     ),
             );
@@ -17819,8 +17826,8 @@ struct ProjectReorder {
     after: bool,
 }
 
-/// Where a dropped project goes, read from the current order rather than the
-/// one the drag began with, since the tree can change during a drag.
+/// Where a dropped project goes in this order. The drop line and the drop both
+/// read it from the order on screen, so a project lands where the line showed.
 ///
 /// Only siblings can be reordered, since the sidebar lists every project in one
 /// flat column and a drop should not move a folder on disk by surprise. The host
@@ -21131,15 +21138,22 @@ mod tests {
             desktop.remote_host = None;
             desktop.active_endpoint = ChatEndpoint::Local;
             desktop.model.connection_error = None;
+            let reorder = |project: &str, anchor: &str| ProjectReorder {
+                project_id: project.into(),
+                anchor_id: anchor.into(),
+                after: false,
+            };
 
             // An older host could move the folder on disk, so nothing is sent.
             desktop.model.folder_reorder_supported = false;
-            desktop.reorder_project_from_drop("c", "a", cx);
+            desktop.reorder_project_from_drop(reorder("c", "a"), cx);
             assert_eq!(order(desktop), ["a", "b", "c"]);
             assert!(desktop.model.connection_error.is_none());
 
             desktop.model.folder_reorder_supported = true;
-            desktop.reorder_project_from_drop("c", "a", cx);
+            desktop.reorder_project_from_drop(reorder("c", "gone"), cx);
+            assert!(desktop.model.connection_error.is_none());
+            desktop.reorder_project_from_drop(reorder("c", "a"), cx);
             assert_eq!(order(desktop), ["a", "b", "c"]);
             assert!(desktop.model.connection_error.is_some());
         });
