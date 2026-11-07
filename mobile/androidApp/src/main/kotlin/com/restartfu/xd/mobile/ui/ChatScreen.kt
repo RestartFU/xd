@@ -65,6 +65,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
@@ -147,6 +148,8 @@ internal fun ChatScreen(
     workspaceOwner: ViewModelStoreOwner? = null,
     productHeader: @Composable () -> Unit = {},
     sessionTabs: @Composable () -> Unit = {},
+    /** The session's chats; given on phones, where one header bar holds them. */
+    sessionChats: SessionChats? = null,
 ) {
     val state by model.state.collectAsStateWithLifecycle()
     val sending by model.sending.collectAsStateWithLifecycle()
@@ -170,6 +173,9 @@ internal fun ChatScreen(
     )
     workspacePane.chat = model.session
     var pane by workspacePane::pane
+    // On a phone the workspace views replace the chat under one header, so
+    // Back returns to the chat before it leaves the session.
+    androidx.activity.compose.BackHandler(enabled = sessionChats != null && pane != Pane.CHAT) { pane = Pane.CHAT }
     var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
     var choosingOptions by rememberSaveable(state.chatId) { mutableStateOf(false) }
 
@@ -242,7 +248,25 @@ internal fun ChatScreen(
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
         topBar = {
-            Column {
+            if (sessionChats != null) {
+                Column {
+                    productHeader()
+                    val active = sessionChats.chats.firstOrNull { it.id == sessionChats.selectedId }
+                    CompactChatBar(
+                        title = active?.title?.ifBlank { null } ?: state.title.ifEmpty { "New chat" },
+                        subtitle = listOf(sessionTitle, projectName).filter { it.isNotBlank() }.joinToString(" · "),
+                        backend = state.backend.ifBlank { null },
+                        pullRequest = pullRequest,
+                        openPullRequest = openLink,
+                        pane = pane,
+                        onPane = { pane = it },
+                        // Back steps out of a workspace view to the chat first, as system Back does.
+                        onBack = { if (pane != Pane.CHAT) pane = Pane.CHAT else goBack() },
+                        onChatSettings = { choosingOptions = true },
+                        chats = sessionChats,
+                    )
+                }
+            } else Column {
                 productHeader()
                 TopAppBar(
                     title = {
@@ -336,6 +360,8 @@ internal fun ChatScreen(
                     cancelling = cancelling,
                     steering = steering,
                     model = model,
+                    compact = sessionChats != null,
+                    onModel = { choosingModel = true },
                 )
                 }
             }
@@ -497,6 +523,8 @@ private fun Composer(
     cancelling: Boolean,
     steering: Boolean,
     model: ChatViewModel,
+    compact: Boolean = false,
+    onModel: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val attachments by model.attachments.collectAsStateWithLifecycle()
@@ -562,7 +590,7 @@ private fun Composer(
             .fillMaxWidth()
             .navigationBarsPadding()
             .imePadding()
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = if (compact) 8.dp else 12.dp, vertical = if (compact) 6.dp else 10.dp),
     ) {
         attachmentError?.let { message ->
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -709,6 +737,12 @@ private fun Composer(
             }
         }
         Spacer(Modifier.height(6.dp))
+        if (compact) {
+            CompactComposerRow(state, composer, sending, cancelling, steering, model, attachments.size, onModel) {
+                picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            }
+            return@Column
+        }
         // One rounded box, the way the desktop draws it: the message on top,
         // attach and send underneath.
         Surface(
@@ -767,61 +801,187 @@ private fun Composer(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.weight(1f))
-                    // One round button that sends and then stops, as on the
-                    // desktop: an arrow in the accent while it is yours to send,
-                    // a neutral stop while the turn is the assistant's to finish.
-                    // With nothing typed after a turn was cut short, the same button
-                    // continues it, as the desktop's play button does.
-                    val resuming = !state.working && state.resumable &&
-                        composer.isBlank() && attachments.isEmpty()
-                    FilledIconButton(
-                        onClick = {
-                            when {
-                                state.working -> model.cancel()
-                                resuming -> model.resumeTurn()
-                                else -> model.send()
-                            }
-                        },
-                        enabled = when {
-                            state.working -> !cancelling && !steering
-                            resuming -> !sending
-                            // The host accepts text, images, or both.
-                            else -> !sending && (composer.isNotBlank() || attachments.isNotEmpty())
-                        },
-                        modifier = Modifier.size(48.dp),
-                        colors = if (state.working) {
-                            IconButtonDefaults.filledIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                            )
-                        } else {
-                            IconButtonDefaults.filledIconButtonColors(
-                                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                disabledContentColor = LocalXdSignals.current.faint,
-                            )
-                        },
-                    ) {
-                        Icon(
-                            painter = painterResource(
-                                when {
-                                    state.working -> R.drawable.ic_stop
-                                    resuming -> R.drawable.ic_play
-                                    else -> R.drawable.ic_send
-                                },
-                            ),
-                            contentDescription = when {
-                                cancelling -> "Stopping"
-                                state.working -> "Stop"
-                                sending -> "Sending"
-                                resuming -> "Continue where it left off"
-                                else -> "Send"
-                            },
-                            modifier = Modifier.size(if (state.working || resuming) 16.dp else 20.dp),
-                        )
-                    }
+                    SendButton(
+                        state = state,
+                        empty = composer.isBlank() && attachments.isEmpty(),
+                        sending = sending,
+                        cancelling = cancelling,
+                        steering = steering,
+                        model = model,
+                        size = 48.dp,
+                    )
                 }
             }
         }
+    }
+}
+
+/**
+ * The composer as one row: attach, the message, the agent and model, send.
+ *
+ * The agent and model sit where they are chosen for the next message rather
+ * than in the header, the way the desktop composer carries them. The message
+ * grows upward to six lines; the controls stay on its last line.
+ */
+@Composable
+private fun CompactComposerRow(
+    state: com.restartfu.xd.model.ChatState,
+    composer: String,
+    sending: Boolean,
+    cancelling: Boolean,
+    steering: Boolean,
+    model: ChatViewModel,
+    attached: Int,
+    onModel: () -> Unit,
+    onAttach: () -> Unit,
+) {
+    val catalog by model.catalog.collectAsStateWithLifecycle()
+    val faint = LocalXdSignals.current.faint
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Row(
+            modifier = Modifier.padding(4.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            IconButton(onClick = onAttach, enabled = attached < Limits.MAX_IMAGES, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    painterResource(R.drawable.ic_add),
+                    contentDescription = "Attach images",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            androidx.compose.foundation.text.BasicTextField(
+                value = composer,
+                onValueChange = model::updateDraft,
+                modifier = Modifier.weight(1f).heightIn(min = 40.dp),
+                textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.onSurface),
+                maxLines = 6,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(
+                    onSend = { if (state.working) model.enqueue() else model.send() },
+                ),
+                decorationBox = { field ->
+                    Box(Modifier.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), contentAlignment = Alignment.CenterStart) {
+                        if (composer.isEmpty()) {
+                            Text(
+                                "Ask anything…",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = faint,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        field()
+                    }
+                },
+            )
+            // Drawn at 32dp in the 40dp control line. The platform still
+            // extends its touch area to 48dp around it.
+            Box(Modifier.height(40.dp), contentAlignment = Alignment.Center) {
+            CompositionLocalProvider(androidx.compose.material3.LocalMinimumInteractiveComponentSize provides 0.dp) {
+            Surface(
+                onClick = onModel,
+                shape = RoundedCornerShape(16.dp),
+                color = Color.Transparent,
+                modifier = Modifier.padding(horizontal = 2.dp),
+            ) {
+                Row(
+                    modifier = Modifier.height(32.dp).padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    BackendIcon(state.backend, size = 14.dp)
+                    Text(
+                        DisplayLabels.model(state.model, state.backend, catalog),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 96.dp),
+                    )
+                }
+            }
+            }
+            }
+            SendButton(
+                state = state,
+                empty = composer.isBlank() && attached == 0,
+                sending = sending,
+                cancelling = cancelling,
+                steering = steering,
+                model = model,
+                size = 40.dp,
+            )
+        }
+    }
+}
+
+/**
+ * One round button that sends and then stops, as on the desktop: an arrow in
+ * the accent while it is yours to send, a neutral stop while the turn is the
+ * assistant's to finish. With nothing typed after a turn was cut short, the
+ * same button continues it, as the desktop's play button does.
+ */
+@Composable
+private fun SendButton(
+    state: com.restartfu.xd.model.ChatState,
+    empty: Boolean,
+    sending: Boolean,
+    cancelling: Boolean,
+    steering: Boolean,
+    model: ChatViewModel,
+    size: androidx.compose.ui.unit.Dp,
+) {
+    val resuming = !state.working && state.resumable && empty
+    FilledIconButton(
+        onClick = {
+            when {
+                state.working -> model.cancel()
+                resuming -> model.resumeTurn()
+                else -> model.send()
+            }
+        },
+        enabled = when {
+            state.working -> !cancelling && !steering
+            resuming -> !sending
+            // The host accepts text, images, or both.
+            else -> !sending && !empty
+        },
+        modifier = Modifier.size(size),
+        colors = if (state.working) {
+            IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            )
+        } else {
+            IconButtonDefaults.filledIconButtonColors(
+                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                disabledContentColor = LocalXdSignals.current.faint,
+            )
+        },
+    ) {
+        Icon(
+            painter = painterResource(
+                when {
+                    state.working -> R.drawable.ic_stop
+                    resuming -> R.drawable.ic_play
+                    else -> R.drawable.ic_send
+                },
+            ),
+            contentDescription = when {
+                cancelling -> "Stopping"
+                state.working -> "Stop"
+                sending -> "Sending"
+                resuming -> "Continue where it left off"
+                else -> "Send"
+            },
+            modifier = Modifier.size(if (state.working || resuming) size / 3 else size * 5 / 12),
+        )
     }
 }
 

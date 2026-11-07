@@ -86,6 +86,13 @@ android {
         resources.excludes += "META-INF/versions/**/OSGI-INF/MANIFEST.MF"
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        // -Pxd.shots=<dir> makes ChatScreenshotTest write its captures there.
+        val shots = providers.gradleProperty("xd.shots").orNull
+        unitTests.all { test -> shots?.let { test.systemProperty("xd.shots", it) } }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
@@ -109,4 +116,10 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.navigation.compose)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.kotlinx.serialization.json)
 }

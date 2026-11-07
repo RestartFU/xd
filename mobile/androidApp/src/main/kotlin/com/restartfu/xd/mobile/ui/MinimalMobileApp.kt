@@ -298,24 +298,26 @@ internal fun MinimalMobileApp(
                         UsageContent(usage)
                     }
                     mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
+                        val selectTab = { id: String ->
+                            hiddenChatIds = hiddenChatIds - id
+                            chatSelections = chatSelections + (activeSession.id to id)
+                        }
+                        val closeTab = { id: String ->
+                            val index = openChats.indexOfFirst { it.id == id }
+                            val remaining = openChats.filterNot { it.id == id }
+                            if (id == activeChat?.id && remaining.isNotEmpty()) {
+                                chatSelections = chatSelections + (activeSession.id to remaining[index.coerceAtMost(remaining.lastIndex)].id)
+                            }
+                            hiddenChatIds = hiddenChatIds + id
+                        }
                         val tabStrip: @Composable () -> Unit = {
                             SessionTabStrip(
                                 compact = !expanded,
                                 chats = sessionChats,
                                 hiddenChatIds = hiddenChatIds,
                                 selectedChatId = activeChat?.id,
-                                selectTab = { id ->
-                                    hiddenChatIds = hiddenChatIds - id
-                                    chatSelections = chatSelections + (activeSession.id to id)
-                                },
-                                closeTab = { id ->
-                                    val index = openChats.indexOfFirst { it.id == id }
-                                    val remaining = openChats.filterNot { it.id == id }
-                                    if (id == activeChat?.id && remaining.isNotEmpty()) {
-                                        chatSelections = chatSelections + (activeSession.id to remaining[index.coerceAtMost(remaining.lastIndex)].id)
-                                    }
-                                    hiddenChatIds = hiddenChatIds + id
-                                },
+                                selectTab = selectTab,
+                                closeTab = closeTab,
                                 addTab = { addChat(activeSession) },
                                 renameChat = { renameChatId = it.id },
                                 deleteChat = { deleteChat = it },
@@ -340,6 +342,20 @@ internal fun MinimalMobileApp(
                                     terminalChatId = activeSession.terminalChatId,
                                     workspaceOwner = stores.workspace(activeSession.id),
                                     sessionTabs = tabStrip,
+                                    // A phone keeps one header row and moves the
+                                    // tabs into it; a tablet has room for the tabs.
+                                    sessionChats = if (expanded) null else SessionChats(
+                                        chats = sessionChats,
+                                        selectedId = activeChat.id,
+                                        select = selectTab,
+                                        add = { addChat(activeSession) },
+                                        close = closeTab,
+                                        rename = { renameChatId = it.id },
+                                        delete = { deleteChat = it },
+                                        settleSession = { sessionActions.settle(activeSession) }
+                                            .takeIf { sessionActions.settlement && !activeSession.settled },
+                                        renameSession = { sessionActions.rename(activeSession) },
+                                    ),
                                 )
                             }
                         } else {
