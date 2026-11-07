@@ -5,11 +5,60 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 class OpsTest {
+    @Test
+    fun sessionOperationsNameTheSession() {
+        assertEquals("settle-session", Ops.settleSession("s")["op"]!!.jsonPrimitive.content)
+        assertEquals("s", Ops.unsettleSession("s")["session"]!!.jsonPrimitive.content)
+        assertEquals("delete-session", Ops.deleteSession("s")["op"]!!.jsonPrimitive.content)
+        val rename = Ops.renameSession("s", "Layout")
+        assertEquals("rename-session", rename["op"]!!.jsonPrimitive.content)
+        assertEquals("Layout", rename["title"]!!.jsonPrimitive.content)
+        val auto = Ops.setSessionAutoSettle("s", enabled = false)
+        assertEquals(false, auto["enabled"]!!.jsonPrimitive.boolean)
+        assertFailsWith<IllegalArgumentException> { Ops.settleSession(" ") }
+        assertFailsWith<IllegalArgumentException> { Ops.renameSession("s", " ") }
+    }
+
+    @Test
+    fun autoSettleSettingsSendOnlyWhatChangedAndNullTurnsTheRuleOff() {
+        val off = Ops.setAutoSettleSettings(afterDays = Ops.AfterDays.Off)
+        assertTrue("after_days" in off)
+        assertTrue(off["after_days"] is JsonNull)
+        assertFalse("on_merge" in off)
+        val some = Ops.setAutoSettleSettings(afterDays = Ops.AfterDays.Days(7), onMerge = true)
+        assertEquals(7, some["after_days"]!!.jsonPrimitive.int)
+        assertEquals(true, some["on_merge"]!!.jsonPrimitive.boolean)
+        assertFalse("keep_pull_requests" in some)
+        assertFailsWith<IllegalArgumentException> { Ops.setAutoSettleSettings(afterDays = Ops.AfterDays.Days(0)) }
+        assertFailsWith<IllegalArgumentException> { Ops.setAutoSettleSettings(afterDays = Ops.AfterDays.Days(91)) }
+    }
+
+    @Test
+    fun reorderQueueCarriesBothTextsForTheHostToCheck() {
+        val request = Ops.reorderQueue("c", source = 2, sourceText = "third", anchor = 0, anchorText = "first", after = false)
+        assertEquals("reorder-queue", request["op"]!!.jsonPrimitive.content)
+        assertEquals(2, request["source"]!!.jsonPrimitive.int)
+        assertEquals("third", request["source-text"]!!.jsonPrimitive.content)
+        assertEquals("first", request["anchor-text"]!!.jsonPrimitive.content)
+        assertEquals(false, request["after"]!!.jsonPrimitive.boolean)
+        assertEquals("resume-turn", Ops.resumeTurn("c")["op"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun projectOperationsRefuseHiddenOrNestedNames() {
+        assertEquals("trash-folder", Ops.trashFolder("f")["op"]!!.jsonPrimitive.content)
+        assertEquals("Atlas", Ops.renameFolder("f", "Atlas")["name"]!!.jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.renameFolder("f", ".hidden") }
+        assertFailsWith<IllegalArgumentException> { Ops.renameFolder("f", "a/b") }
+    }
+
     @Test
     fun shortcutOperationsDistinguishGlobalAndWorkspaceScope() {
         val global = Ops.setShortcuts(prompts = listOf("Run tests"))

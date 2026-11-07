@@ -2,6 +2,7 @@ package com.restartfu.xd.protocol
 
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
@@ -211,6 +212,113 @@ public object Ops {
         put("op", "rename-chat")
         put("chat", chatId)
         put("title", title)
+    }
+
+    /** Renames a workspace session; its chats keep their own titles. */
+    public fun renameSession(sessionId: String, title: String): JsonObject = buildJsonObject {
+        require(title.isNotBlank()) { "A session needs a title" }
+        put("op", "rename-session")
+        put("session", requireId(sessionId, "Session"))
+        put("title", title)
+    }
+
+    /**
+     * Deletes a session with every chat in it, stops its agents and closes its
+     * terminals. Checkout files and worktrees stay. There is no undo.
+     */
+    public fun deleteSession(sessionId: String): JsonObject =
+        withSession("delete-session", sessionId)
+
+    /**
+     * Moves finished work to the Settled shelf. The host refuses while a member
+     * chat is running, has a queued message, or waits on an approval.
+     */
+    public fun settleSession(sessionId: String): JsonObject =
+        withSession("settle-session", sessionId)
+
+    /** Brings a settled session back and keeps the automatic rules off it until new activity. */
+    public fun unsettleSession(sessionId: String): JsonObject =
+        withSession("unsettle-session", sessionId)
+
+    /** Keeps a session out of the automatic rules for good, or hands it back to them. */
+    public fun setSessionAutoSettle(sessionId: String, enabled: Boolean): JsonObject = buildJsonObject {
+        put("op", "set-session-auto-settle")
+        put("session", requireId(sessionId, "Session"))
+        put("enabled", enabled)
+    }
+
+    public fun autoSettleSettings(): JsonObject = op("auto-settle-settings")
+
+    /**
+     * Changes the host's auto-settle rules. Only the members given are sent;
+     * [afterDays] of [AfterDays.Off] turns the inactivity rule off.
+     */
+    public fun setAutoSettleSettings(
+        afterDays: AfterDays? = null,
+        onMerge: Boolean? = null,
+        keepPullRequests: Boolean? = null,
+    ): JsonObject = buildJsonObject {
+        put("op", "set-auto-settle-settings")
+        when (afterDays) {
+            null -> Unit
+            AfterDays.Off -> put("after_days", JsonNull)
+            is AfterDays.Days -> {
+                require(afterDays.days in 1..90) { "Auto-settle takes 1 to 90 days" }
+                put("after_days", afterDays.days)
+            }
+        }
+        if (onMerge != null) put("on_merge", onMerge)
+        if (keepPullRequests != null) put("keep_pull_requests", keepPullRequests)
+    }
+
+    /** The inactivity rule's setting: off, or a number of days. */
+    public sealed interface AfterDays {
+        public data object Off : AfterDays
+        public data class Days(val days: Int) : AfterDays
+    }
+
+    public fun renameFolder(folderId: String, name: String): JsonObject = buildJsonObject {
+        require(
+            name.isNotBlank() && !name.startsWith('.') && '/' !in name && '\\' !in name
+        ) { "A project name cannot be empty or hidden, or contain a path separator" }
+        put("op", "rename-folder")
+        put("folder", requireId(folderId, "Folder"))
+        put("name", name)
+    }
+
+    /**
+     * Removes a project and its sessions from xd; the host moves its files to
+     * the workspace trash.
+     */
+    public fun trashFolder(folderId: String): JsonObject = buildJsonObject {
+        put("op", "trash-folder")
+        put("folder", requireId(folderId, "Folder"))
+    }
+
+    /** Continues a cut-short turn; the host refuses if the chat moved on. */
+    public fun resumeTurn(chatId: String): JsonObject = withChat("resume-turn", chatId)
+
+    /**
+     * Moves queued message [source] before or [after] [anchor]. Both texts are
+     * what the client saw there, so a queue another device changed is refused
+     * rather than reordered wrongly.
+     */
+    public fun reorderQueue(
+        chatId: String,
+        source: Int,
+        sourceText: String,
+        anchor: Int,
+        anchorText: String,
+        after: Boolean,
+    ): JsonObject = buildJsonObject {
+        require(source >= 0 && anchor >= 0) { "Queue indexes must not be negative" }
+        put("op", "reorder-queue")
+        put("chat", chatId)
+        put("source", source)
+        put("source-text", sourceText)
+        put("anchor", anchor)
+        put("anchor-text", anchorText)
+        put("after", after)
     }
 
     public fun newChat(
@@ -439,6 +547,16 @@ public object Ops {
 
     private fun op(name: String): JsonObject = buildJsonObject {
         put("op", name)
+    }
+
+    private fun requireId(id: String, kind: String): String {
+        require(id.isNotBlank()) { "$kind id must not be blank" }
+        return id
+    }
+
+    private fun withSession(name: String, sessionId: String): JsonObject = buildJsonObject {
+        put("op", name)
+        put("session", requireId(sessionId, "Session"))
     }
 
     private fun withChat(name: String, chatId: String): JsonObject = buildJsonObject {

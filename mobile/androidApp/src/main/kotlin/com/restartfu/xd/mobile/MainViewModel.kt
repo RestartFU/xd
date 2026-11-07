@@ -13,10 +13,12 @@ import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.parsePairingInvitation
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
+import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
+import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -65,6 +67,13 @@ data class DraftPrompt(val id: Long, val text: String)
 /** The most prompt buttons one editor offers. */
 const val MAX_SHORTCUTS = 24
 
+/** A session the user just settled, which the app offers to bring back. */
+data class SettledNotice(
+    val sessionId: String,
+    val title: String,
+    val serial: Long,
+)
+
 data class CreatedDirectSession(
     val projectId: String,
     val chatId: String,
@@ -104,6 +113,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _createdDirectSession.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
+    private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
+    private var settledSerial = 0L
+    val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
+    private val _autoSettle = MutableStateFlow<AutoSettleSettingsReply?>(null)
+    private val _autoSettleError = MutableStateFlow<String?>(null)
+    private var autoSettleRequests = 0L
+    val autoSettle: StateFlow<AutoSettleSettingsReply?> = _autoSettle.asStateFlow()
+    val autoSettleError: StateFlow<String?> = _autoSettleError.asStateFlow()
     val shortcutEditor: StateFlow<ShortcutEditorState?> = _shortcutEditor.asStateFlow()
     private val _host = MutableStateFlow<HostUpdateReply?>(null)
     private val _hostError = MutableStateFlow<String?>(null)
@@ -326,6 +343,85 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = error.message ?: "Could not rename the chat"
             } finally {
                 _renamingChat.value = false
+            }
+        }
+    }
+
+    /** Runs one tree change on the host, reporting a refusal where the app shows errors. */
+    private fun treeAction(failure: String, action: suspend () -> Unit) {
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                action()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: failure
+            }
+        }
+    }
+
+    /**
+     * Moves a session to the Settled shelf. The host refuses while one of its
+     * chats is running, has a queued message, or waits on an approval, and
+     * says why.
+     */
+    fun settleSession(sessionId: String, title: String) = treeAction("Could not settle the session") {
+        client.settleSession(sessionId)
+        _settledNotice.value = SettledNotice(sessionId, title, ++settledSerial)
+    }
+
+    fun consumeSettledNotice(notice: SettledNotice) {
+        _settledNotice.compareAndSet(notice, null)
+    }
+
+    fun unsettleSession(sessionId: String) = treeAction("Could not bring the session back") {
+        client.unsettleSession(sessionId)
+    }
+
+    fun setSessionAutoSettle(sessionId: String, enabled: Boolean) =
+        treeAction("Could not change auto-settle for the session") {
+            client.setSessionAutoSettle(sessionId, enabled)
+        }
+
+    fun renameSession(sessionId: String, title: String) = treeAction("Could not rename the session") {
+        client.renameSession(sessionId, title)
+    }
+
+    fun deleteSession(sessionId: String) = treeAction("Could not delete the session") {
+        client.deleteSession(sessionId)
+    }
+
+    fun renameProject(folderId: String, name: String) = treeAction("Could not rename the project") {
+        client.renameFolder(folderId, name)
+    }
+
+    fun deleteProject(folderId: String) = treeAction("Could not delete the project") {
+        client.trashFolder(folderId)
+    }
+
+    fun loadAutoSettle() = autoSettleRequest("Could not read the auto-settle rules") {
+        client.autoSettleSettings()
+    }
+
+    /** Changes one auto-settle rule; the host answers with all of them. */
+    fun setAutoSettle(afterDays: Ops.AfterDays? = null, onMerge: Boolean? = null) =
+        autoSettleRequest("Could not change the auto-settle rules") {
+            client.setAutoSettleSettings(afterDays = afterDays, onMerge = onMerge)
+        }
+
+    /** Only the newest request's answer is shown, so quick taps cannot land out of order. */
+    private fun autoSettleRequest(failure: String, request: suspend () -> AutoSettleSettingsReply) {
+        val serial = ++autoSettleRequests
+        _autoSettleError.value = null
+        viewModelScope.launch {
+            try {
+                val reply = request()
+                if (serial == autoSettleRequests) _autoSettle.value = reply
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (serial == autoSettleRequests) _autoSettleError.value = error.message ?: failure
             }
         }
     }
@@ -768,6 +864,29 @@ class ChatViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * Moves queued message [index] one place [up] or down. The host checks
+     * both texts, so a queue another device just changed is refused instead
+     * of being shuffled wrongly.
+     */
+    fun moveQueued(index: Int, up: Boolean) {
+        val queue = state.value.queue
+        val anchor = if (up) index - 1 else index + 1
+        if (index !in queue.indices || anchor !in queue.indices) return
+        launchGuarded(_droppingQueued) {
+            session.reorderQueued(index, queue[index], anchor, queue[anchor], after = !up)
+            withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
+                state.first { it.queue != queue }
+            }
+        }
+    }
+
+    /** Continues a turn that was stopped, cut off, or ended by a usage limit. */
+    fun resumeTurn() {
+        if (!state.value.resumable || state.value.working) return
+        launchGuarded(_sending) { session.resumeTurn() }
     }
 
     fun dropQueued(index: Int) {

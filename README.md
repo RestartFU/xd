@@ -50,8 +50,9 @@ own. To keep one session out of them, choose **Disable auto-settle** from its
 right-click menu. Settling only changes where a session is listed: its terminals
 and anything its agent is still doing keep running. The host stops an agent's
 process once it has nothing left to do, within two minutes of settling or after 30
-idle minutes otherwise, and the next message resumes the conversation. The Android
-app still lists settled sessions with the active ones.
+idle minutes otherwise, and the next message resumes the conversation. On Android,
+settle a session from its **⋮** menu or the chat tab menu; the **Settled** shelf
+sits below the projects, and the auto-settle rules are in Settings.
 
 The host can also delete sessions for you. In **Settings → General →
 Auto-delete**, turn on **Auto-delete inactive sessions** and choose how many

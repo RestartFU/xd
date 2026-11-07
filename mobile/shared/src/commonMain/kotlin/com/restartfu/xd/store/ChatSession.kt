@@ -106,6 +106,18 @@ public class ChatSession internal constructor(
     public suspend fun steerQueued(index: Int, text: String): Unit =
         core.call(Ops.steerQueue(core.chatId, index, text))
 
+    /** Moves queued message [source] next to [anchor]; see [Ops.reorderQueue]. */
+    public suspend fun reorderQueued(
+        source: Int,
+        sourceText: String,
+        anchor: Int,
+        anchorText: String,
+        after: Boolean,
+    ): Unit = core.call(Ops.reorderQueue(core.chatId, source, sourceText, anchor, anchorText, after))
+
+    /** Continues the chat's cut-short turn; see [Ops.resumeTurn]. */
+    public suspend fun resumeTurn(): Unit = core.call(Ops.resumeTurn(core.chatId))
+
     public suspend fun loadOlder(): Unit = core.loadOlder()
 
     /** The whole patch for [read], one of `working-all` or `branch-all`. */

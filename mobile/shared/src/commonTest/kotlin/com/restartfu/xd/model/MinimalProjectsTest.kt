@@ -117,4 +117,37 @@ class MinimalProjectsTest {
         branch = branch,
         terminalWorking = terminalWorking,
     )
+
+    @Test
+    fun settledSessionsLeaveTheProjectForTheShelfNewestFirst() {
+        val snapshot = TreeSnapshot(
+            folders = listOf(Folder("compiler", "Compiler", null), Folder("website", "Website", null)),
+            sessions = listOf(
+                WorkspaceSession("active", "compiler", "Active", listOf("one")),
+                WorkspaceSession("older", "compiler", "Older", listOf("two"), settledAt = 100),
+                WorkspaceSession("newer", "website", "Newer", listOf("three"), settledAt = 200, autoSettleDisabled = true),
+            ),
+            chats = listOf(
+                chat("one", "compiler", "One", "codex").copy(sessionId = "active"),
+                chat("two", "compiler", "Two", "claude").copy(sessionId = "older"),
+                chat("three", "website", "Three", "codex", working = true).copy(sessionId = "newer"),
+            ),
+            settlement = true,
+        )
+
+        assertEquals(listOf("active"), snapshot.activeSessions("compiler").map(MinimalSession::id))
+        assertEquals(emptyList(), snapshot.activeSessions("website"))
+        assertEquals(
+            listOf(
+                MinimalProject("compiler", "Compiler", sessions = 1, working = 0),
+                MinimalProject("website", "Website", sessions = 0, working = 0),
+            ),
+            snapshot.minimalProjects(),
+        )
+        val shelf = snapshot.settledSessions()
+        assertEquals(listOf("newer", "older"), shelf.map { it.session.id })
+        assertEquals(listOf("Website", "Compiler"), shelf.map { it.project.name })
+        assertEquals(true, shelf.first().session.autoSettleDisabled)
+        assertEquals(false, shelf.last().session.autoSettleDisabled)
+    }
 }

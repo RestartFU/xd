@@ -102,6 +102,12 @@ import com.restartfu.xd.model.MinimalSession
 import com.restartfu.xd.model.minimalProjects
 import com.restartfu.xd.model.minimalSessions
 import com.restartfu.xd.net.Link
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
+import com.restartfu.xd.model.SettledSession
+import com.restartfu.xd.model.activeSessions
+import com.restartfu.xd.model.settledSessions
+import com.restartfu.xd.protocol.Ops
 import kotlinx.coroutines.launch
 
 private enum class MobileDestination {
@@ -172,6 +178,19 @@ internal fun MinimalMobileApp(
     var renameChat by remember { mutableStateOf<ChatSummary?>(null) }
     var deleteChat by remember { mutableStateOf<ChatSummary?>(null) }
     val deleting by model.deletingChat.collectAsStateWithLifecycle()
+    var renamingSession by remember { mutableStateOf<MinimalSession?>(null) }
+    var deletingSession by remember { mutableStateOf<MinimalSession?>(null) }
+    var renamingProject by remember { mutableStateOf<MinimalProject?>(null) }
+    var deletingProject by remember { mutableStateOf<MinimalProject?>(null) }
+    val settledNotice by model.settledNotice.collectAsStateWithLifecycle()
+    val sessionActions = SessionActions(
+        settlement = tree.settlement,
+        settle = { model.settleSession(it.id, it.title) },
+        unsettle = { model.unsettleSession(it.id) },
+        setAutoSettle = { session, enabled -> model.setSessionAutoSettle(session.id, enabled) },
+        rename = { renamingSession = it },
+        delete = { deletingSession = it },
+    )
     val projects = tree.minimalProjects()
     val sessions = projects.flatMap { project -> tree.minimalSessions(project.id) }
     val activeSession = sessions.firstOrNull { it.id == activeSessionId }
@@ -204,7 +223,7 @@ internal fun MinimalMobileApp(
     }
     val showProjects = { mobileDestination = MobileDestination.PROJECTS }
     val showSessions = {
-        if (activeSession == null) activeSessionId = sessions.firstOrNull()?.id
+        if (activeSession == null) activeSessionId = (sessions.firstOrNull { !it.settled } ?: sessions.firstOrNull())?.id
         mobileDestination = if (sessions.isEmpty()) MobileDestination.PROJECTS else MobileDestination.SESSIONS
     }
     val showTerminal = { mobileDestination = MobileDestination.TERMINAL }
@@ -223,6 +242,20 @@ internal fun MinimalMobileApp(
 
     LaunchedEffect(operationError) {
         operationError?.let { snackbar.showSnackbar(it) }
+    }
+    // A session settled by hand can come straight back, as on the desktop.
+    LaunchedEffect(settledNotice) {
+        val notice = settledNotice ?: return@LaunchedEffect
+        if (notice.sessionId == activeSessionId && mobileDestination == MobileDestination.SESSIONS) {
+            mobileDestination = MobileDestination.PROJECTS
+        }
+        val result = snackbar.showSnackbar(
+            message = "Settled ${notice.title}",
+            actionLabel = "Undo",
+            duration = SnackbarDuration.Short,
+        )
+        if (result == SnackbarResult.ActionPerformed) model.unsettleSession(notice.sessionId)
+        model.consumeSettledNotice(notice)
     }
     Box(Modifier.fillMaxSize()) {
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -257,6 +290,8 @@ internal fun MinimalMobileApp(
                                 addTab = { addChat(activeSession) },
                                 renameChat = { renameChat = it },
                                 deleteChat = { deleteChat = it },
+                                session = activeSession,
+                                actions = sessionActions,
                             )
                         }
                         if (activeChat != null) {
@@ -292,6 +327,9 @@ internal fun MinimalMobileApp(
                     }
                     else -> MinimalProjectsHome(
                         model, settings, link, projects, tree.loading, tree.error, showSessions, showTerminal,
+                        actions = sessionActions,
+                        onRenameProject = { renamingProject = it },
+                        onDeleteProject = { deletingProject = it },
                         open = { _, session ->
                             activeSessionId = session.id
                             // Opening a session always reveals at least its most recent chat.
@@ -326,6 +364,55 @@ internal fun MinimalMobileApp(
             onText = { id, text -> model.setShortcutText(editor.opening, id, text) },
             onAdd = { model.addShortcut(editor.opening) },
             onRemove = { id -> model.removeShortcut(editor.opening, id) },
+        )
+    }
+    renamingSession?.let { session ->
+        NameDialog(
+            title = "Rename session",
+            initial = session.title,
+            onDismiss = { renamingSession = null },
+            onConfirm = { name ->
+                renamingSession = null
+                if (name != session.title) model.renameSession(session.id, name)
+            },
+        )
+    }
+    deletingSession?.let { session ->
+        ConfirmDeleteDialog(
+            title = "Delete session?",
+            text = "This permanently removes ${session.title} and all its chats from xd. Project files are kept.",
+            confirm = "Delete session",
+            onDismiss = { deletingSession = null },
+            onConfirm = {
+                deletingSession = null
+                if (session.id == activeSessionId) mobileDestination = MobileDestination.PROJECTS
+                model.deleteSession(session.id)
+            },
+        )
+    }
+    renamingProject?.let { project ->
+        NameDialog(
+            title = "Rename project",
+            initial = project.name,
+            validate = ::projectNameError,
+            onDismiss = { renamingProject = null },
+            onConfirm = { name ->
+                renamingProject = null
+                if (name != project.name) model.renameProject(project.id, name)
+            },
+        )
+    }
+    deletingProject?.let { project ->
+        ConfirmDeleteDialog(
+            title = "Delete project?",
+            text = "This removes ${project.name} and all its sessions from xd. Its files will be moved to the workspace trash.",
+            confirm = "Delete project",
+            onDismiss = { deletingProject = null },
+            onConfirm = {
+                deletingProject = null
+                if (activeProject?.id == project.id) mobileDestination = MobileDestination.PROJECTS
+                model.deleteProject(project.id)
+            },
         )
     }
     renameChat?.let { chat ->
@@ -378,9 +465,14 @@ private fun MinimalProjectsHome(
     treeError: String?,
     onSessions: () -> Unit,
     onTerminal: () -> Unit,
+    actions: SessionActions,
+    onRenameProject: (MinimalProject) -> Unit,
+    onDeleteProject: (MinimalProject) -> Unit,
     open: (MinimalProject, MinimalSession) -> Unit,
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    var shelfOpen by rememberSaveable { mutableStateOf(false) }
+    val settled = if (actions.settlement) tree.settledSessions() else emptyList()
     val operationError by model.error.collectAsStateWithLifecycle()
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var createProject by rememberSaveable { mutableStateOf(false) }
@@ -388,7 +480,7 @@ private fun MinimalProjectsHome(
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
 
     val selected = projects.firstOrNull { it.id == selectedId } ?: projects.firstOrNull()
-    val sessions = selected?.let { tree.minimalSessions(it.id) }.orEmpty()
+    val sessions = selected?.let { tree.activeSessions(it.id) }.orEmpty()
     val waiting by model.client.waitingChats.collectAsStateWithLifecycle()
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
     val signalOf = { session: MinimalSession ->
@@ -451,12 +543,15 @@ private fun MinimalProjectsHome(
                                 sessions = sessions,
                                 signalOf = signalOf,
                                 open = { session -> open(project, session) },
+                                actions = actions,
                                 menu = {
                                     ProjectMenu(
                                         project = project,
                                         onShortcuts = {
                                             model.openShortcutEditor(project.id, "${project.name} shortcuts")
                                         },
+                                        onRename = { onRenameProject(project) },
+                                        onDelete = { onDeleteProject(project) },
                                     )
                                 },
                             )
@@ -464,10 +559,21 @@ private fun MinimalProjectsHome(
                             DrawerRow(
                                 project = project,
                                 selected = false,
-                                signals = tree.minimalSessions(project.id).map(signalOf),
+                                signals = tree.activeSessions(project.id).map(signalOf),
                                 onClick = { selectedId = project.id },
                             )
                         }
+                    }
+                }
+                if (settled.isNotEmpty()) {
+                    item("settled-shelf") {
+                        SettledShelf(
+                            settled = settled,
+                            expanded = shelfOpen,
+                            toggle = { shelfOpen = !shelfOpen },
+                            open = { open(it.project, it.session) },
+                            actions = actions,
+                        )
                     }
                 }
             }
@@ -599,6 +705,8 @@ private fun SessionTabStrip(
     addTab: () -> Unit,
     renameChat: (ChatSummary) -> Unit,
     deleteChat: (ChatSummary) -> Unit,
+    session: MinimalSession,
+    actions: SessionActions,
 ) {
     var openMenu by remember { mutableStateOf(false) }
     Row(
@@ -676,6 +784,17 @@ private fun SessionTabStrip(
                         onClick = { openMenu = false; deleteChat(active) },
                     )
                 }
+                HorizontalDivider()
+                if (actions.settlement && !session.settled) {
+                    DropdownMenuItem(
+                        text = { Text("Settle session") },
+                        onClick = { openMenu = false; actions.settle(session) },
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("Rename session") },
+                    onClick = { openMenu = false; actions.rename(session) },
+                )
             }
         }
     }
@@ -921,6 +1040,8 @@ private fun DrawerRow(
 private fun ProjectMenu(
     project: MinimalProject,
     onShortcuts: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
@@ -934,8 +1055,17 @@ private fun ProjectMenu(
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(
+                text = { Text("Rename project") },
+                onClick = { open = false; onRename() },
+            )
+            DropdownMenuItem(
                 text = { Text("Prompt shortcuts") },
                 onClick = { open = false; onShortcuts() },
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Delete project", color = MaterialTheme.colorScheme.error) },
+                onClick = { open = false; onDelete() },
             )
         }
     }
@@ -948,6 +1078,7 @@ private fun OpenDrawer(
     sessions: List<MinimalSession>,
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
+    actions: SessionActions,
     menu: @Composable () -> Unit,
 ) {
     Column(
@@ -966,7 +1097,7 @@ private fun OpenDrawer(
             )
         }
         sessions.forEach { session ->
-            SessionRow(session = session, signal = signalOf(session), onClick = { open(session) })
+            SessionRow(session = session, signal = signalOf(session), onClick = { open(session) }, actions = actions)
         }
     }
 }
@@ -976,7 +1107,13 @@ private fun OpenDrawer(
  * there is something to say. A branch shows when the session has its own.
  */
 @Composable
-private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: () -> Unit) {
+private fun SessionRow(
+    session: MinimalSession,
+    signal: SessionSignal,
+    onClick: () -> Unit,
+    actions: SessionActions,
+    subtitle: String? = null,
+) {
     val signals = LocalXdSignals.current
     Row(
         modifier = Modifier
@@ -985,7 +1122,7 @@ private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: 
             .heightIn(min = 64.dp)
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp),
+            .padding(start = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -999,9 +1136,11 @@ private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: 
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    "${session.chatIds.size} chat${if (session.chatIds.size == 1) "" else "s"}",
+                    subtitle ?: "${session.chatIds.size} chat${if (session.chatIds.size == 1) "" else "s"}",
                     style = MaterialTheme.typography.labelMedium,
                     color = signals.faint,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 if (session.branch != "Project directory") Text(
                     session.branch,
@@ -1015,6 +1154,130 @@ private fun SessionRow(session: MinimalSession, signal: SessionSignal, onClick: 
             }
         }
         SignalMark(signal)
+        if (session.settled) {
+            IconButton(onClick = { actions.unsettle(session) }, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    painterResource(R.drawable.ic_undo),
+                    contentDescription = "Bring back ${session.title}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+        SessionMenu(session, actions)
+    }
+}
+
+/**
+ * What can be done to one session, as in the desktop's right-click menu.
+ * Settling is offered only when the host supports it.
+ */
+@Composable
+private fun SessionMenu(session: MinimalSession, actions: SessionActions) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }, modifier = Modifier.size(48.dp)) {
+            Icon(
+                painterResource(R.drawable.ic_more),
+                contentDescription = "${session.title} actions",
+                tint = LocalXdSignals.current.faint,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (actions.settlement) {
+                if (session.settled) {
+                    DropdownMenuItem(
+                        text = { Text("Bring back") },
+                        onClick = { open = false; actions.unsettle(session) },
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("Settle session") },
+                        onClick = { open = false; actions.settle(session) },
+                    )
+                }
+            }
+            DropdownMenuItem(
+                text = { Text("Rename session") },
+                onClick = { open = false; actions.rename(session) },
+            )
+            if (actions.settlement) {
+                DropdownMenuItem(
+                    text = { Text(if (session.autoSettleDisabled) "Enable auto-settle" else "Disable auto-settle") },
+                    onClick = { open = false; actions.setAutoSettle(session, session.autoSettleDisabled) },
+                )
+            }
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Delete session", color = MaterialTheme.colorScheme.error) },
+                onClick = { open = false; actions.delete(session) },
+            )
+        }
+    }
+}
+
+/** What the app's session menus can do; built once at the top so every surface agrees. */
+private class SessionActions(
+    val settlement: Boolean,
+    val settle: (MinimalSession) -> Unit,
+    val unsettle: (MinimalSession) -> Unit,
+    val setAutoSettle: (MinimalSession, Boolean) -> Unit,
+    val rename: (MinimalSession) -> Unit,
+    val delete: (MinimalSession) -> Unit,
+)
+
+/**
+ * Settled sessions, below the projects as on the desktop: out of the way, most
+ * recently settled first, each a tap from coming back.
+ */
+@Composable
+private fun SettledShelf(
+    settled: List<SettledSession>,
+    expanded: Boolean,
+    toggle: () -> Unit,
+    open: (SettledSession) -> Unit,
+    actions: SessionActions,
+) {
+    val faint = LocalXdSignals.current.faint
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(onClick = toggle)
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                painterResource(if (expanded) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = faint,
+                modifier = Modifier.size(14.dp),
+            )
+            Icon(painterResource(R.drawable.ic_check), contentDescription = null, tint = faint, modifier = Modifier.size(15.dp))
+            Text(
+                "Settled",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(settled.size.toString(), fontSize = 12.sp, color = faint)
+        }
+        if (expanded) {
+            settled.forEach { entry ->
+                SessionRow(
+                    session = entry.session,
+                    signal = SessionSignal.IDLE,
+                    onClick = { open(entry) },
+                    actions = actions,
+                    subtitle = entry.project.name,
+                )
+            }
+        }
     }
 }
 
@@ -1213,6 +1476,7 @@ private fun MinimalSettingsDialog(
     val theme by settings.theme.collectAsStateWithLifecycle()
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
     val speech by settings.speechEnabled.collectAsStateWithLifecycle()
+    val tree by model.client.tree.collectAsStateWithLifecycle()
     var updatingHost by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1279,6 +1543,7 @@ private fun MinimalSettingsDialog(
                     onDismiss()
                     model.openShortcutEditor(null, "Prompt shortcuts")
                 }
+                if (tree.settlement) AutoSettleSettings(model)
                 SettingAction(
                     title = "Host updates",
                     detail = "Check for a new xd build on the connected machine.",
@@ -1295,6 +1560,67 @@ private fun MinimalSettingsDialog(
         HostUpdateDialog(model = model, onDismiss = { updatingHost = false })
     }
 }
+
+/**
+ * The host's rules for settling sessions by itself, with the desktop's
+ * wording. They belong to the host, so they keep running while no client is
+ * connected.
+ */
+@Composable
+private fun AutoSettleSettings(model: MainViewModel) {
+    val rules by model.autoSettle.collectAsStateWithLifecycle()
+    val error by model.autoSettleError.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { model.loadAutoSettle() }
+    val current = rules
+    if (current == null) {
+        Text(
+            error ?: "Reading auto-settle rules…",
+            color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (error != null) TextButton(onClick = model::loadAutoSettle) { Text("Try again") }
+        return
+    }
+    SettingSwitch(
+        title = "Auto-settle merged sessions",
+        detail = "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on.",
+        checked = current.onMerge,
+        onCheckedChange = { model.setAutoSettle(onMerge = it) },
+    )
+    SettingSwitch(
+        title = "Auto-settle inactive sessions",
+        detail = "Sessions with no activity for this long settle automatically.",
+        checked = current.afterDays != null,
+        onCheckedChange = { on ->
+            model.setAutoSettle(afterDays = if (on) Ops.AfterDays.Days(DEFAULT_SETTLE_DAYS) else Ops.AfterDays.Off)
+        },
+    )
+    current.afterDays?.let { days ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                Text("Days before auto-settle", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Any new activity un-settles a session automatically.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            IconButton(
+                onClick = { model.setAutoSettle(afterDays = Ops.AfterDays.Days(days - 1)) },
+                enabled = days > 1,
+            ) { Text("\u2212", style = MaterialTheme.typography.titleMedium) }
+            Text(days.toString(), fontWeight = FontWeight.SemiBold, modifier = Modifier.widthIn(min = 24.dp))
+            IconButton(
+                onClick = { model.setAutoSettle(afterDays = Ops.AfterDays.Days(days + 1)) },
+                enabled = days < 90,
+            ) { Text("+", style = MaterialTheme.typography.titleMedium) }
+        }
+    }
+    error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+}
+
+/** The host's own default for the inactivity rule. */
+private const val DEFAULT_SETTLE_DAYS = 3
 
 @Composable
 private fun SettingSwitch(
@@ -1334,6 +1660,67 @@ private fun SettingAction(
         }
         TextButton(onClick = onClick) { Text(action) }
     }
+}
+
+/** Asks for a new name, keeping the old one until it is changed. */
+@Composable
+private fun NameDialog(
+    title: String,
+    initial: String,
+    validate: (String) -> String? = { null },
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit,
+) {
+    var name by rememberSaveable(initial) { mutableStateOf(initial) }
+    val cleaned = name.trim()
+    val error = validate(cleaned)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                isError = error != null,
+                supportingText = error?.let { { Text(it) } },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(cleaned) }, enabled = cleaned.isNotEmpty() && error == null) {
+                Text("Rename")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** A permanent removal, with the action named on its button rather than a bare Yes. */
+@Composable
+private fun ConfirmDeleteDialog(
+    title: String,
+    text: String,
+    confirm: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = { Text(text) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text(confirm, color = MaterialTheme.colorScheme.error) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** The host names a project's folder after it, so the same rules apply. */
+private fun projectNameError(name: String): String? = when {
+    name.startsWith('.') -> "A project name cannot begin with a period."
+    '/' in name || '\\' in name -> "A project name cannot contain a path separator."
+    else -> null
 }
 
 private class SessionViewModelOwner : ViewModelStoreOwner {

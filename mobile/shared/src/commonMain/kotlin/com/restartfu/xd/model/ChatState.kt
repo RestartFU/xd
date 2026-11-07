@@ -53,6 +53,8 @@ public data class ChatState(
     val draftRevision: Long = 0,
     val draftAttachments: List<PngAttachment> = emptyList(),
     val working: Boolean = false,
+    /** The last turn was cut short, so the composer can offer to continue it. */
+    val resumable: Boolean = false,
     val label: String? = null,
     /** Live turn this state reflects, and how far into it we have applied. */
     val turnEpoch: String = "",

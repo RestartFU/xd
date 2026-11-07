@@ -35,6 +35,9 @@ public data class SessionSummaryReply(
     val branch: String? = null,
     val working: Boolean = false,
     @SerialName("terminal_chat") val terminalChat: String = "session:$id",
+    /** Seconds since the epoch when the session was settled; absent while it is active. */
+    @SerialName("settled_at") val settledAt: Long? = null,
+    @SerialName("auto_settle_disabled") val autoSettleDisabled: Boolean = false,
 )
 
 @Serializable
@@ -43,6 +46,18 @@ public data class TreeReply(
     val folders: List<FolderReply>,
     val chats: List<ChatSummaryReply>,
     val sessions: List<SessionSummaryReply> = emptyList(),
+    /** True when the host can settle sessions; hide settling otherwise. */
+    val settlement: Boolean = false,
+)
+
+/** The host's rules for settling sessions by itself. */
+@Serializable
+public data class AutoSettleSettingsReply(
+    val ok: Boolean = true,
+    /** Days without activity before a session settles, or null when that rule is off. */
+    @SerialName("after_days") val afterDays: Int? = null,
+    @SerialName("on_merge") val onMerge: Boolean = false,
+    @SerialName("keep_pull_requests") val keepPullRequests: Boolean = false,
 )
 
 @Serializable
@@ -97,6 +112,8 @@ public data class ChatReply(
     @SerialName("draft_attachments")
     val draftAttachments: List<DraftAttachmentReply> = emptyList(),
     val working: Boolean,
+    /** The last turn was cut short: stopped, interrupted, or ended by a usage limit. */
+    val resumable: Boolean = false,
     val label: String? = null,
     // Present only while a turn is live. Together they mark exactly how much
     // of that turn this snapshot already contains, so the covered `text` and

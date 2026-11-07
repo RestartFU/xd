@@ -109,6 +109,7 @@ public object TranscriptMachine {
             TranscriptTransition(
                 state.copy(
                     working = true,
+                    resumable = false,
                     label = input.label,
                     turnId = input.turnId,
                     turnSequence = input.turnSequence ?: 0,
@@ -338,6 +339,7 @@ public object TranscriptMachine {
                     PngAttachment(Base64.Default.decode(it.data))
                 },
                 working = chat.working,
+                resumable = chat.resumable,
                 label = chat.label,
                 turnEpoch = chat.turnEpoch,
                 turnId = if (chat.working) chat.turnId else null,

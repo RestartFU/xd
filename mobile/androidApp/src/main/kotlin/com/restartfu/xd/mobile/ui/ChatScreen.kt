@@ -475,6 +475,12 @@ private fun Composer(
         QueuedMessageDialog(
             original = original,
             working = state.working,
+            canMoveUp = index > 0,
+            canMoveDown = index < state.queue.lastIndex,
+            onMove = { up ->
+                editing = null
+                model.moveQueued(index, up)
+            },
             onDismiss = { editing = null },
             onSave = { text ->
                 editing = null
@@ -704,13 +710,23 @@ private fun Composer(
                     // One round button that sends and then stops, as on the
                     // desktop: an arrow in the accent while it is yours to send,
                     // a neutral stop while the turn is the assistant's to finish.
+                    // With nothing typed after a turn was cut short, the same button
+                    // continues it, as the desktop's play button does.
+                    val resuming = !state.working && state.resumable &&
+                        composer.isBlank() && attachments.isEmpty()
                     FilledIconButton(
-                        onClick = { if (state.working) model.cancel() else model.send() },
-                        enabled = if (state.working) {
-                            !cancelling && !steering
-                        } else {
+                        onClick = {
+                            when {
+                                state.working -> model.cancel()
+                                resuming -> model.resumeTurn()
+                                else -> model.send()
+                            }
+                        },
+                        enabled = when {
+                            state.working -> !cancelling && !steering
+                            resuming -> !sending
                             // The host accepts text, images, or both.
-                            !sending && (composer.isNotBlank() || attachments.isNotEmpty())
+                            else -> !sending && (composer.isNotBlank() || attachments.isNotEmpty())
                         },
                         modifier = Modifier.size(48.dp),
                         colors = if (state.working) {
@@ -727,15 +743,20 @@ private fun Composer(
                     ) {
                         Icon(
                             painter = painterResource(
-                                if (state.working) R.drawable.ic_stop else R.drawable.ic_send,
+                                when {
+                                    state.working -> R.drawable.ic_stop
+                                    resuming -> R.drawable.ic_play
+                                    else -> R.drawable.ic_send
+                                },
                             ),
                             contentDescription = when {
                                 cancelling -> "Stopping"
                                 state.working -> "Stop"
                                 sending -> "Sending"
+                                resuming -> "Continue where it left off"
                                 else -> "Send"
                             },
-                            modifier = Modifier.size(if (state.working) 16.dp else 20.dp),
+                            modifier = Modifier.size(if (state.working || resuming) 16.dp else 20.dp),
                         )
                     }
                 }
@@ -755,6 +776,9 @@ private fun Composer(
 private fun QueuedMessageDialog(
     original: String,
     working: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onMove: (up: Boolean) -> Unit,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit,
     onSteer: (String) -> Unit,
@@ -775,6 +799,18 @@ private fun QueuedMessageDialog(
                     minLines = 2,
                     maxLines = 6,
                 )
+                if (canMoveUp || canMoveDown) {
+                    // Reordering moves the message as it was queued; an edit
+                    // still in the field above is not sent with it.
+                    Row {
+                        TextButton(onClick = { onMove(true) }, enabled = canMoveUp && text == original) {
+                            Text("Move earlier")
+                        }
+                        TextButton(onClick = { onMove(false) }, enabled = canMoveDown && text == original) {
+                            Text("Move later")
+                        }
+                    }
+                }
                 if (working) {
                     Spacer(Modifier.height(8.dp))
                     Text(

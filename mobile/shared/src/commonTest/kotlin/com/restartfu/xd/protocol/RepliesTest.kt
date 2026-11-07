@@ -55,4 +55,35 @@ class RepliesTest {
         assertNull(reply.startedAt)
         assertNull(reply.jobs[0].startedAt)
     }
+
+    @Test
+    fun settlementMembersAreOptional() {
+        val legacy = WireJson.parseToJsonElement(
+            """{"ok":true,"folders":[],"chats":[],"sessions":[{"id":"s","folder":"p","title":"W","chats":[]}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals(false, legacy.settlement)
+        assertNull(legacy.sessions.single().settledAt)
+        assertEquals(false, legacy.sessions.single().autoSettleDisabled)
+
+        val settled = WireJson.parseToJsonElement(
+            """{"ok":true,"settlement":true,"folders":[],"chats":[],"sessions":[{"id":"s","folder":"p","title":"W","chats":[],"settled_at":1700000000,"auto_settle_disabled":true}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals(true, settled.settlement)
+        assertEquals(1700000000L, settled.sessions.single().settledAt)
+        assertEquals(true, settled.sessions.single().autoSettleDisabled)
+    }
+
+    @Test
+    fun autoSettleSettingsReadAnOffInactivityRuleAsNull() {
+        val off = WireJson.parseToJsonElement(
+            """{"ok":true,"after_days":null,"on_merge":true,"keep_pull_requests":false}""",
+        ).jsonObject.decodeReply<AutoSettleSettingsReply>()
+        assertNull(off.afterDays)
+        assertEquals(true, off.onMerge)
+        val on = WireJson.parseToJsonElement(
+            """{"ok":true,"after_days":3,"on_merge":false,"keep_pull_requests":true}""",
+        ).jsonObject.decodeReply<AutoSettleSettingsReply>()
+        assertEquals(3, on.afterDays)
+        assertEquals(true, on.keepPullRequests)
+    }
 }

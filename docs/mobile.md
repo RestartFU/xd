@@ -42,6 +42,16 @@ in every project; a project's **⋮** menu edits the ones only that project adds
 **New project** can browse the host's folders for the repository instead of typing
 its path.
 
+A session's **⋮** menu settles, renames, or deletes it, and keeps it out of
+auto-settle. Settled sessions move to the **Settled** shelf below the projects,
+most recently settled first; **Undo** appears for a moment after settling, and the
+undo arrow on a shelf row brings one back. Sending a settled session a message
+also brings it back. **Settings → Auto-settle** changes the host's rules. A
+project's **⋮** menu renames or deletes it. After a turn is stopped, cut off, or
+ended by a usage limit, the send button becomes a play button while the composer
+is empty, and pressing it continues the chat. Tap a queued message to move it
+earlier or later.
+
 Older hosts appear as one chat per session. Update the connected host before
 adding another chat inside an existing session; Android displays an update
 message instead of creating a separate session. The host automatically deletes

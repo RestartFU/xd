@@ -7,6 +7,7 @@ import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocketFactory
+import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
@@ -297,6 +298,59 @@ public class XdClient(
         // would keep showing its old title in the header until something else
         // reloaded it.
         sessions.value[chatId]?.core?.requestReload()
+    }
+
+    /** Renames a session. Its chats keep their own titles. */
+    public suspend fun renameSession(sessionId: String, title: String) {
+        actor.call(Ops.renameSession(sessionId, title))
+        requestTreeRefresh()
+    }
+
+    /** Deletes a session with every chat in it. There is no undo. */
+    public suspend fun deleteSession(sessionId: String) {
+        actor.call(Ops.deleteSession(sessionId))
+        requestTreeRefresh()
+    }
+
+    public suspend fun settleSession(sessionId: String) {
+        actor.call(Ops.settleSession(sessionId))
+        requestTreeRefresh()
+    }
+
+    public suspend fun unsettleSession(sessionId: String) {
+        actor.call(Ops.unsettleSession(sessionId))
+        requestTreeRefresh()
+    }
+
+    public suspend fun setSessionAutoSettle(sessionId: String, enabled: Boolean) {
+        actor.call(Ops.setSessionAutoSettle(sessionId, enabled))
+        requestTreeRefresh()
+    }
+
+    public suspend fun autoSettleSettings(): AutoSettleSettingsReply {
+        val value = actor.call(Ops.autoSettleSettings())
+        return actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+    }
+
+    /** Changes only the rules given and answers with all of them. */
+    public suspend fun setAutoSettleSettings(
+        afterDays: Ops.AfterDays? = null,
+        onMerge: Boolean? = null,
+        keepPullRequests: Boolean? = null,
+    ): AutoSettleSettingsReply {
+        val value = actor.call(Ops.setAutoSettleSettings(afterDays, onMerge, keepPullRequests))
+        return actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+    }
+
+    public suspend fun renameFolder(folderId: String, name: String) {
+        actor.call(Ops.renameFolder(folderId, name))
+        requestTreeRefresh()
+    }
+
+    /** Removes a project from xd; the host moves its files to the workspace trash. */
+    public suspend fun trashFolder(folderId: String) {
+        actor.call(Ops.trashFolder(folderId))
+        requestTreeRefresh()
     }
 
     public suspend fun createChat(
