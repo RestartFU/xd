@@ -1015,7 +1015,7 @@ struct PendingSend {
 #[derive(Clone, Copy)]
 enum OptimisticSend {
     Started { message_index: Option<usize> },
-    Queued { index: usize },
+    Queued,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4554,8 +4554,7 @@ impl XdDesktop {
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if let Some(pending) = self.pending_send.take() {
-                    let predicted_queued =
-                        matches!(pending.optimistic, OptimisticSend::Queued { .. });
+                    let predicted_queued = matches!(pending.optimistic, OptimisticSend::Queued);
                     if predicted_queued != queued {
                         self.rollback_optimistic_send(&pending);
                         if !queued {
@@ -8429,9 +8428,8 @@ impl XdDesktop {
 
     fn apply_optimistic_send(&mut self, text: &str) -> OptimisticSend {
         if self.model.working {
-            let index = self.model.queue.len();
             self.model.queue.push(text.to_owned());
-            return OptimisticSend::Queued { index };
+            return OptimisticSend::Queued;
         }
 
         let message_index = (!text.is_empty()).then(|| {
@@ -8487,8 +8485,14 @@ impl XdDesktop {
                     summary.working = false;
                 }
             }
-            OptimisticSend::Queued { index } => {
-                if self.model.queue.get(index) == Some(&pending.text) {
+            // By text, because steering can move it before the reply arrives.
+            OptimisticSend::Queued => {
+                if let Some(index) = self
+                    .model
+                    .queue
+                    .iter()
+                    .rposition(|text| *text == pending.text)
+                {
                     self.model.queue.remove(index);
                 }
             }
@@ -8589,6 +8593,28 @@ impl XdDesktop {
                 self.model.queue.remove(index);
             }
             Ok(()) => {}
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    /// Sends a queued message ahead of the rest and stops the running turn, so
+    /// the agent takes it up now. The next turn starts as soon as this one
+    /// ends, so the chat stays working throughout.
+    fn steer_queued(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(text) = self.model.queue.get(index).cloned() else {
+            return;
+        };
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        match host.steer_queue(&chat_id, index, &text) {
+            Ok(()) => self.model.promote_queued(index),
             Err(error) => self.model.connection_error = Some(error),
         }
         cx.notify();
@@ -12367,6 +12393,8 @@ impl XdDesktop {
             .max_h_full()
             .into_any_element()
         };
+        // Only a running turn can be steered away from.
+        let can_steer = self.model.working;
         let queued = self
             .model
             .queue
@@ -12411,6 +12439,25 @@ impl XdDesktop {
                             .text_color(rgb(colors.text))
                             .child(text),
                     )
+                    .when(can_steer, |row| {
+                        row.child(
+                            ui_button(("native-steer-queued", index), ButtonKind::Ghost, colors)
+                                .h(px(26.0))
+                                .px(px(8.0))
+                                .text_size(px(12.0))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| PaneTooltip {
+                                        label: "Stop the running turn and send this now",
+                                        colors,
+                                    })
+                                    .into()
+                                })
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.steer_queued(index, cx)),
+                                )
+                                .child("Steer"),
+                        )
+                    })
                     .child(
                         div()
                             .id(("native-drop-queued", index))
@@ -17188,6 +17235,7 @@ mod tests {
             "this.queue_composer(cx)",
             "this.cancel_turn(cx)",
             "this.drop_queued(index, cx)",
+            "this.steer_queued(index, cx)",
         ] {
             assert!(chat.contains(behavior), "missing {behavior}");
         }
@@ -17201,6 +17249,7 @@ mod tests {
             .0;
         assert!(actions.contains("host.queue_message(&chat_id, &text)"));
         assert!(actions.contains("host.drop_queue(&chat_id, index)"));
+        assert!(actions.contains("host.steer_queue(&chat_id, index, &text)"));
         assert!(actions.contains("host.cancel(&chat_id)"));
     }
 
