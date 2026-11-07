@@ -770,16 +770,15 @@ impl XdDesktop {
                     }
                 }))
                 .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                    // The backdrop also sees a press on the image, so a drag let
-                    // go out here arrives as a click. It was not one outside.
-                    let began_on_image = match event {
-                        ClickEvent::Mouse(click) => {
-                            this.image_preview.as_ref().is_some_and(|preview| {
-                                preview.is_over_image(point_tuple(click.down.position))
-                            })
-                        }
-                        ClickEvent::Keyboard(_) => false,
+                    // Holding focus, the backdrop also gets a keyboard click when
+                    // Enter or Space, which zoom, are released. And it sees a press
+                    // on the image, so a drag let go out here arrives as a click.
+                    let ClickEvent::Mouse(click) = event else {
+                        return;
                     };
+                    let began_on_image = this.image_preview.as_ref().is_some_and(|preview| {
+                        preview.is_over_image(point_tuple(click.down.position))
+                    });
                     if event.standard_click() && !began_on_image {
                         this.close_image_preview(window, cx);
                     }
@@ -1321,6 +1320,27 @@ mod tests {
         cx.simulate_click(outside, modifiers);
         cx.run_until_parked();
         desktop.read_with(cx, |desktop, _| assert!(desktop.image_preview.is_none()));
+    }
+
+    #[gpui::test]
+    fn releasing_enter_or_space_does_not_close_the_viewer(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[(4000, 3000)]);
+        click(cx, "draft-image-0");
+
+        for (key, zoom) in [("enter", CLICK_ZOOM), ("space", 1.0)] {
+            cx.simulate_keystrokes(key);
+            cx.simulate_event(gpui::KeyUpEvent {
+                keystroke: gpui::Keystroke::parse(key).unwrap(),
+            });
+            cx.run_until_parked();
+            desktop.read_with(cx, |desktop, _| {
+                let preview = desktop
+                    .image_preview
+                    .as_ref()
+                    .expect("the viewer stays open");
+                assert_eq!(preview.zoom, zoom);
+            });
+        }
     }
 
     #[gpui::test]
