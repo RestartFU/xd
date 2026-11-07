@@ -6155,7 +6155,8 @@ impl XdDesktop {
     }
 
     /// The native browser sits above GPUI's surface, so anything counted here
-    /// also hides the page; otherwise the page would paint over the popup.
+    /// covers the page, which then shows as a picture under the popup;
+    /// otherwise the page would paint over it.
     fn minimal_popup_is_open(&self) -> bool {
         self.minimal_theme_open
             || self.image_preview.is_some()
@@ -7397,9 +7398,12 @@ impl XdDesktop {
     ) -> Option<Entity<BrowserPane>> {
         let key = self.browser_scope_key();
         let open = self.browser_is_open();
-        let visible = open && !self.minimal_popup_is_open();
+        let covered = self.minimal_popup_is_open();
         for (scope, pane) in &self.browser_panes {
-            pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
+            pane.update(cx, |pane, _| {
+                pane.set_covered(covered);
+                pane.set_visible(open && scope == &key);
+            });
         }
         if !open {
             return None;
@@ -7469,7 +7473,8 @@ impl XdDesktop {
         pane.update(cx, |pane, cx| {
             pane.configure_side_tabs(side_tab, tools_enabled, cx);
             pane.set_colors(colors, cx);
-            pane.set_visible(visible);
+            pane.set_covered(covered);
+            pane.set_visible(open);
         });
         Some(pane)
     }
@@ -21214,16 +21219,21 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(restored.read(cx).session(), saved);
             assert!(!b.read(cx).is_visible());
 
+            // A popup covers the page rather than taking the pane away.
             desktop.minimal_theme_open = true;
             desktop.sync_browser_pane(window, cx);
-            assert!(!a.read(cx).is_visible());
+            assert!(a.read(cx).is_visible());
+            assert!(a.read(cx).is_covered());
             desktop.minimal_theme_open = false;
             desktop.sync_browser_pane(window, cx);
             assert!(a.read(cx).is_visible());
+            assert!(!a.read(cx).is_covered());
             desktop.creating_workspace = true;
             desktop.sync_browser_pane(window, cx);
-            assert!(!a.read(cx).is_visible());
+            assert!(a.read(cx).is_covered());
             desktop.creating_workspace = false;
+            desktop.sync_browser_pane(window, cx);
+            assert!(!a.read(cx).is_covered());
             desktop.browser_drag = Some((100.0, 460));
             desktop.sync_browser_pane(window, cx);
             assert!(a.read(cx).is_visible());
