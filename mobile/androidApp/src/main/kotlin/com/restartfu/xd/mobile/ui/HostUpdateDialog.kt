@@ -35,8 +35,9 @@ internal fun HostUpdateDialog(
 
     LaunchedEffect(Unit) { model.hostUpdate("check") }
     // Checking and installing finish on the host after it answers, so ask
-    // again until they do; this also catches up after a reconnect.
-    val pending = status?.state == "checking" || status?.state == "installing"
+    // again until they do. A failed request is asked about again too: the
+    // host may have taken an install whose answer was lost.
+    val pending = status?.state == "checking" || status?.state == "installing" || error != null
     LaunchedEffect(pending) {
         while (pending) {
             delay(HOST_UPDATE_POLL_MILLIS)
@@ -61,7 +62,7 @@ internal fun HostUpdateDialog(
                 Text(
                     when {
                         error != null -> error.orEmpty()
-                        status == null || busy && state == "checking" ->
+                        status == null || state == "checking" ->
                             "Checking for an update…"
                         !supported ->
                             "This machine's installation cannot update itself. " +
