@@ -83,6 +83,11 @@ done
 # the driver matching its GPU and kernel.
 require_file lib/libvulkan.so.1
 
+# libnss3 loads these by name, so no library closure would bring them along.
+for module in libsoftokn3 libfreebl3 libfreeblpriv3 libnssckbi libnssdbm3; do
+  require_file "lib/$module.so"
+done
+
 # Exercise the public entrypoint with only the host's base utilities visible.
 # Preserve PATH because NixOS does not place those utilities in /usr/bin.
 # This catches broken relocation/cache setup before an archive is published;

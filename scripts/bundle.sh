@@ -59,9 +59,16 @@ done
 # refuses to start if it finds one that is not, so it uses namespaces instead.
 strip --strip-unneeded "$OUT/lib/libcef.so"
 
-# libnss3 loads its cryptographic modules by name, from beside itself. GIO only
-# looks in the bundle, which keeps a host's modules out of the private GLib.
-cp -aL "$ARCH_DIR"/nss/. "$OUT/lib/"
+# libnss3 loads its cryptographic modules by name, from beside itself, so the
+# library closure cannot find them. Debian installs them beside libnss3, with
+# the signature files FIPS mode checks. GIO only looks in the bundle, which
+# keeps a host's modules out of the private GLib.
+for module in libsoftokn3 libfreebl3 libfreeblpriv3 libnssckbi libnssdbm3; do
+  cp -aL "$ARCH_DIR/$module.so" "$OUT/lib/"
+  if [ -e "$ARCH_DIR/$module.chk" ]; then
+    cp -aL "$ARCH_DIR/$module.chk" "$OUT/lib/"
+  fi
+done
 mkdir -p "$OUT/lib/gio/modules"
 
 # --- shared library closure -------------------------------------------------
