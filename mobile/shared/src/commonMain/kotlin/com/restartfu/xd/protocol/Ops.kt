@@ -4,6 +4,7 @@ import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -398,6 +399,103 @@ public object Ops {
     public fun folderSettings(folderId: String): JsonObject = buildJsonObject {
         put("op", "folder-settings")
         put("folder", requireId(folderId, "Folder"))
+    }
+
+    public fun agentAuth(): JsonObject = op("agent-auth")
+
+    /** Starts, feeds, or cancels an assistant's sign-in on the host. */
+    public fun agentAuthAction(action: AuthAction, provider: String, input: String? = null): JsonObject = buildJsonObject {
+        require(provider in AUTH_PROVIDERS) { "Unknown assistant: $provider" }
+        put("op", action.wire)
+        put("provider", provider)
+        if (action == AuthAction.INPUT) {
+            require(!input.isNullOrEmpty()) { "Sign-in input must not be empty" }
+            put("input", input)
+        }
+    }
+
+    public enum class AuthAction(public val wire: String) {
+        START("agent-auth-start"),
+        INPUT("agent-auth-input"),
+        CANCEL("agent-auth-cancel"),
+    }
+
+    /** `status`, `check`, or `install` (which needs a [provider]). */
+    public fun agentCliUpdates(action: String = "status", provider: String? = null): JsonObject = buildJsonObject {
+        require(action in setOf("status", "check", "install")) { "Unknown CLI update action: $action" }
+        require(action != "install" || !provider.isNullOrBlank()) { "Installing an update needs a provider" }
+        put("op", "agent-cli-updates")
+        put("action", action)
+        if (!provider.isNullOrBlank()) put("provider", provider)
+    }
+
+    public fun chatTitleSettings(): JsonObject = op("chat-title-settings")
+
+    /** Turns titling on or off. */
+    public fun setChatTitlesEnabled(enabled: Boolean): JsonObject = buildJsonObject {
+        put("op", "set-chat-title-settings")
+        put("enabled", enabled)
+    }
+
+    /** Chooses the model that titles [backend]'s chats; null goes back to the built-in choice. */
+    public fun setChatTitleModel(backend: String, model: String?): JsonObject = buildJsonObject {
+        require(backend in setOf("codex", "claude")) { "Only Codex and Claude chats are titled" }
+        put("op", "set-chat-title-settings")
+        put("backend", backend)
+        put("model", model?.let(::JsonPrimitive) ?: JsonNull)
+    }
+
+    public fun folderContext(folderId: String): JsonObject = buildJsonObject {
+        put("op", "folder-context")
+        put("folder", requireId(folderId, "Folder"))
+    }
+
+    /** Replaces a project's context; blank clears it. The host keeps at most 256 KiB. */
+    public fun setFolderContext(folderId: String, context: String?): JsonObject = buildJsonObject {
+        put("op", "set-folder-context")
+        put("folder", requireId(folderId, "Folder"))
+        val trimmed = context?.trim()?.takeIf(String::isNotEmpty)
+        put("context", trimmed?.let(::JsonPrimitive) ?: JsonNull)
+    }
+
+    /** Secret names for a project, or the host-wide ones without [folderId]. */
+    public fun agentSecrets(folderId: String? = null): JsonObject = buildJsonObject {
+        put("op", "agent-secrets")
+        if (folderId != null) put("folder", requireId(folderId, "Folder"))
+    }
+
+    /**
+     * Replaces a secret set. An entry without a value keeps the stored one, so
+     * values never have to come back to the phone to be kept.
+     */
+    public fun setAgentSecrets(folderId: String?, entries: List<SecretEntry>): JsonObject = buildJsonObject {
+        require(entries.map(SecretEntry::name).toSet().size == entries.size) { "Secret names must be unique" }
+        put("op", "set-agent-secrets")
+        if (folderId != null) put("folder", requireId(folderId, "Folder"))
+        put("entries", buildJsonArray {
+            entries.forEach { entry ->
+                require(SECRET_NAME.matches(entry.name)) { "Not an environment variable name: ${entry.name}" }
+                add(buildJsonObject {
+                    put("name", entry.name)
+                    entry.value?.let {
+                        require(it.isNotEmpty()) { "A replacement secret needs a value" }
+                        put("value", it)
+                    }
+                })
+            }
+        })
+    }
+
+    /** A secret to keep ([value] null) or to set. */
+    public data class SecretEntry(val name: String, val value: String? = null)
+
+    private val SECRET_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*")
+    private val AUTH_PROVIDERS = setOf("codex", "claude")
+
+    /** Continues, or drops, every chat a host restart cut off since the last answer. */
+    public fun resumeInterrupted(resume: Boolean): JsonObject = buildJsonObject {
+        put("op", "resume-interrupted")
+        put("resume", resume)
     }
 
     public fun gitStatus(chatId: String): JsonObject = withChat("git-status", chatId)

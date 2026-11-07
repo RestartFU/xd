@@ -132,6 +132,73 @@ public data class FolderSettingsReply(
     @SerialName("effective_workdir") val effectiveWorkdir: String? = null,
 )
 
+/** One assistant's sign-in on the host, as `agent-auth` and `agent-auth-changed` report it. */
+@Serializable
+public data class AgentAuthProviderReply(
+    val provider: String,
+    @SerialName("display_name") val displayName: String = provider,
+    /** `unknown`, `signed-in`, `signed-out`, `signing-in`, or `failed`. */
+    val state: String = "unknown",
+    @SerialName("needs_input") val needsInput: Boolean = false,
+    val detail: String? = null,
+    @SerialName("login_url") val loginUrl: String? = null,
+    @SerialName("device_code") val deviceCode: String? = null,
+)
+
+@Serializable
+public data class AgentAuthReply(
+    val ok: Boolean = true,
+    val providers: List<AgentAuthProviderReply> = emptyList(),
+)
+
+/** One assistant CLI: its version, the latest release, and any update in progress. */
+@Serializable
+public data class AgentCliProviderReply(
+    val provider: String,
+    @SerialName("display_name") val displayName: String = provider,
+    /** `idle`, `updating`, `updated`, or `failed`. */
+    val state: String = "idle",
+    val available: Boolean = false,
+    val updatable: Boolean = false,
+    val version: String? = null,
+    val latest: String? = null,
+    val detail: String? = null,
+)
+
+@Serializable
+public data class AgentCliUpdatesReply(
+    val ok: Boolean = true,
+    val providers: List<AgentCliProviderReply> = emptyList(),
+)
+
+/** Whether new chats are titled, and the model titling each assistant's chats. */
+@Serializable
+public data class ChatTitleSettingsReply(
+    val ok: Boolean = true,
+    val enabled: Boolean = false,
+    /** The model that will title each assistant's chats, or null if its CLI offers none. */
+    val models: Map<String, String?> = emptyMap(),
+)
+
+@Serializable
+public data class FolderContextReply(
+    val ok: Boolean = true,
+    val context: String? = null,
+)
+
+/** Secret names only; values never cross the wire. */
+@Serializable
+public data class AgentSecretsReply(
+    val ok: Boolean = true,
+    val names: List<String> = emptyList(),
+)
+
+@Serializable
+public data class ResumeInterruptedReply(
+    val ok: Boolean = true,
+    val resumed: List<String> = emptyList(),
+)
+
 /** The host's rules for settling sessions by itself. */
 @Serializable
 public data class AutoSettleSettingsReply(

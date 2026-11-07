@@ -15,6 +15,8 @@ import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
+import com.restartfu.xd.net.Link
+import com.restartfu.xd.protocol.ChatTitleSettingsReply
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
@@ -141,6 +143,119 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** A change that failed, kept until a newer change succeeds; a read does not clear it. */
     val autoSettleWriteError: StateFlow<String?> = client.autoSettleWriteError
     val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
+
+    private val _accountsError = MutableStateFlow<String?>(null)
+    val accountsError: StateFlow<String?> = _accountsError.asStateFlow()
+    val agentAuth = client.agentAuth
+    val agentClis = client.agentClis
+    private val _chatTitles = MutableStateFlow<ChatTitleSettingsReply?>(null)
+    private val _chatTitlesError = MutableStateFlow<String?>(null)
+    private val _catalog = MutableStateFlow<List<BackendReply>>(emptyList())
+    val chatTitles: StateFlow<ChatTitleSettingsReply?> = _chatTitles.asStateFlow()
+    val chatTitlesError: StateFlow<String?> = _chatTitlesError.asStateFlow()
+    /** Each assistant's models, for choosing a title model. */
+    val hostCatalog: StateFlow<List<BackendReply>> = _catalog.asStateFlow()
+    private var chatTitleRequests = 0L
+
+    init {
+        // Answer for chats a host restart cut off, when this phone is set to
+        // continue them. With the setting off it does not answer at all, so
+        // another device set to resume them still can.
+        viewModelScope.launch {
+            var wasUp = false
+            client.link.collect { link ->
+                val up = link is Link.Up
+                if (up && !wasUp && (application as XdApplication).settings.resumeChats.value) {
+                    try {
+                        client.resumeInterrupted(resume = true)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        // The play button on each chat still continues it.
+                    }
+                }
+                wasUp = up
+            }
+        }
+        // Per-host state belongs to the host it came from.
+        viewModelScope.launch {
+            client.sessionGeneration.collect {
+                _accountsError.value = null
+                _chatTitles.value = null
+                _chatTitlesError.value = null
+                _catalog.value = emptyList()
+                chatTitleRequests++
+            }
+        }
+    }
+
+    /** Runs one assistant-account request, reporting a failure in the accounts dialog. */
+    private fun accountsAction(failure: String, action: suspend () -> Unit) {
+        _accountsError.value = null
+        viewModelScope.launch {
+            try {
+                action()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _accountsError.value = error.message ?: failure
+            }
+        }
+    }
+
+    fun loadAccounts() {
+        accountsAction("Could not read the assistant accounts") { client.loadAgentAuth() }
+        accountsAction("Could not read the assistant tools") { client.agentCliUpdates("status") }
+    }
+
+    fun checkCliUpdates() = accountsAction("Could not check for updates") { client.agentCliUpdates("check") }
+
+    fun installCliUpdate(provider: String) =
+        accountsAction("Could not start the update") { client.agentCliUpdates("install", provider) }
+
+    fun signIn(provider: String) =
+        accountsAction("Could not start signing in") { client.agentAuthAction(Ops.AuthAction.START, provider) }
+
+    fun sendSignInInput(provider: String, input: String) =
+        accountsAction("Could not send that") { client.agentAuthAction(Ops.AuthAction.INPUT, provider, input) }
+
+    fun cancelSignIn(provider: String) =
+        accountsAction("Could not cancel signing in") { client.agentAuthAction(Ops.AuthAction.CANCEL, provider) }
+
+    /** Only the newest request's answer or failure is shown. */
+    private fun chatTitleRequest(failure: String, request: suspend () -> ChatTitleSettingsReply) {
+        val serial = ++chatTitleRequests
+        _chatTitlesError.value = null
+        viewModelScope.launch {
+            try {
+                val reply = request()
+                if (serial == chatTitleRequests) _chatTitles.value = reply
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (serial == chatTitleRequests) _chatTitlesError.value = error.message ?: failure
+            }
+        }
+    }
+
+    fun loadChatTitles() {
+        chatTitleRequest("Could not read the chat title settings") { client.chatTitleSettings() }
+        viewModelScope.launch {
+            _catalog.value = try {
+                client.agentCatalog()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                emptyList()
+            }
+        }
+    }
+
+    fun setChatTitlesEnabled(enabled: Boolean) =
+        chatTitleRequest("Could not change chat titles") { client.setChatTitlesEnabled(enabled) }
+
+    fun setChatTitleModel(backend: String, model: String) =
+        chatTitleRequest("Could not change the title model") { client.setChatTitleModel(backend, model) }
 
     init {
         viewModelScope.launch {

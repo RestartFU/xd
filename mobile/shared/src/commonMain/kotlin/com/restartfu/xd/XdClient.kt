@@ -7,7 +7,18 @@ import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocketFactory
+import com.restartfu.xd.protocol.AgentAuthProviderReply
+import com.restartfu.xd.protocol.AgentAuthReply
+import com.restartfu.xd.protocol.AgentCatalogReply
+import com.restartfu.xd.protocol.AgentCliProviderReply
+import com.restartfu.xd.protocol.AgentCliUpdatesReply
+import com.restartfu.xd.protocol.AgentSecretsReply
 import com.restartfu.xd.protocol.AutoSettleSettingsReply
+import com.restartfu.xd.protocol.BackendReply
+import com.restartfu.xd.protocol.ChatTitleSettingsReply
+import com.restartfu.xd.protocol.FolderContextReply
+import com.restartfu.xd.protocol.ResumeInterruptedReply
+import com.restartfu.xd.store.ProviderStates
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
@@ -74,6 +85,15 @@ public class XdClient(
     private val unreadTerminalOwners = MutableStateFlow<Set<String>>(emptySet())
     private val terminalBusy = MutableStateFlow<Set<String>>(emptySet())
     private val visibleChat = MutableStateFlow<String?>(null)
+    private val agentAuthStates = ProviderStates<AgentAuthProviderReply> { it.provider }
+    private val agentCliStates = ProviderStates<AgentCliProviderReply> { it.provider }
+
+    /** Each assistant's sign-in on the host, kept current by its broadcasts. */
+    public val agentAuth: StateFlow<Map<String, AgentAuthProviderReply>?> = agentAuthStates.items
+
+    /** Each assistant CLI's version and update state, kept current by its broadcasts. */
+    public val agentClis: StateFlow<Map<String, AgentCliProviderReply>?> = agentCliStates.items
+
     private val _autoSettleSettings = MutableStateFlow<AutoSettleSettingsReply?>(null)
     /** Counts the host's auto-settle broadcasts, to tell whether one arrived during a request. */
     private val autoSettleBroadcasts = MutableStateFlow(0L)
@@ -230,6 +250,14 @@ public class XdClient(
             actor.events.collect { event ->
                 val eventName =
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
+                if (eventName == "agent-auth-changed") {
+                    runCatching { event.value.decodeReply<AgentAuthProviderReply>() }
+                        .onSuccess(agentAuthStates::event)
+                }
+                if (eventName == "agent-cli-update") {
+                    runCatching { event.value.decodeReply<AgentCliProviderReply>() }
+                        .onSuccess(agentCliStates::event)
+                }
                 if (eventName == "auto-settle-settings") {
                     autoSettleLock.withLock { autoSettleBroadcasts.update { it + 1 } }
                     rereadAutoSettle()
@@ -298,6 +326,8 @@ public class XdClient(
             autoSettleWriteSucceeded = 0
             _autoSettleWriteError.value = null
         }
+        agentAuthStates.clear()
+        agentCliStates.clear()
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -419,6 +449,62 @@ public class XdClient(
         actor.call(Ops.setSessionAutoSettle(sessionId, enabled))
         requestTreeRefresh()
     }
+
+    /** Asks each assistant for its sign-in state, into [agentAuth]. */
+    public suspend fun loadAgentAuth() {
+        val generation = _sessionGeneration.value
+        val mark = agentAuthStates.mark()
+        val reply = actor.decodeReply(actor.call(Ops.agentAuth())) { it.decodeReply<AgentAuthReply>() }
+        if (generation == _sessionGeneration.value) agentAuthStates.reply(reply.providers, mark)
+    }
+
+    /** Starts, feeds, or cancels a sign-in; progress arrives through [agentAuth]. */
+    public suspend fun agentAuthAction(action: Ops.AuthAction, provider: String, input: String? = null) {
+        actor.call(Ops.agentAuthAction(action, provider, input))
+    }
+
+    /** `status` or `check` the assistant CLIs, or `install` one [provider]'s update, into [agentClis]. */
+    public suspend fun agentCliUpdates(action: String = "status", provider: String? = null) {
+        val generation = _sessionGeneration.value
+        val mark = agentCliStates.mark()
+        val reply = actor.decodeReply(actor.call(Ops.agentCliUpdates(action, provider))) {
+            it.decodeReply<AgentCliUpdatesReply>()
+        }
+        if (generation == _sessionGeneration.value) agentCliStates.reply(reply.providers, mark)
+    }
+
+    /** The host's assistants and their models. */
+    public suspend fun agentCatalog(): List<BackendReply> =
+        actor.decodeReply(actor.call(Ops.agentCatalog())) { it.decodeReply<AgentCatalogReply>().backends }
+
+    public suspend fun chatTitleSettings(): ChatTitleSettingsReply =
+        actor.decodeReply(actor.call(Ops.chatTitleSettings())) { it.decodeReply<ChatTitleSettingsReply>() }
+
+    public suspend fun setChatTitlesEnabled(enabled: Boolean): ChatTitleSettingsReply =
+        actor.decodeReply(actor.call(Ops.setChatTitlesEnabled(enabled))) { it.decodeReply<ChatTitleSettingsReply>() }
+
+    public suspend fun setChatTitleModel(backend: String, model: String?): ChatTitleSettingsReply =
+        actor.decodeReply(actor.call(Ops.setChatTitleModel(backend, model))) { it.decodeReply<ChatTitleSettingsReply>() }
+
+    public suspend fun folderContext(folderId: String): String? =
+        actor.decodeReply(actor.call(Ops.folderContext(folderId))) { it.decodeReply<FolderContextReply>() }.context
+
+    public suspend fun setFolderContext(folderId: String, context: String?) {
+        actor.call(Ops.setFolderContext(folderId, context))
+        // A project's context reaches its chats' next turns; reload open ones.
+        requestTreeRefresh()
+    }
+
+    public suspend fun agentSecrets(folderId: String? = null): List<String> =
+        actor.decodeReply(actor.call(Ops.agentSecrets(folderId))) { it.decodeReply<AgentSecretsReply>() }.names
+
+    public suspend fun setAgentSecrets(folderId: String?, entries: List<Ops.SecretEntry>) {
+        actor.call(Ops.setAgentSecrets(folderId, entries))
+    }
+
+    /** Answers for chats a host restart cut off; see [Ops.resumeInterrupted]. */
+    public suspend fun resumeInterrupted(resume: Boolean): List<String> =
+        actor.decodeReply(actor.call(Ops.resumeInterrupted(resume))) { it.decodeReply<ResumeInterruptedReply>() }.resumed
 
     /** Reads the rules into [autoSettleSettings]. */
     public suspend fun loadAutoSettleSettings() {
