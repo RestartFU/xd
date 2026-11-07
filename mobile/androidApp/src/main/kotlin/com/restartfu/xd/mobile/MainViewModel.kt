@@ -414,9 +414,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * device and loses the turn.
      */
     fun hostUpdate(action: String = "status") {
-        if (_updating.value) return
-        _updating.value = true
         if (action == "check") hostCheckPending = true
+        // One request at a time; one asked for meanwhile runs next rather
+        // than being dropped, so a reopened dialog's check is not lost.
+        if (_updating.value) {
+            queuedHostAction = action
+            return
+        }
+        _updating.value = true
         // A new attempt replaces the last failure; the dialog shows an error in
         // place of any status, so a stale one would hide what happened next.
         _hostError.value = null
@@ -430,9 +435,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _hostError.value = error.message ?: "Could not reach the host"
             } finally {
                 _updating.value = false
+                queuedHostAction?.let { next ->
+                    queuedHostAction = null
+                    hostUpdate(next)
+                }
             }
         }
     }
+
+    private var queuedHostAction: String? = null
 
     /**
      * A check was asked for and no answer has confirmed the host took it.
@@ -444,10 +455,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Asks again about the update in progress, or the check that may not have happened. */
     fun followHostUpdate() = hostUpdate(if (hostCheckPending) "check" else "status")
 
+    /** Closing the dialog keeps an unconfirmed check, so reopening still follows it up. */
     fun clearHostUpdate() {
         _host.value = null
         _hostError.value = null
-        hostCheckPending = false
     }
 }
 
