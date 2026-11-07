@@ -206,8 +206,10 @@ ignore these members keep listing settled sessions with the active ones.
 ```
 
 Success always includes `ok`, `title`, `backend`, `session_mode`, `auth_state`, `commands`,
-`plan`, `queue` (oldest first), `working`, `effort`, `new_worktree`, and
-`has_messages`. It also includes `session`, `session_title`, and
+`plan`, `queue` (oldest first), `working`, `resumable`, `effort`, `new_worktree`, and
+`has_messages`. `resumable` is true when the chat's last turn was cut short: stopped,
+interrupted by the host going down, or ended by a usage limit. It clears when any
+turn starts. It also includes `session`, `session_title`, and
 `terminal_chat` for its shared workspace session. The chat's `title` belongs to
 that conversation; the session title is managed independently.
 
@@ -330,8 +332,8 @@ boundary, not an event cursor.
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, `pending: true` while the host fetches, `retry: true` when the last fetch failed, or none of these when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
-| `usage-summary` | `days` of `1`, `7`, `30`, or `90`, optional IANA `time_zone`, optional `now_ms`, optional `refresh: boolean`, optional `generation` | `pending: true`; the asking connection then receives a `usage-summary` event with `generation` and `summary:{resolution,window_label,periods,buckets,sessions,sources,pricing}`, read from the host's Claude Code and Codex transcripts and priced from a daily LiteLLM price list |
-| `usage-limits` | optional IANA `time_zone`, optional `generation` | `pending: true`; the asking connection then receives a `usage-limits` event with `generation` and `accounts:[{provider,account_key,plan,windows,reset_credits,unavailable}]`, asked of each installed assistant; `account_key` is a hash, so no address crosses the wire |
+| `usage-summary` | `days` of `1`, `7`, `30`, or `90`, optional IANA `time_zone`, optional `now_ms`, optional `refresh: boolean`, optional `generation` | `pending: true`; the asking connection then receives a `usage-summary` event with `generation` and either `error` or `summary:{read_at_ms,resolution,window_label,periods,buckets,sessions,sources,pricing}`, read from the host's Claude Code and Codex transcripts and priced from a daily LiteLLM price list |
+| `usage-limits` | optional IANA `time_zone`, optional `generation` | `pending: true`; the asking connection then receives a `usage-limits` event with `generation`, `host_now_ms`, and `accounts:[{provider,account_key,plan,checked_at_ms,windows,reset_credits,unavailable}]`, asked of each installed assistant; `account_key` is a hash, so no address crosses the wire |
 | `usage-prices` | none | saved `prices:{model:{input,output,cache_read,cache_write}}` in USD per million tokens, and `aliases:{model:target}` |
 | `image-read` | absolute host `path`, optional `preview: boolean` | `mime` of `image/png`, `image/jpeg`, `image/gif`, or `image/webp`, and base64 `data`; only images the host stored itself: remote pastes and [images in replies](#images-in-replies) |
 | `search` | `query` | matching stored messages |
@@ -571,6 +573,17 @@ attached device sees what is waiting and either can steer it.
 
 Stops the running turn. A control operation: answered even while a serialized
 command is slow.
+
+### `resume-turn`
+
+```json
+{"op":"resume-turn","chat":"chat-1"}
+{"ok":true,"queued":false}
+```
+
+Continues a cut-short turn by sending `Continue where you left off.` as a visible
+user message. Fails when the chat is not `resumable` or has moved on since, so
+clients pressing it together start one turn. Anything queued runs after that turn.
 
 ### `respond`
 

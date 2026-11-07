@@ -67,7 +67,7 @@ use self_update::SelfUpdate;
 pub use self_update::installed_host_executable;
 use settlement::AutoSettler;
 pub use storage::ChatToResume;
-use storage::SendDisposition;
+use storage::{Continuation, SendDisposition};
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
@@ -370,6 +370,7 @@ impl Engine {
             Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
             Some("set-option") => self.event_mutation(|store| store.set_option(&request)),
             Some("send") => self.send_message(&request),
+            Some("resume-turn") => self.resume_turn(&request),
             Some("respond") => {
                 match (
                     request.get("chat").and_then(Value::as_str),
@@ -497,7 +498,7 @@ impl Engine {
             {
                 let reply = self.send_message_inner(
                     &json!({"op": "send", "chat": chat_id, "text": storage::RESUME_PROMPT}),
-                    Some(last_message),
+                    Some(Continuation::AfterRestart(last_message)),
                 );
                 if reply["ok"] == true {
                     self.events
@@ -1338,7 +1339,21 @@ impl Engine {
         self.send_message_inner(request, None)
     }
 
-    fn send_message_inner(&self, request: &Value, continues: Option<i64>) -> Value {
+    /// Continues a turn that was cut short. Unlike a plain send it refuses once
+    /// the chat has moved on, so two clients pressing resume cannot queue a
+    /// second "continue" behind the first.
+    fn resume_turn(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "resume-turn needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        self.send_message_inner(
+            &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
+            Some(Continuation::Resume),
+        )
+    }
+
+    fn send_message_inner(&self, request: &Value, continues: Option<Continuation>) -> Value {
         let chat_id = match required_string(request, "chat", "send needs a chat id") {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
@@ -1379,7 +1394,10 @@ impl Engine {
         };
         let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false);
         let prepared = match continues {
-            Some(last_message) => store.prepare_continuation(&request, last_message),
+            Some(Continuation::AfterRestart(last_message)) => {
+                store.prepare_continuation(&request, last_message)
+            }
+            Some(Continuation::Resume) => store.prepare_resume(&request),
             None => store.prepare_send(&request),
         };
         if resumes && prepared.is_ok() {

@@ -37,7 +37,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
     activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
-    host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
+    host::{
+        HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RESUME_TEXT, RequestKind,
+        StartedHost,
+    },
     markdown,
     model::{
         AppModel, Attachment, AutoSettleRules, ChatSummary, MAX_MESSAGE_IMAGE_BYTES, Message,
@@ -129,6 +132,7 @@ const COPILOT_ICON: &str = "icons/copilot.svg";
 const XD_MARK_ICON: &str = "icons/xd-mark.svg";
 const SEND_ICON: &str = "icons/send.svg";
 const STOP_ICON: &str = "icons/stop.svg";
+const PLAY_ICON: &str = "icons/play.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
@@ -3506,9 +3510,13 @@ impl XdDesktop {
                     self.settle_advances.remove(session_id);
                 }
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
-                RequestKind::Send { .. } => {
+                RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
+                    // Whether the chat can still be resumed is the host's to say.
+                    if self.chat_is_active(chat_id) {
+                        self.request_chat(chat_id);
+                    }
                 }
                 RequestKind::ChatTitleSettings => self.chat_title_settings = None,
                 // The switch moved ahead of the host, so take back its answer.
@@ -9095,6 +9103,46 @@ impl XdDesktop {
         true
     }
 
+    /// Whether the send button is the resume button: only with nothing typed,
+    /// which is why Enter never resumes and typing brings the arrow back.
+    fn shows_resume(&self) -> bool {
+        self.model.resumable
+            && !self.model.working
+            && self.open_question.is_none()
+            && self.queue_edit.is_none()
+            && self.composer.trim().is_empty()
+            && self.model.draft_attachments.is_empty()
+    }
+
+    fn resume_turn(&mut self, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        if let Err(error) = host.resume_turn(&chat_id) {
+            self.model.connection_error = Some(error);
+            cx.notify();
+            return;
+        }
+        self.sending = true;
+        let optimistic = self.apply_optimistic_send(RESUME_TEXT);
+        self.pending_send = Some(PendingSend {
+            chat_id,
+            text: RESUME_TEXT.to_owned(),
+            attachments: Vec::new(),
+            restore: false,
+            optimistic,
+        });
+        cx.notify();
+    }
+
     fn queue_composer(&mut self, cx: &mut Context<Self>) {
         let text = self.composer.trim().to_owned();
         let Some(chat_id) = self.model.selected_chat.clone() else {
@@ -13781,6 +13829,9 @@ impl XdDesktop {
             && !self.composer.trim().is_empty()
             && self.model.draft_attachments.is_empty();
         let working = self.model.working;
+        let shows_resume = self.shows_resume();
+        let can_resume = shows_resume && self.model.connected && metadata_ready && !self.sending;
+        let can_submit = can_send || can_resume;
         let agent = AgentCli::from_backend(&self.model.backend);
 
         let attachments = self
@@ -14168,31 +14219,43 @@ impl XdDesktop {
                                 controls.child(
                                     div()
                                         .id("native-send-message")
+                                        .debug_selector(|| "native-send-message".into())
                                         .size(px(32.0))
                                         .flex_none()
                                         .flex()
                                         .items_center()
                                         .justify_center()
                                         .rounded_full()
-                                        .bg(rgb(if can_send {
+                                        .bg(rgb(if can_submit {
                                             colors.accent
                                         } else {
                                             colors.surface_high
                                         }))
-                                        .when(can_send, |button| {
+                                        .when(can_submit, |button| {
                                             button
                                                 .cursor_pointer()
                                                 .hover(|style| style.bg(rgb(colors.accent_hover)))
                                         })
+                                        .when(shows_resume, |button| {
+                                            button.tooltip(move |_, cx| {
+                                                cx.new(|_| PaneTooltip {
+                                                    label: "Resume chat",
+                                                    colors,
+                                                })
+                                                .into()
+                                            })
+                                        })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if can_send {
                                                 this.send_composer(cx)
+                                            } else if can_resume {
+                                                this.resume_turn(cx)
                                             }
                                         }))
                                         .child(icon(
-                                            SEND_ICON,
+                                            if shows_resume { PLAY_ICON } else { SEND_ICON },
                                             16.0,
-                                            if can_send {
+                                            if can_submit {
                                                 colors.accent_text
                                             } else {
                                                 colors.faint
@@ -17188,6 +17251,9 @@ impl AssetSource for EmbeddedIcons {
             STOP_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/stop.svg").as_slice(),
             )),
+            PLAY_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/play.svg").as_slice(),
+            )),
             FOLDER_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/folder.svg").as_slice(),
             )),
@@ -17288,6 +17354,7 @@ impl AssetSource for EmbeddedIcons {
             XD_MARK_ICON.into(),
             SEND_ICON.into(),
             STOP_ICON.into(),
+            PLAY_ICON.into(),
             FOLDER_ICON.into(),
             FILE_ICON.into(),
             GIT_BRANCH_ICON.into(),
@@ -18122,6 +18189,65 @@ mod tests {
                     .focus_handle(cx)
                     .is_focused(window)
             );
+        });
+    }
+
+    #[gpui::test]
+    fn the_send_button_resumes_a_cut_short_chat_while_nothing_is_typed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.model.connected = true;
+            desktop.model.resumable = true;
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.set_composer_text(String::new(), cx);
+            window.blur();
+            assert!(desktop.shows_resume());
+
+            desktop.set_composer_text("a new message".into(), cx);
+            assert!(!desktop.shows_resume());
+            desktop.set_composer_text("  \n".into(), cx);
+            assert!(desktop.shows_resume());
+            desktop.set_composer_text(String::new(), cx);
+
+            desktop.model.start_working();
+            assert!(!desktop.shows_resume());
+            desktop.model.stop_working();
+            desktop.model.resumable = true;
+
+            desktop.open_question = Some(OpenQuestion {
+                chat_id: "implementation".into(),
+                question: "Which one?".into(),
+                options: vec!["This one".into(), "That one".into()],
+                accepts_input: false,
+            });
+            assert!(!desktop.shows_resume());
+            desktop.open_question = None;
+            assert!(desktop.shows_resume());
+        });
+        cx.run_until_parked();
+        // With no host to reach, only the resume path reports it: sending an
+        // empty composer returns without a word.
+        let send = cx.debug_bounds("native-send-message").unwrap();
+        cx.simulate_click(send.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            assert_eq!(
+                desktop.model.connection_error.as_deref(),
+                Some("xd is not connected to a host.")
+            );
+            assert!(desktop.pending_send.is_none());
         });
     }
 
@@ -20693,6 +20819,7 @@ mod tests {
         for path in [
             "icons/send.svg",
             "icons/stop.svg",
+            PLAY_ICON,
             GIT_BRANCH_ICON,
             TRASH_ICON,
         ] {

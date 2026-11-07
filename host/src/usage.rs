@@ -60,11 +60,11 @@ struct Totals {
 
 impl Totals {
     fn add(&mut self, other: &Totals) {
-        self.uncached_input += other.uncached_input;
-        self.cached_input += other.cached_input;
-        self.cache_creation += other.cache_creation;
-        self.output += other.output;
-        self.reasoning += other.reasoning;
+        self.uncached_input = self.uncached_input.saturating_add(other.uncached_input);
+        self.cached_input = self.cached_input.saturating_add(other.cached_input);
+        self.cache_creation = self.cache_creation.saturating_add(other.cache_creation);
+        self.output = self.output.saturating_add(other.output);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
     }
 }
 
@@ -96,7 +96,9 @@ fn timestamp_ms(value: &Value) -> Option<i64> {
 
 fn token_count(value: &Value) -> u64 {
     match value.as_f64() {
-        Some(number) if number.is_finite() && number > 0.0 => number.trunc() as u64,
+        Some(number) if number.is_finite() && number > 0.0 => {
+            number.min(MAX_TOKEN_COUNT as f64).trunc() as u64
+        }
         _ => 0,
     }
 }
@@ -181,6 +183,9 @@ fn parse_claude_record(record: &Value) -> Vec<UsageRecord> {
 
 /// `[input, cached_input, cache_write_input, output, reasoning_output, total]`.
 type CodexUsage = [i64; 6];
+/// The largest counter accepted, as upstream's JSON numbers allow. Far past any
+/// real count, and small enough that sums of these cannot overflow.
+const MAX_TOKEN_COUNT: i64 = (1 << 53) - 1;
 const CODEX_INPUT: usize = 0;
 const CODEX_CACHED: usize = 1;
 const CODEX_CACHE_WRITE: usize = 2;
@@ -190,16 +195,20 @@ const CODEX_TOTAL: usize = 5;
 
 fn codex_integer(value: &Value) -> Option<i64> {
     if let Some(number) = value.as_i64() {
-        return (number >= 0).then_some(number);
+        return (0..=MAX_TOKEN_COUNT).contains(&number).then_some(number);
     }
     value
         .as_f64()
-        .filter(|number| number.fract() == 0.0 && *number >= 0.0 && *number <= i64::MAX as f64)
+        .filter(|number| {
+            number.fract() == 0.0 && *number >= 0.0 && *number <= MAX_TOKEN_COUNT as f64
+        })
         .map(|number| number as i64)
 }
 
 fn valid_codex_usage(usage: CodexUsage) -> Option<CodexUsage> {
-    (usage.iter().all(|field| *field >= 0)
+    (usage
+        .iter()
+        .all(|field| (0..=MAX_TOKEN_COUNT).contains(field))
         && usage[CODEX_CACHED] + usage[CODEX_CACHE_WRITE] <= usage[CODEX_INPUT]
         && usage[CODEX_REASONING] <= usage[CODEX_OUTPUT]
         && usage[CODEX_TOTAL] >= usage[CODEX_INPUT] + usage[CODEX_OUTPUT])
@@ -368,8 +377,11 @@ fn codex_unreported_requests(
     let previous = previous?;
     let pending = pending?;
     for index in 0..6 {
-        let explained: i64 = pending.iter().map(|request| request.usage[index]).sum();
-        if cumulative[index] - previous[index] != explained {
+        let explained: i128 = pending
+            .iter()
+            .map(|request| i128::from(request.usage[index]))
+            .sum();
+        if i128::from(cumulative[index] - previous[index]) != explained {
             return None;
         }
     }
@@ -2164,12 +2176,9 @@ fn claude_limits(mut command: std::process::Command, now: i64, zone: Tz) -> Opti
             if response["subtype"] == "error" {
                 return Some(failed());
             }
-            return Some(claude_account(
-                &response["response"],
-                identity.as_deref(),
-                now,
-                zone,
-            ));
+            let mut account = claude_account(&response["response"], identity.as_deref(), now, zone);
+            account["checked_at_ms"] = json!(now_ms());
+            return Some(account);
         }
     }
 }
@@ -2226,6 +2235,7 @@ fn codex_limits(command: std::process::Command, now: i64, zone: Tz) -> Option<Va
     }
     let mut limits = None;
     let mut profile = None;
+    let mut read_at = now;
     while limits.is_none() || profile.is_none() {
         let Some(value) = session.next() else {
             break;
@@ -2237,6 +2247,7 @@ fn codex_limits(command: std::process::Command, now: i64, zone: Tz) -> Option<Va
                 )));
             }
             limits = Some(value["result"].clone());
+            read_at = now_ms();
         } else if value["id"] == 3 {
             profile = Some(value["result"].clone());
         }
@@ -2244,12 +2255,9 @@ fn codex_limits(command: std::process::Command, now: i64, zone: Tz) -> Option<Va
     let Some(limits) = limits else {
         return Some(failed("Codex did not answer the usage request."));
     };
-    Some(codex_account(
-        &limits,
-        &profile.unwrap_or(Value::Null),
-        now,
-        zone,
-    ))
+    let mut account = codex_account(&limits, &profile.unwrap_or(Value::Null), now, zone);
+    account["checked_at_ms"] = json!(read_at);
+    Some(account)
 }
 
 fn which_missing(command: &std::process::Command) -> bool {
@@ -2439,6 +2447,20 @@ fn fetch_rates_document(agent: &ureq::Agent, url: &str, accept: &str) -> Option<
     serde_json::from_slice(&body).ok()
 }
 
+/// Always an answer: a scan that dies must still end the asker's loading state.
+fn summary_event(generation: Value, read: impl FnOnce() -> Value) -> Value {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)) {
+        Ok(summary) => {
+            json!({"event":"usage-summary", "generation":generation, "summary":summary})
+        }
+        Err(_) => json!({
+            "event": "usage-summary",
+            "generation": generation,
+            "error": "The host could not read usage.",
+        }),
+    }
+}
+
 impl UsageService {
     pub(crate) fn new(events: Arc<EventBus>, data_directory: Option<PathBuf>) -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -2499,10 +2521,11 @@ impl UsageService {
         self.summaries.submit(
             owner,
             Box::new(move || {
-                let summary = shared.summary(days as u32, zone, refresh, read_at);
                 events.publish_to(
                     owner,
-                    json!({"event":"usage-summary", "generation":generation, "summary":summary}),
+                    summary_event(generation, || {
+                        shared.summary(days as u32, zone, refresh, read_at)
+                    }),
                 );
             }),
         )?;
@@ -2536,7 +2559,7 @@ impl UsageService {
                 .collect();
             events.publish_to(
                 owner,
-                json!({"event":"usage-limits", "generation":generation, "accounts":accounts, "checked_at_ms":now}),
+                json!({"event":"usage-limits", "generation":generation, "accounts":accounts, "host_now_ms":now_ms()}),
             );
         }))?;
         Ok(json!({"ok": true, "pending": true}))
@@ -3268,6 +3291,39 @@ read e; case "$e" in *consume*) echo '{"id":2,"result":{"outcome":"reset"}}';; e
             &PriceSettings::default(),
         );
         assert_eq!(buckets[0]["records"], 2);
+    }
+
+    #[test]
+    fn absurd_counters_are_malformed_rather_than_overflowing() {
+        let mut state = codex_state();
+        let huge = json!({"input_tokens": i64::MAX, "output_tokens": 1});
+        assert_eq!(read_codex_usage(&huge), None);
+        let event = token_count_line("2026-11-05T12:00:01Z", huge.clone(), huge);
+        assert!(parse_codex_record(&event, &mut state).is_empty());
+        assert_eq!(state.malformed, 1);
+        let at_limit = json!({"input_tokens": MAX_TOKEN_COUNT, "output_tokens": MAX_TOKEN_COUNT});
+        assert_eq!(
+            read_codex_usage(&at_limit),
+            None,
+            "their total is past the limit"
+        );
+        assert_eq!(token_count(&json!(1e300)), MAX_TOKEN_COUNT as u64);
+        let mut totals = Totals {
+            output: u64::MAX,
+            ..Totals::default()
+        };
+        totals.add(&MILLION);
+        assert_eq!(totals.output, u64::MAX);
+    }
+
+    #[test]
+    fn a_scan_that_dies_still_answers() {
+        let answer = summary_event(json!(4), || panic!("scan failed"));
+        assert_eq!(answer["generation"], 4);
+        assert!(answer["error"].is_string());
+        assert!(answer.get("summary").is_none());
+        let answer = summary_event(json!(5), || json!({"buckets": []}));
+        assert_eq!(answer["summary"]["buckets"], json!([]));
     }
 
     #[test]

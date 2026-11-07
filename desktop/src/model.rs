@@ -448,6 +448,8 @@ pub struct AppModel {
     pub waiting_chats: HashMap<String, HashSet<String>>,
     pub messages: Vec<Message>,
     pub queue: Vec<String>,
+    /// The chat's last turn was cut short and can be continued.
+    pub resumable: bool,
     pub working: bool,
     pub working_started_at: Option<Instant>,
     /// The running turn's label ("Sonnet · High"), which its stored reply
@@ -761,6 +763,7 @@ impl AppModel {
             self.selected_chat = None;
             self.messages.clear();
             self.queue.clear();
+            self.resumable = false;
             self.working = false;
             self.working_started_at = None;
             self.new_worktree = false;
@@ -801,6 +804,7 @@ impl AppModel {
         self.selected_chat = Some(chat_id);
         self.messages.clear();
         self.queue.clear();
+        self.resumable = false;
         self.working = false;
         self.working_started_at = None;
         self.turn_label = None;
@@ -1035,6 +1039,11 @@ impl AppModel {
         } else {
             None
         };
+        self.resumable = !self.working
+            && body
+                .get("resumable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         self.new_worktree = body
             .get("new_worktree")
             .and_then(Value::as_bool)
@@ -1445,11 +1454,14 @@ impl AppModel {
 
     pub fn start_working(&mut self) {
         self.working = true;
+        self.resumable = false;
         self.working_started_at.get_or_insert_with(Instant::now);
     }
 
     pub fn stop_working(&mut self) {
         self.working = false;
+        // Only the host knows how the turn ended; the chat refetch that follows says.
+        self.resumable = false;
         self.working_started_at = None;
     }
 
@@ -1575,6 +1587,7 @@ impl AppModel {
                 Message::new(Some(3), "tool", "Building the Rust desktop shell", None),
             ],
             queue: vec!["Port workspace and chat shortcuts".into()],
+            resumable: false,
             working: true,
             working_started_at: Some(Instant::now()),
             turn_label: None,
@@ -1749,6 +1762,33 @@ mod tests {
         assert_eq!(model.terminal_key_for_chat("legacy"), "legacy");
         assert_eq!(model.session_key_for_chat("unlisted"), "unlisted");
         assert_eq!(model.terminal_key_for_chat("unlisted"), "unlisted");
+    }
+
+    #[test]
+    fn a_chat_is_resumable_only_while_the_host_says_so_and_nothing_runs() {
+        let mut model = AppModel::default();
+        model.select_chat("chat-1");
+        model.apply_chat(&json!({"working": false, "resumable": true}));
+        assert!(model.resumable);
+
+        // An older host does not report it.
+        model.apply_chat(&json!({"working": false}));
+        assert!(!model.resumable);
+
+        model.apply_chat(&json!({"working": true, "resumable": true}));
+        assert!(!model.resumable);
+
+        model.apply_chat(&json!({"working": false, "resumable": true}));
+        model.start_working();
+        assert!(!model.resumable);
+
+        model.apply_chat(&json!({"working": false, "resumable": true}));
+        model.stop_working();
+        assert!(!model.resumable);
+
+        model.apply_chat(&json!({"working": false, "resumable": true}));
+        model.select_chat("chat-2");
+        assert!(!model.resumable);
     }
 
     #[test]

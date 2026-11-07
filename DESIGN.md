@@ -170,7 +170,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 **Chat tabs.** Each tab has an agent mark and title. Add creates another chat sharing the workspace. Close hides a tab without deleting history; Reopen on desktop and All chats on Android restore it. Phone tabs omit inline close buttons; All chats contains Close chat. Explicit rename and confirmed delete remain separate actions. Desktop keeps the final visible chat open. Android can hide all tabs and shows a saved-chats state with reopen and create actions.
 
-**Composer.** A bordered opaque surface, using Material on Android, holds the editor, attachments, agent options and send action. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft.
+**Composer.** A bordered opaque surface, using Material on Android, holds the editor, attachments, agent options and send action. With nothing typed after a turn was cut short, the send action becomes a filled play button that continues the chat. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft.
 
 **Workspace tools.** Files, Changes, Browser and Terminal retain session scope across sibling chat switches. Agent history, options, approvals and drafts retain chat scope. Hosts without grouped-session support remain usable with singleton sessions and show an update message when adding a sibling chat.
 

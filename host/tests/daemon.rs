@@ -339,6 +339,74 @@ fn a_client_that_leaves_at_once_does_not_stop_the_daemon() {
 }
 
 #[test]
+fn a_cut_short_turn_can_be_resumed_exactly_once() {
+    let mut daemon = Daemon::start();
+    let mut client = daemon.client();
+    let chat = daemon.chat(&mut client);
+    let resumable = |client: &mut Client<UnixStream, UnixStream>| {
+        client.call(json!({"op":"chat", "chat":chat}))["resumable"] == true
+    };
+    let continues = |client: &mut Client<UnixStream, UnixStream>| {
+        client.call(json!({"op":"messages", "chat":chat}))["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| {
+                message["role"] == "user" && message["content"] == "Continue where you left off."
+            })
+            .count()
+    };
+    let idle = |client: &mut Client<UnixStream, UnixStream>| {
+        client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+            reply["working"] == false
+        });
+    };
+
+    // A turn that ran to its end has nothing to resume.
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"hello"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    idle(&mut client);
+    assert!(!resumable(&mut client));
+    let refused = client.call(json!({"op":"resume-turn", "chat":chat}));
+    assert_eq!(refused["ok"], false, "{refused}");
+
+    // Stop offers it, and a running turn does not.
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(!resumable(&mut client));
+    assert_eq!(client.call(json!({"op":"cancel", "chat":chat}))["ok"], true);
+    idle(&mut client);
+    assert!(resumable(&mut client));
+
+    // Resuming spends the offer, so a second client pressing it adds nothing.
+    let reply = client.call(json!({"op":"resume-turn", "chat":chat}));
+    assert_eq!(reply["queued"], false, "{reply}");
+    let refused = client.call(json!({"op":"resume-turn", "chat":chat}));
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(continues(&mut client), 1);
+    idle(&mut client);
+    assert!(!resumable(&mut client));
+    assert_eq!(continues(&mut client), 1);
+
+    // A crash offers it too, and the offer survives the restart.
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    drop(client);
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
+    daemon.restart();
+    let mut client = daemon.client();
+    idle(&mut client);
+    assert!(resumable(&mut client));
+    // Typing a message instead moves the chat on.
+    let reply = client.call(json!({"op":"send", "chat":chat, "text":"hello"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert!(!resumable(&mut client));
+    idle(&mut client);
+    assert!(!resumable(&mut client));
+}
+
+#[test]
 fn a_restart_continues_cut_off_turns_only_when_asked() {
     let continued = |client: &mut Client<UnixStream, UnixStream>, chat: &str| {
         client.call(json!({"op":"messages", "chat":chat}))["messages"]

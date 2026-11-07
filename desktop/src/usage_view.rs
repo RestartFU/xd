@@ -899,8 +899,12 @@ impl XdDesktop {
                     environment.summary_loading = false;
                     let summary = body.get("summary").and_then(Summary::parse);
                     if summary.is_none() {
-                        environment.summary_error =
-                            Some("The host sent an unreadable usage summary.".into());
+                        environment.summary_error = Some(
+                            body.get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("The host sent an unreadable usage summary.")
+                                .to_owned(),
+                        );
                     } else {
                         environment.summary = summary;
                         environment.summary_window = environment.requested_window;
@@ -913,11 +917,20 @@ impl XdDesktop {
                 if generation != 0 && generation == environment.limits_generation {
                     environment.limits_loading = false;
                     environment.limits_error = None;
-                    environment.accounts = Some(parse_limit_accounts(
+                    let mut accounts = parse_limit_accounts(
                         &Value::Object(body.clone()),
                         index,
                         environment_label(index),
-                    ));
+                    );
+                    // Place each report in this machine's clock by its age. Two hosts'
+                    // clocks can disagree, and a probe can answer long after it read.
+                    let received = now_ms();
+                    let host_now = body.get("host_now_ms").and_then(Value::as_i64);
+                    for account in &mut accounts {
+                        let age = host_now.map_or(0, |now| (now - account.checked_at_ms).max(0));
+                        account.checked_at_ms = received - age;
+                    }
+                    environment.accounts = Some(accounts);
                     self.usage.limits_now = now_ms();
                 }
                 true
@@ -1234,7 +1247,7 @@ impl XdDesktop {
             .find(|index| self.usage.environments[*index].prices.is_none())
     }
 
-    fn save_usage_prices(&mut self, cx: &mut Context<Self>) {
+    fn save_usage_prices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let unread = self.usage_unread_prices(&self.usage_selected());
         let Some(dialog) = &mut self.usage.price else {
             return;
@@ -1304,9 +1317,15 @@ impl XdDesktop {
                 }
             }
         }
+        let sending = !sent.is_empty();
         if let Some(dialog) = &mut self.usage.price {
             dialog.saving = sent;
             dialog.error = failure;
+        }
+        // The dialog is locked until the hosts answer and closes when they do, so
+        // nothing typed in the meantime can be lost and focus has somewhere to be.
+        if sending {
+            window.focus(&self.usage.focus);
         }
         cx.notify();
     }
@@ -3333,14 +3352,23 @@ impl XdDesktop {
                                         button.opacity(0.6).cursor_default()
                                     })
                                     .child(if saving { "Saving…" } else { "Save changes" })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         if has_changes && !saving {
-                                            this.save_usage_prices(cx);
+                                            this.save_usage_prices(window, cx);
                                         }
                                     })),
                                 ),
                         ),
                 );
+        let panel = panel.relative().when(saving, |panel| {
+            panel.child(
+                div()
+                    .id("usage-price-saving")
+                    .occlude()
+                    .absolute()
+                    .inset_0(),
+            )
+        });
         // Typed prices are not dropped by a stray press; Discard and Escape are explicit.
         Some(usage_dialog_layer(panel, colors, |_, _, cx| {
             cx.stop_propagation()
@@ -4345,6 +4373,58 @@ mod tests {
             let rows = &desktop.usage.price.as_ref().unwrap().rows;
             let names: Vec<&str> = rows.iter().map(|row| row.model.as_str()).collect();
             assert_eq!(names, ["a", "b"]);
+        });
+    }
+
+    #[gpui::test]
+    fn limits_rank_by_arrival_not_by_a_hosts_clock(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, _| {
+            let answer = |generation: u64, checked: i64, used: f64| {
+                json!({
+                    "generation": generation,
+                    "accounts": [{
+                        "provider": "codex", "account_key": "same", "checked_at_ms": checked,
+                        "windows": [{"id":"primary","kind":"weekly","label":"Weekly","used_percent":used}],
+                    }],
+                })
+                .as_object()
+                .cloned()
+                .unwrap()
+            };
+            desktop.usage.environments[1].limits_generation = 1;
+            // The remote clock runs a day ahead of this machine.
+            let ahead = now_ms() + 86_400_000;
+            assert!(desktop.usage_event(1, "usage-limits", &answer(1, ahead, 100.0)));
+            std::thread::sleep(Duration::from_millis(2));
+            desktop.usage.environments[0].limits_generation = 2;
+            assert!(desktop.usage_event(0, "usage-limits", &answer(2, 5, 0.0)));
+            let reports = [0, 1].into_iter().filter_map(|index| {
+                desktop.usage.environments[index].accounts.clone()
+            });
+            let accounts = collect_accounts(reports.flatten());
+            assert_eq!(accounts[0].windows[0].used_percent, 0.0, "the newer answer wins");
+
+            // A slow probe answers last, but what it says was read a minute ago.
+            std::thread::sleep(Duration::from_millis(2));
+            let mut slow = answer(3, 1_000_000 - 60_000, 100.0);
+            slow.insert("host_now_ms".into(), json!(1_000_000));
+            desktop.usage.environments[1].limits_generation = 3;
+            assert!(desktop.usage_event(1, "usage-limits", &slow));
+            let reports = [0, 1].into_iter().filter_map(|index| {
+                desktop.usage.environments[index].accounts.clone()
+            });
+            let accounts = collect_accounts(reports.flatten());
+            assert_eq!(accounts[0].windows[0].used_percent, 0.0, "age counts, not arrival");
+
+            // A scan that died reports why and ends the wait.
+            desktop.usage.environments[0].summary_generation = 4;
+            desktop.usage.environments[0].summary_loading = true;
+            let died = json!({"generation": 4, "error": "The host could not read usage."});
+            assert!(desktop.usage_event(0, "usage-summary", died.as_object().unwrap()));
+            let environment = &desktop.usage.environments[0];
+            assert!(!environment.summary_loading);
+            assert_eq!(environment.summary_error.as_deref(), Some("The host could not read usage."));
         });
     }
 
