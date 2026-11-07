@@ -1435,8 +1435,18 @@ mod tests {
             assert_eq!(desktop.attachments_reading, 0);
         });
 
+        // Away and back again before the read finishes: still not added.
         desktop.update(cx, |desktop, cx| {
-            desktop.model.selected_chat = Some("implementation".into());
+            desktop.attach_paths("implementation".into(), vec![notes.clone()], cx);
+            desktop.model.select_chat("elsewhere");
+            desktop.model.select_chat("implementation");
+        });
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.model.draft_attachments.is_empty());
+        });
+
+        desktop.update(cx, |desktop, cx| {
             desktop.attach_paths("implementation".into(), vec![notes], cx);
         });
         cx.run_until_parked();

@@ -10173,14 +10173,15 @@ impl XdDesktop {
         cx.notify();
     }
 
-    /// The host connection now in use. Files chosen while it was another one
-    /// are not sent to this one, even to a chat of the same name.
-    fn attachment_connection(&self) -> (ChatEndpoint, u64) {
+    /// The host connection and chat visit now in use. Files chosen during
+    /// another one are not added, even to a chat of the same name, or to the
+    /// same chat opened again.
+    fn attachment_connection(&self) -> (ChatEndpoint, u64, u64) {
         let generation = match self.active_endpoint {
             ChatEndpoint::Local => self.connection_generation,
             ChatEndpoint::Remote => self.remote_generation,
         };
-        (self.active_endpoint, generation)
+        (self.active_endpoint, generation, self.model.chat_visits)
     }
 
     /// Opens the system file picker and attaches what the user chooses.

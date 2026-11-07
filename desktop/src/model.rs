@@ -602,6 +602,9 @@ pub struct AppModel {
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
+    /// Counts chat selections, so work begun for one visit to a chat can tell
+    /// it from a later visit to the same chat.
+    pub chat_visits: u64,
     pub unread_chats: HashSet<String>,
     /// Pending approval or question request ids per chat, for every chat the
     /// daemon reports on, so the sidebar can flag sessions waiting on the user.
@@ -971,6 +974,7 @@ impl AppModel {
         let chat_id = chat_id.into();
         self.unread_chats.remove(&chat_id);
         self.selected_chat = Some(chat_id);
+        self.chat_visits = self.chat_visits.wrapping_add(1);
         self.messages.clear();
         self.queue.clear();
         self.resumable = false;
@@ -1750,6 +1754,7 @@ impl AppModel {
             terminal_activity_epoch: None,
             terminal_activity_by_chat: HashMap::new(),
             selected_chat: Some("chat-gpui".into()),
+            chat_visits: 0,
             unread_chats: HashSet::new(),
             waiting_chats: HashMap::new(),
             messages: vec![
