@@ -390,6 +390,29 @@ fn turn_status(waiting: bool, colors: ThemeColors) -> (&'static str, u32) {
     }
 }
 
+/// One line of text as wide as it needs, down to whatever room its row leaves,
+/// ending in an ellipsis when that is too little. Size it from the outside.
+fn truncating_label(text: impl Into<SharedString>) -> gpui::Div {
+    let text = text.into();
+    truncating_box(text.clone(), text)
+}
+
+/// `.truncate()` alone is not enough inside a flexible row: GPUI truncates only
+/// on its first measure and keeps that result, and layout first measures a flex
+/// item with no width. The whole text gets shaped, then cut off mid-letter.
+///
+/// So a hidden copy, `sizer`, gives the box its natural width, and `shown` is
+/// positioned over it. Layout places positioned children last, once the box has
+/// its final width, so the first measure `shown` sees is the one to truncate to.
+fn truncating_box(sizer: impl IntoElement, shown: impl IntoElement) -> gpui::Div {
+    div()
+        .relative()
+        .min_w_0()
+        .overflow_hidden()
+        .child(div().invisible().whitespace_nowrap().child(sizer))
+        .child(div().absolute().inset_0().truncate().child(shown))
+}
+
 /// The action a session row offers while the pointer is over it. It sits on top
 /// of the row's trailing label, so nothing on the row moves when it appears.
 fn session_row_action(
@@ -11286,31 +11309,26 @@ impl XdDesktop {
                     })),
             )
             .child(
-                div()
+                truncating_label(session.title)
                     .flex_1()
-                    .min_w_0()
-                    .truncate()
                     .text_size(px(13.0))
                     .text_color(rgb(if emphasized {
                         colors.text
                     } else {
                         colors.muted
                     }))
-                    .when(emphasized, |title| title.font_weight(FontWeight::MEDIUM))
-                    .child(session.title),
+                    .when(emphasized, |title| title.font_weight(FontWeight::MEDIUM)),
             )
             .when(
                 signal == SessionSignal::Idle && session.branch != "Project directory",
                 |row| {
                     row.child(
-                        div()
+                        truncating_label(session.branch)
                             .max_w(px(96.0))
                             .flex_none()
-                            .truncate()
                             .font_family(MONO)
                             .text_size(px(10.5))
-                            .text_color(rgb(colors.faint))
-                            .child(session.branch),
+                            .text_color(rgb(colors.faint)),
                     )
                 },
             )
@@ -11407,28 +11425,23 @@ impl XdDesktop {
                     .text_color(rgb(if selected { colors.text } else { colors.faint })),
             )
             .child(
-                div()
+                truncating_label(card.title)
                     .flex_1()
-                    .min_w_0()
-                    .truncate()
                     .text_size(px(13.0))
                     .text_color(rgb(if selected { colors.text } else { colors.muted }))
-                    .when(selected, |title| title.font_weight(FontWeight::MEDIUM))
-                    .child(card.title),
+                    .when(selected, |title| title.font_weight(FontWeight::MEDIUM)),
             )
             .child(
-                div()
-                    .max_w(px(96.0))
-                    .flex_none()
-                    .truncate()
-                    .font_family(MONO)
-                    .text_size(px(10.5))
-                    .text_color(rgb(colors.faint))
-                    .child(format!(
-                        "{} \u{b7} {}",
-                        card.project,
-                        age_label(card.settled_at, now)
-                    )),
+                truncating_label(format!(
+                    "{} \u{b7} {}",
+                    card.project,
+                    age_label(card.settled_at, now)
+                ))
+                .max_w(px(96.0))
+                .flex_none()
+                .font_family(MONO)
+                .text_size(px(10.5))
+                .text_color(rgb(colors.faint)),
             )
             .when_some(unsettle_session, |row, session_id| {
                 row.child(
@@ -11689,14 +11702,11 @@ impl XdDesktop {
             let line_project = project.id.clone();
             let line_folders = folders.clone();
             let drop_folders = folders.clone();
-            let name = div()
-                .min_w_0()
+            let name = truncating_label(project.name.clone())
                 .flex_shrink()
-                .truncate()
                 .text_size(px(12.5))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(if current { colors.text } else { colors.muted }))
-                .child(project.name.clone());
+                .text_color(rgb(if current { colors.text } else { colors.muted }));
             let header = div()
                 .id(("minimal-session-group-header", project_index))
                 .h(px(30.0))
@@ -18622,6 +18632,97 @@ Binary files /dev/null and b/image.png differ\n";
         });
     }
 
+    /// Text in each kind of box the sidebar puts it in, keeping hold of what GPUI
+    /// actually shaped and where the box ended up.
+    struct TruncatingLabelProbe {
+        text: &'static str,
+        shaped: std::rc::Rc<std::cell::RefCell<Vec<gpui::TextLayout>>>,
+    }
+
+    impl TruncatingLabelProbe {
+        fn label(&self, selector: &'static str) -> gpui::Div {
+            let shown = StyledText::new(self.text);
+            self.shaped.borrow_mut().push(shown.layout().clone());
+            truncating_box(self.text, shown).debug_selector(|| selector.into())
+        }
+    }
+
+    impl Render for TruncatingLabelProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.shaped.borrow_mut().clear();
+            let row = || div().w(px(240.0)).flex().items_center().gap(px(8.0));
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .text_size(px(13.0))
+                // A session title, beside a capped trailing label.
+                .child(
+                    row()
+                        .child(self.label("fills").flex_1())
+                        .child(self.label("capped").max_w(px(96.0)).flex_none()),
+                )
+                // A project name, hugging its text ahead of its count.
+                .child(
+                    row().child(self.label("hugs").flex_shrink()).child(
+                        div()
+                            .flex_none()
+                            .w(px(20.0))
+                            .debug_selector(|| "count".into()),
+                    ),
+                )
+        }
+    }
+
+    fn shaped_truncating_labels(
+        cx: &mut gpui::TestAppContext,
+        text: &'static str,
+    ) -> (Vec<String>, gpui::Bounds<Pixels>, gpui::Bounds<Pixels>) {
+        let shaped = std::rc::Rc::<std::cell::RefCell<Vec<gpui::TextLayout>>>::default();
+        let probe_shaped = std::rc::Rc::clone(&shaped);
+        let (_, cx) = cx.add_window_view(move |_, _| TruncatingLabelProbe {
+            text,
+            shaped: probe_shaped,
+        });
+        cx.simulate_resize(size(px(1180.0), px(560.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let texts = shaped.borrow().iter().map(|layout| layout.text()).collect();
+        let hugs = cx.debug_bounds("hugs").unwrap();
+        let count = cx.debug_bounds("count").unwrap();
+        (texts, hugs, count)
+    }
+
+    #[gpui::test]
+    fn truncating_label_ends_in_an_ellipsis_in_every_kind_of_box(cx: &mut gpui::TestAppContext) {
+        let (texts, hugs, count) = shaped_truncating_labels(
+            cx,
+            "A title far too long to fit in any box the sidebar has to offer it",
+        );
+        assert_eq!(texts.len(), 3);
+        for text in texts {
+            assert!(text.starts_with("A t"), "shaped {text:?}");
+            assert!(text.ends_with('…'), "shaped {text:?}");
+        }
+        assert!(hugs.right() <= count.left(), "the count keeps its room");
+        assert!(count.right() <= px(240.0), "the row holds its width");
+    }
+
+    #[gpui::test]
+    fn truncating_label_leaves_text_that_fits_whole_and_hugs_it(cx: &mut gpui::TestAppContext) {
+        let (texts, hugs, _) = shaped_truncating_labels(cx, "Short");
+        assert_eq!(texts, ["Short", "Short", "Short"]);
+        assert!(
+            hugs.size.width < px(100.0),
+            "hugged to {:?}",
+            hugs.size.width
+        );
+        assert!(hugs.size.width > px(0.0), "the text still takes up room");
+    }
+
     #[gpui::test]
     fn sibling_chat_terminal_refresh_hydrates_the_shared_shell(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -22941,7 +23042,7 @@ Binary files /dev/null and b/image.png differ\n";
             "minimal-session-card",
             "minimal-project-list",
             "minimal-new-project",
-            ".child(session.branch)",
+            "truncating_label(session.branch)",
             "self.toggle_folder_collapsed(project_id, cx)",
             "this.begin_chat_create",
             "signal_tab(signal, colors)",
@@ -23019,7 +23120,7 @@ Binary files /dev/null and b/image.png differ\n";
 
         let compact = board.split_whitespace().collect::<String>();
         assert!(
-            compact.contains("div().max_w(px(96.0)).flex_none().truncate()"),
+            compact.contains("truncating_label(session.branch).max_w(px(96.0)).flex_none()"),
             "branch text needs a bounded, truncating child"
         );
         let _ = home;
