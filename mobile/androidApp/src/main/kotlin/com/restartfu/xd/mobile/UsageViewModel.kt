@@ -40,10 +40,11 @@ class UsageViewModel(private val client: XdClient) : ViewModel() {
     private var limitReads = 0L
 
     /**
-     * One reset attempt's key, kept until the host settles it, so retrying
-     * after a dropped answer cannot spend a second credit.
+     * Each account's unsettled reset attempt, kept until the host settles it,
+     * so retrying after a dropped answer cannot spend a second credit, even
+     * after another account was used in between, as the desktop keeps them.
      */
-    private var pendingReset: Pair<String, String>? = null
+    private val pendingResets = mutableMapOf<String, String>()
 
     init {
         refresh()
@@ -117,13 +118,12 @@ class UsageViewModel(private val client: XdClient) : ViewModel() {
     /** Spends one banked Codex reset credit. The caller has asked the user first. */
     fun useResetCredit(accountKey: String) {
         if (_state.value.resetting) return
-        val attempt = pendingReset?.takeIf { it.first == accountKey }
-            ?: (accountKey to UUID.randomUUID().toString()).also { pendingReset = it }
+        val attempt = pendingResets.getOrPut(accountKey) { UUID.randomUUID().toString() }
         _state.update { it.copy(resetting = true, resetMessage = null) }
         viewModelScope.launch {
             try {
-                val outcome = client.consumeResetCredit(attempt.first, attempt.second)
-                pendingReset = null
+                val outcome = client.consumeResetCredit(accountKey, attempt)
+                pendingResets.remove(accountKey, attempt)
                 _state.update { it.copy(resetting = false, resetMessage = resetOutcome(outcome)) }
                 readLimits()
             } catch (error: CancellationException) {
