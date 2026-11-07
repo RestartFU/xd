@@ -100,8 +100,15 @@ enum NativeEvent {
     Started(String),
     Finished(String),
     TitleReady,
+    /// The page as it looked just before a covering popup hid it.
+    Snapshot {
+        generation: u64,
+        frame: image::RgbaImage,
+    },
     /// The native view is on screen again, over its picture.
-    Shown,
+    Shown {
+        generation: u64,
+    },
     Open(String),
     Error(String),
     Navigation {
@@ -817,6 +824,7 @@ impl BrowserTab {
                 visible: Cell::new(false),
                 covered: Cell::new(false),
                 snapshot: RefCell::new(None),
+                generation: Cell::new(0),
                 native_visible: Cell::new(false),
                 has_page: Cell::new(false),
                 healthy: Cell::new(error.is_none()),
@@ -1017,10 +1025,16 @@ impl BrowserTab {
                 self.title = title;
                 cx.emit(TabEvent::Updated);
             }
-            NativeEvent::Shown => {
-                if self.display.native_visible.get() {
-                    self.display.snapshot.take();
+            NativeEvent::Snapshot { generation, frame } => {
+                if !self.display.accept_snapshot(generation, frame) {
+                    return;
                 }
+            }
+            NativeEvent::Shown { generation } => {
+                if self.display.generation.get() != generation {
+                    return;
+                }
+                self.display.snapshot.take();
             }
             NativeEvent::Open(url) => cx.emit(TabEvent::Open(url)),
             NativeEvent::Error(error) => {
@@ -1390,6 +1404,9 @@ struct TabDisplay {
     covered: Cell<bool>,
     /// The page as it looked when it was covered, drawn in its place.
     snapshot: RefCell<Option<Arc<RenderImage>>>,
+    /// Counts native visibility requests, so a late reply to an earlier one
+    /// cannot change the picture.
+    generation: Cell<u64>,
     native_visible: Cell<bool>,
     has_page: Cell<bool>,
     healthy: Cell<bool>,
@@ -1403,7 +1420,7 @@ impl TabDisplay {
     fn set_state(&self, visible: bool, covered: bool) {
         self.visible.set(visible);
         self.covered.set(covered);
-        let pictured = visible && covered && self.has_page.get() && self.healthy.get();
+        let pictured = self.is_pictured();
         let shown = visible && !covered && self.has_page.get() && self.healthy.get();
         // A page being shown again keeps its picture until it is back on
         // screen, so the slot does not flash empty in between.
@@ -1417,15 +1434,16 @@ impl TabDisplay {
             return;
         }
         self.bounds.set(None);
+        // Replies to earlier requests no longer describe the view.
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
         let events = self.events.clone();
-        if pictured {
-            // The page was on screen a moment ago; keep its picture there.
-            let snapshot = native.hide_with_snapshot(events);
-            *self.snapshot.borrow_mut() =
-                snapshot.map(|frame| Arc::new(RenderImage::new(vec![image::Frame::new(frame)])));
-            return;
-        }
         native.with_view(move |view| {
+            // Capture before hiding: an unmapped window has no pixels. The
+            // picture is sent first so GPUI can draw it as soon as possible.
+            if pictured && let Some(frame) = capture_view(view) {
+                events.send(NativeEvent::Snapshot { generation, frame });
+            }
             #[cfg(target_os = "linux")]
             if !shown {
                 blur_gtk_webview(&view.webview());
@@ -1433,9 +1451,24 @@ impl TabDisplay {
             if let Err(error) = view.set_visible(shown) {
                 events.send(NativeEvent::Error(error.to_string()));
             } else if shown {
-                events.send(NativeEvent::Shown);
+                events.send(NativeEvent::Shown { generation });
             }
         });
+    }
+
+    fn is_pictured(&self) -> bool {
+        self.visible.get() && self.covered.get() && self.has_page.get() && self.healthy.get()
+    }
+
+    /// Keep a picture only if it answers the latest visibility request and
+    /// the page is still covered.
+    fn accept_snapshot(&self, generation: u64, frame: image::RgbaImage) -> bool {
+        if generation != self.generation.get() || !self.is_pictured() {
+            return false;
+        }
+        *self.snapshot.borrow_mut() =
+            Some(Arc::new(RenderImage::new(vec![image::Frame::new(frame)])));
+        true
     }
 
     fn shutdown(&self) {
@@ -1446,10 +1479,17 @@ impl TabDisplay {
     }
 }
 
-/// How long GPUI waits for a covered page's picture. Past this the page is
-/// still hidden, and the pane shows its plain background instead.
-#[cfg(target_os = "linux")]
-const SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(250);
+/// The view's current pixels in GPUI's BGRA order, where the platform can
+/// read them back. Elsewhere a covered page leaves its slot blank.
+fn capture_view(view: &WebView) -> Option<image::RgbaImage> {
+    #[cfg(target_os = "linux")]
+    return capture_gtk_webview(&view.webview());
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = view;
+        None
+    }
+}
 
 /// A handle to a native view living on the thread its toolkit requires: GPUI's
 /// on macOS and Windows, [`gtk_thread`] on Linux.
@@ -1526,33 +1566,6 @@ impl NativeBrowser {
             entry: RefCell::new(Some(create_native(parent, events)?)),
             disposed: Cell::new(false),
         })
-    }
-
-    /// Hide the view, returning a BGRA picture of what it showed just before.
-    #[cfg(target_os = "linux")]
-    fn hide_with_snapshot(&self, events: NativeEvents) -> Option<image::RgbaImage> {
-        let (reply, snapshot) = std::sync::mpsc::channel();
-        self.with_view(move |view| {
-            let webview = view.webview();
-            // Capture before hiding: an unmapped window has no pixels.
-            let _ = reply.send(capture_gtk_webview(&webview));
-            blur_gtk_webview(&webview);
-            if let Err(error) = view.set_visible(false) {
-                events.send(NativeEvent::Error(error.to_string()));
-            }
-        });
-        snapshot.recv_timeout(SNAPSHOT_TIMEOUT).ok().flatten()
-    }
-
-    /// Wry offers no way to capture the page on these platforms yet.
-    #[cfg(not(target_os = "linux"))]
-    fn hide_with_snapshot(&self, events: NativeEvents) -> Option<image::RgbaImage> {
-        self.with_view(move |view| {
-            if let Err(error) = view.set_visible(false) {
-                events.send(NativeEvent::Error(error.to_string()));
-            }
-        });
-        None
     }
 
     /// Destroy the view before returning: callers may be about to destroy the
@@ -2204,9 +2217,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_covered_page_keeps_its_slot_and_drops_its_picture_when_hidden(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_covered_page_shows_only_its_latest_picture(cx: &mut gpui::TestAppContext) {
         let (pane, cx) = cx.add_window_view(|window, cx| {
             BrowserPane::new(
                 Some("http://localhost:3000/".into()),
@@ -2216,29 +2227,53 @@ mod tests {
             )
         });
         cx.update(|_, cx| {
-            pane.update(cx, |pane, _| {
+            pane.update(cx, |pane, cx| {
+                let tab = pane.tabs[0].entity.clone();
                 let display = pane.tabs[0].display.clone();
+                let frame = || image::RgbaImage::new(1, 1);
+                let mut send = |event| tab.update(cx, |tab, cx| tab.native_event(event, cx));
+
+                // Tests have no native view, so stand in for its requests.
                 pane.set_covered(true);
                 assert!(display.visible.get());
                 assert!(display.covered.get());
-                assert!(!display.native_visible.get());
+                display.generation.set(2);
+                send(NativeEvent::Snapshot {
+                    generation: 1,
+                    frame: frame(),
+                });
+                assert!(display.snapshot.borrow().is_none());
+                send(NativeEvent::Snapshot {
+                    generation: 2,
+                    frame: frame(),
+                });
+                assert!(display.snapshot.borrow().is_some());
 
-                let picture = || {
-                    Some(Arc::new(RenderImage::new(vec![image::Frame::new(
-                        image::RgbaImage::new(1, 1),
-                    )])))
-                };
-                *display.snapshot.borrow_mut() = picture();
-                // Leaving the chat takes the page away, picture and all.
-                pane.set_visible(false);
+                // Uncovered, the picture waits for the live page to return,
+                // and an earlier show's reply does not count.
+                pane.set_covered(false);
+                display.generation.set(3);
+                assert!(display.snapshot.borrow().is_some());
+                send(NativeEvent::Shown { generation: 2 });
+                assert!(display.snapshot.borrow().is_some());
+                send(NativeEvent::Shown { generation: 3 });
                 assert!(display.snapshot.borrow().is_none());
 
-                pane.set_visible(true);
-                *display.snapshot.borrow_mut() = picture();
-                // So does a side tool taking the pane's place.
-                pane.tools_enabled = true;
-                pane.auxiliary = Some(SideTab::Files);
-                pane.update_visibility();
+                // A picture arriving after the popup closed is not shown.
+                send(NativeEvent::Snapshot {
+                    generation: 3,
+                    frame: frame(),
+                });
+                assert!(display.snapshot.borrow().is_none());
+
+                // Leaving the chat takes the picture away with the page.
+                pane.set_covered(true);
+                send(NativeEvent::Snapshot {
+                    generation: 3,
+                    frame: frame(),
+                });
+                assert!(display.snapshot.borrow().is_some());
+                pane.set_visible(false);
                 assert!(display.snapshot.borrow().is_none());
             })
         });
