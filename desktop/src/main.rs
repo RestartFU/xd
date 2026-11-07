@@ -43,8 +43,8 @@ use xd_desktop::{
     },
     markdown,
     model::{
-        AppModel, Attachment, AutoSettleRules, ChatSummary, MAX_MESSAGE_IMAGE_BYTES, Message,
-        MessageImage, MessagePageDirection, ToolView, Worktree,
+        AppModel, Attachment, AutoSettleRules, ChatSummary, Folder, MAX_MESSAGE_IMAGE_BYTES,
+        Message, MessageImage, MessagePageDirection, ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -1540,6 +1540,54 @@ struct SessionDragPayload {
     project_id: String,
     source_index: usize,
     title: String,
+}
+
+/// A project being dragged to a new place in the sidebar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectDragPayload {
+    project_id: String,
+    parent_id: Option<String>,
+    source_index: usize,
+    title: String,
+}
+
+/// A row-sized ghost beside the pointer, which leaves the drop line in view.
+struct ProjectDragPreview {
+    title: String,
+    position: Point<Pixels>,
+    colors: ThemeColors,
+}
+
+impl Render for ProjectDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .pl(self.position.x + px(14.0))
+            .pt(self.position.y - px(15.0))
+            .child(
+                div()
+                    .h(px(30.0))
+                    .max_w(px(200.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(rgb(self.colors.border))
+                    .bg(rgb(self.colors.surface_high))
+                    .shadow_md()
+                    .child(workspace_icon(None, 13.0, self.colors.muted))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(self.colors.text))
+                            .child(self.title.clone()),
+                    ),
+            )
+    }
 }
 
 struct SessionDragPreview {
@@ -8382,6 +8430,37 @@ impl XdDesktop {
         cx.notify();
     }
 
+    fn reorder_project_from_drop(
+        &mut self,
+        project_id: &str,
+        target_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reorder) = project_reorder_for_drop(&self.model.folders, project_id, target_id)
+        else {
+            return;
+        };
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| {
+                host.reorder_folder(&reorder.project_id, &reorder.anchor_id, reorder.after)
+            });
+        match result {
+            Ok(()) => {
+                reorder_around_anchor(
+                    &mut self.model.folders,
+                    |folder| &folder.id,
+                    &reorder.project_id,
+                    &reorder.anchor_id,
+                    reorder.after,
+                );
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn close_sidebar_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_context_menu = None;
         self.restore_minimal_popup_focus(window);
@@ -11443,6 +11522,20 @@ impl XdDesktop {
             let context_project = project.id.clone();
             let context_name = project.name.clone();
             let create_project = project.id.clone();
+            let project_parent = self
+                .model
+                .folders
+                .iter()
+                .find(|folder| folder.id == project.id)
+                .and_then(|folder| folder.parent.clone());
+            let drag_payload = ProjectDragPayload {
+                project_id: project.id.clone(),
+                parent_id: project_parent.clone(),
+                source_index: project_index,
+                title: project.name.clone(),
+            };
+            let drop_project = project.id.clone();
+            let can_drop_project = project.id.clone();
             let name = div()
                 .min_w_0()
                 .flex_shrink()
@@ -11467,6 +11560,13 @@ impl XdDesktop {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_drawer(toggle_project.clone(), current, cx);
                 }))
+                .on_drag(drag_payload, move |drag, position, _, cx| {
+                    cx.new(|_| ProjectDragPreview {
+                        title: drag.title.clone(),
+                        position,
+                        colors,
+                    })
+                })
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -11540,6 +11640,7 @@ impl XdDesktop {
             drawers.push(
                 div()
                     .id(("minimal-session-group", project_index))
+                    .relative()
                     .w_full()
                     .flex()
                     .flex_col()
@@ -11570,7 +11671,34 @@ impl XdDesktop {
                                     )
                                 }),
                         )
-                    }),
+                    })
+                    // Covers the open drawer too, so its sessions are not a
+                    // dead zone. It only marks where the project will land:
+                    // a drop line on the edge it would be placed against.
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .can_drop(move |value, _, _| {
+                                value
+                                    .downcast_ref::<ProjectDragPayload>()
+                                    .is_some_and(|drag| {
+                                        drag.project_id != can_drop_project
+                                            && drag.parent_id == project_parent
+                                    })
+                            })
+                            .drag_over::<ProjectDragPayload>(move |style, drag, _, _| {
+                                let style = if drag.source_index < project_index {
+                                    style.border_b_2()
+                                } else {
+                                    style.border_t_2()
+                                };
+                                style.border_color(rgb(colors.accent))
+                            })
+                            .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
+                                this.reorder_project_from_drop(&drag.project_id, &drop_project, cx);
+                            })),
+                    ),
             );
         }
 
@@ -17666,23 +17794,68 @@ fn chat_reorder_for_drop(
 }
 
 fn apply_optimistic_chat_reorder(chats: &mut Vec<ChatSummary>, reorder: &ChatReorder) -> bool {
-    let Some(source_index) = chats.iter().position(|chat| chat.id == reorder.chat_id) else {
+    reorder_around_anchor(
+        chats,
+        |chat| &chat.id,
+        &reorder.chat_id,
+        &reorder.anchor_id,
+        reorder.after,
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectReorder {
+    project_id: String,
+    anchor_id: String,
+    after: bool,
+}
+
+/// Where a dropped project goes, read from the current order rather than the
+/// one the drag began with, since the tree can change during a drag.
+///
+/// Only siblings can be reordered. Anchoring on a project with another parent
+/// makes the host move the folder there on disk, and the sidebar lists every
+/// project in one flat column, so a drop should never do that by surprise.
+fn project_reorder_for_drop(
+    folders: &[Folder],
+    project_id: &str,
+    target_id: &str,
+) -> Option<ProjectReorder> {
+    if project_id == target_id {
+        return None;
+    }
+    let position = |id: &str| folders.iter().position(|folder| folder.id == id);
+    let source_index = position(project_id)?;
+    let target_index = position(target_id)?;
+    if folders[source_index].parent != folders[target_index].parent {
+        return None;
+    }
+    Some(ProjectReorder {
+        project_id: project_id.to_owned(),
+        anchor_id: target_id.to_owned(),
+        after: source_index < target_index,
+    })
+}
+
+fn reorder_around_anchor<T>(
+    items: &mut Vec<T>,
+    id: impl Fn(&T) -> &String,
+    source_id: &str,
+    anchor_id: &str,
+    after: bool,
+) -> bool {
+    let Some(source_index) = items.iter().position(|item| id(item) == source_id) else {
         return false;
     };
-    if !chats.iter().any(|chat| chat.id == reorder.anchor_id) {
+    if source_id == anchor_id || !items.iter().any(|item| id(item) == anchor_id) {
         return false;
     }
-    let chat = chats.remove(source_index);
-    let anchor_index = chats
+    let item = items.remove(source_index);
+    let anchor_index = items
         .iter()
-        .position(|candidate| candidate.id == reorder.anchor_id)
-        .expect("the checked reorder anchor remains after removing another chat");
-    let insert_at = if reorder.after {
-        anchor_index + 1
-    } else {
-        anchor_index
-    };
-    chats.insert(insert_at, chat);
+        .position(|candidate| id(candidate) == anchor_id)
+        .expect("the checked reorder anchor remains after removing another item");
+    items.insert(anchor_index + usize::from(after), item);
     true
 }
 
@@ -18558,7 +18731,7 @@ mod tests {
         assert_eq!(first_line("```rust\nfn main() {}"), "fn main() {}");
         assert_eq!(first_line(""), "");
     }
-    use xd_desktop::model::{ChatSummary, Folder};
+    use xd_desktop::model::ChatSummary;
 
     #[gpui::test]
     fn bundled_ui_font_can_be_registered(cx: &mut gpui::TestAppContext) {
@@ -20873,6 +21046,105 @@ mod tests {
             None
         );
         assert_eq!(chat_reorder_for_drop(&drag, "workspace", 1, "chat-b"), None);
+    }
+
+    fn project(id: &str, parent: Option<&str>) -> Folder {
+        Folder {
+            id: id.into(),
+            name: id.into(),
+            parent: parent.map(str::to_owned),
+            owner: None,
+        }
+    }
+
+    #[test]
+    fn project_drop_places_the_project_on_the_side_it_came_from() {
+        let folders = [project("a", None), project("b", None), project("c", None)];
+
+        assert_eq!(
+            project_reorder_for_drop(&folders, "b", "a"),
+            Some(ProjectReorder {
+                project_id: "b".into(),
+                anchor_id: "a".into(),
+                after: false,
+            })
+        );
+        assert_eq!(
+            project_reorder_for_drop(&folders, "b", "c"),
+            Some(ProjectReorder {
+                project_id: "b".into(),
+                anchor_id: "c".into(),
+                after: true,
+            })
+        );
+        assert_eq!(project_reorder_for_drop(&folders, "b", "b"), None);
+        assert_eq!(project_reorder_for_drop(&folders, "b", "gone"), None);
+        assert_eq!(project_reorder_for_drop(&folders, "gone", "b"), None);
+    }
+
+    #[test]
+    fn project_drop_never_moves_a_project_to_another_parent() {
+        let folders = [
+            project("root", None),
+            project("parent", None),
+            project("child", Some("parent")),
+            project("sibling", Some("parent")),
+            project("elsewhere", Some("root")),
+        ];
+
+        assert_eq!(project_reorder_for_drop(&folders, "root", "child"), None);
+        assert_eq!(project_reorder_for_drop(&folders, "child", "root"), None);
+        assert_eq!(
+            project_reorder_for_drop(&folders, "child", "elsewhere"),
+            None
+        );
+        assert!(project_reorder_for_drop(&folders, "child", "sibling").is_some());
+    }
+
+    #[gpui::test]
+    fn dropping_a_project_without_a_host_keeps_the_order_and_says_why(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.folders =
+                vec![project("a", None), project("b", None), project("c", None)];
+            let order = |desktop: &XdDesktop| {
+                desktop
+                    .model
+                    .folders
+                    .iter()
+                    .map(|folder| folder.id.clone())
+                    .collect::<Vec<_>>()
+            };
+            desktop.host = None;
+            desktop.remote_host = None;
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.reorder_project_from_drop("c", "a", cx);
+            assert_eq!(order(desktop), ["a", "b", "c"]);
+            assert!(desktop.model.connection_error.is_some());
+        });
+    }
+
+    #[test]
+    fn reordering_around_an_anchor_handles_both_sides_and_missing_ids() {
+        let mut items = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let ordered = |items: &mut Vec<String>, source: &str, anchor: &str, after: bool| {
+            let moved = reorder_around_anchor(items, |item| item, source, anchor, after);
+            (moved, items.join(""))
+        };
+
+        assert_eq!(ordered(&mut items, "c", "a", false), (true, "cab".into()));
+        assert_eq!(ordered(&mut items, "c", "b", true), (true, "abc".into()));
+        assert_eq!(
+            ordered(&mut items, "gone", "a", true),
+            (false, "abc".into())
+        );
+        assert_eq!(
+            ordered(&mut items, "a", "gone", true),
+            (false, "abc".into())
+        );
+        assert_eq!(ordered(&mut items, "a", "a", true), (false, "abc".into()));
     }
 
     #[test]

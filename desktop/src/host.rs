@@ -2504,6 +2504,51 @@ mod tests {
     }
 
     #[test]
+    fn reorders_folders_before_and_after_an_anchor() {
+        let directory = env::temp_dir().join(format!("xd-reorder-folder-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for (field, after) in [("before", false), ("after", true)] {
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["op"], "move-folder");
+                assert_eq!(request["folder"], "folder-1");
+                assert_eq!(request[field], "folder-2");
+                assert_eq!(request.get(if after { "before" } else { "after" }), None);
+                assert_eq!(request.get("parent"), None);
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+            }
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        for after in [false, true] {
+            host.reorder_folder("folder-1", "folder-2", after).unwrap();
+            assert!(matches!(
+                updates.recv_blocking().unwrap(),
+                HostUpdate::Reply {
+                    kind: RequestKind::MoveFolder { folder_id, parent_id: None },
+                    ..
+                } if folder_id == "folder-1"
+            ));
+        }
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
     fn sends_the_configured_git_writer_for_worktree_naming() {
         let directory = env::temp_dir().join(format!("xd-worktree-name-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);

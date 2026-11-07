@@ -166,7 +166,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 ## Components
 
-**Project navigation.** Each project reveals its sessions. One sidebar row represents a session even when it contains several chats. The row restores that session's last active chat and aggregates working, waiting and unread activity.
+**Project navigation.** Each project reveals its sessions. One sidebar row represents a session even when it contains several chats. The row restores that session's last active chat and aggregates working, waiting and unread activity. On desktop, drag a project's row to reorder it among its siblings; a line shows where it will land, and the order is saved on the host.
 
 **Chat tabs.** Each tab has an agent mark and title. Add creates another chat sharing the workspace. Close hides a tab without deleting history; Reopen on desktop and All chats on Android restore it. Phone tabs omit inline close buttons; All chats contains Close chat. Explicit rename and confirmed delete remain separate actions. Desktop keeps the final visible chat open. Android can hide all tabs and shows a saved-chats state with reopen and create actions.
 

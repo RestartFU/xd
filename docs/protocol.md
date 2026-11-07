@@ -798,6 +798,11 @@ the repository so a stale client cannot run the wrong operation.
 to move the folder to the workspace root. A folder cannot be moved into itself
 or one of its descendants, and the host rejects a destination name collision.
 
+To reorder, send `before` or `after` with the id of another folder instead of
+`parent`. The order is saved and every client sees it in the next `tree`. The
+folder also takes that folder's parent, so anchoring on a folder with a different
+parent moves it on disk.
+
 ## Events
 
 Chat-scoped events carry a `chat` member; ignore those for other chats.
