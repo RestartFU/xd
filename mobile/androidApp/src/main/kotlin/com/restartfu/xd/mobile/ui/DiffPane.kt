@@ -45,6 +45,21 @@ internal fun DiffPaneContent(model: DiffViewModel) {
 
     Column(Modifier.fillMaxSize()) {
         state.git?.let { git -> GitSummary(git, state, model) }
+        state.gitError?.let { error ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (state.git == null) "Git status could not be read: $error"
+                    else "This may be out of date: Git status could not be read again ($error)",
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = model::refresh) { Text("Try again") }
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()

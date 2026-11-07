@@ -22,6 +22,8 @@ public data class DiffPane(
     val error: String? = null,
     /** The checkout's branch and uncommitted changes; null outside a repository. */
     val git: GitStatusReply? = null,
+    /** Why the last status read failed; [git] is then the last one known, and may be old. */
+    val gitError: String? = null,
     /** The branch's pull request, when it has one. */
     val pullRequestUrl: String? = null,
     /** The branch [pullRequestUrl] was looked up for. */
@@ -87,6 +89,7 @@ class DiffViewModel(
                 _state.value = _state.value.let { latest ->
                     latest.copy(
                         git = git,
+                        gitError = null,
                         pullRequestUrl = latest.pullRequestUrl.takeIf { latest.pullRequestBranch == git.branch },
                         committing = false,
                         commitMessage = latest.commitMessage.takeIf { it != message }.orEmpty(),
@@ -108,6 +111,7 @@ class DiffViewModel(
     private fun refreshGit() {
         val read = ++gitReads
         viewModelScope.launch {
+            var gitError: String? = null
             val git = try {
                 session().gitStatus()
             } catch (error: CancellationException) {
@@ -115,6 +119,8 @@ class DiffViewModel(
             } catch (error: Throwable) {
                 // Keep what was known: a dropped request should not hide the
                 // commit box, and a checkout outside Git never had a status.
+                // The failure is shown, so what is kept reads as possibly old.
+                gitError = error.message ?: "Could not read the Git status"
                 _state.value.git
             }
             // The status is shown at once; the pull request lookup can take a
@@ -124,6 +130,7 @@ class DiffViewModel(
                 _state.value = _state.value.let { current ->
                     current.copy(
                         git = git,
+                        gitError = gitError,
                         pullRequestUrl = current.pullRequestUrl.takeIf { current.pullRequestBranch == git?.branch },
                     )
                 }
