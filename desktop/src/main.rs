@@ -12458,6 +12458,16 @@ impl XdDesktop {
         .into_any_element()
     }
 
+    /// A code block's text, selectable and copyable like the prose around it.
+    fn render_native_code_text(text: &str, index: usize) -> gpui::AnyElement {
+        let value: SharedString = text.to_owned().into();
+        let styled = StyledText::new(value.clone());
+        let layout = styled.layout().clone();
+        let document = scoped_element_id(&format!("native-code:{text}"), index);
+        selectable_in_document(document, document, value, 0..text.len(), layout, styled)
+            .into_any_element()
+    }
+
     fn render_message_image(
         colors: ThemeColors,
         path: &str,
@@ -12590,6 +12600,7 @@ impl XdDesktop {
                 .into_any_element(),
             markdown::Block::Code(code) => div()
                 .id(("native-code", index))
+                .debug_selector(|| "native-code".into())
                 .w_full()
                 .p_3()
                 .rounded(px(6.0))
@@ -12600,7 +12611,7 @@ impl XdDesktop {
                 .text_size(px(12.5))
                 .line_height(px(19.0))
                 .text_color(rgb(colors.text))
-                .child(code.code.clone())
+                .child(Self::render_native_code_text(&code.code, index))
                 .into_any_element(),
             markdown::Block::Table(table) => {
                 let weights = table.column_weights();
@@ -19103,6 +19114,29 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
+    fn dragging_across_a_code_block_selects_its_text(cx: &mut gpui::TestAppContext) {
+        let code = "first line of code\nsecond line of code";
+        let cx = table_transcript(cx, 1100.0, &format!("Run this:\n\n```sh\n{code}\n```"));
+        let bounds = cx.debug_bounds("native-code").unwrap();
+        // Inside the block's padding: from the start of the first line to the
+        // middle of the second.
+        let from = point(bounds.left() + px(14.0), bounds.top() + px(20.0));
+        let to = point(bounds.left() + px(60.0), bounds.top() + px(40.0));
+        cx.simulate_mouse_move(from, None, gpui::Modifiers::default());
+        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        let selected = cx.update(|_, cx| TextSelection::selected(cx)).unwrap();
+        assert!(
+            selected.starts_with("first line of code\nsec"),
+            "{selected:?}"
+        );
+        assert!(code.starts_with(&selected), "{selected:?}");
+    }
+
+    #[gpui::test]
     fn a_table_too_long_for_one_line_wraps_inside_aligned_columns(cx: &mut gpui::TestAppContext) {
         let prose = "A cell with far more to say than one line of the column can hold. ".repeat(3);
         let table = format!(
@@ -20452,7 +20486,7 @@ Binary files /dev/null and b/image.png differ\n";
         cx: &mut gpui::TestAppContext,
     ) {
         let url = "http://localhost:3000/o/r/pull/173";
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.active_endpoint = ChatEndpoint::Local;
             desktop.set_browser_open(false);

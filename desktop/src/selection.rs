@@ -251,9 +251,16 @@ impl Selectable {
                     scroll.set_offset(offset);
                     scrolled = true;
                 }
-            } else if event.position.y < moved.top() || event.position.y > moved.bottom() {
+            } else if block != document
+                && (event.position.y < moved.top() || event.position.y > moved.bottom())
+            {
+                // Every block of a shared document hears this move; only the
+                // one under the pointer may place the head.
                 return;
             }
+            // A block that is its whole document keeps following a drag that
+            // leaves it: GPUI reports index 0 above the text and its end below,
+            // so overshooting the block selects through to its edge.
 
             let index = document_range.start + index_at(&layout, event.position);
             let selection = cx.global_mut::<TextSelection>();
@@ -705,6 +712,38 @@ mod tests {
             scroll.offset().y > bottom,
             "dragging above the viewport should scroll toward older output"
         );
+    }
+
+    #[gpui::test]
+    fn dragging_past_the_bottom_of_the_text_selects_to_its_end(cx: &mut TestAppContext) {
+        struct PaddedText;
+
+        impl Render for PaddedText {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let value: SharedString = "first line\nsecond line".into();
+                let text = StyledText::new(value.clone());
+                let layout = text.layout().clone();
+                let range = 0..value.len();
+                div()
+                    .w(px(240.0))
+                    .p(px(20.0))
+                    .child(selectable_in_document(1, 1, value, range, layout, text))
+            }
+        }
+
+        let (_, cx) = cx.add_window_view(|_, _| PaddedText);
+        cx.run_until_parked();
+
+        let start = point(px(21.0), px(22.0));
+        let below = point(px(30.0), px(200.0));
+        cx.simulate_mouse_move(start, None, Modifiers::default());
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+
+        let selected = cx.update(|_, cx| TextSelection::selected(cx));
+        assert_eq!(selected.as_deref(), Some("first line\nsecond line"));
     }
 
     #[test]
