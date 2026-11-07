@@ -114,7 +114,7 @@ pub(crate) fn models(backend: &str) -> Vec<Model> {
         .unwrap_or_default()
 }
 
-struct Probe(Child);
+pub(crate) struct Probe(pub(crate) Child);
 impl Drop for Probe {
     fn drop(&mut self) {
         // Assistants can spawn helpers during initialization. Reap this probe's group.

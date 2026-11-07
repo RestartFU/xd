@@ -98,6 +98,10 @@ pub struct AppSettings {
     /// Active and hidden chat tabs within each connection's shared sessions.
     pub session_chats: HashMap<String, String>,
     pub hidden_chat_tabs: HashMap<String, Vec<String>>,
+    /// The Usage page's last view: `cost`, `tokens`, or `limits`.
+    pub usage_metric: String,
+    pub usage_window_days: u32,
+    pub usage_hidden_providers: Vec<String>,
     #[serde(skip)]
     load_error: Option<String>,
 }
@@ -138,6 +142,9 @@ impl Default for AppSettings {
             pane_states: HashMap::new(),
             session_chats: HashMap::new(),
             hidden_chat_tabs: HashMap::new(),
+            usage_metric: "limits".into(),
+            usage_window_days: 30,
+            usage_hidden_providers: Vec::new(),
             load_error: None,
         }
     }
@@ -298,6 +305,9 @@ mod tests {
                 "local/session/workspace".into(),
                 vec!["implementation".into()],
             )]),
+            usage_metric: "tokens".into(),
+            usage_window_days: 7,
+            usage_hidden_providers: vec!["codex".into()],
             theme: ThemePreset::Light,
             accent: AccentPreset::Purple,
             notifications: false,

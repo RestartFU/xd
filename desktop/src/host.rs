@@ -82,6 +82,19 @@ pub enum RequestKind {
     OwnerIcon {
         owner: String,
     },
+    UsageSummary {
+        generation: u64,
+    },
+    UsageLimits {
+        generation: u64,
+    },
+    UsagePrices {
+        dialog: u64,
+    },
+    SetUsagePrices {
+        dialog: u64,
+    },
+    UsageResetCredit,
     DiffRead {
         chat_id: String,
         read: String,
@@ -616,6 +629,75 @@ impl HostHandle {
                 marker: marker.to_owned(),
             },
             json!({"op": "workflow-status", "text": marker}),
+        )
+    }
+
+    /// Asks for token and cost totals. The answer arrives as a `usage-summary`
+    /// event carrying `generation`, so a stale window can be told apart.
+    pub fn usage_summary(
+        &self,
+        days: u32,
+        time_zone: &str,
+        now_ms: i64,
+        refresh: bool,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::UsageSummary { generation },
+            json!({
+                "op": "usage-summary",
+                "days": days,
+                "time_zone": time_zone,
+                "now_ms": now_ms,
+                "refresh": refresh,
+                "generation": generation,
+            }),
+        )
+    }
+
+    /// Asks each installed assistant for its subscription limits. The answer
+    /// arrives as a `usage-limits` event carrying `generation`.
+    pub fn usage_limits(&self, time_zone: &str, generation: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::UsageLimits { generation },
+            json!({"op": "usage-limits", "time_zone": time_zone, "generation": generation}),
+        )
+    }
+
+    pub fn usage_prices(&self, dialog: u64) -> Result<(), String> {
+        self.send(
+            RequestKind::UsagePrices { dialog },
+            json!({"op": "usage-prices"}),
+        )
+    }
+
+    pub fn set_usage_prices(
+        &self,
+        dialog: u64,
+        prices: &Value,
+        aliases: &Value,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::SetUsagePrices { dialog },
+            json!({"op": "set-usage-prices", "prices": prices, "aliases": aliases}),
+        )
+    }
+
+    /// Spends a banked Codex reset credit; `idempotency_key` names this attempt.
+    /// The host refuses if `account_key` is no longer the signed-in account.
+    pub fn usage_consume_reset_credit(
+        &self,
+        idempotency_key: &str,
+        account_key: Option<&str>,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::UsageResetCredit,
+            json!({
+                "op": "usage-consume-reset-credit",
+                "provider": "codex",
+                "idempotency_key": idempotency_key,
+                "account_key": account_key,
+            }),
         )
     }
 
