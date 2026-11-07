@@ -847,6 +847,17 @@ new repository action state and an optional URL; failures contain `success:
 false` and `error`. The host rechecks the advertised action before mutating
 the repository so a stale client cannot run the wrong operation.
 
+Three synchronous operations back the Changes pane; each takes a `chat` and
+works in that chat's checkout:
+
+- `git-status` answers `branch`, `base` (the default branch, without `origin/`),
+  `upstream` (empty when none), `ahead`, `behind`, `staged`, `unstaged`,
+  `untracked`, `conflicted`, and `clean`.
+- `git-commit` takes a `message` of 1 to 4096 bytes after trimming, stages every
+  change, commits, and answers like `git-status`.
+- `git-pr-status` asks GitHub's CLI for the checked-out branch's pull request and
+  answers `url`, empty when there is none or GitHub could not say.
+
 `move-folder` takes a required `folder` and an optional `parent`. Omit `parent`
 to move the folder to the workspace root. A folder cannot be moved into itself
 or one of its descendants, and the host rejects a destination name collision.

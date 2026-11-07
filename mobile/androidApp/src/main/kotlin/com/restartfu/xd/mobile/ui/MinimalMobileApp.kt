@@ -1388,13 +1388,14 @@ private fun NewSessionDialog(
     var agent by rememberSaveable { mutableStateOf(DirectAgent.CODEX) }
     var loaded by remember { mutableStateOf<NewSessionPlaces?>(null) }
     var placesError by remember { mutableStateOf<String?>(null) }
-    var worktree by remember { mutableStateOf<Ops.NewSessionWorktree?>(null) }
+    // Saved, so rotating keeps a branch or pull request rather than falling back to the default.
+    var worktree by rememberSaveable(stateSaver = WorktreeChoiceSaver) { mutableStateOf<Ops.NewSessionWorktree?>(null) }
     if (places != null) {
         LaunchedEffect(Unit) {
             try {
                 val found = places()
                 loaded = found
-                worktree = found.default
+                if (worktree == null) worktree = found.default
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -1447,7 +1448,9 @@ private fun NewSessionDialog(
                 onClick = { onCreate(title.trim(), agent, worktree) },
                 // Wait for the choices, as the desktop does; if they cannot be
                 // read, the host's own default checkout still works.
-                enabled = places == null || placesError != null || worktree != null,
+                // A project with no checkout to list leaves the choice to the host, as before.
+                enabled = places == null || placesError != null || worktree != null ||
+                    (loaded != null && loaded?.default == null),
             ) {
                 Text(if (chatTab) "Create chat" else "Create session")
             }
@@ -1575,6 +1578,28 @@ private fun WorkspacePicker(
         }
     }
 }
+
+/** Keeps a workspace choice across rotation. */
+private val WorktreeChoiceSaver = listSaver<Ops.NewSessionWorktree?, String>(
+    save = { choice ->
+        when (choice) {
+            null -> emptyList()
+            Ops.NewSessionWorktree.New -> listOf("new")
+            is Ops.NewSessionWorktree.Existing -> listOf("existing", choice.path)
+            is Ops.NewSessionWorktree.Branch -> listOf("branch", choice.reference, choice.oid)
+            is Ops.NewSessionWorktree.PullRequest -> listOf("pull-request", choice.number.toString(), choice.oid)
+        }
+    },
+    restore = { saved ->
+        when (saved.firstOrNull()) {
+            "new" -> Ops.NewSessionWorktree.New
+            "existing" -> Ops.NewSessionWorktree.Existing(saved[1])
+            "branch" -> Ops.NewSessionWorktree.Branch(saved[1], saved[2])
+            "pull-request" -> Ops.NewSessionWorktree.PullRequest(saved[1].toLong(), saved[2])
+            else -> null
+        }
+    },
+)
 
 /** Branches and pull requests shown at once; the filter finds the rest. */
 private const val PLACE_LIMIT = 12
