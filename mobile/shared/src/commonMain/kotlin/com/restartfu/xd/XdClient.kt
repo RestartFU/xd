@@ -71,6 +71,8 @@ public class XdClient(
     private val _autoSettleSettings = MutableStateFlow<AutoSettleSettingsReply?>(null)
     /** Counts the host's auto-settle broadcasts, to tell whether one arrived during a request. */
     private val autoSettleBroadcasts = MutableStateFlow(0L)
+    /** Something has asked for the rules on this host, so a reconnect should read them again. */
+    private val autoSettleWanted = MutableStateFlow(false)
 
     /**
      * The host's auto-settle rules. Null until read, and again after
@@ -163,7 +165,7 @@ public class XdClient(
             actor.link.collect { value ->
                 if (value is Link.Up) {
                     // Broadcasts sent while disconnected were missed.
-                    if (_autoSettleSettings.value != null) rereadAutoSettle()
+                    if (autoSettleWanted.value) rereadAutoSettle()
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
                         entry.core.requestReload()
@@ -233,6 +235,7 @@ public class XdClient(
         visibleChat.value = null
         _sessionGeneration.update { it + 1 }
         _autoSettleSettings.value = null
+        autoSettleWanted.value = false
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -370,6 +373,7 @@ public class XdClient(
     }
 
     private suspend fun autoSettleCall(request: kotlinx.serialization.json.JsonObject) {
+        autoSettleWanted.value = true
         val generation = _sessionGeneration.value
         val broadcasts = autoSettleBroadcasts.value
         val value = actor.call(request)

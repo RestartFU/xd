@@ -905,8 +905,10 @@ class ChatViewModel(
         launchGuarded(_sending) { session.resumeTurn() }
     }
 
-    fun dropQueued(index: Int) {
+    fun dropQueued(index: Int, text: String) {
         val before = state.value.queue
+        // Another device may have changed the queue since this message was opened.
+        if (before.getOrNull(index) != text) return
         launchGuarded(_droppingQueued) {
             session.dropQueued(index)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {

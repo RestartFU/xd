@@ -492,7 +492,7 @@ private fun Composer(
             },
             onDrop = {
                 editing = null
-                model.dropQueued(index)
+                model.dropQueued(index, original)
             },
         )
     }

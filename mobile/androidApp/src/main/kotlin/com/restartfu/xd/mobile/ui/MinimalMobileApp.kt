@@ -1583,7 +1583,8 @@ private fun AutoSettleSettings(model: MainViewModel) {
             color = if (error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodySmall,
         )
-        if (error != null) TextButton(onClick = model::loadAutoSettle) { Text("Try again") }
+        // Also while reading: a read started by a broadcast fails quietly.
+        TextButton(onClick = model::loadAutoSettle) { Text("Try again") }
         return
     }
     SettingSwitch(
@@ -1600,7 +1601,16 @@ private fun AutoSettleSettings(model: MainViewModel) {
             model.setAutoSettle(afterDays = if (on) Ops.AfterDays.Days(DEFAULT_SETTLE_DAYS) else Ops.AfterDays.Off)
         },
     )
-    current.afterDays?.let { days ->
+    // Taps add up before the host answers, rather than each starting from the shown value.
+    var wantedDays by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(current.afterDays, error) {
+        if (error != null || current.afterDays == wantedDays) wantedDays = null
+    }
+    val setDays = { days: Int ->
+        wantedDays = days
+        model.setAutoSettle(afterDays = Ops.AfterDays.Days(days))
+    }
+    (if (current.afterDays != null) wantedDays ?: current.afterDays else null)?.let { days ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 8.dp)) {
                 Text("Days before auto-settle", fontWeight = FontWeight.SemiBold)
@@ -1611,12 +1621,12 @@ private fun AutoSettleSettings(model: MainViewModel) {
                 )
             }
             IconButton(
-                onClick = { model.setAutoSettle(afterDays = Ops.AfterDays.Days(days - 1)) },
+                onClick = { setDays(days - 1) },
                 enabled = days > 1,
             ) { Text("\u2212", style = MaterialTheme.typography.titleMedium) }
             Text(days.toString(), fontWeight = FontWeight.SemiBold, modifier = Modifier.widthIn(min = 24.dp))
             IconButton(
-                onClick = { model.setAutoSettle(afterDays = Ops.AfterDays.Days(days + 1)) },
+                onClick = { setDays(days + 1) },
                 enabled = days < 90,
             ) { Text("+", style = MaterialTheme.typography.titleMedium) }
         }
