@@ -1114,27 +1114,42 @@ struct WorkRun {
     start: usize,
     len: usize,
     position: usize,
+    /// Entries the log lists once identical neighbours merge, and which of
+    /// them this row belongs to.
+    entries: usize,
+    entry: usize,
+    /// Where this row's identical neighbours begin, and how many there are,
+    /// counting this row.
+    repeat_start: usize,
+    repeats: usize,
 }
 
 impl WorkRun {
-    /// Rows the collapsed log leaves out: everything but the newest steps.
-    /// The head row stays to carry the log's header.
-    fn hides(self, expanded: bool) -> bool {
-        !expanded
-            && self.len > WORK_LOG_VISIBLE
-            && self.position > 0
-            && self.position < self.len - WORK_LOG_VISIBLE
+    /// The newest of identical neighbours draws their entry, so the run's last
+    /// row always has one to close the frame around.
+    fn draws_entry(self) -> bool {
+        self.start + self.position + 1 == self.repeat_start + self.repeats
     }
 
-    fn head_shows_entry(self, expanded: bool) -> bool {
-        expanded || self.len <= WORK_LOG_VISIBLE
+    /// Entries the collapsed log leaves out: everything but the newest.
+    fn entry_is_collapsed(self, expanded: bool) -> bool {
+        !expanded && self.entry + WORK_LOG_VISIBLE < self.entries
+    }
+
+    /// Rows that draw nothing. The head row stays to carry the log's header.
+    fn hides(self, expanded: bool) -> bool {
+        self.position > 0 && !self.shows_entry(expanded)
+    }
+
+    fn shows_entry(self, expanded: bool) -> bool {
+        self.draws_entry() && !self.entry_is_collapsed(expanded)
     }
 
     fn hidden_count(self, expanded: bool) -> usize {
         if expanded {
             0
         } else {
-            self.len.saturating_sub(WORK_LOG_VISIBLE)
+            self.entries.saturating_sub(WORK_LOG_VISIBLE)
         }
     }
 }
@@ -1158,12 +1173,15 @@ struct TranscriptSnapshot {
     /// Agents still running, kept with the rows so a frame need not parse
     /// every record to find them.
     running_agents: Arc<Vec<RunningAgent>>,
+    /// Each row's place in its work log, kept with the rows so measuring a long
+    /// log need not compare its text again for every row.
+    work_runs: Arc<Vec<Option<WorkRun>>>,
 }
 
 impl TranscriptSnapshot {
     fn sync_messages(&mut self, model: &AppModel) {
         self.messages = Arc::new(model.messages.clone());
-        self.sync_running_agents();
+        self.sync_derived_rows();
     }
 
     /// Rows the list draws. The list's item count must always equal this,
@@ -1185,8 +1203,13 @@ impl TranscriptSnapshot {
             Arc::make_mut(&mut self.live_items)[index] = message;
             self.messages.len() + index
         };
-        self.sync_running_agents();
+        self.sync_derived_rows();
         Some(row)
+    }
+
+    fn sync_derived_rows(&mut self) {
+        self.sync_running_agents();
+        self.sync_work_runs();
     }
 
     fn sync_running_agents(&mut self) {
@@ -1223,33 +1246,56 @@ impl TranscriptSnapshot {
 
     fn sync_live_items(&mut self, model: &AppModel) {
         self.live_items = Arc::new(model.live_items.clone());
-        self.sync_running_agents();
+        self.sync_derived_rows();
     }
 
-    fn stacks_activity(&self, index: usize) -> bool {
-        self.get(index).is_some_and(|message| {
+    fn sync_work_runs(&mut self) {
+        let rows = self
+            .messages
+            .iter()
+            .chain(self.live_items.iter())
+            .collect::<Vec<_>>();
+        let stacks = |message: &Message| {
             message.role == "tool" && activity::is_plain_activity(&message.content)
-        })
+        };
+        let mut runs = vec![None; rows.len()];
+        let mut start = 0;
+        while start < rows.len() {
+            let mut end = start;
+            while end < rows.len() && stacks(rows[end]) {
+                end += 1;
+            }
+            if end - start > 1 {
+                // The whole text must match: rows that only look alike, such as
+                // long commands sharing a truncated start, open onto different
+                // details.
+                let entry_starts = (start..end)
+                    .filter(|&row| row == start || rows[row].content != rows[row - 1].content)
+                    .collect::<Vec<_>>();
+                for (entry, &repeat_start) in entry_starts.iter().enumerate() {
+                    let repeat_end = entry_starts.get(entry + 1).copied().unwrap_or(end);
+                    let repeats = &mut runs[repeat_start..repeat_end];
+                    for (offset, run) in repeats.iter_mut().enumerate() {
+                        *run = Some(WorkRun {
+                            start,
+                            len: end - start,
+                            position: repeat_start + offset - start,
+                            entries: entry_starts.len(),
+                            entry,
+                            repeat_start,
+                            repeats: repeat_end - repeat_start,
+                        });
+                    }
+                }
+            }
+            start = end.max(start + 1);
+        }
+        self.work_runs = Arc::new(runs);
     }
 
     /// The run of plain activity a row belongs to, when there is more than one.
     fn work_run(&self, index: usize) -> Option<WorkRun> {
-        if !self.stacks_activity(index) {
-            return None;
-        }
-        let mut start = index;
-        while start > 0 && self.stacks_activity(start - 1) {
-            start -= 1;
-        }
-        let mut end = index + 1;
-        while self.stacks_activity(end) {
-            end += 1;
-        }
-        (end - start > 1).then_some(WorkRun {
-            start,
-            len: end - start,
-            position: index - start,
-        })
+        self.work_runs.get(index).copied().flatten()
     }
 
     fn row_key(&self, index: usize) -> i64 {
@@ -11029,7 +11075,7 @@ impl XdDesktop {
                         .text_color(rgb(colors.faint))
                         .child(format!("Work log · {} steps", run.len)),
                 )
-                .when(run.len > WORK_LOG_VISIBLE, |header| {
+                .when(run.entries > WORK_LOG_VISIBLE, |header| {
                     header.child(
                         div()
                             .id(("work-log-toggle", index))
@@ -11053,7 +11099,7 @@ impl XdDesktop {
                     )
                 })
         });
-        let entry = (!head || run.head_shows_entry(log_expanded)).then(|| {
+        let entry = run.shows_entry(log_expanded).then(|| {
             div()
                 .id(("work-log-entry", index))
                 .w_full()
@@ -11082,7 +11128,6 @@ impl XdDesktop {
                 .child(
                     div()
                         .min_w_0()
-                        .flex_1()
                         .truncate()
                         .font_family(MONO)
                         .text_size(px(12.0))
@@ -11090,6 +11135,18 @@ impl XdDesktop {
                         .text_color(rgb(if failed { colors.danger } else { colors.muted }))
                         .child(card.name.clone()),
                 )
+                .when(run.repeats > 1, |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .line_height(px(20.0))
+                            .text_color(rgb(mark))
+                            .child(format!("×{}", run.repeats)),
+                    )
+                })
+                .child(div().flex_1())
                 .when(card.kind == ActivityKind::Running || failed, |row| {
                     row.child(
                         div()
@@ -12182,6 +12239,9 @@ impl XdDesktop {
                     if run.hides(log_expanded) {
                         return div().w_full().into_any_element();
                     }
+                    // Keyed by its oldest row, an entry stays open as repeats
+                    // of it arrive.
+                    let entry_key = messages.row_key(run.repeat_start);
                     return div()
                         .w_full()
                         .flex()
@@ -12191,10 +12251,10 @@ impl XdDesktop {
                             card,
                             run,
                             index,
-                            messages.row_key(index),
+                            entry_key,
                             log_key,
                             log_expanded,
-                            expanded_activities.contains(&messages.row_key(index)),
+                            expanded_activities.contains(&entry_key),
                         )))
                         .into_any_element();
                 }
@@ -16618,6 +16678,145 @@ mod tests {
         assert_eq!(snapshot.len(), 3);
         assert!(snapshot.running_agents.is_empty());
         assert_eq!(snapshot.replace_record(99, "x"), None);
+    }
+
+    fn work_log(rows: &[&str]) -> TranscriptSnapshot {
+        let mut model = AppModel::default();
+        model.messages = rows
+            .iter()
+            .enumerate()
+            .map(|(id, text)| Message::new(Some(id as i64), "tool", *text, None))
+            .collect();
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+        snapshot
+    }
+
+    /// The rows a work log draws an entry for, and the count each one shows.
+    fn drawn_entries(log: &TranscriptSnapshot, expanded: bool) -> Vec<(usize, usize)> {
+        (0..log.len())
+            .filter_map(|index| Some((index, log.work_run(index)?)))
+            .filter(|(_, run)| run.shows_entry(expanded))
+            .map(|(index, run)| (index, run.repeats))
+            .collect()
+    }
+
+    #[test]
+    fn identical_neighbours_in_a_work_log_merge_into_one_counted_entry() {
+        let log = work_log(&["Read a", "Read a", "Bash x", "Read a", "Read a", "Read a"]);
+        assert_eq!(drawn_entries(&log, false), [(1, 2), (2, 1), (5, 3)]);
+        // Only neighbours merge, so the later reads stay their own entry.
+        let head = log.work_run(0).unwrap();
+        assert_eq!((head.len, head.entries, head.repeat_start), (6, 3, 0));
+        assert!(!head.hides(false));
+        assert!(!head.shows_entry(false));
+        assert!(log.work_run(3).unwrap().hides(true));
+        assert!(log.work_run(4).unwrap().hides(true));
+        // An open entry keeps its key as newer repeats take over drawing it.
+        assert_eq!(log.work_run(5).unwrap().repeat_start, 3);
+
+        // The header still counts every step, even with one entry left.
+        let same = work_log(&["Read a", "Read a", "Read a"]);
+        assert_eq!(drawn_entries(&same, false), [(2, 3)]);
+        assert_eq!(same.work_run(2).unwrap().len, 3);
+        assert_eq!(same.work_run(0).unwrap().hidden_count(false), 0);
+    }
+
+    #[test]
+    fn work_log_follows_live_rows_and_breaks_at_other_rows() {
+        let mut model = AppModel::default();
+        model.messages = vec![
+            Message::new(Some(1), "tool", "Read a", None),
+            Message::new(Some(2), "tool", "Read a", None),
+            Message::new(Some(3), "assistant", "Read a", None),
+            Message::new(Some(4), "tool", "Read a", None),
+        ];
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+        assert_eq!(snapshot.work_run(1).map(|run| run.repeats), Some(2));
+        assert_eq!(snapshot.work_run(2), None);
+        // A lone row is not a log until another joins it.
+        assert_eq!(snapshot.work_run(3), None);
+
+        // A live row joins the stored run before it, across the seam.
+        model.live_items = vec![Message::new(None, "tool", "Read a", None)];
+        snapshot.sync_live_items(&model);
+        let tail = snapshot.work_run(4).unwrap();
+        assert_eq!((tail.start, tail.repeat_start, tail.repeats), (3, 3, 2));
+        assert!(!snapshot.work_run(3).unwrap().hides(false));
+        assert!(!snapshot.work_run(3).unwrap().shows_entry(false));
+        assert_eq!(snapshot.work_run(5), None);
+
+        // Clearing the live rows takes their place in the log with them.
+        model.live_items.clear();
+        snapshot.sync_live_items(&model);
+        assert_eq!(snapshot.work_run(3), None);
+        assert_eq!(snapshot.work_run(4), None);
+    }
+
+    #[test]
+    fn work_log_rows_that_only_look_alike_stay_apart() {
+        let long = "x".repeat(400);
+        let first = format!("{long} one");
+        let second = format!("{long} two");
+        let log = work_log(&[&first, &second, "Error", "Error", "Done"]);
+        let name = |row: usize| match log.get(row).and_then(Message::tool_view) {
+            Some(ToolView::Activity(card)) => card.name.clone(),
+            _ => panic!("row {row} is not an activity"),
+        };
+        assert_eq!(name(0), name(1));
+        assert_eq!(drawn_entries(&log, false), [(0, 1), (1, 1), (3, 2), (4, 1)]);
+    }
+
+    #[test]
+    fn collapsed_work_log_keeps_its_newest_entries_rather_than_rows() {
+        let log = work_log(&[
+            "Bash one",
+            "Bash two",
+            "Read remote",
+            "Read docs",
+            "Read main",
+            "Read main",
+            "Read settings",
+            "Bash three",
+            "Read main",
+            "Read main",
+            "Read main",
+            "Read main",
+            "Read main",
+            "Read main",
+        ]);
+        let head = log.work_run(0).unwrap();
+        assert_eq!((head.len, head.entries), (14, 8));
+        assert_eq!(head.hidden_count(false), 2);
+        assert_eq!(head.hidden_count(true), 0);
+        assert_eq!(
+            drawn_entries(&log, false),
+            [(2, 1), (3, 1), (5, 2), (6, 1), (7, 1), (13, 6)]
+        );
+        assert_eq!(
+            drawn_entries(&log, true),
+            [
+                (0, 1),
+                (1, 1),
+                (2, 1),
+                (3, 1),
+                (5, 2),
+                (6, 1),
+                (7, 1),
+                (13, 6)
+            ]
+        );
+        // The head row stays for the header, and the tail closes the frame.
+        assert!(!head.hides(false));
+        assert!(log.work_run(1).unwrap().hides(false));
+        assert!(!log.work_run(13).unwrap().hides(false));
+
+        // Six entries fit without a toggle, however many steps they hold.
+        let fits = work_log(&["a", "a", "a", "b", "c", "d", "e", "f", "f"]);
+        let head = fits.work_run(0).unwrap();
+        assert_eq!((head.len, head.entries), (9, 6));
+        assert_eq!(head.hidden_count(false), 0);
     }
 
     #[test]
