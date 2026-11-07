@@ -79,6 +79,9 @@ data class SettledNotice(
 /** The queue as a queued message was opened on, and the host's revision of it. */
 data class OpenedQueue(val messages: List<String>, val revision: Long?)
 
+/** A queued message open for editing: its place, its text, and the queue around it. */
+data class OpenedMessage(val index: Int, val text: String, val queue: OpenedQueue)
+
 data class CreatedDirectSession(
     val projectId: String,
     val chatId: String,
@@ -613,6 +616,24 @@ class ChatViewModel(
     private val _attachments = MutableStateFlow(emptyList<Attachment>())
     private val _attachmentError = MutableStateFlow<String?>(null)
     private val _queueNotice = MutableStateFlow<String?>(null)
+    private val _openQueued = MutableStateFlow<OpenedMessage?>(null)
+
+    /**
+     * The queued message being edited, with the queue it was opened on. Kept
+     * here, not in saved state: it survives rotation, and a long queue never
+     * has to fit in the activity's saved state.
+     */
+    val openQueued: StateFlow<OpenedMessage?> = _openQueued.asStateFlow()
+
+    fun openQueuedMessage(index: Int) {
+        val state = state.value
+        val text = state.queue.getOrNull(index) ?: return
+        _openQueued.value = OpenedMessage(index, text, OpenedQueue(state.queue, state.queueRevision))
+    }
+
+    fun closeQueuedMessage() {
+        _openQueued.value = null
+    }
 
     /** Why a queued-message action was not done, shown beside the queue. */
     val queueNotice: StateFlow<String?> = _queueNotice.asStateFlow()

@@ -175,7 +175,9 @@ internal fun MinimalMobileApp(
     var hiddenChatIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var mobileDestination by rememberSaveable { mutableStateOf(MobileDestination.PROJECTS) }
     var createChatIn by remember { mutableStateOf<MinimalSession?>(null) }
-    var renameChat by remember { mutableStateOf<ChatSummary?>(null) }
+    // Saved by id, so a chat rename survives rotating the phone.
+    var renameChatId by rememberSaveable { mutableStateOf<String?>(null) }
+    val renameChat = tree.chats.firstOrNull { it.id == renameChatId }
     var deleteChat by remember { mutableStateOf<ChatSummary?>(null) }
     val deleting by model.deletingChat.collectAsStateWithLifecycle()
     val renamingChats by model.renamingChat.collectAsStateWithLifecycle()
@@ -290,7 +292,7 @@ internal fun MinimalMobileApp(
                                     hiddenChatIds = hiddenChatIds + id
                                 },
                                 addTab = { addChat(activeSession) },
-                                renameChat = { renameChat = it },
+                                renameChat = { renameChatId = it.id },
                                 deleteChat = { deleteChat = it },
                                 session = activeSession,
                                 actions = sessionActions,
@@ -433,9 +435,9 @@ internal fun MinimalMobileApp(
             target = "chat:${chat.id}",
             initial = chat.title,
             busy = renamingChats,
-            onDismiss = { renameChat = null },
+            onDismiss = { renameChatId = null },
             onConfirm = { title ->
-                renameChat = null
+                renameChatId = null
                 if (title != chat.title) model.renameChat(chat.id, title)
             },
         )

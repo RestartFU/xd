@@ -444,7 +444,11 @@ public class XdClient(
                 return
             }
             // Otherwise the read that broadcast started decides the value.
-            if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
+            // Only an answer to a newer request than the one shown: an older
+            // reply arriving last must not bring back older rules.
+            if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value &&
+                call > autoSettleAppliedCall
+            ) {
                 _autoSettleSettings.value = rules
                 autoSettleAppliedCall = maxOf(autoSettleAppliedCall, call)
                 if (call > autoSettleFailedCall) {

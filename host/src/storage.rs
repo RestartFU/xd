@@ -781,7 +781,8 @@ impl StateStore {
             .query_row(
                 "SELECT folder_id, title, backend, workdir, model, effort, access, plan, fast, \
                  queued, new_worktree, host_working, draft, draft_attachments, \
-                 draft_revision, original_workdir, turn_resumable FROM chats WHERE id = ?",
+                 draft_revision, original_workdir, turn_resumable, queue_revision \
+                 FROM chats WHERE id = ?",
                 [chat_id],
                 |row| {
                     Ok((
@@ -802,6 +803,8 @@ impl StateStore {
                         row.get::<_, i64>(14)?,
                         row.get::<_, Option<String>>(15)?,
                         row.get::<_, bool>(16)?,
+                        // In the same statement as the queue, so the two agree.
+                        row.get::<_, i64>(17)?,
                     ))
                 },
             )
@@ -849,12 +852,6 @@ impl StateStore {
                         .as_deref()
                         .is_none_or(|selected| model.as_deref() == Some(selected))
             });
-        // Read under the same lock as the queue above, so the two agree.
-        let transaction_queue_revision: i64 = database.query_row(
-            "SELECT queue_revision FROM chats WHERE id = ?",
-            [chat_id],
-            |row| row.get(0),
-        )?;
         let mut response = json!({
             "ok": true,
             "title": row.1,
@@ -868,7 +865,7 @@ impl StateStore {
             "plan": row.7,
             "fast": row.2 == "codex" && row.8,
             "queue": queue,
-            "queue_revision": transaction_queue_revision,
+            "queue_revision": row.17,
             "draft": row.12,
             "draft_attachments": attachments,
             "draft_revision": row.14,
