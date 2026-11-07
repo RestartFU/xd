@@ -339,17 +339,30 @@ fn a_restart_continues_cut_off_turns_only_when_asked() {
 
     // A crash leaves the turn looking as if it were still running.
     let crashed = daemon.chat(&mut client);
-    assert_eq!(
-        client.call(json!({"op":"send", "chat":crashed, "text":"forever"}))["ok"],
-        true
-    );
+    let handled = daemon.chat(&mut client);
+    for chat in [&crashed, &handled] {
+        let reply = client.call(json!({"op":"send", "chat":chat, "text":"forever"}));
+        assert_eq!(reply["ok"], true, "{reply}");
+    }
+    let draft = client.call(json!({"op":"set-draft", "chat":crashed, "text":"unsent"}));
+    assert_eq!(draft["ok"], true, "{draft}");
     drop(client);
     daemon.child.kill().unwrap();
     daemon.child.wait().unwrap();
     daemon.restart();
     let mut client = daemon.client();
+    // Picked up by another client first, so it is not continued a second time.
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":handled, "text":"hello"}))["ok"],
+        true
+    );
     let reply = client.call(json!({"op":"resume-interrupted", "resume":true}));
     assert_eq!(reply["resumed"], json!([crashed]), "{reply}");
+    assert!(!continued(&mut client, &handled));
+    assert_eq!(
+        client.call(json!({"op":"chat", "chat":crashed}))["draft"],
+        "unsent"
+    );
     assert!(continued(&mut client, &crashed));
     let again = client.call(json!({"op":"resume-interrupted", "resume":true}));
     assert_eq!(again["resumed"], json!([]), "{again}");

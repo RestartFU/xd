@@ -3014,6 +3014,14 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// What the local host owes the app on every connection, whichever endpoint
+    /// is being viewed.
+    fn request_local_host_state(&self, host: &HostHandle) {
+        let _ = host.host_update("status");
+        let _ = host.agent_cli_updates("status", None);
+        let _ = host.resume_interrupted(self.settings.auto_resume_chats);
+    }
+
     fn handle_host_update(&mut self, update: HostUpdate, generation: u64, cx: &mut Context<Self>) {
         if generation != self.connection_generation {
             return;
@@ -3029,9 +3037,7 @@ impl XdDesktop {
                     if let Some(host) = &self.host {
                         let _ = host.tree();
                         let _ = host.agent_catalog();
-                        let _ = host.host_update("status");
-                        let _ = host.agent_cli_updates("status", None);
-                        let _ = host.resume_interrupted(self.settings.auto_resume_chats);
+                        self.request_local_host_state(host);
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
                             let _ = host.git_state(chat_id);
                         }
@@ -3129,7 +3135,7 @@ impl XdDesktop {
                 self.request_tree();
                 self.request_agent_catalog();
                 if let Some(host) = &self.host {
-                    let _ = host.host_update("status");
+                    self.request_local_host_state(host);
                 }
                 self.refresh_selected_chat_after_connect(cx);
             }

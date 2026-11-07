@@ -59,6 +59,7 @@ use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
 pub use self_update::installed_host_executable;
+pub use storage::ChatToResume;
 use storage::SendDisposition;
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
@@ -75,7 +76,7 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
-    chats_to_resume: Mutex<Vec<String>>,
+    chats_to_resume: Mutex<Vec<ChatToResume>>,
     cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
@@ -431,7 +432,7 @@ impl Engine {
 
     /// Chats this daemon found cut off when it started. They wait here for the
     /// desktop, which owns the setting that says whether to continue them.
-    pub fn remember_chats_to_resume(&self, chats: Vec<String>) {
+    pub fn remember_chats_to_resume(&self, chats: Vec<ChatToResume>) {
         if let Ok(mut remembered) = self.chats_to_resume.lock() {
             *remembered = chats;
         }
@@ -447,16 +448,21 @@ impl Engine {
             .unwrap_or_default();
         let mut resumed = Vec::new();
         if request.get("resume").and_then(Value::as_bool) == Some(true) {
-            for chat_id in chats {
-                let reply = self.send_message(
+            for ChatToResume {
+                chat_id,
+                last_message,
+            } in chats
+            {
+                let reply = self.send_message_inner(
                     &json!({"op": "send", "chat": chat_id, "text": storage::RESUME_PROMPT}),
+                    Some(last_message),
                 );
                 if reply["ok"] == true {
                     self.events
                         .publish(json!({"event": "changed", "chat": chat_id}));
                     resumed.push(chat_id);
                 } else {
-                    eprintln!("xd-host: cannot resume chat {chat_id}: {reply}");
+                    eprintln!("xd-host: not resuming chat {chat_id}: {reply}");
                 }
             }
         }
@@ -1222,6 +1228,10 @@ impl Engine {
     }
 
     fn send_message(&self, request: &Value) -> Value {
+        self.send_message_inner(request, None)
+    }
+
+    fn send_message_inner(&self, request: &Value, continues: Option<i64>) -> Value {
         let chat_id = match required_string(request, "chat", "send needs a chat id") {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
@@ -1255,7 +1265,11 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
-        match store.prepare_send(&request) {
+        let prepared = match continues {
+            Some(last_message) => store.prepare_continuation(&request, last_message),
+            None => store.prepare_send(&request),
+        };
+        match prepared {
             Ok(SendDisposition::Queued { reply, event }) => {
                 self.events.publish(event);
                 reply

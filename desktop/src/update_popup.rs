@@ -476,6 +476,64 @@ mod tests {
     }
 
     #[gpui::test]
+    fn connecting_asks_for_local_state_from_either_endpoint(cx: &mut gpui::TestAppContext) {
+        use std::{
+            io::{BufRead, BufReader},
+            os::unix::net::UnixListener,
+        };
+
+        let directory = std::env::temp_dir().join(format!(
+            "xd-local-state-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut seen = Vec::new();
+            for line in BufReader::new(stream).lines() {
+                let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+                match request["op"].as_str().unwrap() {
+                    "resume-interrupted" => seen.push(request["resume"].clone()),
+                    "agent-cli-updates" => seen.push(request["action"].clone()),
+                    _ => {}
+                }
+                if seen.len() == 4 {
+                    break;
+                }
+            }
+            seen
+        });
+        let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        let (host, updates) =
+            HostHandle::connect_io(stream.try_clone().unwrap(), stream, socket.clone());
+        let connected = updates.recv_blocking().unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.host = Some(host);
+            let generation = desktop.connection_generation;
+            desktop.settings.auto_resume_chats = true;
+            desktop.handle_host_update(connected.clone(), generation, cx);
+            desktop.settings.auto_resume_chats = false;
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.handle_host_update(connected, generation, cx);
+        });
+        assert_eq!(
+            server.join().unwrap(),
+            [
+                serde_json::json!("status"),
+                serde_json::json!(true),
+                serde_json::json!("status"),
+                serde_json::json!(false),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[gpui::test]
     fn updates_received_later_replace_the_listed_status(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
