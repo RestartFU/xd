@@ -81,6 +81,17 @@ public data class GitStatusReply(
             base.isNotEmpty() && branch != base && upstream.isNotEmpty() && ahead == 0
 }
 
+/**
+ * The pull request of [branch], as `git-state` answers it. The host drops the
+ * answer if HEAD moved during the lookup, so the link belongs to [branch].
+ * An empty [url] means there is none; a null one means GitHub could not say.
+ */
+@Serializable
+public data class PullRequestLookup(
+    val branch: String,
+    val url: String? = null,
+)
+
 /** The pull request of a chat's checked-out branch; an empty [url] means there is none. */
 @Serializable
 public data class PullRequestStatusReply(

@@ -24,6 +24,8 @@ public data class DiffPane(
     val git: GitStatusReply? = null,
     /** The branch's pull request, when it has one. */
     val pullRequestUrl: String? = null,
+    /** The branch [pullRequestUrl] was looked up for. */
+    val pullRequestBranch: String? = null,
     val committing: Boolean = false,
     val commitError: String? = null,
     /** The commit message being typed; kept here so a refresh cannot lose it. */
@@ -110,25 +112,33 @@ class DiffViewModel(
                 // commit box, and a checkout outside Git never had a status.
                 _state.value.git
             }
-            var shown = git
+            val branch = git?.branch
+            // The last link is kept only while it is this branch's and GitHub
+            // could not say otherwise.
+            val known = _state.value.pullRequestUrl.takeIf { _state.value.pullRequestBranch == branch }
             val pullRequest = if (git?.mayHavePullRequest == true) {
                 try {
-                    val url = session().pullRequestUrl()
-                    // The lookup asks about whatever is checked out when it runs;
-                    // if the branch moved meanwhile, the link is someone else's.
-                    val after = session().gitStatus()
-                    shown = after
-                    url.takeIf { after.branch == git.branch }
+                    // The answer names the branch it is for, so it is paired by
+                    // name rather than trusting the checkout to have held still.
+                    val lookup = session().pullRequest()
+                    val url = lookup?.url
+                    when {
+                        lookup == null || lookup.branch != branch -> null
+                        url == null -> known
+                        else -> url.ifBlank { null }
+                    }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
-                    null
+                    known
                 }
             } else {
                 null
             }
             // An older read finishing late must not replace a newer answer.
-            if (read == gitReads) _state.value = _state.value.copy(git = shown, pullRequestUrl = pullRequest)
+            if (read == gitReads) {
+                _state.value = _state.value.copy(git = git, pullRequestUrl = pullRequest, pullRequestBranch = branch)
+            }
         }
     }
 

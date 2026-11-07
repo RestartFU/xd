@@ -415,6 +415,18 @@ public object Ops {
 
     public fun gitPullRequestStatus(chatId: String): JsonObject = withChat("git-pr-status", chatId)
 
+    /**
+     * Asks for the checkout's Git state and its branch's pull request. The
+     * host acknowledges, then publishes a `git-state` event carrying [request].
+     */
+    public fun gitState(chatId: String, request: String): JsonObject = buildJsonObject {
+        require(request.isNotBlank()) { "A Git state request needs a correlation string" }
+        put("op", "git-state")
+        put("chat", chatId)
+        put("request", request)
+        put("pull_request", true)
+    }
+
     public fun newFolder(
         name: String,
         parentId: String? = null,

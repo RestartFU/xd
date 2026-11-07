@@ -1001,12 +1001,18 @@ class ChatViewModel(
         val read = ++pullRequestReads
         viewModelScope.launch {
             try {
-                // The lookup asks about whatever is checked out when it runs, so
-                // keep it only if the branch held still around it.
-                val before = session.gitStatus().branch
-                val url = session.pullRequestUrl()
-                val after = session.gitStatus().branch
-                if (read == pullRequestReads) _pullRequest.value = url.takeIf { before == after }
+                // The answer names its branch; one for another branch than the
+                // session's is not shown, and "GitHub could not say" keeps the
+                // last link rather than erasing it.
+                val lookup = session.pullRequest()
+                val url = lookup?.url
+                if (read == pullRequestReads) {
+                    when {
+                        lookup == null || lookup.branch != branch -> _pullRequest.value = null
+                        url == null -> Unit
+                        else -> _pullRequest.value = url.ifBlank { null }
+                    }
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {

@@ -18,7 +18,7 @@ import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.DiffReply
 import com.restartfu.xd.protocol.FileEntryReply
 import com.restartfu.xd.protocol.GitStatusReply
-import com.restartfu.xd.protocol.PullRequestStatusReply
+import com.restartfu.xd.protocol.PullRequestLookup
 import com.restartfu.xd.protocol.ImageReply
 import com.restartfu.xd.protocol.Limits
 import kotlin.io.encoding.Base64
@@ -48,6 +48,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -127,10 +131,11 @@ public class ChatSession internal constructor(
     public suspend fun commitAll(message: String): GitStatusReply =
         core.read(Ops.gitCommit(core.chatId, message)) { it.decodeReply<GitStatusReply>() }
 
-    /** The checked-out branch's pull request, or null when it has none. */
-    public suspend fun pullRequestUrl(): String? =
-        core.read(Ops.gitPullRequestStatus(core.chatId)) { it.decodeReply<PullRequestStatusReply>() }
-            .url.takeIf(String::isNotBlank)
+    /**
+     * The checked-out branch's pull request, tagged with that branch. Null
+     * outside a branch, or when HEAD moved while GitHub was asked.
+     */
+    public suspend fun pullRequest(): PullRequestLookup? = core.pullRequest()
 
     /** Continues the chat's cut-short turn; see [Ops.resumeTurn]. */
     public suspend fun resumeTurn(): Unit = core.call(Ops.resumeTurn(core.chatId))
@@ -438,6 +443,32 @@ internal class ChatSessionCore(
      * failed diff or directory listing is not a chat error and must not
      * surface as one.
      */
+    private var gitStateRequests = 0L
+
+    /**
+     * Sends `git-state` and waits for the event carrying its correlation
+     * string. Subscribed before sending, so the event cannot slip past.
+     */
+    suspend fun pullRequest(): PullRequestLookup? = coroutineScope {
+        ensureActive()
+        val token = "mobile-pr-$chatId-${++gitStateRequests}"
+        val answer = async(start = CoroutineStart.UNDISPATCHED) {
+            actor.events.first {
+                (it.value["event"] as? JsonPrimitive)?.contentOrNull == "git-state" &&
+                    (it.value["request"] as? JsonPrimitive)?.contentOrNull == token
+            }.value
+        }
+        try {
+            actor.decodeReply(actor.call(Ops.gitState(chatId, token))) { it }
+            val event = withTimeout(GIT_STATE_TIMEOUT_MILLIS) { answer.await() }
+            (event["pull_request"] as? JsonObject)?.let {
+                WireJson.decodeFromJsonElement(PullRequestLookup.serializer(), it)
+            }
+        } finally {
+            answer.cancel()
+        }
+    }
+
     suspend fun <T> read(
         request: JsonObject,
         decode: (JsonObject) -> T,
@@ -712,3 +743,6 @@ internal class ChatSessionCore(
         val input: TranscriptInput,
     )
 }
+
+/** GitHub can be slow; past this the header and Changes just keep what they showed. */
+private const val GIT_STATE_TIMEOUT_MILLIS = 60_000L
