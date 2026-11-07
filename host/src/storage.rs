@@ -1393,6 +1393,26 @@ impl StateStore {
         Ok((json!({"ok": true}), event))
     }
 
+    /// Waits until a chat with no model yet can resolve the assistant's default,
+    /// so that its turn does not run on the built-in one. Call this before taking
+    /// any lock another chat needs, since discovery can take seconds.
+    pub fn await_default_model(&self, chat_id: &str) -> Result<(), StorageError> {
+        let unset = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            database
+                .query_row(
+                    "SELECT backend FROM chats WHERE id = ? AND model IS NULL",
+                    [chat_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+        };
+        if let Some(backend) = unset {
+            crate::model_catalog::awaited_default_model(&backend);
+        }
+        Ok(())
+    }
+
     pub fn prepare_send(&self, request: &Value) -> Result<SendDisposition, StorageError> {
         let chat_id = required_string(
             request,
@@ -1523,7 +1543,7 @@ impl StateStore {
                     .then(|| chat_model.clone())
                     .flatten()
             })
-            .unwrap_or_else(|| default_model(&backend));
+            .unwrap_or_else(|| awaited_default_model(&backend));
         validate_model(&backend, &model)?;
         let effort = (backend == chat_backend)
             .then_some(chat_effort)
@@ -2427,7 +2447,7 @@ impl StateStore {
                     .then(|| chat_model.clone())
                     .flatten()
             })
-            .unwrap_or_else(|| default_model(&backend));
+            .unwrap_or_else(|| awaited_default_model(&backend));
         validate_model(&backend, &model)?;
         let effort = (backend == chat_backend)
             .then_some(chat_effort)
@@ -4504,6 +4524,13 @@ fn default_model(backend: &str) -> String {
         .unwrap_or_else(|| fallback_model(backend).into())
 }
 
+/// [`default_model`] for callers that hold no database lock and can wait.
+fn awaited_default_model(backend: &str) -> String {
+    crate::model_catalog::awaited_default_model(backend)
+        .map(|model| model.id)
+        .unwrap_or_else(|| fallback_model(backend).into())
+}
+
 fn fallback_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
@@ -4533,7 +4560,7 @@ fn default_effort(backend: &str, model: Option<&str>) -> String {
 ///
 /// This runs with the database locked, so it only reads the discovery cache. A
 /// model stays unset if nothing is cached yet: clients then show the default from
-/// the catalog, and the turn resolves it once discovery has finished.
+/// the catalog, and sending waits for discovery in `await_default_model`.
 fn new_chat_model_and_effort(
     transaction: &rusqlite::Transaction<'_>,
     backend: &str,

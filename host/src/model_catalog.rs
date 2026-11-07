@@ -66,6 +66,13 @@ pub(crate) fn cached_default_model(backend: &str) -> Option<Model> {
         .find(|model| model.is_default)
 }
 
+/// Like [`cached_default_model`], but waits for discovery when nothing is cached.
+/// A probe can take seconds, so never call this with the database locked.
+pub(crate) fn awaited_default_model(backend: &str) -> Option<Model> {
+    cached_default_model(backend)
+        .or_else(|| models(backend).into_iter().find(|model| model.is_default))
+}
+
 /// Discovers without blocking the caller, for when only the cache may be read.
 pub(crate) fn refresh_in_background(backend: &str) {
     if cfg!(test) {

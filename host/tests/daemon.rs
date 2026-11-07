@@ -37,6 +37,9 @@ for line in sys.stdin:
         log.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv, 'home': os.environ.get('CODEX_HOME'), 'frame': frame}) + '\n')
     method = frame.get('method')
     if method == 'initialize': print(json.dumps({'id':1,'result':{}}), flush=True)
+    elif method == 'model/list':
+        time.sleep(0.3)
+        print(json.dumps({'id':2,'result':{'data':[{'model':'cli-default','isDefault':True,'defaultReasoningEffort':'low'}]}}), flush=True)
     elif method in ('thread/start','thread/resume'): print(json.dumps({'id':2,'result':{'thread':{'id':'thread-test'}}}), flush=True)
     elif method == 'turn/start':
         print(json.dumps({'id':3,'result':{'turn':{'id':'turn-test'}}}), flush=True)
@@ -387,6 +390,28 @@ fn installed_cli_reuses_sessions_and_resumes_after_process_loss() {
             .iter()
             .any(|arg| arg == "service_tier=\"priority\"")
     );
+}
+
+#[test]
+fn a_first_turn_waits_for_the_default_the_assistant_reports() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    // Nothing has been discovered yet, and the send races the probe this starts.
+    let chat = daemon.chat(&mut client);
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"hello"}))["ok"],
+        true
+    );
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let requests = fs::read_to_string(daemon.root.join("codex.requests")).unwrap();
+    let thread = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|frame| frame["frame"]["method"] == "thread/start")
+        .unwrap();
+    assert_eq!(thread["frame"]["params"]["model"], "cli-default");
 }
 
 #[test]
