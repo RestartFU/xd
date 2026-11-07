@@ -30,8 +30,8 @@ use gpui::{
     ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render, ResizeEdge,
     ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer, TitlebarOptions,
     WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*, px, rgb, rgba,
-    size, svg,
+    WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*, px, relative, rgb,
+    rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -149,6 +149,7 @@ const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
 const BROWSER_ICON: &str = "icons/browser.svg";
 const TERMINAL_ICON: &str = "icons/terminal.svg";
+const SETTINGS_ICON: &str = "icons/settings.svg";
 const DOWNLOAD_ICON: &str = "icons/download.svg";
 const SEARCH_ICON: &str = "icons/search.svg";
 const MINIMIZE_ICON: &str = "icons/minimize.svg";
@@ -167,7 +168,7 @@ const CATALOG_MIN_WIDTH: f32 = 220.0;
 /// Widest the catalog sidebar can be dragged.
 const CATALOG_MAX_WIDTH: f32 = 480.0;
 /// Narrower than this, the catalog footer's Update button shows only its icon
-/// so Settings stays inside the catalog.
+/// so the settle notice beside it keeps its room.
 const CATALOG_UPDATE_LABEL_MIN_WIDTH: f32 = 256.0;
 /// Width the catalog always leaves for the session beside it.
 const CATALOG_SESSION_MIN_WIDTH: f32 = 384.0;
@@ -612,6 +613,15 @@ gpui::actions!(xd, [CloseSearch, CopyRenderedSelection, ToggleUsage]);
 #[action(namespace = xd, no_json)]
 struct OpenBrowserUrl {
     url: String,
+    window: gpui::AnyWindowHandle,
+}
+
+/// A transcript image was clicked. Routed by window, like a link click, for the
+/// same reason: it can arrive with nothing focused.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct OpenMessageImage {
+    path: String,
     window: gpui::AnyWindowHandle,
 }
 
@@ -1299,6 +1309,8 @@ type MessageImages = HashMap<String, MessageImageState>;
 /// The tallest an image is drawn in a transcript, so a long screenshot cannot
 /// push the rest of the turn out of view.
 const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
+/// What the image viewer leaves around an image, showing the window it is over.
+const IMAGE_VIEWER_MARGIN: f32 = 32.0;
 
 /// How much memory images in a chat may hold. Scrolling through a long chat
 /// should not keep every image it passes.
@@ -1888,6 +1900,9 @@ struct XdDesktop {
     /// Pixels of closed chats' images that have not been let go of yet, which
     /// count against the budget until they are.
     message_images_closing: usize,
+    /// The path of the open chat's image shown over the window, which stays in
+    /// `message_images` while it is open. A draft's images have `image_preview`.
+    image_viewer: Option<String>,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
@@ -1918,6 +1933,24 @@ impl XdDesktop {
                 let _ = browser_window.update(cx, |_, window, cx| {
                     let _ = desktop.update(cx, |desktop, cx| {
                         desktop.open_browser_url(&url, window, cx);
+                    });
+                });
+            });
+        });
+        let desktop = cx.weak_entity();
+        let app: &mut App = cx;
+        app.on_action(move |action: &OpenMessageImage, cx| {
+            if action.window != browser_window || desktop.upgrade().is_none() {
+                cx.propagate();
+                return;
+            }
+            let desktop = desktop.clone();
+            let path = action.path.clone();
+            // Action dispatch already borrows the window; update after it ends.
+            cx.defer(move |cx| {
+                let _ = browser_window.update(cx, |_, window, cx| {
+                    let _ = desktop.update(cx, |desktop, cx| {
+                        desktop.open_image_viewer(path, window, cx);
                     });
                 });
             });
@@ -2437,6 +2470,7 @@ impl XdDesktop {
             message_image_fetching: None,
             message_image_decoding: false,
             message_images_closing: 0,
+            image_viewer: None,
             owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
@@ -5868,6 +5902,7 @@ impl XdDesktop {
 
     fn browser_occluded_by_popup(&self) -> bool {
         self.image_preview.is_some()
+            || self.image_viewer.is_some()
             || self.auth_open
             || self.update_popup_open
             || self.usage_open
@@ -5912,6 +5947,19 @@ impl XdDesktop {
         } else {
             window.blur();
         }
+    }
+
+    fn open_image_viewer(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        // It may have gone in the moment since the click.
+        if !matches!(
+            self.message_images.get(&path),
+            Some(MessageImageState::Ready(_))
+        ) {
+            return;
+        }
+        self.image_viewer = Some(path);
+        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        cx.notify();
     }
 
     fn begin_workspace_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -8730,12 +8778,19 @@ impl XdDesktop {
     /// Lets go of images past the budget. Scrolling away from images is what
     /// makes them eligible, so this runs after frames as well as new arrivals.
     fn evict_message_images(&mut self, cx: &mut Context<Self>) {
+        let viewed = self.image_viewer.as_ref();
         let held = self
             .message_images
             .iter()
             .filter_map(|(path, state)| match state {
                 MessageImageState::Ready(ready) => {
-                    Some((path.clone(), ready.image.bytes(), ready.drawn.get()))
+                    // The viewer draws it wherever the transcript has scrolled to.
+                    let drawn = if viewed == Some(path) {
+                        u64::MAX
+                    } else {
+                        ready.drawn.get()
+                    };
+                    Some((path.clone(), ready.image.bytes(), drawn))
                 }
                 _ => None,
             })
@@ -8771,6 +8826,7 @@ impl XdDesktop {
     /// Until then they count against the budget, and a chat opened meanwhile
     /// loads only what fits alongside them.
     fn forget_message_images(&mut self, cx: &mut Context<Self>) {
+        self.image_viewer = None;
         self.message_image_queue.clear();
         self.message_image_fetching = None;
         let images = std::mem::take(&mut self.message_images);
@@ -10442,6 +10498,8 @@ impl XdDesktop {
                 16.0
             }))
             .bg(rgb(colors.chrome))
+            .border_b_1()
+            .border_color(rgb(colors.border))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
@@ -11238,9 +11296,11 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    /// The Settled shelf below the projects: collapsed by default, with only
-    /// the open session still listed then, so the sidebar always shows where
-    /// you are. Finding opens it, so a match cannot hide inside it.
+    /// The Settled shelf, pinned between the projects and the footer: collapsed
+    /// by default, with only the open session still listed then, so the sidebar
+    /// always shows where you are. Finding opens it, so a match cannot hide
+    /// inside it. Opened, it grows upward to half the sidebar and scrolls past
+    /// that, so the projects above it stay reachable.
     fn render_settled_shelf(
         &mut self,
         colors: ThemeColors,
@@ -11286,8 +11346,11 @@ impl XdDesktop {
         Some(
             div()
                 .id("minimal-settled-shelf")
+                .debug_selector(|| "catalog-settled-shelf".into())
                 .w_full()
-                .mt(px(6.0))
+                .flex_none()
+                .max_h(relative(0.5))
+                .px(px(8.0))
                 .flex()
                 .flex_col()
                 .child(
@@ -11295,6 +11358,7 @@ impl XdDesktop {
                         .id("minimal-settled-header")
                         .h(px(30.0))
                         .w_full()
+                        .flex_none()
                         .pl(px(4.0))
                         .pr(px(2.0))
                         .flex()
@@ -11337,37 +11401,49 @@ impl XdDesktop {
                                 .child(count.to_string()),
                         ),
                 )
-                .child(
-                    div()
-                        .mt(px(1.0))
-                        .mb(px(6.0))
-                        .pl(px(12.0))
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .children(rows)
-                        .when(open && hidden > 0, |list| {
-                            list.child(
+                .when(!rows.is_empty(), |shelf| {
+                    shelf.child(
+                        div()
+                            .id("minimal-settled-list")
+                            .debug_selector(|| "catalog-settled-list".into())
+                            .w_full()
+                            .min_h_0()
+                            .mt(px(1.0))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .child(
                                 div()
-                                    .id("minimal-settled-more")
-                                    .h(px(CARD_HEIGHT))
-                                    .pl(px(10.0))
+                                    .w_full()
+                                    .flex_none()
+                                    .pl(px(12.0))
                                     .flex()
-                                    .items_center()
-                                    .rounded(px(7.0))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(colors.faint))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settled_visible += SETTLED_MORE_ROWS;
-                                        cx.notify();
-                                    }))
-                                    .child("Show more"),
-                            )
-                        }),
-                )
+                                    .flex_col()
+                                    .gap(px(1.0))
+                                    .children(rows)
+                                    .when(open && hidden > 0, |list| {
+                                        list.child(
+                                            div()
+                                                .id("minimal-settled-more")
+                                                .h(px(CARD_HEIGHT))
+                                                .pl(px(10.0))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(7.0))
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(colors.faint))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.settled_visible += SETTLED_MORE_ROWS;
+                                                    cx.notify();
+                                                }))
+                                                .child("Show more"),
+                                        )
+                                    }),
+                            ),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -11686,7 +11762,6 @@ impl XdDesktop {
                     .flex_col()
                     .gap(px(1.0))
                     .children(drawers)
-                    .children(settled_shelf)
                     .when(projects.is_empty(), |list| {
                         list.child(
                             div()
@@ -11714,14 +11789,66 @@ impl XdDesktop {
                         )
                     }),
             )
+            .children(settled_shelf)
             .child(
                 div()
+                    .id("minimal-catalog-footer")
+                    .debug_selector(|| "catalog-footer".into())
                     .flex_none()
-                    .px_3()
-                    .py(px(10.0))
+                    .pl(px(8.0))
+                    .pr_3()
+                    .pt(px(2.0))
+                    .pb(px(10.0))
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(
+                                pane_icon_button(
+                                    "minimal-terminal-tab",
+                                    "Terminal",
+                                    TERMINAL_ICON,
+                                    terminal_active,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.show_minimal_terminal(window, cx),
+                                )),
+                            )
+                            .child(
+                                pane_icon_button(
+                                    "minimal-theme",
+                                    "Settings",
+                                    SETTINGS_ICON,
+                                    settings_open,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.toggle_minimal_theme_popup(window, cx)
+                                    },
+                                )),
+                            )
+                            .child(
+                                pane_icon_button(
+                                    "minimal-usage",
+                                    "Usage",
+                                    USAGE_ICON,
+                                    self.usage_open,
+                                    colors,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.toggle_usage(window, cx)
+                                    }),
+                                ),
+                            ),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -11762,51 +11889,7 @@ impl XdDesktop {
                                     this.open_update_popup(window, cx)
                                 })),
                         )
-                    })
-                    .child(
-                        ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
-                            .when(terminal_active, |button| {
-                                button
-                                    .bg(rgb(colors.selected_surface))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .child(icon(
-                                TERMINAL_ICON,
-                                15.0,
-                                if terminal_active {
-                                    colors.text
-                                } else {
-                                    colors.muted
-                                },
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_minimal_terminal(window, cx)
-                            })),
-                    )
-                    .child(
-                        ui_button("minimal-theme", ButtonKind::Ghost, colors)
-                            .when(settings_open, |button| {
-                                button
-                                    .bg(rgb(colors.selected_surface))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .child("Settings")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_minimal_theme_popup(window, cx)
-                            })),
-                    )
-                    .child(
-                        pane_icon_button(
-                            "minimal-usage",
-                            "Usage",
-                            USAGE_ICON,
-                            self.usage_open,
-                            colors,
-                        )
-                        .w(px(30.0))
-                        .h(px(30.0))
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_usage(window, cx))),
-                    ),
+                    }),
             )
             .into_any_element()
     }
@@ -11967,6 +12050,7 @@ impl XdDesktop {
     fn render_message_image(
         colors: ThemeColors,
         path: &str,
+        index: usize,
         images: &MessageImages,
         max_width: f32,
     ) -> gpui::AnyElement {
@@ -11987,6 +12071,7 @@ impl XdDesktop {
         match images.get(path) {
             Some(MessageImageState::Ready(ready)) => {
                 let (width, height) = ready.image.fitted(max_width, MESSAGE_IMAGE_MAX_HEIGHT);
+                let path = path.to_owned();
                 // Out of flow, so the image gives its row no intrinsic width. When
                 // a card's narrowest possible width equals its real width, layout
                 // reuses the measurement made at the narrowest, where every line
@@ -11998,12 +12083,23 @@ impl XdDesktop {
                     .h(px(height))
                     .child(
                         img(ready.image.image.clone())
+                            .id(("message-image", index))
                             .absolute()
                             .top_0()
                             .left_0()
                             .w(px(width))
                             .h(px(height))
-                            .rounded(px(8.0)),
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(OpenMessageImage {
+                                        path: path.clone(),
+                                        window: window.window_handle(),
+                                    }),
+                                    cx,
+                                );
+                            }),
                     )
                     .into_any_element()
             }
@@ -12023,7 +12119,7 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         match block {
             markdown::Block::Image(path) => {
-                Self::render_message_image(colors, path, images, image_width)
+                Self::render_message_image(colors, path, index, images, image_width)
             }
             markdown::Block::Heading { level, content } => div()
                 .id(("native-heading", index))
@@ -13114,7 +13210,17 @@ impl XdDesktop {
             .children(
                 attached
                     .iter()
-                    .map(|path| Self::render_message_image(colors, path, images, image_width))
+                    .enumerate()
+                    .map(|(attached_index, path)| {
+                        Self::render_message_image(
+                            colors,
+                            path,
+                            scoped_element_id(&block_scope, markdown.blocks.len() + attached_index)
+                                as usize,
+                            images,
+                            image_width,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             );
         // Prose sits on the page; only what the user wrote and host errors are
@@ -16653,6 +16759,42 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
+        let viewport = window.viewport_size();
+        let image_viewer_overlay = self.image_viewer.as_ref().and_then(|path| {
+            let image = match self.message_images.get(path) {
+                Some(MessageImageState::Ready(ready)) => img(ready.image.image.clone()),
+                _ => return None,
+            };
+            Some(
+                div()
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .track_focus(&minimal_popup_focus)
+                    .bg(rgba(colors.backdrop))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.image_viewer = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        // In exact pixels: an image lays itself out by its own
+                        // proportions, which outvote a percentage and overflow.
+                        image
+                            .debug_selector(|| "image-viewer-image".into())
+                            .w(viewport.width - px(IMAGE_VIEWER_MARGIN * 2.0))
+                            .h(viewport.height - px(IMAGE_VIEWER_MARGIN * 2.0))
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
+                    .into_any_element(),
+            )
+        });
         let error_banner = self.model.connection_error.clone().map(|error| {
             div()
                 .absolute()
@@ -16800,6 +16942,10 @@ impl XdDesktop {
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
                 if this.image_preview.is_some() {
                     this.close_image_preview(window, cx);
+                    return;
+                }
+                if this.image_viewer.take().is_some() {
+                    cx.notify();
                     return;
                 }
                 if this.dismiss_usage_layer(window, cx) {
@@ -16969,6 +17115,7 @@ impl XdDesktop {
             .when_some(chat_delete_overlay, |root, overlay| root.child(overlay))
             .when_some(chat_overlay, |root, overlay| root.child(overlay))
             .when_some(image_preview_overlay, |root, overlay| root.child(overlay))
+            .when_some(image_viewer_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
             .when(!minimal_popup_open, |root| {
                 root.child(
@@ -17281,6 +17428,9 @@ impl AssetSource for EmbeddedIcons {
             )),
             USAGE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/chart-no-axes-column.svg").as_slice(),
+            )),
+            SETTINGS_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/settings.svg").as_slice(),
             )),
             GAUGE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/gauge.svg").as_slice(),
@@ -18543,13 +18693,9 @@ mod tests {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.run_until_parked();
 
-        // The catalog footer holds Terminal, Settings, and Usage.
+        // The catalog footer holds Terminal, Settings, and Usage, from the left.
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
-        let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
-        cx.simulate_click(
-            point(px(catalog_width - 88.0), footer_y),
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_click(point(px(52.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
 
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
@@ -18565,11 +18711,7 @@ mod tests {
         cx.run_until_parked();
 
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
-        let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
-        cx.simulate_click(
-            point(px(catalog_width - 23.0), footer_y),
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_click(point(px(82.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
         // A press on the page stays on it; one on the backdrop dismisses it.
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
@@ -19201,7 +19343,8 @@ mod tests {
                 "let chat_delete_overlay =",
             ),
             ("let chat_delete_overlay =", "let chat_overlay ="),
-            ("let chat_overlay =", "let error_banner ="),
+            ("let chat_overlay =", "let image_viewer_overlay ="),
+            ("let image_viewer_overlay =", "let error_banner ="),
         ];
 
         for (start, end) in overlays {
@@ -19667,15 +19810,68 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // The left of Settings, which an overflowing footer pushes aside.
-        let settings = cx.update(|window, _| {
-            point(
-                px(CATALOG_MIN_WIDTH - 80.0),
-                window.viewport_size().height - px(26.0),
-            )
-        });
+        // Settings stays where it always is, and Update fits inside the catalog.
+        let settings =
+            cx.update(|window, _| point(px(52.0), window.viewport_size().height - px(26.0)));
         cx.simulate_click(settings, gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
+        let footer = cx.debug_bounds("catalog-footer").unwrap();
+        assert!(footer.right() <= px(CATALOG_MIN_WIDTH));
+    }
+
+    #[gpui::test]
+    fn the_settled_shelf_sits_on_the_footer_and_scrolls_once_open(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.folders = vec![Folder {
+                id: "project".into(),
+                name: "project".into(),
+                parent: None,
+                owner: None,
+            }];
+            desktop.model.chats = (0..60)
+                .map(|index| ChatSummary {
+                    id: format!("settled-{index}"),
+                    folder: "project".into(),
+                    title: Some(format!("Settled {index}")),
+                    backend: "codex".into(),
+                    branch: None,
+                    working: false,
+                    terminal_working: false,
+                    settled_at: Some(index),
+                    auto_settle_disabled: false,
+                })
+                .collect();
+            desktop.settled_visible = 60;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let shelf = cx.debug_bounds("catalog-settled-shelf").unwrap();
+        let footer = cx.debug_bounds("catalog-footer").unwrap();
+        assert_eq!(shelf.bottom(), footer.top());
+        assert_eq!(shelf.size.height, px(30.0));
+        assert!(cx.debug_bounds("catalog-settled-list").is_none());
+
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.settled_shelf_expanded = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Sixty rows would run off the window; the shelf stops at half the
+        // sidebar and scrolls them, with the footer still in place below it.
+        let shelf = cx.debug_bounds("catalog-settled-shelf").unwrap();
+        let list = cx.debug_bounds("catalog-settled-list").unwrap();
+        let footer = cx.debug_bounds("catalog-footer").unwrap();
+        let height = cx.update(|window, _| window.viewport_size().height);
+        assert_eq!(footer.bottom(), height);
+        assert_eq!(shelf.bottom(), footer.top());
+        assert_eq!(list.bottom(), shelf.bottom());
+        assert!(list.size.height > px(CARD_HEIGHT));
+        assert!(shelf.size.height <= height * 0.5);
     }
 
     #[gpui::test]
@@ -19918,6 +20114,207 @@ mod tests {
             );
             assert!(desktop.browser_panes.contains_key(&remote_key));
             assert!(desktop.settings.browser_sessions.contains_key(&remote_key));
+        });
+    }
+
+    fn ready_message_image(drawn: u64) -> MessageImageState {
+        MessageImageState::Ready(ReadyImage {
+            image: MessageImage {
+                image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                    image::RgbaImage::new(1, 1),
+                )])),
+                width: 1,
+                height: 1,
+            },
+            drawn: Rc::new(Cell::new(drawn)),
+        })
+    }
+
+    #[gpui::test]
+    fn clicking_a_drawn_image_asks_for_it_by_path(cx: &mut gpui::TestAppContext) {
+        struct Reply {
+            message: Message,
+            images: MessageImages,
+            opened: Option<String>,
+        }
+        impl Render for Reply {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(720.0)).child(XdDesktop::render_native_message(
+                    ThemePreset::default().colors(),
+                    &self.message,
+                    None,
+                    None,
+                    0,
+                    false,
+                    &self.images,
+                    720.0,
+                ))
+            }
+        }
+
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.weak_entity();
+            let target = window.window_handle();
+            let app: &mut App = cx;
+            app.on_action(move |action: &OpenMessageImage, cx| {
+                if action.window != target {
+                    cx.propagate();
+                    return;
+                }
+                let _ = view.update(cx, |view: &mut Reply, cx| {
+                    view.opened = Some(action.path.clone());
+                    cx.notify();
+                });
+            });
+            Reply {
+                message: Message::new(Some(1), "assistant", "[image: /kept/a.png]", None),
+                images: MessageImages::from([(
+                    "/kept/a.png".to_owned(),
+                    MessageImageState::Ready(ReadyImage {
+                        image: MessageImage {
+                            image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                                image::RgbaImage::new(1, 1),
+                            )])),
+                            width: 200,
+                            height: 200,
+                        },
+                        drawn: Rc::default(),
+                    }),
+                )]),
+                opened: None,
+            }
+        });
+        cx.run_until_parked();
+
+        // Past the picture, its row is empty, and clicking there opens nothing.
+        cx.simulate_click(point(px(600.0), px(100.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| view.read(cx).opened.clone()), None);
+
+        cx.simulate_click(point(px(100.0), px(100.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).opened.clone()).as_deref(),
+            Some("/kept/a.png")
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_a_transcript_image_opens_it_and_a_click_closes_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let target = cx.update(|window, _| window.window_handle());
+        desktop.update(cx, |desktop, _| {
+            Arc::make_mut(&mut desktop.message_images)
+                .insert("/kept/a.png".to_owned(), ready_message_image(0));
+        });
+
+        cx.dispatch_action(OpenMessageImage {
+            path: "/kept/a.png".into(),
+            window: target,
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(desktop.image_viewer.as_deref(), Some("/kept/a.png"));
+            assert!(desktop.minimal_popup_is_open());
+            assert!(desktop.browser_occluded_by_popup());
+        });
+
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.image_viewer.is_none());
+            assert!(!desktop.minimal_popup_is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn the_image_viewer_fits_an_image_inside_the_window(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        // Proportioned differently from the window, so either side could overflow.
+        for (width, height) in [(1200, 800), (800, 1200), (4000, 100)] {
+            cx.update_window_entity(&desktop, |desktop, window, cx| {
+                Arc::make_mut(&mut desktop.message_images).insert(
+                    "/kept/a.png".to_owned(),
+                    MessageImageState::Ready(ReadyImage {
+                        image: MessageImage {
+                            image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                                image::RgbaImage::new(width, height),
+                            )])),
+                            width,
+                            height,
+                        },
+                        drawn: Rc::default(),
+                    }),
+                );
+                desktop.open_image_viewer("/kept/a.png".into(), window, cx);
+            });
+            cx.run_until_parked();
+            let viewport = cx.update(|window, _| window.viewport_size());
+            let bounds = cx
+                .debug_bounds("image-viewer-image")
+                .expect("the open image");
+            assert_eq!(
+                bounds.size,
+                size(
+                    viewport.width - px(IMAGE_VIEWER_MARGIN * 2.0),
+                    viewport.height - px(IMAGE_VIEWER_MARGIN * 2.0),
+                ),
+                "{width}x{height}"
+            );
+            assert_eq!(
+                bounds.origin,
+                point(px(IMAGE_VIEWER_MARGIN), px(IMAGE_VIEWER_MARGIN))
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_image_viewer_before_anything_under_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.auth_open = true;
+            Arc::make_mut(&mut desktop.message_images)
+                .insert("/kept/a.png".to_owned(), ready_message_image(0));
+            desktop.open_image_viewer("/kept/a.png".into(), window, cx);
+            assert!(desktop.minimal_popup_focus.is_focused(window));
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(CloseSearch);
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.image_viewer.is_none());
+            assert!(desktop.auth_open, "only the viewer closes");
+        });
+    }
+
+    #[gpui::test]
+    fn an_image_that_is_not_ready_does_not_open(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_image_viewer("/gone.png".into(), window, cx);
+            assert!(desktop.image_viewer.is_none());
+            assert!(!desktop.minimal_popup_is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn the_viewed_image_outlives_eviction_and_leaves_with_its_chat(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.message_image_frame = 5;
+            desktop.message_images_closing = MESSAGE_IMAGE_BUDGET;
+            Arc::make_mut(&mut desktop.message_images).extend([
+                ("/viewed".to_owned(), ready_message_image(1)),
+                ("/scrolled-away".to_owned(), ready_message_image(4)),
+            ]);
+            desktop.open_image_viewer("/viewed".into(), window, cx);
+
+            desktop.evict_message_images(cx);
+            assert!(desktop.message_images.contains_key("/viewed"));
+            assert!(!desktop.message_images.contains_key("/scrolled-away"));
+
+            desktop.forget_message_images(cx);
+            assert!(desktop.image_viewer.is_none());
         });
     }
 
