@@ -4193,9 +4193,10 @@ impl StateStore {
             return Ok(AutoDeletion::Changed);
         }
         let known = KnownWorktrees::read(&transaction, &candidate.session)?;
+        let chats = plan.chats.iter().map(String::as_str).collect::<Vec<_>>();
         let mut worktrees = Vec::new();
         for worktree in plan.worktrees {
-            if known.in_use(&worktree.path) {
+            if known.in_use(&worktree.path) || !known.owns(&worktree.path, &chats) {
                 continue;
             }
             if let Err(reason) = removable_worktree(&worktree.path)? {
@@ -5529,6 +5530,20 @@ impl KnownWorktrees {
             .into_iter()
             .map(|workdir| PathBuf::from(normalize_existing_path(Path::new(&workdir))))
             .collect(),
+        })
+    }
+
+    /// Whether the worktree at `path` is one xd generated and still a linked
+    /// worktree of its repository, on the branch xd recorded for it.
+    fn owns(&self, path: &Path, chats: &[&str]) -> bool {
+        let Some(recorded) = self.generated.get(path) else {
+            return false;
+        };
+        list_git_worktrees(path).is_ok_and(|worktrees| {
+            worktrees.iter().skip(1).any(|worktree| {
+                Path::new(&normalize_existing_path(&worktree.path)) == path
+                    && still_generated(recorded, worktree.branch.as_deref(), chats)
+            })
         })
     }
 

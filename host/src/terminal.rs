@@ -473,14 +473,15 @@ impl TerminalManager {
         {
             return false;
         }
-        drop(marking);
         for writer in &mut writers {
             writer.take();
         }
         drop(writers);
-        for session in sessions {
-            close_session(&session, &self.sessions, &self.events);
+        for session in &sessions {
+            close_session(session, &self.sessions, &self.events);
         }
+        // Output marked from here on belongs to a closed terminal.
+        drop(marking);
         true
     }
 
@@ -867,6 +868,12 @@ fn close_session(
         if !session.begin_close_state() {
             false
         } else {
+            // Before it leaves the open terminals, so its use is never in neither.
+            if let Ok(mut usage) = session.activity.closed_usage.lock() {
+                let used = session.last_used.load(Ordering::Acquire);
+                let entry = usage.entry(session.owner()).or_insert(used);
+                *entry = (*entry).max(used);
+            }
             if let Ok(mut sessions) = sessions.lock() {
                 sessions.remove(&session.id);
             }
@@ -876,11 +883,6 @@ fn close_session(
         }
     };
     if closed {
-        if let Ok(mut usage) = session.activity.closed_usage.lock() {
-            let used = session.last_used.load(Ordering::Acquire);
-            let entry = usage.entry(session.owner()).or_insert(used);
-            *entry = (*entry).max(used);
-        }
         session.close_resources();
     }
 }

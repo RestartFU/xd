@@ -637,4 +637,34 @@ mod tests {
         );
         assert!(nested.exists());
     }
+
+    #[test]
+    fn switching_branch_after_planning_keeps_the_worktree() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        fixture.enable(1);
+        fixture.age(3);
+        let settings = fixture.store.auto_delete_settings().unwrap();
+        let candidate = fixture
+            .store
+            .deletion_candidates(now_seconds(), &settings)
+            .unwrap()
+            .remove(0);
+        let plan = fixture
+            .store
+            .plan_auto_delete(&candidate, &settings)
+            .unwrap()
+            .ok()
+            .unwrap();
+        fixture.git(&worktree, &["checkout", "-q", "-b", "mine-now"]);
+        let finished = fixture
+            .store
+            .finish_auto_delete(&candidate, &settings, plan)
+            .unwrap();
+        assert!(
+            matches!(&finished, AutoDeletion::Deleted { worktrees, .. } if worktrees.is_empty()),
+            "{finished:?}"
+        );
+        assert!(worktree.exists());
+    }
 }
