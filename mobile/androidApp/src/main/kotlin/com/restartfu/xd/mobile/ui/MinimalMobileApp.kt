@@ -1637,6 +1637,12 @@ private fun AutoSettleSettings(model: MainViewModel) {
             ) { Text("+", style = MaterialTheme.typography.titleMedium) }
         }
     }
+    SettingSwitch(
+        title = "Keep sessions with a PR",
+        detail = "Inactivity does not settle sessions with a pull request. Merge and close still do.",
+        checked = current.keepPullRequests,
+        onCheckedChange = { model.setAutoSettle(keepPullRequests = it) },
+    )
     error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
     val stale by model.autoSettleStale.collectAsStateWithLifecycle()
     if (stale && error == null) {

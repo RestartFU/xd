@@ -420,10 +420,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Changes one auto-settle rule; the host answers with all of them. */
-    fun setAutoSettle(afterDays: Ops.AfterDays? = null, onMerge: Boolean? = null) =
-        autoSettleRequest("Could not change the auto-settle rules") {
-            client.setAutoSettleSettings(afterDays = afterDays, onMerge = onMerge)
-        }
+    fun setAutoSettle(
+        afterDays: Ops.AfterDays? = null,
+        onMerge: Boolean? = null,
+        keepPullRequests: Boolean? = null,
+    ) = autoSettleRequest("Could not change the auto-settle rules") {
+        client.setAutoSettleSettings(afterDays = afterDays, onMerge = onMerge, keepPullRequests = keepPullRequests)
+    }
 
     /**
      * The rules themselves arrive through [autoSettle]; this only reports
