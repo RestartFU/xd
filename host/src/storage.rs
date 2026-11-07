@@ -730,6 +730,7 @@ impl StateStore {
             "chats": chats,
             "sessions": sessions,
             "settlement": true,
+            "folder_reorder": true,
         }))
     }
 
@@ -3300,6 +3301,12 @@ impl StateStore {
         let requested_parent_id = optional_string(request, "parent")?;
         let before_id = optional_string(request, "before")?;
         let after_id = optional_string(request, "after")?;
+        let keep_parent = match request.get("keep_parent") {
+            None | Some(Value::Null) => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                StorageError::InvalidRequest("keep_parent must be true or false".into())
+            })?,
+        };
         if before_id.is_some() && after_id.is_some() {
             return Err(StorageError::InvalidRequest(
                 "Choose either a workspace before or after which to move.".into(),
@@ -3358,6 +3365,11 @@ impl StateStore {
         let source = self.workspace_root.join(&relative);
         let parent = self.workspace_root.join(&parent_relative);
         if source.parent() != Some(parent.as_path()) {
+            if keep_parent {
+                return Err(StorageError::InvalidRequest(
+                    "Reordering would move this folder to another directory.".into(),
+                ));
+            }
             if parent.join(".git").exists() {
                 return Err(StorageError::InvalidRequest(
                     "A folder cannot be moved inside a repository.".into(),
@@ -8923,6 +8935,53 @@ mod tests {
             .map(|folder| folder["id"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![alpha, bravo, charlie]);
+    }
+
+    #[test]
+    fn keep_parent_refuses_a_reorder_that_would_move_the_folder_on_disk() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.tree().unwrap()["folder_reorder"], true);
+        let sibling = store.new_folder(&json!({"name": "Sibling"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let top = store.new_folder(&json!({"name": "Top"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let parent = store.new_folder(&json!({"name": "Parent"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child = store
+            .new_folder(&json!({"name": "Child", "parent": parent}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        for keep_parent in [json!(true), json!("true"), json!(1)] {
+            store
+                .move_folder(&json!({"folder": top, "before": child, "keep_parent": keep_parent}))
+                .unwrap_err();
+        }
+        assert!(fixture.workspaces.join("Top").is_dir());
+        assert!(!fixture.workspaces.join("Parent/Top").exists());
+        let ids = || {
+            store.tree().unwrap()["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|folder| folder["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(), vec![sibling.clone(), top.clone(), parent, child]);
+
+        store
+            .move_folder(&json!({"folder": top, "before": sibling, "keep_parent": true}))
+            .unwrap();
+        assert_eq!(ids()[..2], [top, sibling]);
     }
 
     #[test]
