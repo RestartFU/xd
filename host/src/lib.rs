@@ -1181,7 +1181,7 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
         };
-        if let Err(error) = store.await_default_model(chat_id) {
+        if let Err(error) = store.await_chat_defaults(chat_id) {
             return error_reply(error);
         }
         let mut request = request.clone();

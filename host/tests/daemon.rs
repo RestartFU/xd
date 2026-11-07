@@ -39,7 +39,7 @@ for line in sys.stdin:
     if method == 'initialize': print(json.dumps({'id':1,'result':{}}), flush=True)
     elif method == 'model/list':
         time.sleep(0.3)
-        print(json.dumps({'id':2,'result':{'data':[{'model':'cli-default','isDefault':True,'defaultReasoningEffort':'low'}]}}), flush=True)
+        print(json.dumps({'id':2,'result':{'data':[{'model':'cli-default','isDefault':True,'defaultReasoningEffort':'low'},{'model':'gpt-5.5','defaultReasoningEffort':'medium'}]}}), flush=True)
     elif method in ('thread/start','thread/resume'): print(json.dumps({'id':2,'result':{'thread':{'id':'thread-test'}}}), flush=True)
     elif method == 'turn/start':
         print(json.dumps({'id':3,'result':{'turn':{'id':'turn-test'}}}), flush=True)
@@ -412,6 +412,34 @@ fn a_first_turn_waits_for_the_default_the_assistant_reports() {
         .find(|frame| frame["frame"]["method"] == "thread/start")
         .unwrap();
     assert_eq!(thread["frame"]["params"]["model"], "cli-default");
+}
+
+#[test]
+fn a_first_turn_waits_for_the_default_effort_of_a_model_already_chosen() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let folder = client.call(json!({"op":"new-folder", "name":"Project"}));
+    // A built-in model is accepted and pinned without anything being discovered.
+    let settings = client.call(json!({"op":"set-folder-settings", "folder":folder["id"],
+        "backend":null, "model":"gpt-5.5", "workdir":null, "repo":null}));
+    assert_eq!(settings["ok"], true, "{settings}");
+    let chat = client.call(json!({"op":"new-chat", "folder":folder["id"]}));
+    assert_eq!(chat["ok"], true, "{chat}");
+    let chat = chat["id"].as_str().unwrap();
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"hello"}))["ok"],
+        true
+    );
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let requests = fs::read_to_string(daemon.root.join("codex.requests")).unwrap();
+    let turn = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|frame| frame["frame"]["method"] == "turn/start")
+        .unwrap();
+    assert_eq!(turn["frame"]["params"]["effort"], "medium");
 }
 
 #[test]

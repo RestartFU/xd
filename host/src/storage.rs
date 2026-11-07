@@ -1393,15 +1393,15 @@ impl StateStore {
         Ok((json!({"ok": true}), event))
     }
 
-    /// Waits until a chat with no model yet can resolve the assistant's default,
-    /// so that its turn does not run on the built-in one. Call this before taking
-    /// any lock another chat needs, since discovery can take seconds.
-    pub fn await_default_model(&self, chat_id: &str) -> Result<(), StorageError> {
+    /// Waits until a chat with no model or effort yet can resolve the assistant's
+    /// defaults, so that its turn does not run on the built-in ones. Call this
+    /// before taking any lock another chat needs, since discovery can take seconds.
+    pub fn await_chat_defaults(&self, chat_id: &str) -> Result<(), StorageError> {
         let unset = {
             let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
             database
                 .query_row(
-                    "SELECT backend FROM chats WHERE id = ? AND model IS NULL",
+                    "SELECT backend FROM chats WHERE id = ? AND (model IS NULL OR effort IS NULL)",
                     [chat_id],
                     |row| row.get::<_, String>(0),
                 )
@@ -4560,7 +4560,7 @@ fn default_effort(backend: &str, model: Option<&str>) -> String {
 ///
 /// This runs with the database locked, so it only reads the discovery cache. A
 /// model stays unset if nothing is cached yet: clients then show the default from
-/// the catalog, and sending waits for discovery in `await_default_model`.
+/// the catalog, and sending waits for discovery in `await_chat_defaults`.
 fn new_chat_model_and_effort(
     transaction: &rusqlite::Transaction<'_>,
     backend: &str,
@@ -4587,7 +4587,7 @@ fn new_chat_model_and_effort(
     let model = workspace_model
         .or(picked_model)
         .or_else(|| crate::model_catalog::cached_default_model(backend).map(|model| model.id));
-    if model.is_none() {
+    if discovered.is_empty() {
         crate::model_catalog::refresh_in_background(backend);
     }
     let effort = picked_effort.filter(|effort| effort_supported(backend, effort));
