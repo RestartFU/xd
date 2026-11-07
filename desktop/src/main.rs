@@ -10947,6 +10947,24 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    /// What the tray says is at work. A backgrounded shell command shares the
+    /// agents' cards but is no agent, so it is counted as what it is.
+    fn agents_tray_label(agents: &[RunningAgent]) -> String {
+        let count = |count: usize, noun: &str| {
+            format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+        };
+        let commands = agents.iter().filter(|agent| agent.view.is_shell()).count();
+        match (agents.len() - commands, commands) {
+            (delegated, 0) => format!("{} working", count(delegated, "agent")),
+            (0, commands) => format!("{} running", count(commands, "command")),
+            (delegated, commands) => format!(
+                "{} and {} running",
+                count(delegated, "agent"),
+                count(commands, "command")
+            ),
+        }
+    }
+
     /// Every agent still at work, above the composer: background agents keep
     /// running after the turn and the reader may have scrolled far away from
     /// their cards. A pill jumps to its card and opens it.
@@ -11044,11 +11062,7 @@ impl XdDesktop {
                     div()
                         .text_size(px(11.5))
                         .text_color(rgb(colors.faint))
-                        .child(format!(
-                            "{} agent{} working",
-                            agents.len(),
-                            if agents.len() == 1 { "" } else { "s" }
-                        )),
+                        .child(Self::agents_tray_label(agents)),
                 )
                 .children(pills)
                 .when(agents.len() > SHOWN, |tray| {
@@ -11276,7 +11290,7 @@ impl XdDesktop {
             SubagentState::Failed => colors.danger,
             SubagentState::Stopped => colors.muted,
         };
-        let provider_icon = if view.agent == "Shell" {
+        let provider_icon = if view.is_shell() {
             Some(TERMINAL_ICON)
         } else {
             match view.provider.to_ascii_lowercase().as_str() {
@@ -16849,6 +16863,36 @@ mod tests {
         let head = fits.work_run(0).unwrap();
         assert_eq!((head.len, head.entries), (9, 6));
         assert_eq!(head.hidden_count(false), 0);
+    }
+
+    #[test]
+    fn the_agents_tray_counts_shell_commands_as_commands() {
+        let label = |agents: &[&str]| {
+            let mut model = AppModel::default();
+            model.messages = agents
+                .iter()
+                .enumerate()
+                .map(|(index, agent)| {
+                    Message::new(
+                        Some(index as i64),
+                        "tool",
+                        format!("subagent_run\n{{\"status\":\"running\",\"agent\":\"{agent}\"}}"),
+                        None,
+                    )
+                })
+                .collect();
+            let mut snapshot = TranscriptSnapshot::default();
+            snapshot.sync_messages(&model);
+            XdDesktop::agents_tray_label(&snapshot.running_agents)
+        };
+        assert_eq!(label(&["Explore"]), "1 agent working");
+        assert_eq!(label(&["Explore", "Plan"]), "2 agents working");
+        assert_eq!(label(&["Shell"]), "1 command running");
+        assert_eq!(label(&["Shell", "Shell"]), "2 commands running");
+        assert_eq!(
+            label(&["Explore", "Shell", "Plan"]),
+            "2 agents and 1 command running"
+        );
     }
 
     #[test]
