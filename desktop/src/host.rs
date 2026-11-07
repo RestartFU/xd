@@ -956,7 +956,7 @@ impl HostHandle {
         anchor_id: &str,
         after: bool,
     ) -> Result<(), String> {
-        let mut body = json!({"op": "move-folder", "folder": folder_id});
+        let mut body = json!({"op": "move-folder", "folder": folder_id, "keep_parent": true});
         body[if after { "after" } else { "before" }] = Value::String(anchor_id.to_owned());
         self.send(
             RequestKind::MoveFolder {
@@ -2523,6 +2523,7 @@ mod tests {
                 assert_eq!(request[field], "folder-2");
                 assert_eq!(request.get(if after { "before" } else { "after" }), None);
                 assert_eq!(request.get("parent"), None);
+                assert_eq!(request["keep_parent"], true);
                 let request_id = request["_xd_request"].as_u64().unwrap();
                 writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
             }

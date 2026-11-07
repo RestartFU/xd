@@ -801,7 +801,8 @@ or one of its descendants, and the host rejects a destination name collision.
 To reorder, send `before` or `after` with the id of another folder instead of
 `parent`. The order is saved and every client sees it in the next `tree`. The
 folder also takes that folder's parent, so anchoring on a folder with a different
-parent moves it on disk.
+parent moves it on disk. Send `keep_parent: true` to refuse that move and report
+an error instead. Older hosts ignore this field.
 
 ## Events
 

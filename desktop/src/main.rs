@@ -1546,8 +1546,6 @@ struct SessionDragPayload {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ProjectDragPayload {
     project_id: String,
-    parent_id: Option<String>,
-    source_index: usize,
     title: String,
 }
 
@@ -11467,6 +11465,7 @@ impl XdDesktop {
         let current_project = self.selected_minimal_project_id();
         let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
+        let folders: Rc<[Folder]> = self.model.folders.clone().into();
 
         let query = self.catalog_query.clone();
         let mut matches = 0usize;
@@ -11522,20 +11521,15 @@ impl XdDesktop {
             let context_project = project.id.clone();
             let context_name = project.name.clone();
             let create_project = project.id.clone();
-            let project_parent = self
-                .model
-                .folders
-                .iter()
-                .find(|folder| folder.id == project.id)
-                .and_then(|folder| folder.parent.clone());
             let drag_payload = ProjectDragPayload {
                 project_id: project.id.clone(),
-                parent_id: project_parent.clone(),
-                source_index: project_index,
                 title: project.name.clone(),
             };
             let drop_project = project.id.clone();
             let can_drop_project = project.id.clone();
+            let can_drop_folders = folders.clone();
+            let line_project = project.id.clone();
+            let line_folders = folders.clone();
             let name = div()
                 .min_w_0()
                 .flex_shrink()
@@ -11683,12 +11677,22 @@ impl XdDesktop {
                                 value
                                     .downcast_ref::<ProjectDragPayload>()
                                     .is_some_and(|drag| {
-                                        drag.project_id != can_drop_project
-                                            && drag.parent_id == project_parent
+                                        project_reorder_for_drop(
+                                            &can_drop_folders,
+                                            &drag.project_id,
+                                            &can_drop_project,
+                                        )
+                                        .is_some()
                                     })
                             })
                             .drag_over::<ProjectDragPayload>(move |style, drag, _, _| {
-                                let style = if drag.source_index < project_index {
+                                let after = project_reorder_for_drop(
+                                    &line_folders,
+                                    &drag.project_id,
+                                    &line_project,
+                                )
+                                .is_some_and(|reorder| reorder.after);
+                                let style = if after {
                                     style.border_b_2()
                                 } else {
                                     style.border_t_2()
@@ -17813,9 +17817,10 @@ struct ProjectReorder {
 /// Where a dropped project goes, read from the current order rather than the
 /// one the drag began with, since the tree can change during a drag.
 ///
-/// Only siblings can be reordered. Anchoring on a project with another parent
-/// makes the host move the folder there on disk, and the sidebar lists every
-/// project in one flat column, so a drop should never do that by surprise.
+/// Only siblings can be reordered, since the sidebar lists every project in one
+/// flat column and a drop should not move a folder on disk by surprise. The host
+/// has the final say, because this tree can be stale: see `keep_parent` in
+/// `HostHandle::reorder_folder`.
 fn project_reorder_for_drop(
     folders: &[Folder],
     project_id: &str,
