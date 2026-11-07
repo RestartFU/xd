@@ -873,7 +873,7 @@ class ChatViewModel(
     }
 
     fun editQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
-        if (!sameQueue(state.value.queue, opened.messages)) return
+        if (!sameQueue(state.value.queue, opened)) return
         launchGuarded(_droppingQueued) {
             session.editQueued(index, oldText, text, opened.revision)
         }
@@ -894,7 +894,7 @@ class ChatViewModel(
      */
     fun steerQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
         val before = state.value
-        if (!sameQueue(before.queue, opened.messages)) return
+        if (!sameQueue(before.queue, opened)) return
         launchGuarded(_steering) {
             // Each step names the queue it expects, so a message another device
             // moved or dropped meanwhile is never mistaken for an equal one.
@@ -926,7 +926,7 @@ class ChatViewModel(
         // Queued messages have no identity but their place, and texts can
         // repeat, so an action applies only to the queue it was opened on,
         // which the host checks by revision.
-        if (!sameQueue(queue, opened.messages)) return
+        if (!sameQueue(queue, opened)) return
         val anchor = if (up) index - 1 else index + 1
         if (queue.getOrNull(index) != text || anchor !in queue.indices) return
         // Swapping two equal messages changes nothing, and the queue would never
@@ -948,7 +948,7 @@ class ChatViewModel(
 
     fun dropQueued(index: Int, text: String, opened: OpenedQueue) {
         val before = state.value.queue
-        if (!sameQueue(before, opened.messages) || before.getOrNull(index) != text) return
+        if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
         launchGuarded(_droppingQueued) {
             session.dropQueued(index, text, opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
@@ -962,8 +962,10 @@ class ChatViewModel(
     }
 
     /** False, with a notice saying so, when the queue moved on since a message was opened. */
-    private fun sameQueue(queue: List<String>, opened: List<String>): Boolean {
-        if (queue == opened) {
+    private fun sameQueue(queue: List<String>, opened: OpenedQueue): Boolean {
+        // The revision too: equal texts can stand for a queue that changed.
+        val revisionHeld = opened.revision == null || state.value.queueRevision == opened.revision
+        if (queue == opened.messages && revisionHeld) {
             _queueNotice.value = null
             return true
         }

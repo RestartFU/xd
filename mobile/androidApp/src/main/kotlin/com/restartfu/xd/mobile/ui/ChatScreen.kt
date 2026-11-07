@@ -474,9 +474,10 @@ private fun Composer(
     // queue only, and the dialog closes if another device changes it.
     var editing by remember { mutableStateOf<Triple<Int, String, OpenedQueue>?>(null) }
     val queueNotice by model.queueNotice.collectAsStateWithLifecycle()
-    LaunchedEffect(state.queue) {
+    LaunchedEffect(state.queue, state.queueRevision) {
         val opened = editing ?: return@LaunchedEffect
-        if (state.queue != opened.third.messages) {
+        val revision = opened.third.revision
+        if (state.queue != opened.third.messages || (revision != null && state.queueRevision != revision)) {
             editing = null
             model.queueChanged()
         }
@@ -486,7 +487,9 @@ private fun Composer(
     val queueBusy by model.queueBusy.collectAsStateWithLifecycle()
     editing?.let { (index, original, opened) ->
         QueuedMessageDialog(
-            identity = "${state.chatId}|${opened.revision}|${opened.messages.size}|$index",
+            // The texts too, so a host without revisions cannot restore a draft
+            // onto a different message that took the same place.
+            identity = "${state.chatId}|${opened.revision}|$index|${opened.messages.hashCode()}|$original",
             original = original,
             busy = queueBusy || steering,
             working = state.working,

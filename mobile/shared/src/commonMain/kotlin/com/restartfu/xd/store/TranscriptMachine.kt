@@ -212,9 +212,15 @@ public object TranscriptMachine {
         is TranscriptInput.Commands -> TranscriptTransition(
             state.copy(commands = input.commands),
         )
-        is TranscriptInput.Queued -> TranscriptTransition(
-            state.copy(queue = input.messages, queueRevision = input.revision, pendingUser = null),
-        )
+        // A reply and an event can arrive in either order, so an older queue
+        // never replaces a newer one the host already reported.
+        is TranscriptInput.Queued -> if (isOlderQueue(input.revision, state.queueRevision)) {
+            TranscriptTransition(state)
+        } else {
+            TranscriptTransition(
+                state.copy(queue = input.messages, queueRevision = input.revision, pendingUser = null),
+            )
+        }
         is TranscriptInput.Draft -> if (input.revision <= state.draftRevision) {
             TranscriptTransition(state)
         } else {
@@ -332,8 +338,8 @@ public object TranscriptMachine {
                 shortcuts = chat.shortcuts,
                 plan = chat.plan,
                 fast = chat.fast,
-                queue = chat.queue,
-                queueRevision = chat.queueRevision,
+                queue = if (isOlderQueue(chat.queueRevision, state.queueRevision)) state.queue else chat.queue,
+                queueRevision = if (isOlderQueue(chat.queueRevision, state.queueRevision)) state.queueRevision else chat.queueRevision,
                 draft = chat.draft,
                 draftRevision = chat.draftRevision,
                 draftAttachments = chat.draftAttachments.map {
@@ -415,3 +421,7 @@ private fun String.todoSnapshot(): List<TodoItem>? {
 }
 
 private const val TODO_PREFIX = "todo_list\n"
+
+/** True when [incoming] is a revision older than [current]; unknown revisions are never older. */
+internal fun isOlderQueue(incoming: Long?, current: Long?): Boolean =
+    incoming != null && current != null && incoming < current
