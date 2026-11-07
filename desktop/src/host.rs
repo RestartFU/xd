@@ -2236,7 +2236,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut seen = Vec::new();
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
                 let request: Value = serde_json::from_str(&line).unwrap();
@@ -2257,11 +2257,15 @@ mod tests {
             .unwrap();
         host.send_message("chat-1", "a shortcut", &[], None, None, false)
             .unwrap();
+        // The clear after a send that carried no attachments leaves them be.
+        host.set_draft("chat-1", "", None, None).unwrap();
 
         let seen = server.join().unwrap();
         assert_eq!(seen[0]["files"], true);
         assert_eq!(seen[0]["attachments"][0]["mime"], "application/pdf");
         assert!(seen[1].get("files").is_none() && seen[1].get("attachments").is_none());
+        assert_eq!(seen[2]["op"], "set-draft");
+        assert!(seen[2].get("attachments").is_none());
         let _ = fs::remove_dir_all(directory);
     }
 

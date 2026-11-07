@@ -68,6 +68,10 @@ const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 /// all of a message's attachments share one total.
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+/// A draft can hold a client's images on top of the files only other clients
+/// show it, so it has room for both; a message keeps to the limits above.
+const MAX_DRAFT_ATTACHMENTS: usize = MAX_ATTACHMENTS + MAX_IMAGES;
+const MAX_DRAFT_ATTACHMENT_BYTES: usize = 2 * MAX_TOTAL_ATTACHMENT_BYTES;
 const MAX_ATTACHMENT_MIME_BYTES: usize = 255;
 const PNG_MIME: &str = "image/png";
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -1995,6 +1999,8 @@ impl StateStore {
             });
         };
         let attachments = validate_attachments(value, false)?;
+        // A draft may hold more than one message can send; sending is where
+        // the client that shows them all trims it to fit.
         fs::create_dir_all(&self.paste_root).map_err(|source| StorageError::Filesystem {
             context: "Cannot create the remote attachment cache".into(),
             source,
@@ -3193,6 +3199,9 @@ impl StateStore {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let supplied = match request.get("attachments") {
             Some(value) if !shows_files(request) => {
+                // Its own images keep to a message's limits; the files kept
+                // beside them, which it cannot see or remove, never refuse them.
+                validate_attachments(value, true)?;
                 let stored = stored_draft_attachments(&database, chat_id)?;
                 Some(with_kept_files(value, &stored))
             }
@@ -3200,7 +3209,7 @@ impl StateStore {
         };
         let attachments = supplied
             .as_ref()
-            .map(|value| validate_attachments(value, true))
+            .map(validate_draft_attachments)
             .transpose()?;
         let attachments_json = attachments
             .as_ref()
@@ -8497,14 +8506,13 @@ fn invalid_remote_paste() -> StorageError {
     StorageError::InvalidRequest("That image is not a remote paste.".into())
 }
 
+/// A message's attachments, or an image-only client's own draft list.
 fn validate_attachments(
     value: &Value,
     allow_empty: bool,
 ) -> Result<Vec<ValidatedAttachment>, StorageError> {
-    let attachments = value.as_array().ok_or_else(|| {
-        StorageError::InvalidRequest("Message attachments must be an array.".into())
-    })?;
-    if attachments.len() > MAX_ATTACHMENTS || (!allow_empty && attachments.is_empty()) {
+    let count = value.as_array().map_or(0, Vec::len);
+    if count > MAX_ATTACHMENTS || (!allow_empty && count == 0) {
         return Err(StorageError::InvalidRequest(
             if allow_empty {
                 "A draft can contain at most 10 attachments."
@@ -8514,6 +8522,30 @@ fn validate_attachments(
             .into(),
         ));
     }
+    validate_attachment_list(value, MAX_TOTAL_ATTACHMENT_BYTES)
+}
+
+/// A whole stored draft: room for an image-only client's images beside the
+/// files it keeps, within a bound of its own.
+fn validate_draft_attachments(value: &Value) -> Result<Vec<ValidatedAttachment>, StorageError> {
+    if value
+        .as_array()
+        .is_some_and(|list| list.len() > MAX_DRAFT_ATTACHMENTS)
+    {
+        return Err(StorageError::InvalidRequest(
+            "A draft can contain at most 14 attachments.".into(),
+        ));
+    }
+    validate_attachment_list(value, MAX_DRAFT_ATTACHMENT_BYTES)
+}
+
+fn validate_attachment_list(
+    value: &Value,
+    max_total: usize,
+) -> Result<Vec<ValidatedAttachment>, StorageError> {
+    let attachments = value.as_array().ok_or_else(|| {
+        StorageError::InvalidRequest("Message attachments must be an array.".into())
+    })?;
     let too_large =
         || StorageError::InvalidRequest("Each attachment must be 10 MiB or less.".into());
     let invalid =
@@ -8540,10 +8572,11 @@ fn validate_attachments(
             if data.len() > MAX_IMAGE_BYTES {
                 return Err(too_large());
             }
-            if total > MAX_TOTAL_ATTACHMENT_BYTES.saturating_sub(data.len()) {
-                return Err(StorageError::InvalidRequest(
-                    "Attachments can add up to at most 20 MiB.".into(),
-                ));
+            if total > max_total.saturating_sub(data.len()) {
+                return Err(StorageError::InvalidRequest(format!(
+                    "Attachments can add up to at most {} MiB.",
+                    max_total / (1024 * 1024)
+                )));
             }
             let image = mime == PNG_MIME;
             if image {
@@ -12865,17 +12898,41 @@ mod tests {
             .unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["draft_files"], json!([]));
 
-        // A full draft refuses images it has no room left for.
+        // Files it cannot see never refuse its images, even past a message's
+        // limits; sending is where a client that shows them all trims it.
+        let large = |name: &str| {
+            json!({"name": name, "mime": "application/octet-stream",
+                   "data": STANDARD.encode(vec![0_u8; MAX_IMAGE_BYTES])})
+        };
         store
             .set_draft(&json!({
                 "chat": "chat-1", "text": "", "files": true,
-                "attachments": vec![pdf; MAX_ATTACHMENTS],
+                "attachments": [large("one.bin"), large("two.bin")],
             }))
             .unwrap();
+        let (reply, _) = store
+            .set_draft(&json!({"chat": "chat-1", "text": "kept", "attachments": [png("d.png")]}))
+            .unwrap();
+        assert_eq!(reply["draft"], "kept");
+        assert_eq!(names(&reply["draft_attachments"]), ["d.png"]);
+        assert_eq!(names(&reply["draft_files"]), ["one.bin", "two.bin"]);
+        let all = json!([png("d.png"), large("one.bin"), large("two.bin")]);
+        assert!(
+            store
+                .prepare_send(&json!({"chat": "chat-1", "files": true, "attachments": all}))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("20 MiB")
+        );
+        // Its own list still keeps to a message's limits.
         let refused = store
-            .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": [png("d.png")]}))
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "",
+                "attachments": vec![png("e.png"); MAX_IMAGES + 1],
+            }))
             .unwrap_err();
-        assert!(refused.to_string().contains("10 attachments"));
+        assert!(refused.to_string().contains("4 images"));
     }
 
     #[test]

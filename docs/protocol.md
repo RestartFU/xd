@@ -607,7 +607,10 @@ MiB. Optional `attachments` replaces the synchronized attachment list, in the
 same form and limits as `send`; omit it for ordinary text edits so large payloads
 are not resent on every keystroke. An empty array clears them. Without
 `"files":true`, as for `send`, the list replaces only the draft's images: the
-files the client cannot see are kept after them, within the same limits. A
+files the client cannot see are kept after them. The client's own list keeps to
+a message's limits, but a draft may hold up to 14 attachments and 40 MiB, so
+files kept beside a client's images never refuse them; a message sent from it
+must still fit a message's limits. A
 client that shows only images skips the other files. The `chat` snapshot returns `draft`,
 `draft_revision`, `draft_attachments`, and `draft_files` so a newly connected
 device starts with the same composer. `draft_attachments` holds only the draft's

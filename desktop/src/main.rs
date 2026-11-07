@@ -9638,6 +9638,7 @@ impl XdDesktop {
         }
         let text = self.composer.trim().to_owned();
         let attachments = self.model.draft_attachments.clone();
+        let carries_attachments = !attachments.is_empty();
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -9670,12 +9671,19 @@ impl XdDesktop {
             optimistic,
         });
         self.set_composer_text(String::new(), cx);
-        self.model.draft_attachments.clear();
         self.draft_dirty = true;
-        self.attachments_dirty = true;
-        self.attachment_generation = self.attachment_generation.saturating_add(1);
         self.draft_generation = self.draft_generation.saturating_add(1);
-        let _ = host.set_draft(&chat_id, "", Some(&[]), Some(self.attachment_generation));
+        // Clearing the draft's attachments claims them all, files included, so
+        // only a send that carried them does; one that carried none clears the
+        // text and leaves any file another device added since.
+        if !carries_attachments {
+            let _ = host.set_draft(&chat_id, "", None, None);
+        } else {
+            self.model.draft_attachments.clear();
+            self.attachments_dirty = true;
+            self.attachment_generation = self.attachment_generation.saturating_add(1);
+            let _ = host.set_draft(&chat_id, "", Some(&[]), Some(self.attachment_generation));
+        }
         cx.notify();
     }
 
