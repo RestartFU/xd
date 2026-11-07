@@ -1636,7 +1636,7 @@ impl NativeBrowser {
                 let entry = BROWSER_VIEWS.with(|views| views.borrow_mut().remove(&id));
                 #[cfg(target_os = "linux")]
                 if let Some((view, ())) = entry {
-                    view.close(NATIVE_REPLY_TIMEOUT);
+                    view.close(CEF_CLOSE_TIMEOUT);
                 }
                 let _ = reply.send(());
             });
@@ -1651,6 +1651,11 @@ impl NativeBrowser {
 /// thread never waits on GPUI, so reaching this means Chromium itself is stuck.
 #[cfg(target_os = "linux")]
 const NATIVE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long closing a view waits for CEF. Shorter than GPUI's own wait, so a
+/// stuck close still answers GPUI before it gives up on the browser thread.
+#[cfg(target_os = "linux")]
+const CEF_CLOSE_TIMEOUT: Duration = Duration::from_secs(4);
 
 type NativeAllocation = (Bounds<Pixels>, f32, gpui::Point<Pixels>);
 

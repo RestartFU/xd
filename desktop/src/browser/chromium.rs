@@ -131,6 +131,9 @@ fn ensure_initialized(scale: f32) -> Result<(), String> {
                 no_sandbox: i32::from(std::env::var_os("XD_CHROMIUM_NO_SANDBOX").is_some()),
                 multi_threaded_message_loop: 1,
                 persist_session_cookies: 1,
+                // Without a cache path CEF keeps the profile in memory, and every
+                // restart would sign the user out of every site.
+                cache_path: CefString::from(directory.to_string_lossy().as_ref()),
                 root_cache_path: CefString::from(directory.to_string_lossy().as_ref()),
                 ..Default::default()
             };
@@ -158,6 +161,8 @@ unsafe impl Send for SharedBrowser {}
 
 #[derive(Default)]
 struct Shared {
+    /// GPUI's window, which takes the keyboard back from the page.
+    parent: XWindow,
     /// Sits between GPUI's window and Chromium's; see [`create_host_window`].
     host: XWindow,
     colormap: u32,
@@ -168,6 +173,11 @@ struct Shared {
     /// Set once the view is being closed, which can happen before the browser
     /// it asked for exists. That browser then closes as soon as it arrives.
     closed: Option<mpsc::Sender<()>>,
+    /// CEF has finished with the browser, so its windows may go.
+    browser_gone: bool,
+    /// A close gave up waiting for CEF; release the windows once it finishes.
+    release_pending: bool,
+    released: bool,
 }
 
 type SharedState = Arc<Mutex<Shared>>;
@@ -244,6 +254,18 @@ fn apply_window_state(shared: &Shared) {
         }
     }
     let _ = connection.flush();
+}
+
+/// Destroy the host window and its colormap, once, after Chromium is done.
+fn release_windows(shared: &mut Shared) {
+    if std::mem::replace(&mut shared.released, true) {
+        return;
+    }
+    if let Some(connection) = x11() {
+        let _ = connection.destroy_window(shared.host);
+        let _ = connection.free_colormap(shared.colormap);
+        let _ = connection.flush();
+    }
 }
 
 /// GPUI's window has a 32-bit visual. Chromium creates its window with the
@@ -362,8 +384,12 @@ wrap_life_span_handler! {
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
             let mut shared = lock(&self.shared);
             shared.browser = None;
+            shared.browser_gone = true;
             if let Some(closed) = shared.closed.take() {
                 let _ = closed.send(());
+            }
+            if shared.release_pending {
+                release_windows(&mut shared);
             }
         }
     }
@@ -633,6 +659,7 @@ impl ChromiumView {
     fn create_in(parent: XWindow, events: NativeEvents) -> Result<Self, String> {
         let (host, colormap) = create_host_window(parent)?;
         let shared = SharedState::new(Mutex::new(Shared {
+            parent,
             host,
             colormap,
             ..Default::default()
@@ -749,14 +776,17 @@ impl ChromiumView {
         if let Some(host) = browser.host() {
             host.set_focus(0);
         }
-        let (Some(window), Some(connection)) = (browser_window(&browser), x11()) else {
+        let Some(connection) = x11() else {
             return;
         };
-        if has_keyboard_focus(connection, window)
-            && let Ok(reply) = connection.query_tree(window)
-            && let Ok(tree) = reply.reply()
-        {
-            let _ = connection.set_input_focus(InputFocus::PARENT, tree.parent, 0u32);
+        // Chromium's window is a grandchild of GPUI's, so focus goes back to
+        // GPUI itself, not to the host window in between.
+        let (host, parent) = {
+            let shared = lock(&self.shared);
+            (shared.host, shared.parent)
+        };
+        if has_keyboard_focus(connection, host) {
+            let _ = connection.set_input_focus(InputFocus::PARENT, parent, 0u32);
             let _ = connection.flush();
         }
     }
@@ -804,6 +834,8 @@ impl ChromiumView {
     }
 
     /// Destroy the browser before returning: the parent X11 window may be next.
+    /// If CEF does not confirm in time, its windows stay until it does, since
+    /// Chromium may still be drawing into them or about to create one there.
     pub fn close(&self, timeout: Duration) {
         let (closed, done) = mpsc::channel();
         let mut shared = lock(&self.shared);
@@ -813,12 +845,12 @@ impl ChromiumView {
         if let Some(host) = host {
             host.close_browser(1);
         }
-        let _ = done.recv_timeout(timeout);
-        if let Some(connection) = x11() {
-            let shared = lock(&self.shared);
-            let _ = connection.destroy_window(shared.host);
-            let _ = connection.free_colormap(shared.colormap);
-            let _ = connection.flush();
+        let confirmed = done.recv_timeout(timeout).is_ok();
+        let mut shared = lock(&self.shared);
+        if confirmed || shared.browser_gone {
+            release_windows(&mut shared);
+        } else {
+            shared.release_pending = true;
         }
     }
 }
