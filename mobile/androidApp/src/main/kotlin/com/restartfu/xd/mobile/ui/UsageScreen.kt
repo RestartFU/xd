@@ -481,7 +481,10 @@ private fun PriceField(label: String, value: String, enabled: Boolean, modifier:
     )
 }
 
-private fun Double.plain(): String = if (this == Math.floor(this)) toLong().toString() else toString()
+// A whole rate drops its ".0", but only where a Long holds it exactly; past
+// that, toLong() would saturate and a save would change the rate.
+private fun Double.plain(): String =
+    if (this == Math.floor(this) && kotlin.math.abs(this) < 1e15) toLong().toString() else toString()
 
 private fun usd(value: Double): String = when {
     value >= 100 -> String.format(Locale.US, "$%,.0f", value)
