@@ -75,6 +75,12 @@ fn check_sandbox() -> Result<(), String> {
     if std::env::var_os("XD_CHROMIUM_NO_SANDBOX").is_some() {
         return Ok(());
     }
+    // Chromium will not sandbox itself as root, and exits the whole process
+    // rather than failing to start.
+    // SAFETY: this call cannot fail and reads no memory.
+    if unsafe { libc::geteuid() } == 0 {
+        return Err("The browser cannot run as root. Run xd as your own user to use it.".into());
+    }
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     let helper_ready = executable
         .with_file_name("chrome-sandbox")
