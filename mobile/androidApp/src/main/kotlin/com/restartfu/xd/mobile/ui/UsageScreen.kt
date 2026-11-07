@@ -323,38 +323,42 @@ private val PriceRowsSaver = androidx.compose.runtime.saveable.listSaver<List<Pr
     },
 )
 
-private val AliasesSaver = androidx.compose.runtime.saveable.listSaver<Map<String, String>, String>(
-    save = { aliases -> aliases.flatMap { (model, target) -> listOf(model, target) } },
-    restore = { saved -> saved.chunked(2).filter { it.size == 2 }.associate { it[0] to it[1] } },
-)
 
 /**
  * The host's custom model prices, in USD per million tokens. Mappings from
- * one model to another are kept as they are.
+ * one model to another are not sent, so the host keeps them as they are now.
  */
 @Composable
 private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
-    val scope = rememberCoroutineScope()
+    val usage by model.state.collectAsStateWithLifecycle()
     // Saved, so rotating keeps unsaved edits; prices are not secret.
     var rows by rememberSaveable(stateSaver = PriceRowsSaver) { mutableStateOf<List<PriceRow>?>(null) }
-    var aliases by rememberSaveable(stateSaver = AliasesSaver) { mutableStateOf(emptyMap<String, String>()) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var saving by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     var attempt by remember { mutableStateOf(0) }
+    // The save runs in the view model; the editor closes when its own save lands.
+    val savesAtOpening = rememberSaveable { model.state.value.pricesSaves }
+    val saving = usage.pricesSaving
+    val error = loadError ?: usage.pricesError
+    val close = {
+        model.clearPricesError()
+        onDismiss()
+    }
+    LaunchedEffect(usage.pricesSaves) {
+        if (usage.pricesSaves > savesAtOpening) close()
+    }
     LaunchedEffect(attempt) {
         // A draft restored after recreation is kept, not replaced by the host's list.
         if (rows != null) return@LaunchedEffect
-        error = null
+        loadError = null
         try {
             val prices = model.prices()
-            aliases = prices.aliases
             rows = prices.prices.map { (id, price) ->
                 PriceRow(id, price.input.plain(), price.output.plain(), price.cacheRead?.plain().orEmpty(), price.cacheWrite?.plain().orEmpty())
             }
         } catch (failure: CancellationException) {
             throw failure
         } catch (failure: Throwable) {
-            error = failure.message ?: "Could not read the model prices"
+            loadError = failure.message ?: "Could not read the model prices"
         }
     }
     val parsed = rows?.map { row ->
@@ -370,7 +374,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
     val valid = parsed != null && parsed.all { (id, price) -> id.isNotEmpty() && price != null } &&
         parsed.map { it.first }.toSet().size == parsed.size
     AlertDialog(
-        onDismissRequest = { if (!saving) onDismiss() },
+        onDismissRequest = { if (!saving) close() },
         title = { Text("Model prices") },
         text = {
             Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -420,26 +424,12 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = {
-                    val prices = parsed.orEmpty().associate { (id, price) -> id to checkNotNull(price) }
-                    saving = true
-                    error = null
-                    scope.launch {
-                        try {
-                            model.savePrices(prices, aliases)
-                            onDismiss()
-                        } catch (failure: CancellationException) {
-                            throw failure
-                        } catch (failure: Throwable) {
-                            error = failure.message ?: "Could not save the model prices"
-                        } finally {
-                            saving = false
-                        }
-                    }
+                    model.savePrices(parsed.orEmpty().associate { (id, price) -> id to checkNotNull(price) })
                 },
                 enabled = valid && !saving,
             ) { Text(if (saving) "Saving…" else "Save changes") }
         },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = close, enabled = !saving) { Text("Cancel") } },
     )
 }
 

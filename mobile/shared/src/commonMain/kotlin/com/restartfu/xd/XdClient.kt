@@ -672,7 +672,8 @@ public class XdClient(
     public suspend fun usagePrices(): UsagePricesReply =
         actor.decodeReply(actor.call(Ops.usagePrices())) { it.decodeReply<UsagePricesReply>() }
 
-    public suspend fun setUsagePrices(prices: Map<String, UsagePriceReply>, aliases: Map<String, String>): UsagePricesReply =
+    /** Without [aliases] the host keeps its saved mappings, so another client's are not reverted. */
+    public suspend fun setUsagePrices(prices: Map<String, UsagePriceReply>, aliases: Map<String, String>? = null): UsagePricesReply =
         actor.decodeReply(actor.call(Ops.setUsagePrices(prices, aliases))) { it.decodeReply<UsagePricesReply>() }
 
     /** Reads the rules into [autoSettleSettings]. */

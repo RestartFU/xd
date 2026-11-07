@@ -92,6 +92,7 @@ class OpsTest {
         val local = prices["prices"]!!.jsonObject["local"]!!.jsonObject
         assertFalse("cache_read" in local)
         assertEquals("local", prices["aliases"]!!.jsonObject["alias"]!!.jsonPrimitive.content)
+        assertFalse("aliases" in Ops.setUsagePrices(emptyMap()))
         assertFailsWith<IllegalArgumentException> { Ops.setUsagePrices(mapOf("m" to UsagePriceReply(-1.0, 1.0)), emptyMap()) }
     }
 

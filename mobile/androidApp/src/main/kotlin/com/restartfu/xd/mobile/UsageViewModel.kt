@@ -29,6 +29,10 @@ data class UsageState(
     val resetMessage: String? = null,
     /** Accounts with a reset attempt the host has not settled yet. */
     val unsettledResets: Set<String> = emptySet(),
+    val pricesSaving: Boolean = false,
+    val pricesError: String? = null,
+    /** Counts saved price edits, so an editor can close on its own save. */
+    val pricesSaves: Int = 0,
 )
 
 /**
@@ -162,10 +166,29 @@ class UsageViewModel(
 
     suspend fun prices(): UsagePricesReply = client.usagePrices()
 
-    suspend fun savePrices(prices: Map<String, UsagePriceReply>, aliases: Map<String, String>): UsagePricesReply {
-        val saved = client.setUsagePrices(prices, aliases)
-        readSummary(refresh = false)
-        return saved
+    /**
+     * Saves the custom prices and leaves the host's model mappings as they
+     * are. Runs here rather than in the editor, so rotating the phone mid-save
+     * neither loses its outcome nor skips reading usage again.
+     */
+    fun savePrices(prices: Map<String, UsagePriceReply>) {
+        if (_state.value.pricesSaving) return
+        _state.update { it.copy(pricesSaving = true, pricesError = null) }
+        viewModelScope.launch {
+            try {
+                client.setUsagePrices(prices)
+                _state.update { it.copy(pricesSaving = false, pricesSaves = it.pricesSaves + 1) }
+                readSummary(refresh = false)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.update { it.copy(pricesSaving = false, pricesError = error.message ?: "Could not save the model prices") }
+            }
+        }
+    }
+
+    fun clearPricesError() {
+        _state.update { it.copy(pricesError = null) }
     }
 
     class Factory(

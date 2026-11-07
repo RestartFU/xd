@@ -534,8 +534,12 @@ public object Ops {
 
     public fun usagePrices(): JsonObject = op("usage-prices")
 
-    /** Replaces the custom prices and aliases. A blank cache rate uses the input rate. */
-    public fun setUsagePrices(prices: Map<String, UsagePriceReply>, aliases: Map<String, String>): JsonObject = buildJsonObject {
+    /**
+     * Replaces the custom prices, and the aliases too when [aliases] is given;
+     * without it the host keeps its saved ones. A blank cache rate uses the
+     * input rate.
+     */
+    public fun setUsagePrices(prices: Map<String, UsagePriceReply>, aliases: Map<String, String>? = null): JsonObject = buildJsonObject {
         put("op", "set-usage-prices")
         put("prices", buildJsonObject {
             prices.forEach { (model, price) ->
@@ -549,7 +553,7 @@ public object Ops {
                 })
             }
         })
-        put("aliases", buildJsonObject { aliases.forEach { (model, target) -> put(model, target) } })
+        if (aliases != null) put("aliases", buildJsonObject { aliases.forEach { (model, target) -> put(model, target) } })
     }
 
     public fun gitStatus(chatId: String): JsonObject = withChat("git-status", chatId)
