@@ -156,6 +156,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Each assistant's models, for choosing a title model. */
     val hostCatalog: StateFlow<List<BackendReply>> = _catalog.asStateFlow()
     private var chatTitleRequests = 0L
+    /** Settings has asked for the title settings, so a reconnect reads them again. */
+    private var chatTitlesWanted = false
 
     init {
         // Answer for chats a host restart cut off, when this phone is set to
@@ -165,6 +167,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             var wasUp = false
             client.link.collect { link ->
                 val up = link is Link.Up
+                // A change made elsewhere while this phone was away was not broadcast to it.
+                if (up && !wasUp && chatTitlesWanted) loadChatTitles()
                 if (up && !wasUp && (application as XdApplication).settings.resumeChats.value) {
                     // Off the watcher, so a reconnect during the request is still seen.
                     launch {
@@ -188,6 +192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _chatTitlesError.value = null
                 _catalog.value = emptyList()
                 chatTitleRequests++
+                chatTitlesWanted = false
             }
         }
     }
@@ -236,12 +241,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (serial == chatTitleRequests) _chatTitlesError.value = error.message ?: failure
+                if (serial != chatTitleRequests) return@launch
+                _chatTitlesError.value = error.message ?: failure
+                // An earlier change may have landed even though this one did
+                // not, and its answer was set aside for this one; ask again.
+                try {
+                    val fresh = client.chatTitleSettings()
+                    if (serial == chatTitleRequests) _chatTitles.value = fresh
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    // Keep the error shown; the next request reads again.
+                }
             }
         }
     }
 
     fun loadChatTitles() {
+        chatTitlesWanted = true
         chatTitleRequest("Could not read the chat title settings") { client.chatTitleSettings() }
         viewModelScope.launch {
             _catalog.value = try {

@@ -87,6 +87,9 @@ public class XdClient(
     private val visibleChat = MutableStateFlow<String?>(null)
     private val agentAuthStates = ProviderStates<AgentAuthProviderReply> { it.provider }
     private val agentCliStates = ProviderStates<AgentCliProviderReply> { it.provider }
+    /** Asked for on this host, so a reconnect reads them again even if no answer landed. */
+    private val agentAuthWanted = MutableStateFlow(false)
+    private val agentClisWanted = MutableStateFlow(false)
 
     /** Each assistant's sign-in on the host, kept current by its broadcasts. */
     public val agentAuth: StateFlow<Map<String, AgentAuthProviderReply>?> = agentAuthStates.items
@@ -239,10 +242,10 @@ public class XdClient(
                 if (value is Link.Up) {
                     // Broadcasts sent while disconnected were missed.
                     if (autoSettleWanted.value) rereadAutoSettle()
-                    if (agentAuthStates.items.value != null) {
+                    if (agentAuthWanted.value) {
                         scope.launch { runCatching { loadAgentAuth() } }
                     }
-                    if (agentCliStates.items.value != null) {
+                    if (agentClisWanted.value) {
                         scope.launch { runCatching { agentCliUpdates("status") } }
                     }
                     requestTreeRefresh()
@@ -334,6 +337,8 @@ public class XdClient(
         }
         agentAuthStates.clear()
         agentCliStates.clear()
+        agentAuthWanted.value = false
+        agentClisWanted.value = false
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -458,6 +463,7 @@ public class XdClient(
 
     /** Asks each assistant for its sign-in state, into [agentAuth]. */
     public suspend fun loadAgentAuth() {
+        agentAuthWanted.value = true
         val generation = _sessionGeneration.value
         val mark = agentAuthStates.mark()
         val reply = actor.decodeReply(actor.call(Ops.agentAuth())) { it.decodeReply<AgentAuthReply>() }
@@ -471,6 +477,7 @@ public class XdClient(
 
     /** `status` or `check` the assistant CLIs, or `install` one [provider]'s update, into [agentClis]. */
     public suspend fun agentCliUpdates(action: String = "status", provider: String? = null) {
+        agentClisWanted.value = true
         val generation = _sessionGeneration.value
         val mark = agentCliStates.mark()
         val reply = actor.decodeReply(actor.call(Ops.agentCliUpdates(action, provider))) {
