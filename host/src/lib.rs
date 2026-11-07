@@ -335,10 +335,11 @@ impl Engine {
                     )
                 } else {
                     let reply = self.self_update.perform(action).unwrap_or_else(error_reply);
-                    if action == Some("restart") && reply["ok"] == true {
-                        if let Some(runtime) = &self.runtime {
-                            runtime.shutdown();
-                        }
+                    if action == Some("restart")
+                        && reply["ok"] == true
+                        && let Some(runtime) = &self.runtime
+                    {
+                        runtime.shutdown();
                     }
                     reply
                 }
@@ -651,13 +652,12 @@ impl Engine {
     }
 
     fn clear_authentication_deadline(&self, owner: u64) {
-        if let Ok(subscribers) = self.events.subscribers.lock() {
-            if let Some(connection) = subscribers
+        if let Ok(subscribers) = self.events.subscribers.lock()
+            && let Some(connection) = subscribers
                 .get(&owner)
                 .and_then(|subscriber| subscriber.connection.as_ref())
-            {
-                let _ = connection.set_read_timeout(None);
-            }
+        {
+            let _ = connection.set_read_timeout(None);
         }
     }
 
@@ -754,10 +754,9 @@ impl Engine {
             .map(|request| request.remove("_through_id"));
         if let (Some(runtime), Some(chat)) =
             (&self.runtime, request.get("chat").and_then(Value::as_str))
+            && let Some(live) = runtime.live_turn(chat)
         {
-            if let Some(live) = runtime.live_turn(chat) {
-                request["_through_id"] = json!(live.message_boundary);
-            }
+            request["_through_id"] = json!(live.message_boundary);
         }
         self.read(|store| store.messages(&request))
     }
@@ -1085,10 +1084,10 @@ impl Engine {
                 if let Some(runtime) = &self.runtime {
                     runtime.discard_chat(chat_id);
                 }
-                if reply["session_deleted"] == true {
-                    if let Some(session) = reply["session"].as_str() {
-                        self.terminals.kill_chat(&format!("session:{session}"));
-                    }
+                if reply["session_deleted"] == true
+                    && let Some(session) = reply["session"].as_str()
+                {
+                    self.terminals.kill_chat(&format!("session:{session}"));
                 }
                 self.events.publish(json!({"event": "tree"}));
                 reply
@@ -1483,12 +1482,45 @@ impl Engine {
                     if let Some(runtime) = &self.runtime {
                         runtime.cancel(chat_id);
                     }
+                    if let Err(error) = self.start_queued_if_idle(chat_id, text) {
+                        return error_reply(error);
+                    }
                 }
                 reply["steered"] = Value::Bool(steered);
                 reply
             }
             Err(error) => error_reply(error),
         }
+    }
+
+    /// The turn a steer was meant for may have ended before it could take it,
+    /// with nothing left to start the message when it does. A turn still ending
+    /// picks the message up from the queue itself.
+    fn start_queued_if_idle(&self, chat_id: &str, text: &str) -> Result<(), String> {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return Ok(());
+        };
+        let chat = store.chat(chat_id).map_err(|error| error.to_string())?;
+        if chat["working"] == true || chat["queue"][0].as_str() != Some(text) {
+            return Ok(());
+        }
+        let (_, event) = store
+            .take_queued(&json!({"chat": chat_id, "index": 0, "text": text}))
+            .map_err(|error| error.to_string())?;
+        self.events.publish(event);
+        match store
+            .prepare_send(&json!({"chat": chat_id, "text": text}))
+            .map_err(|error| error.to_string())?
+        {
+            SendDisposition::Queued { event, .. } => self.events.publish(event),
+            SendDisposition::Start { turn, .. } => {
+                if let Err(error) = runtime.start(turn.clone()) {
+                    let _ = store.abort_turn_start(&turn.chat_id, &error);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn remove_worktree(&self, request: &Value) -> Value {
@@ -1793,10 +1825,10 @@ pub fn serve_daemon_connection(
         )
         .map_err(std::io::Error::other)?;
     let events_ready = Arc::new(AtomicBool::new(!remote));
-    if let Ok(mut subscribers) = engine.events.subscribers.lock() {
-        if let Some(client) = subscribers.get_mut(&subscriber) {
-            client.events_ready = Some(events_ready.clone());
-        }
+    if let Ok(mut subscribers) = engine.events.subscribers.lock()
+        && let Some(client) = subscribers.get_mut(&subscriber)
+    {
+        client.events_ready = Some(events_ready.clone());
     }
     let writer_stream = stream.try_clone()?;
     let writer = thread::spawn(move || write_frames(writer_stream, frames));
@@ -1909,16 +1941,13 @@ pub fn serve_stdio(
     let result = read_requests(&mut reader, &engine, subscriber, &outbound);
     engine.unsubscribe(subscriber);
     drop(outbound);
-    if result.is_err() {
-        // A full event queue usually means stdout itself is blocked. Waiting
-        // for that writer here would keep a dead stdio transport alive forever;
-        // returning lets the dedicated host process exit and the client resync.
-        return result;
-    }
-    let writer_result = writer
+    // A full event queue usually means stdout itself is blocked. Waiting for
+    // that writer here would keep a dead stdio transport alive forever;
+    // returning lets the dedicated host process exit and the client resync.
+    result?;
+    writer
         .join()
-        .map_err(|_| std::io::Error::other("host writer panicked"))?;
-    result.and(writer_result)
+        .map_err(|_| std::io::Error::other("host writer panicked"))?
 }
 
 fn read_requests(
@@ -2084,7 +2113,7 @@ mod tests {
         let root = env::temp_dir().join(format!("xd-engine-settle-{}-{id}", std::process::id()));
         let workspaces = root.join("Workspaces");
         std::fs::create_dir_all(&workspaces).unwrap();
-        let store = StateStore::open(&root.join("chats.db"), &workspaces).unwrap();
+        let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
         let engine = Engine::with_store(store);
         let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
         let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder, "title": "Task"}));
@@ -2286,12 +2315,31 @@ mod tests {
         (engine, chat)
     }
 
-    /// With no running agent to take it, a steer keeps the message and puts it
-    /// first in line, and refuses a message that is no longer the one the
-    /// client saw.
+    /// The turn is already over, so nothing would start the message later. It
+    /// starts now, ahead of what was queued with it. A message that is no longer
+    /// the one the client saw is refused.
+    #[cfg(unix)]
     #[test]
-    fn a_steer_nothing_can_take_keeps_the_message_first_in_line() {
+    fn a_steer_with_no_turn_left_to_take_it_starts_the_message() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("xd-steer-idle-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+read prompt
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+read never
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
         let (engine, chat) = steer_engine(&root);
         let store = engine.store.as_ref().unwrap();
         store
@@ -2311,10 +2359,22 @@ mod tests {
             .dispatch(json!({"op": "steer-queue", "chat": chat, "index": 1, "text": "second"}));
         assert_eq!(reply["ok"], true);
         assert_eq!(reply["steered"], false);
-        assert_eq!(
-            store.chat(&chat).unwrap()["queue"],
-            json!(["second", "first"])
+        let state = store.chat(&chat).unwrap();
+        assert_eq!(state["queue"], json!(["first"]));
+        assert_eq!(state["working"], true);
+        let messages = store.messages(&json!({"chat": chat})).unwrap();
+        assert!(
+            messages["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["role"] == "user" && row["content"] == "second"),
+            "{messages}"
         );
+
+        engine.runtime.as_ref().unwrap().discard_chat(&chat);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
         let _ = std::fs::remove_dir_all(root);
     }
 

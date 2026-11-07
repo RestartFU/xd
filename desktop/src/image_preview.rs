@@ -1178,7 +1178,7 @@ mod tests {
         click(cx, "draft-image-1");
         cx.update(|window, cx| {
             let desktop = desktop.read(cx);
-            assert!(desktop.browser_occluded_by_popup());
+            assert!(desktop.minimal_popup_is_open());
             assert!(desktop.minimal_popup_focus.is_focused(window));
             let preview = desktop.image_preview.as_ref().expect("the viewer is open");
             assert_eq!(preview.index, 1);
@@ -1486,7 +1486,7 @@ mod tests {
         cx.run_until_parked();
         desktop.read_with(cx, |desktop, _| {
             assert!(desktop.image_preview.is_none());
-            assert!(!desktop.browser_occluded_by_popup());
+            assert!(!desktop.minimal_popup_is_open());
         });
     }
 

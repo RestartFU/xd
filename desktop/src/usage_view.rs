@@ -1,6 +1,6 @@
-//! The Usage page: a large modal opened from the sidebar's chart icon, showing
-//! cost, tokens, and subscription limits. Layout and copy follow T3 Code
-//! (MIT, see `data/licenses/t3code-LICENSE`).
+//! Usage: a flyout over the sidebar's chart icon showing subscription limits,
+//! cost, and tokens, and a full page for cost and tokens in detail. The full page
+//! follows T3 Code (MIT, see `data/licenses/t3code-LICENSE`).
 
 use std::{cell::Cell, collections::BTreeMap, rc::Rc, time::Duration};
 
@@ -11,19 +11,16 @@ use gpui::{
 use serde_json::{Map, json};
 use xd_desktop::usage::{
     Bucket, Chart, ChartMetric, ChartPoint, LimitAccount, LimitPool, Merged, ModelTotals,
-    PROVIDER_ORDER, Pace, PoolWindow, ResetCredits, Summary, VIEW_HEIGHT, VIEW_WIDTH, build_chart,
-    collect_accounts, collect_notices, collect_pools, format_count, format_percent, format_tokens,
-    format_usd, merge, parse_limit_accounts, parse_price_cell, provider_label, rank_providers,
-    sort_models_by_tokens, source_messages,
+    PROVIDER_ORDER, Pace, Period, PeriodTotals, PoolWindow, ResetCredits, Summary, VIEW_HEIGHT,
+    VIEW_WIDTH, build_chart, collect_accounts, collect_notices, collect_pools, format_count,
+    format_percent, format_tokens, format_usd, merge, parse_limit_accounts, parse_price_cell,
+    provider_label, rank_providers, sort_models_by_tokens, source_messages,
 };
 
 use super::*;
 use crate::input::{ComposerEvent, ComposerInput};
 
 pub(super) const USAGE_ICON: &str = "icons/chart-no-axes-column.svg";
-pub(super) const GAUGE_ICON: &str = "icons/gauge.svg";
-pub(super) const TRENDING_UP_ICON: &str = "icons/trending-up.svg";
-pub(super) const TRENDING_DOWN_ICON: &str = "icons/trending-down.svg";
 pub(super) const REFRESH_ICON: &str = "icons/refresh.svg";
 pub(super) const INFO_ICON: &str = "icons/info.svg";
 pub(super) const SLIDERS_ICON: &str = "icons/sliders-horizontal.svg";
@@ -41,6 +38,13 @@ const WINDOW_OPTIONS: [(u32, &str); 4] = [
 const METRIC_OPTIONS: [(&str, &str); 3] =
     [("cost", "Cost"), ("tokens", "Tokens"), ("limits", "Limits")];
 const PLOT_HEIGHT: f32 = 224.0;
+const FLYOUT_METRICS: [(&str, &str); 3] =
+    [("limits", "Limits"), ("cost", "Cost"), ("tokens", "Tokens")];
+const FLYOUT_WIDTH: f32 = 348.0;
+/// Lines the flyout up with the sidebar footer's icons, just above them.
+const FLYOUT_LEFT: f32 = 8.0;
+const FLYOUT_BOTTOM: f32 = 46.0;
+const FLYOUT_BARS_HEIGHT: f32 = 44.0;
 const CLAUDE_COLOR: u32 = 0xd97757;
 const PRICE_FIELDS: [(&str, bool); 4] = [
     ("Input", false),
@@ -233,6 +237,8 @@ pub(super) struct UsagePage {
     reset_status: Option<String>,
     price: Option<PriceDialog>,
     limits_now: i64,
+    /// Cost and tokens in detail, instead of the flyout.
+    full_page: bool,
     focus: FocusHandle,
     generation: u64,
     next_row: u64,
@@ -256,6 +262,7 @@ impl UsagePage {
             reset_status: None,
             price: None,
             limits_now: now_ms(),
+            full_page: false,
             focus,
             generation: 0,
             next_row: 0,
@@ -275,9 +282,10 @@ impl Render for UsageTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         div()
-            .max_w(px(320.0))
+            .max_w(px(400.0))
             .px_2()
             .py_1()
+            .font_family(UI_FONT)
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -327,17 +335,8 @@ fn figures(element: gpui::Div, loading: bool) -> gpui::Div {
     element.when(loading, |element| element.opacity(0.4))
 }
 
-fn segmented_shell(colors: ThemeColors) -> gpui::Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(2.0))
-        .p(px(2.0))
-        .rounded(px(8.0))
-        .bg(rgb(colors.surface))
-        .border_1()
-        .border_color(rgb(colors.border))
+fn segmented_shell() -> gpui::Div {
+    div().flex().flex_none().items_center().gap(px(2.0))
 }
 
 fn segment_button(
@@ -348,18 +347,20 @@ fn segment_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .h(px(24.0))
+        .h(px(26.0))
         .px(px(9.0))
         .flex()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(px(7.0))
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
         .text_color(rgb(if active { colors.text } else { colors.muted }))
-        .when(active, |button| button.bg(rgb(colors.selected_surface)))
+        .when(active, |button| {
+            button.bg(rgb(ink(colors.text, colors.chrome, 14)))
+        })
         .when(!active, |button| {
-            button.hover(|style| style.bg(rgb(colors.surface_high)))
+            button.hover(|style| style.bg(rgb(ink(colors.text, colors.chrome, 7))))
         })
         .child(label)
 }
@@ -424,6 +425,278 @@ fn metric_cell(
                 .child(value),
             loading,
         ))
+}
+
+/// One limit in the flyout: its name, then what is left against the time left.
+struct LimitRow {
+    label: SharedString,
+    /// An account under its pooled total.
+    nested: bool,
+    remaining: i64,
+    time_left: Option<i64>,
+    pace: Option<Pace>,
+    /// When it resets, or what the next reset restores.
+    detail: Option<String>,
+    credits: u64,
+}
+
+/// Neutral until the limit needs attention: spent, or running out early.
+fn limit_tone(remaining: i64, pace: Option<Pace>, colors: ThemeColors) -> u32 {
+    if remaining <= 0 {
+        colors.danger
+    } else if pace == Some(Pace::Ahead) {
+        colors.waiting
+    } else {
+        colors.muted
+    }
+}
+
+fn flyout_track(colors: ThemeColors) -> u32 {
+    ink(colors.text, colors.chrome, 14)
+}
+
+fn flyout_bar(share: f64, tone: u32, height: f32, colors: ThemeColors) -> gpui::Div {
+    div()
+        .w_full()
+        .h(px(height))
+        .rounded(px(height / 2.0))
+        .bg(rgb(flyout_track(colors)))
+        .child(
+            div()
+                .h_full()
+                .w(relative((share as f32).clamp(0.0, 1.0)))
+                .rounded(px(height / 2.0))
+                .bg(rgb(tone)),
+        )
+}
+
+fn limit_measure(
+    label: &'static str,
+    share: i64,
+    value: String,
+    tone: u32,
+    value_color: u32,
+    colors: ThemeColors,
+) -> gpui::Div {
+    div()
+        .h(px(16.0))
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .w(px(28.0))
+                .flex_none()
+                .text_size(px(11.5))
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(flyout_bar(share as f64 / 100.0, tone, 5.0, colors)),
+        )
+        .child(
+            div()
+                .min_w(px(52.0))
+                .flex_none()
+                .text_right()
+                .text_color(rgb(value_color))
+                .child(value),
+        )
+}
+
+fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
+    let tone = limit_tone(row.remaining, row.pace, colors);
+    let clock = row.detail.map(|detail| detail.replace("Resets in ", ""));
+    let timed = row.time_left.is_some();
+    div()
+        .px_2()
+        .py(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .rounded(px(6.0))
+        .text_size(px(12.0))
+        .text_color(rgb(colors.muted))
+        .child(
+            div()
+                .h(px(20.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .when(row.nested, |label| label.pl_3())
+                        .when(!row.nested, |label| {
+                            label.text_size(px(13.0)).text_color(rgb(colors.text))
+                        })
+                        .child(row.label),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .when(row.pace == Some(Pace::Ahead), |line| {
+                            line.child(
+                                div()
+                                    .text_color(rgb(colors.waiting))
+                                    .child(Pace::Ahead.short_label()),
+                            )
+                        })
+                        .when(row.credits > 0, |line| {
+                            line.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_color(rgb(colors.text))
+                                    .child(icon(TICKET_ICON, 12.0, colors.muted))
+                                    .child(row.credits.to_string()),
+                            )
+                        }),
+                ),
+        )
+        .child(limit_measure(
+            "Left",
+            row.remaining,
+            format!("{}%", row.remaining),
+            tone,
+            if row.remaining <= 0 {
+                colors.danger
+            } else {
+                colors.text
+            },
+            colors,
+        ))
+        .when_some(row.time_left, |block, left| {
+            block.child(limit_measure(
+                "Time",
+                left,
+                clock.clone().unwrap_or_default(),
+                ink(colors.text, colors.chrome, 45),
+                colors.muted,
+                colors,
+            ))
+        })
+        // Without a clock to compare against, only the words are left to show.
+        .when(!timed, |block| {
+            block.children(clock.clone().map(|clock| div().pl(px(36.0)).child(clock)))
+        })
+}
+
+/// Providers in the flyout differ by shade, so color stays reserved for status.
+fn flyout_provider_shade(provider: &str, colors: ThemeColors) -> u32 {
+    ink(
+        colors.text,
+        colors.chrome,
+        if provider == "claude" { 78 } else { 42 },
+    )
+}
+
+fn metric_amount(metric: ChartMetric, cost: f64, tokens: u64) -> f64 {
+    match metric {
+        ChartMetric::Cost => cost,
+        ChartMetric::Tokens => tokens as f64,
+    }
+}
+
+/// One column per period, stacked by provider, with the figures in its tooltip.
+fn flyout_period_bars(
+    periods: &[Period],
+    totals: &[PeriodTotals],
+    metric: ChartMetric,
+    providers: &[String],
+    colors: ThemeColors,
+) -> gpui::Div {
+    let amount = |key: &str, provider: &str| {
+        totals
+            .iter()
+            .find(|held| held.key == key)
+            .and_then(|held| held.by_provider.get(provider))
+            .map_or(0.0, |(cost, tokens)| metric_amount(metric, *cost, *tokens))
+    };
+    let total = |key: &str| {
+        providers
+            .iter()
+            .map(|provider| amount(key, provider))
+            .sum::<f64>()
+    };
+    let peak = periods
+        .iter()
+        .map(|period| total(&period.key))
+        .fold(0.0_f64, f64::max);
+    div()
+        .h(px(FLYOUT_BARS_HEIGHT))
+        .flex()
+        .items_end()
+        // Ninety columns have no room to spare for gaps.
+        .gap(px(if periods.len() > 45 { 1.0 } else { 2.0 }))
+        .children(periods.iter().enumerate().map(|(index, period)| {
+            let segments: Vec<(u32, f32)> = providers
+                .iter()
+                .rev()
+                .filter_map(|provider| {
+                    let value = amount(&period.key, provider);
+                    (value > 0.0 && peak > 0.0).then(|| {
+                        (
+                            flyout_provider_shade(provider, colors),
+                            ((value / peak) as f32 * FLYOUT_BARS_HEIGHT).max(2.0),
+                        )
+                    })
+                })
+                .collect();
+            let empty = segments.is_empty();
+            div()
+                .id(("usage-period-bar", index))
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .gap(px(1.0))
+                .tooltip(usage_tooltip(
+                    vec![period.tooltip.clone(), metric.format(total(&period.key))],
+                    colors,
+                ))
+                .when(empty, |column| {
+                    column.child(
+                        div()
+                            .h(px(2.0))
+                            .rounded(px(1.0))
+                            .bg(rgb(flyout_track(colors))),
+                    )
+                })
+                .children(
+                    segments
+                        .into_iter()
+                        .map(|(color, height)| div().h(px(height)).rounded(px(1.0)).bg(rgb(color))),
+                )
+        }))
+}
+
+fn flyout_heading(
+    icon_path: Option<&'static str>,
+    label: impl Into<SharedString>,
+    colors: ThemeColors,
+) -> gpui::Div {
+    div()
+        .h(px(26.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(12.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(colors.muted))
+        .children(icon_path.map(|path| icon(path, 14.0, colors.muted)))
+        .child(label.into())
 }
 
 struct ShareSegment {
@@ -609,6 +882,13 @@ fn share_bar(
     )
 }
 
+fn account_credits(account: &LimitAccount) -> u64 {
+    account
+        .reset_credits
+        .as_ref()
+        .map_or(0, |credits| credits.available_count)
+}
+
 fn format_tokens_value(value: f64) -> String {
     format_tokens(value)
 }
@@ -658,6 +938,7 @@ impl XdDesktop {
 
     pub(super) fn close_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.usage_open = false;
+        self.usage.full_page = false;
         self.usage.menu = None;
         self.usage.model = None;
         self.usage.hover = None;
@@ -691,6 +972,10 @@ impl XdDesktop {
             return true;
         }
         if page.model.take().is_some() {
+            cx.notify();
+            return true;
+        }
+        if std::mem::take(&mut page.full_page) {
             cx.notify();
             return true;
         }
@@ -972,6 +1257,9 @@ impl XdDesktop {
         self.usage.segment = None;
         self.usage_save_preferences();
         if metric == "limits" {
+            // Limits only live in the flyout.
+            self.usage.full_page = false;
+            self.usage.model = None;
             self.usage.limits_now = now_ms();
             self.usage_read_limits();
         } else if self.usage_selected().iter().any(|index| {
@@ -1029,6 +1317,7 @@ impl XdDesktop {
         cx.stop_propagation();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn usage_input(
         &mut self,
         placeholder: &'static str,
@@ -1397,44 +1686,471 @@ impl XdDesktop {
             .find_map(|index| self.usage.environments[*index].summary.as_ref())
     }
 
-    pub(super) fn render_usage(
-        &mut self,
-        colors: ThemeColors,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// Limits, cost and tokens open as a flyout over the sidebar's chart icon.
+    /// The full page holds what does not fit: filters, prices and breakdowns.
+    fn usage_flyout_open(&self) -> bool {
+        self.usage_showing_limits() || !self.usage.full_page
+    }
+
+    fn usage_busy(&self) -> bool {
         let showing_limits = self.usage_showing_limits();
-        let selected = self.usage_selected();
-        let viewport = f32::from(window.viewport_size().width);
-        let body = if selected.is_empty() {
-            let noun = if showing_limits { "limits" } else { "usage" };
-            let verb = if self.usage_connected().is_empty() {
-                "Connect"
+        self.usage_selected().iter().any(|index| {
+            let environment = &self.usage.environments[*index];
+            if showing_limits {
+                environment.limits_loading
             } else {
-                "Select"
-            };
-            div()
-                .text_size(px(13.5))
-                .text_color(rgb(colors.muted))
-                .child(format!("{verb} an environment to see {noun}."))
+                environment.summary_loading
+            }
+        })
+    }
+
+    fn render_usage_refresh(
+        &self,
+        size: f32,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let busy = self.usage_busy();
+        let refresh_icon = svg()
+            .path(REFRESH_ICON)
+            .size(px(size / 2.0 + 1.0))
+            .flex_none()
+            .text_color(rgb(colors.muted));
+        let refresh_icon = if busy {
+            refresh_icon
+                .with_animation(
+                    "usage-refreshing",
+                    Animation::new(Duration::from_secs(1)).repeat(),
+                    |icon, delta| {
+                        icon.with_transformation(Transformation::rotate(percentage(delta)))
+                    },
+                )
+                .into_any_element()
+        } else {
+            refresh_icon.into_any_element()
+        };
+        ui_button("usage-refresh", ButtonKind::Ghost, colors)
+            .w(px(size))
+            .h(px(size))
+            .px_0()
+            .when(busy, |button| button.cursor_default())
+            .tooltip(usage_tooltip(
+                vec![
+                    if self.usage_showing_limits() {
+                        "Refresh limits"
+                    } else {
+                        "Refresh usage"
+                    }
+                    .to_owned(),
+                ],
+                colors,
+            ))
+            .child(refresh_icon)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !busy {
+                    this.usage_read_current(true);
+                    cx.notify();
+                }
+            }))
+    }
+
+    fn render_usage_no_environment(&self, colors: ThemeColors) -> gpui::Div {
+        let noun = if self.usage_showing_limits() {
+            "limits"
+        } else {
+            "usage"
+        };
+        let verb = if self.usage_connected().is_empty() {
+            "Connect"
+        } else {
+            "Select"
+        };
+        div()
+            .text_size(px(13.5))
+            .text_color(rgb(colors.muted))
+            .child(format!("{verb} an environment to see {noun}."))
+    }
+
+    /// Filters are set on the full page, so the flyout says when they hide anything.
+    fn usage_filtered(&self) -> bool {
+        !self.settings.usage_hidden_providers.is_empty()
+            || self.usage_selected().len() != self.usage_connected().len()
+    }
+
+    fn usage_show_everything(&mut self, cx: &mut Context<Self>) {
+        self.usage.hidden_environments.clear();
+        self.settings.usage_hidden_providers.clear();
+        self.usage_save_preferences();
+        self.usage_read_current(false);
+        cx.notify();
+    }
+
+    fn render_usage_flyout(&mut self, colors: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        let showing_limits = self.usage_showing_limits();
+        let metric = self.settings.usage_metric.clone();
+        let days = self.settings.usage_window_days;
+        let body = if self.usage_selected().is_empty() {
+            self.render_usage_no_environment(colors)
+                .px_2()
+                .py_1()
                 .into_any_element()
         } else if showing_limits {
             self.render_usage_limits(colors, cx)
+        } else {
+            self.render_usage_flyout_summary(colors, cx)
+        };
+        let windows = (!showing_limits).then(|| {
+            div()
+                .px_1()
+                .pb_1()
+                .child(
+                    segmented_shell().children(WINDOW_OPTIONS.map(|(option, label)| {
+                        segment_button(
+                            ("usage-window", option as usize),
+                            label,
+                            option == days,
+                            colors,
+                        )
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.select_usage_window(option, cx)),
+                        )
+                    })),
+                )
+        });
+        let details = (!showing_limits).then(|| {
+            ui_button("usage-all-details", ButtonKind::Ghost, colors)
+                .w(px(26.0))
+                .h(px(26.0))
+                .px_0()
+                .tooltip(usage_tooltip(vec!["All details".to_owned()], colors))
+                .child(icon(MAXIMIZE_ICON, 13.0, colors.muted))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.usage.full_page = true;
+                    cx.notify();
+                }))
+        });
+        let filtered = self.usage_filtered().then(|| {
+            div()
+                .h(px(32.0))
+                .flex_none()
+                .pl_3()
+                .pr_1()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .border_t_1()
+                .border_color(rgb(colors.border))
+                .text_size(px(12.0))
+                .text_color(rgb(colors.muted))
+                .child("Filters are hiding some usage.")
+                .child(
+                    ui_button("usage-show-everything", ButtonKind::Ghost, colors)
+                        .h(px(24.0))
+                        .child("Show all")
+                        .on_click(cx.listener(|this, _, _, cx| this.usage_show_everything(cx))),
+                )
+        });
+        div()
+            .relative()
+            .w(px(FLYOUT_WIDTH))
+            .max_h_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.chrome))
+            .shadow_lg()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    cx.stop_propagation();
+                    if this.usage.menu.take().is_some() || this.usage.segment.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .child(
+                        div()
+                            .h(px(38.0))
+                            .pl(px(6.0))
+                            .pr_1()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(segmented_shell().children(FLYOUT_METRICS.map(
+                                |(option, label)| {
+                                    segment_button(
+                                        gpui::ElementId::Name(
+                                            format!("usage-metric-{option}").into(),
+                                        ),
+                                        label,
+                                        option == metric,
+                                        colors,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.select_usage_metric(option, cx),
+                                    ))
+                                },
+                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.0))
+                                    .children(details)
+                                    .child(self.render_usage_refresh(26.0, colors, cx)),
+                            ),
+                    )
+                    .children(windows),
+            )
+            .child(
+                div()
+                    .id("usage-scroll")
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_1()
+                    .child(body),
+            )
+            .children(filtered)
+            .into_any_element()
+    }
+
+    fn render_usage_flyout_summary(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.usage_selected();
+        let errors: Vec<String> = selected
+            .iter()
+            .filter_map(|index| {
+                self.usage.environments[*index]
+                    .summary_error
+                    .as_ref()
+                    .map(|error| format!("{}: {error}", environment_label(*index)))
+            })
+            .collect();
+        let Some(summary) = self.usage_shown_summary().cloned() else {
+            let lines = if errors.is_empty() {
+                vec!["Reading usage…".to_owned()]
+            } else {
+                errors
+            };
+            return div()
+                .px_2()
+                .py_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_size(px(13.0))
+                .text_color(rgb(colors.muted))
+                .children(lines)
+                .into_any_element();
+        };
+        let metric = self.usage_chart_metric();
+        let hidden = &self.settings.usage_hidden_providers;
+        let messages = source_messages(
+            self.usage_shown_environments()
+                .iter()
+                .filter_map(|index| self.usage.environments[*index].summary.as_ref())
+                .flat_map(|summary| summary.sources.iter())
+                .filter(|source| !hidden.contains(&source.provider)),
+        );
+        let merged = self.usage_merged(|_| true);
+        let loading = selected
+            .iter()
+            .any(|index| self.usage.environments[*index].summary_loading);
+        let providers = rank_providers(&merged, metric, &[]);
+        let models = match metric {
+            ChartMetric::Tokens => sort_models_by_tokens(&merged.models),
+            ChartMetric::Cost => merged.models.clone(),
+        };
+        let peak = models
+            .iter()
+            .map(|model| metric_amount(metric, model.cost_usd, model.total_tokens))
+            .fold(0.0_f64, f64::max);
+        let (total, caption) = match metric {
+            ChartMetric::Cost => (
+                format_usd(merged.cost_usd),
+                format!(
+                    "{} tokens · API estimate",
+                    format_tokens(merged.total_tokens as f64)
+                ),
+            ),
+            ChartMetric::Tokens => (
+                format_tokens(merged.total_tokens as f64),
+                format!(
+                    "{} · {} sessions",
+                    format_usd(merged.cost_usd),
+                    format_count(merged.sessions)
+                ),
+            ),
+        };
+        let unpriced = (metric == ChartMetric::Cost && merged.unpriced_share > 0.0).then(|| {
+            div()
+                .id("usage-unpriced-info")
+                .tooltip(usage_tooltip(
+                    vec![format!(
+                        "API estimate excludes {} unpriced records.",
+                        format_percent(merged.unpriced_share)
+                    )],
+                    colors,
+                ))
+                .child(icon(INFO_ICON, 12.0, colors.muted))
+        });
+        let rows: Vec<AnyElement> = models
+            .iter()
+            .enumerate()
+            .map(|(index, model)| {
+                let key = model.key();
+                let amount = metric_amount(metric, model.cost_usd, model.total_tokens);
+                let share = if peak > 0.0 { amount / peak } else { 0.0 };
+                div()
+                    .id(("usage-model-row", index))
+                    .px_2()
+                    .py(px(5.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .tooltip(usage_tooltip(
+                        vec![
+                            model.model.clone(),
+                            format!(
+                                "{} · {} tokens",
+                                if model.cost_unknown() {
+                                    "Unpriced".to_owned()
+                                } else {
+                                    format_usd(model.cost_usd)
+                                },
+                                format_tokens(model.total_tokens as f64)
+                            ),
+                        ],
+                        colors,
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.usage.full_page = true;
+                        this.usage.model = Some(key.clone());
+                        this.usage.hover = None;
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(icon(provider_icon(&model.provider), 14.0, colors.muted))
+                                    .child(div().min_w_0().truncate().child(model.model.clone())),
+                            )
+                            .child(div().flex_none().text_size(px(12.0)).child(match metric {
+                                ChartMetric::Cost if model.cost_unknown() => "Unpriced".to_owned(),
+                                ChartMetric::Cost => format_usd(model.cost_usd),
+                                ChartMetric::Tokens => format_tokens(model.total_tokens as f64),
+                            })),
+                    )
+                    .child(flyout_bar(
+                        share,
+                        flyout_provider_shade(&model.provider, colors),
+                        4.0,
+                        colors,
+                    ))
+                    .into_any_element()
+            })
+            .collect();
+        figures(div().flex().flex_col().gap_1(), loading)
+            .children(errors.into_iter().chain(messages).map(|message| {
+                div()
+                    .px_2()
+                    .text_size(px(12.0))
+                    .text_color(rgb(colors.muted))
+                    .child(message)
+            }))
+            .child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .child(
+                        div()
+                            .text_size(px(22.0))
+                            .line_height(px(28.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(colors.text))
+                            .child(total),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(small_muted(caption, colors))
+                            .children(unpriced),
+                    ),
+            )
+            .child(div().px_2().pt_1().child(flyout_period_bars(
+                &summary.periods,
+                &merged.periods,
+                metric,
+                &providers,
+                colors,
+            )))
+            .child(flyout_heading(None, "Models", colors))
+            .when(rows.is_empty(), |page| {
+                page.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .child(small_muted("No activity in this window.", colors)),
+                )
+            })
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn render_usage_full_page(
+        &mut self,
+        colors: ThemeColors,
+        viewport: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let body = if self.usage_selected().is_empty() {
+            self.render_usage_no_environment(colors).into_any_element()
         } else if self.usage_shown_summary().is_none() {
             self.render_usage_placeholder(colors)
         } else {
             self.render_usage_overview(colors, viewport, cx)
         };
-        let modal = div()
+        div()
             .relative()
             .size_full()
             .max_w(px(1280.0))
             .flex()
             .flex_col()
             .min_h_0()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(rgb(colors.border))
+            .rounded(px(16.0))
             .bg(rgb(colors.background))
             .shadow_lg()
             .on_mouse_down(
@@ -1465,36 +2181,72 @@ impl XdDesktop {
                     ),
             )
             .when_some(
-                (!showing_limits)
-                    .then(|| self.render_usage_model_dialog(colors, cx))
-                    .flatten(),
+                self.render_usage_model_dialog(colors, cx),
                 |modal, dialog| modal.child(dialog),
             )
             .when_some(
                 self.render_usage_price_dialog(colors, cx),
                 |modal, dialog| modal.child(dialog),
             )
-            .when_some(self.usage.confirm_reset.clone(), |modal, confirm| {
-                modal.child(self.render_usage_reset_confirm(confirm, colors, cx))
-            });
+            .into_any_element()
+    }
+
+    pub(super) fn render_usage(
+        &mut self,
+        colors: ThemeColors,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let viewport = f32::from(window.viewport_size().width);
+        let flyout = self.usage_flyout_open();
+        let panel = if flyout {
+            self.render_usage_flyout(colors, cx)
+        } else {
+            self.render_usage_full_page(colors, viewport, cx)
+        };
+        // Over the whole window: the flyout can be shorter than this dialog.
+        let confirm_reset = self
+            .usage
+            .confirm_reset
+            .clone()
+            .map(|confirm| self.render_usage_reset_confirm(confirm, colors, cx));
         div()
             .id("usage-page")
             .occlude()
             .absolute()
             .inset_0()
-            .p_6()
             .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(colors.backdrop))
+            .when(flyout, |page| {
+                page.pl(px(FLYOUT_LEFT))
+                    .pr_6()
+                    .pt_6()
+                    .pb(px(FLYOUT_BOTTOM))
+                    .items_end()
+                    .justify_start()
+            })
+            .when(!flyout, |page| {
+                page.p_6()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(colors.backdrop))
+            })
             .font_family(UI_FONT)
             .track_focus(&self.usage.focus)
             .on_key_down(cx.listener(|this, event, _, cx| this.usage_key_down(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.close_usage(window, cx)),
+                cx.listener(|this, _, window, cx| {
+                    // Most of the window is outside the flyout, so a press there
+                    // may only be meant for an open popover or menu.
+                    if this.usage.menu.take().is_some() || this.usage.segment.take().is_some() {
+                        cx.notify();
+                    } else {
+                        this.close_usage(window, cx);
+                    }
+                }),
             )
-            .child(modal)
+            .child(panel)
+            .children(confirm_reset)
             .into_any_element()
     }
 
@@ -1504,52 +2256,27 @@ impl XdDesktop {
         viewport: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let showing_limits = self.usage_showing_limits();
         let days = self.settings.usage_window_days;
         let metric = self.settings.usage_metric.clone();
-        let busy = self.usage_selected().iter().any(|index| {
-            let environment = &self.usage.environments[*index];
-            if showing_limits {
-                environment.limits_loading
-            } else {
-                environment.summary_loading
-            }
-        });
-        let window_label = (!showing_limits && viewport >= 1280.0)
+        let window_label = (viewport >= 1280.0)
             .then(|| {
                 self.usage_shown_summary()
                     .map(|summary| summary.window_label.clone())
             })
             .flatten();
-        let refresh_icon = svg()
-            .path(REFRESH_ICON)
-            .size(px(15.0))
-            .flex_none()
-            .text_color(rgb(colors.muted));
-        let refresh_icon = if busy {
-            refresh_icon
-                .with_animation(
-                    "usage-refreshing",
-                    Animation::new(Duration::from_secs(1)).repeat(),
-                    |icon, delta| {
-                        icon.with_transformation(Transformation::rotate(percentage(delta)))
-                    },
-                )
-                .into_any_element()
-        } else {
-            refresh_icon.into_any_element()
-        };
         div()
-            .min_h(px(48.0))
+            .min_h(px(44.0))
             .flex_none()
             .pl_5()
             .pr_2()
-            .py_2()
+            .py_1()
             .flex()
             .flex_wrap()
             .items_center()
             .gap_x_3()
             .gap_y_2()
+            .rounded_t(px(16.0))
+            .bg(rgb(colors.chrome))
             .border_b_1()
             .border_color(rgb(colors.border))
             .child(
@@ -1574,23 +2301,21 @@ impl XdDesktop {
                 header.child(small_muted(label, colors))
             })
             .child(div().flex_1())
-            .when(!showing_limits, |header| {
-                header.child(segmented_shell(colors).children(WINDOW_OPTIONS.map(
-                    |(option, label)| {
-                        segment_button(
-                            ("usage-window", option as usize),
-                            label,
-                            option == days,
-                            colors,
-                        )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_usage_window(option, cx)),
-                        )
-                    },
-                )))
-            })
             .child(
-                segmented_shell(colors).children(METRIC_OPTIONS.map(|(option, label)| {
+                segmented_shell().children(WINDOW_OPTIONS.map(|(option, label)| {
+                    segment_button(
+                        ("usage-window", option as usize),
+                        label,
+                        option == days,
+                        colors,
+                    )
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.select_usage_window(option, cx)),
+                    )
+                })),
+            )
+            .child(
+                segmented_shell().children(METRIC_OPTIONS.map(|(option, label)| {
                     segment_button(
                         gpui::ElementId::Name(format!("usage-metric-{option}").into()),
                         label,
@@ -1602,31 +2327,7 @@ impl XdDesktop {
                     )
                 })),
             )
-            .child(
-                ui_button("usage-refresh", ButtonKind::Ghost, colors)
-                    .w(px(28.0))
-                    .h(px(28.0))
-                    .px_0()
-                    .when(busy, |button| button.cursor_default())
-                    .tooltip(usage_tooltip(
-                        vec![
-                            if showing_limits {
-                                "Refresh limits"
-                            } else {
-                                "Refresh usage"
-                            }
-                            .to_owned(),
-                        ],
-                        colors,
-                    ))
-                    .child(refresh_icon)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !busy {
-                            this.usage_read_current(true);
-                            cx.notify();
-                        }
-                    })),
-            )
+            .child(self.render_usage_refresh(28.0, colors, cx))
             .child(
                 ui_button("usage-close", ButtonKind::Ghost, colors)
                     .w(px(28.0))
@@ -1646,7 +2347,6 @@ impl XdDesktop {
     ) -> AnyElement {
         let connected = self.usage_connected();
         let selected = self.usage_selected();
-        let showing_limits = self.usage_showing_limits();
         let label = if selected.len() == connected.len() {
             "All environments".to_owned()
         } else if selected.len() == 1 {
@@ -1655,19 +2355,13 @@ impl XdDesktop {
             format!("{} environments", selected.len())
         };
         let open = self.usage.menu == Some(UsageMenu::Environment);
-        let has_issue = !showing_limits
-            && selected
-                .iter()
-                .any(|index| self.usage.environments[*index].summary_error.is_some());
-        let partial = !showing_limits
-            && selected
-                .iter()
-                .any(|index| self.usage.environments[*index].summary_loading);
-        let duplicates = if showing_limits {
-            Vec::new()
-        } else {
-            self.usage_merged(|_| true).duplicate_sources
-        };
+        let has_issue = selected
+            .iter()
+            .any(|index| self.usage.environments[*index].summary_error.is_some());
+        let partial = selected
+            .iter()
+            .any(|index| self.usage.environments[*index].summary_loading);
+        let duplicates = self.usage_merged(|_| true).duplicate_sources;
         let menu = open.then(|| {
             let rows = connected.iter().map(|index| {
                 let index = *index;
@@ -1699,22 +2393,20 @@ impl XdDesktop {
                     cx.notify();
                 }))
                 .child(div().flex_1().child(environment_label(index)))
-                .when(!showing_limits, |row| {
-                    row.child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(rgb(if environment.summary_error.is_some() {
-                                colors.danger
-                            } else {
-                                colors.muted
-                            }))
-                            .child(status),
-                    )
-                })
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(if environment.summary_error.is_some() {
+                            colors.danger
+                        } else {
+                            colors.muted
+                        }))
+                        .child(status),
+                )
             });
             let notices: Vec<String> = connected
                 .iter()
-                .filter(|index| !showing_limits && selected.contains(index))
+                .filter(|index| selected.contains(index))
                 .filter_map(|index| {
                     self.usage.environments[*index]
                         .summary_error
@@ -2291,7 +2983,7 @@ impl XdDesktop {
                     .gap_3()
                     .child(section_title("Breakdown", colors))
                     .child(
-                        segmented_shell(colors)
+                        segmented_shell()
                             .child(
                                 segment_button("usage-breakdown-model", "Model", !by_time, colors)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -3392,7 +4084,6 @@ impl XdDesktop {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(12.0))
             .bg(rgba(colors.backdrop))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
@@ -3483,10 +4174,12 @@ impl XdDesktop {
         div()
             .flex()
             .flex_col()
-            .gap_8()
+            .gap_2()
             .when(empty, |page| {
                 page.child(
                     div()
+                        .px_2()
+                        .py_1()
                         .text_size(px(13.5))
                         .text_color(rgb(colors.muted))
                         .child(if loading {
@@ -3500,22 +4193,24 @@ impl XdDesktop {
             })
             .children(sections)
             .when_some(status, |page, status| {
-                page.child(small_muted(status, colors))
+                page.child(div().px_2().child(small_muted(status, colors)))
             })
             .when(!notices.is_empty(), |page| {
                 page.child(
                     div()
-                        .p_3()
+                        .px_2()
+                        .py_1()
                         .flex()
                         .items_start()
                         .gap_2()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .text_size(px(13.0))
+                        .text_size(px(12.0))
                         .text_color(rgb(colors.waiting))
-                        .child(icon(ALERT_ICON, 15.0, colors.waiting))
-                        .child(div().flex().flex_col().gap_1().children(notices)),
+                        .child(div().flex_none().mt(px(1.0)).child(icon(
+                            ALERT_ICON,
+                            14.0,
+                            colors.waiting,
+                        )))
+                        .child(div().min_w_0().flex().flex_col().gap_1().children(notices)),
                 )
             })
             .into_any_element()
@@ -3528,58 +4223,34 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cards: Vec<AnyElement> = pool
+        let rows: Vec<AnyElement> = pool
             .windows
             .iter()
-            .map(|window| self.render_usage_pool_card(pool, window, now, colors, cx))
+            .flat_map(|window| self.render_usage_pool_rows(pool, window, now, colors, cx))
             .collect();
         div()
             .flex()
             .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(colors.text))
-                    .child(icon(provider_icon(&pool.provider), 16.0, colors.text))
-                    .child(provider_label(&pool.provider).to_owned()),
-            )
-            .children(cards)
+            .child(flyout_heading(
+                Some(provider_icon(&pool.provider)),
+                provider_label(&pool.provider).to_owned(),
+                colors,
+            ))
+            .children(rows)
             .into_any_element()
     }
 
-    fn render_usage_pool_card(
+    /// One row for a window one account reports; a pooled total over one row per
+    /// account when several share it.
+    fn render_usage_pool_rows(
         &self,
         pool: &LimitPool,
         window: &PoolWindow,
         now: i64,
         colors: ThemeColors,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let color = provider_color(&pool.provider, colors);
-        let next_refill = window
-            .resets
-            .iter()
-            .find(|reset| reset.restores_percent > 0);
-        let many = pool.accounts.len() > 1;
-        let pace_icon = window.pace.map(|pace| {
-            let path = match pace {
-                Pace::Ahead => TRENDING_UP_ICON,
-                Pace::On => GAUGE_ICON,
-                Pace::Under => TRENDING_DOWN_ICON,
-            };
-            div()
-                .id(gpui::ElementId::Name(
-                    format!("usage-pace-{}", window.id).into(),
-                ))
-                .tooltip(usage_tooltip(vec![pace.label().to_owned()], colors))
-                .child(icon(path, 14.0, colors.muted))
-        });
-        let segments: Vec<AnyElement> = pool
+    ) -> Vec<AnyElement> {
+        let members: Vec<(&LimitAccount, &xd_desktop::usage::PoolMember)> = pool
             .accounts
             .iter()
             .filter_map(|account| {
@@ -3587,108 +4258,103 @@ impl XdDesktop {
                     .members
                     .iter()
                     .find(|member| member.account == account.key)?;
-                let reset = window
-                    .resets
-                    .iter()
-                    .find(|reset| reset.account == account.key);
-                Some(self.render_usage_segment(
-                    pool,
-                    window,
-                    account,
-                    &member.window,
-                    member.refill_percent,
-                    reset.map(|reset| reset.restores_percent),
-                    color,
-                    now,
-                    many,
-                    colors,
-                    cx,
-                ))
+                Some((account, member))
             })
             .collect();
-        div()
-            .p_4()
-            .flex()
-            .items_center()
-            .gap_6()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(with_alpha(colors.border, 0.6))
-            .child(
-                div()
-                    .w(px(176.0))
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(section_title(window.label.clone(), colors))
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(30.0))
-                                    .line_height(px(36.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child(format!("{}%", window.remaining_percent)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_size(px(13.5))
-                                    .text_color(rgb(colors.muted))
-                                    .child("left")
-                                    .children(pace_icon),
-                            ),
-                    )
-                    .when_some(next_refill.filter(|_| many), |column, reset| {
-                        column.child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(colors.text))
-                                .child(format!("↻ +{}%", reset.restores_percent)),
-                        )
-                    }),
-            )
-            .child(div().flex_1().min_w_0().flex().gap_1().children(segments))
-            .into_any_element()
+        let shared = members.len() > 1;
+        let mut rows = Vec::with_capacity(members.len() + 1);
+        if shared {
+            let next_refill = window
+                .resets
+                .iter()
+                .find(|reset| reset.restores_percent > 0);
+            rows.push(
+                limit_row(
+                    LimitRow {
+                        label: window.label.clone().into(),
+                        nested: false,
+                        remaining: window.remaining_percent,
+                        time_left: None,
+                        pace: window.pace,
+                        detail: next_refill
+                            .map(|reset| format!("+{}% next reset", reset.restores_percent)),
+                        credits: 0,
+                    },
+                    colors,
+                )
+                .id(gpui::ElementId::Name(
+                    format!("usage-pool-{}-{}", pool.provider, window.id).into(),
+                ))
+                .tooltip(usage_tooltip(
+                    std::iter::once(window.label.clone())
+                        .chain(window.pace.map(|pace| pace.label().to_owned()))
+                        .collect(),
+                    colors,
+                ))
+                .into_any_element(),
+            );
+        }
+        let many_accounts = pool.accounts.len() > 1;
+        for (account, member) in members {
+            let environments = account.environments.join(", ");
+            let label = if shared {
+                environments
+            } else if many_accounts {
+                format!("{} · {environments}", window.label)
+            } else {
+                window.label.clone()
+            };
+            let restores = window
+                .resets
+                .iter()
+                .find(|reset| reset.account == account.key)
+                .map(|reset| reset.restores_percent);
+            rows.push(self.render_usage_account_row(
+                pool,
+                window,
+                account,
+                &member.window,
+                label,
+                shared,
+                restores,
+                now,
+                colors,
+                cx,
+            ));
+        }
+        rows
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_usage_segment(
+    fn render_usage_account_row(
         &self,
         pool: &LimitPool,
         pool_window: &PoolWindow,
         account: &LimitAccount,
         window: &xd_desktop::usage::LimitWindow,
-        refill_percent: f64,
+        label: String,
+        nested: bool,
         restores: Option<i64>,
-        color: u32,
         now: i64,
-        many: bool,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let remaining = window.remaining_percent();
         let time_left = window.pace_remaining_percent(now);
         let resets_in = window.resets_in(now);
-        let credits = account
-            .reset_credits
-            .as_ref()
-            .map_or(0, |credits| credits.available_count);
+        let credits = account_credits(account);
         let key = format!("{}:{}:{}", pool.provider, pool_window.id, account.key);
-        let mut lines = vec![format!(
-            "{remaining}% left{}",
-            time_left.map_or_else(String::new, |left| format!(" · {left}% of the window left"))
-        )];
-        if time_left.is_some() {
-            lines.push("The line is where even spending would be.".to_owned());
+        let pace = window.pace(now);
+        // The row may clip a long name, so the tooltip leads with all of it.
+        let mut lines = vec![
+            label.clone(),
+            format!(
+                "{remaining}% left{}",
+                time_left.map_or_else(String::new, |left| format!(" · {left}% of the window left"))
+            ),
+        ];
+        if let Some(pace) = pace {
+            lines.push(pace.label().to_owned());
         }
         if let Some(label) = &window.resets_at_label {
             lines.push(format!(
@@ -3698,36 +4364,40 @@ impl XdDesktop {
                     .map_or_else(String::new, |resets| format!(" · {resets}"))
             ));
         }
+        if let Some(banked) = account.reset_credits.as_ref().filter(|_| credits > 0) {
+            lines.push(banked.summary(now));
+        }
         let open = self.usage.segment.as_deref() == Some(key.as_str());
-        let badge = resets_in
-            .as_ref()
-            .map(|resets| resets.replace("resets in ", "↻ "));
         let popover = open.then(|| {
             self.render_usage_segment_popover(account, window, restores, now, credits, colors, cx)
         });
-        let hatch_width = (100 - remaining).min(refill_percent.round() as i64).max(0);
-        let hatch = (remaining < 100 && window.resets_at_ms.is_some() && refill_percent > 0.0)
-            .then_some(hatch_width);
-        let hatch_color = color;
         let click_key = key.clone();
+        let row = limit_row(
+            LimitRow {
+                label: label.into(),
+                nested,
+                remaining,
+                time_left,
+                pace,
+                detail: resets_in.map(|resets| resets.replacen("resets", "Resets", 1)),
+                credits,
+            },
+            colors,
+        );
         div()
             .relative()
-            .flex_1()
-            .min_w_0()
             .child(
-                div()
-                    .id(gpui::ElementId::Name(format!("usage-segment-{key}").into()))
-                    .relative()
-                    .h(px(32.0))
-                    .rounded(px(6.0))
-                    .bg(rgb(colors.surface_high))
-                    .overflow_hidden()
+                row.id(gpui::ElementId::Name(format!("usage-limit-{key}").into()))
                     .cursor_pointer()
-                    .when(open, |bar| bar.border_1().border_color(rgb(colors.border)))
+                    .when(open, |row| row.bg(rgb(colors.selected_surface)))
                     // The open popover already says all of this.
-                    .when(!open, |bar| bar.tooltip(usage_tooltip(lines, colors)))
+                    .when(!open, |row| {
+                        row.hover(|style| style.bg(rgb(colors.surface_high)))
+                            .tooltip(usage_tooltip(lines, colors))
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.usage.menu = None;
                         this.usage.segment =
                             if this.usage.segment.as_deref() == Some(click_key.as_str()) {
                                 None
@@ -3735,111 +4405,7 @@ impl XdDesktop {
                                 Some(click_key.clone())
                             };
                         cx.notify();
-                    }))
-                    .when(remaining > 0, |bar| {
-                        bar.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .w(relative(remaining as f32 / 100.0))
-                                .rounded(px(6.0))
-                                .bg(with_alpha(color, 0.35)),
-                        )
-                    })
-                    .when_some(hatch, |bar, width| {
-                        bar.child(
-                            canvas(
-                                |_, _, _| (),
-                                move |bounds, _, window, _| {
-                                    paint_usage_hatch(bounds, hatch_color, window);
-                                },
-                            )
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right_0()
-                            .w(relative(width as f32 / 100.0)),
-                        )
-                    })
-                    .when_some(time_left, |bar, left| {
-                        // The slot and its tick mark where even spending would be.
-                        let at = relative((left as f32 / 100.0).clamp(0.0, 1.0));
-                        bar.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left(at)
-                                .w(px(6.0))
-                                .ml(px(-3.0))
-                                .flex()
-                                .justify_center()
-                                .bg(rgb(colors.background))
-                                .child(
-                                    div()
-                                        .mt(px(2.0))
-                                        .mb(px(2.0))
-                                        .w(px(2.0))
-                                        .rounded_full()
-                                        .bg(rgb(colors.text)),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .relative()
-                            .h_full()
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(colors.text))
-                            .when(many, |row| {
-                                row.child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(account.environments.join(", ")),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(format!("{remaining}%")),
-                                )
-                            })
-                            .child(div().flex_1())
-                            .when(badge.is_some() || credits > 0, |row| {
-                                row.child(
-                                    div()
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded(px(4.0))
-                                        .bg(with_alpha(colors.background, 0.85))
-                                        .text_size(px(11.0))
-                                        .children(badge.clone())
-                                        .when(credits > 0, |tag| {
-                                            tag.child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(2.0))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(icon(TICKET_ICON, 12.0, colors.text))
-                                                    .child(credits.to_string()),
-                                            )
-                                        }),
-                                )
-                            }),
-                    ),
+                    })),
             )
             .children(popover)
             .into_any_element()
@@ -3884,100 +4450,106 @@ impl XdDesktop {
             .as_ref()
             .filter(|_| credits > 0 && account.identity.is_some());
         deferred(
-            anchored().snap_to_window_with_margin(px(8.0)).child(
-                div()
-                    .occlude()
-                    .mt(px(36.0))
-                    .w(px(288.0))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.0))
-                    .rounded(px(8.0))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.chrome))
-                    .shadow_lg()
-                    .text_size(px(12.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.usage.segment = None;
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(colors.text))
-                            .child(icon(provider_icon(&account.provider), 16.0, colors.muted))
-                            .child(provider_label(&account.provider).to_owned()),
-                    )
-                    .child(
-                        div()
-                            .pt(px(10.0))
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .border_t_1()
-                            .border_color(with_alpha(colors.border, 0.6))
-                            .when_some(account.plan.clone(), |rows, plan| {
-                                rows.child(row("Plan", plan))
-                            })
-                            .child(row("Signed in", account.environments.join(", "))),
-                    )
-                    .child(
-                        div()
-                            .pt(px(10.0))
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .border_t_1()
-                            .border_color(with_alpha(colors.border, 0.6))
-                            .child(row("Left", format!("{remaining}%")))
-                            .when_some(window.resets_at_label.clone(), |rows, label| {
-                                let suffix =
-                                    resets_in.as_ref().map_or_else(String::new, |resets| {
-                                        format!(" · {}", resets.replace("resets in ", "in "))
-                                    });
-                                rows.child(row("Resets", format!("{label}{suffix}")))
-                            })
-                            .when_some(time_left, |rows, left| {
-                                rows.child(row("Even pace", format!("{left}% left by now")))
-                            })
-                            .when_some(restores.filter(|percent| *percent > 0), |rows, percent| {
-                                rows.child(row("Restores", format!("+{percent}% of pool")))
-                            }),
-                    )
-                    .when_some(reset_credits, |popover, credits| {
-                        popover.child(
+            // Beside the flyout, level with the row, so the row stays in view.
+            anchored()
+                .anchor(gpui::Corner::BottomLeft)
+                .snap_to_window_with_margin(px(8.0))
+                .child(
+                    div()
+                        .occlude()
+                        .ml(px(FLYOUT_WIDTH - 1.0))
+                        .w(px(288.0))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.0))
+                        .rounded(px(8.0))
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .bg(rgb(colors.chrome))
+                        .shadow_lg()
+                        .text_size(px(12.0))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(colors.text))
+                                .child(icon(provider_icon(&account.provider), 16.0, colors.muted))
+                                .child(provider_label(&account.provider).to_owned()),
+                        )
+                        .child(
                             div()
                                 .pt(px(10.0))
                                 .flex()
-                                .items_center()
-                                .gap_3()
+                                .flex_col()
+                                .gap_1()
                                 .border_t_1()
                                 .border_color(with_alpha(colors.border, 0.6))
-                                .text_color(rgb(colors.muted))
-                                .child(div().flex_1().min_w_0().child(credits.summary(now)))
-                                .child(
-                                    ui_button("usage-use-reset", ButtonKind::Secondary, colors)
-                                        .h(px(24.0))
-                                        .when(busy, |button| button.opacity(0.6).cursor_default())
-                                        .child(if busy { "Using…" } else { "Use reset" })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if this.usage.reset_busy.is_none() {
-                                                this.usage.segment = None;
-                                                this.usage.confirm_reset = Some(confirm.clone());
-                                                cx.notify();
-                                            }
-                                        })),
+                                .when_some(account.plan.clone(), |rows, plan| {
+                                    rows.child(row("Plan", plan))
+                                })
+                                .child(row("Signed in", account.environments.join(", "))),
+                        )
+                        .child(
+                            div()
+                                .pt(px(10.0))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .border_t_1()
+                                .border_color(with_alpha(colors.border, 0.6))
+                                .child(row("Left", format!("{remaining}%")))
+                                .when_some(window.resets_at_label.clone(), |rows, label| {
+                                    let suffix =
+                                        resets_in.as_ref().map_or_else(String::new, |resets| {
+                                            format!(" · {}", resets.replace("resets in ", "in "))
+                                        });
+                                    rows.child(row("Resets", format!("{label}{suffix}")))
+                                })
+                                .when_some(time_left, |rows, left| {
+                                    rows.child(row("Even pace", format!("{left}% left by now")))
+                                })
+                                .when_some(
+                                    restores.filter(|percent| *percent > 0),
+                                    |rows, percent| {
+                                        rows.child(row("Restores", format!("+{percent}% of pool")))
+                                    },
                                 ),
                         )
-                    }),
-            ),
+                        .when_some(reset_credits, |popover, credits| {
+                            popover.child(
+                                div()
+                                    .pt(px(10.0))
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .border_t_1()
+                                    .border_color(with_alpha(colors.border, 0.6))
+                                    .text_color(rgb(colors.muted))
+                                    .child(div().flex_1().min_w_0().child(credits.summary(now)))
+                                    .child(
+                                        ui_button("usage-use-reset", ButtonKind::Secondary, colors)
+                                            .h(px(24.0))
+                                            .when(busy, |button| {
+                                                button.opacity(0.6).cursor_default()
+                                            })
+                                            .child(if busy { "Using…" } else { "Use reset" })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if this.usage.reset_busy.is_none() {
+                                                    this.usage.segment = None;
+                                                    this.usage.confirm_reset =
+                                                        Some(confirm.clone());
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
+                            )
+                        }),
+                ),
         )
         .with_priority(2)
         .into_any_element()
@@ -4127,26 +4699,6 @@ fn paint_usage_chart(
             rgb(muted),
         ));
     }
-}
-
-/// The quota this window would restore when it resets, as a faint diagonal hatch.
-fn paint_usage_hatch(bounds: Bounds<Pixels>, color: u32, window: &mut Window) {
-    let height = f32::from(bounds.size.height);
-    let width = f32::from(bounds.size.width);
-    let spacing = 7.0;
-    let stroke_color = with_alpha(color, 0.2);
-    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-        let mut x = -height;
-        while x < width {
-            let mut stroke = PathBuilder::stroke(px(1.0));
-            stroke.move_to(point(bounds.left() + px(x), bounds.bottom()));
-            stroke.line_to(point(bounds.left() + px(x + height), bounds.top()));
-            if let Ok(path) = stroke.build() {
-                window.paint_path(path, stroke_color);
-            }
-            x += spacing;
-        }
-    });
 }
 
 #[cfg(test)]
@@ -4393,6 +4945,86 @@ mod tests {
             let rows = &desktop.usage.price.as_ref().unwrap().rows;
             let names: Vec<&str> = rows.iter().map(|row| row.model.as_str()).collect();
             assert_eq!(names, ["a", "b"]);
+        });
+    }
+
+    #[test]
+    fn a_limit_is_neutral_until_it_needs_attention() {
+        let colors = xd_desktop::theme::ThemePreset::Dark.colors();
+        assert_eq!(limit_tone(100, Some(Pace::Under), colors), colors.muted);
+        assert_eq!(limit_tone(8, Some(Pace::On), colors), colors.muted);
+        assert_eq!(limit_tone(50, None, colors), colors.muted);
+        assert_eq!(limit_tone(7, Some(Pace::Ahead), colors), colors.waiting);
+        assert_eq!(limit_tone(0, Some(Pace::Ahead), colors), colors.danger);
+        assert_eq!(limit_tone(0, None, colors), colors.danger);
+    }
+
+    #[gpui::test]
+    fn the_flyout_and_full_page_close_one_layer_at_a_time(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1600.0), px(1000.0)));
+        let open = |metric: &str, full_page: bool, cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(&desktop, |desktop, _, cx| {
+                desktop.settings.usage_metric = metric.to_owned();
+                desktop.usage.full_page = full_page;
+                desktop.usage_open = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        let press = |at: Point<Pixels>, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        let beside = point(px(800.0), px(400.0));
+
+        open("limits", false, cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.usage.segment = Some("codex:weekly:account".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        press(beside, cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage_open, "the press only closes the popover");
+            assert!(desktop.usage.segment.is_none());
+        });
+        press(beside, cx);
+        desktop.read_with(cx, |desktop, _| assert!(!desktop.usage_open));
+
+        // Cost and tokens open in the flyout too.
+        open("cost", false, cx);
+        press(beside, cx);
+        desktop.read_with(cx, |desktop, _| assert!(!desktop.usage_open));
+
+        // The full page fills the window, so that spot is inside it.
+        open("cost", true, cx);
+        press(beside, cx);
+        desktop.read_with(cx, |desktop, _| assert!(desktop.usage_open));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(desktop.dismiss_usage_layer(window, cx));
+            assert!(desktop.usage_open, "Escape returns to the flyout");
+            assert!(desktop.usage_flyout_open());
+            desktop.usage.full_page = true;
+            desktop.select_usage_metric("limits", cx);
+            assert!(
+                desktop.usage_flyout_open(),
+                "limits only live in the flyout"
+            );
+            assert!(!desktop.usage.full_page);
+        });
+    }
+
+    #[gpui::test]
+    fn the_flyout_says_when_filters_hide_usage(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            assert!(!desktop.usage_filtered());
+            desktop.settings.usage_hidden_providers = vec!["codex".to_owned()];
+            assert!(desktop.usage_filtered());
+            desktop.usage_show_everything(cx);
+            assert!(!desktop.usage_filtered());
+            assert!(desktop.settings.usage_hidden_providers.is_empty());
         });
     }
 

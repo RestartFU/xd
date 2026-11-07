@@ -258,6 +258,13 @@ struct PendingInteractions {
     requests: HashMap<String, PendingInteraction>,
 }
 
+/// A message sent into a running turn.
+struct SteeredMessage {
+    prompt: String,
+    /// Its stored row, once it has one.
+    row: Option<i64>,
+}
+
 struct PendingInteraction {
     id: Value,
     method: String,
@@ -438,15 +445,55 @@ impl TurnRuntime {
             .is_some_and(|sink| sink.send(Feed::Steer(prompt.to_owned())).is_ok())
     }
 
-    /// Puts messages the agent never read back at the front of the queue, in
-    /// the order they were sent.
-    fn requeue_steers(&self, chat_id: &str, prompts: &[String]) {
-        for prompt in prompts.iter().rev() {
-            match self.inner.store.requeue_front(chat_id, prompt) {
-                Ok(event) => self.inner.events.publish(event),
-                Err(error) => eprintln!("xd: cannot requeue a steered message: {error}"),
+    /// Puts a message the agent never read back at the front of the queue.
+    /// `returned` holds those this turn has already put back, oldest first, so
+    /// the message lands in the order it was sent, however they came back.
+    fn requeue_steer(
+        &self,
+        chat_id: &str,
+        steer: u64,
+        prompt: &str,
+        returned: &mut Vec<(u64, String)>,
+    ) {
+        let position = returned.partition_point(|(other, _)| *other < steer);
+        let earlier = returned[..position]
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>();
+        match self.inner.store.requeue_after(chat_id, &earlier, prompt) {
+            Ok(event) => {
+                self.inner.events.publish(event);
+                returned.insert(position, (steer, prompt.to_owned()));
+            }
+            Err(error) => eprintln!("xd: cannot requeue a steered message: {error}"),
+        }
+    }
+
+    /// Takes back a message the agent will not answer: it no longer belongs in
+    /// the transcript, and returns to the queue to be sent again.
+    fn return_steer(
+        &self,
+        chat_id: &str,
+        progress: &TurnProgress,
+        steered: &mut HashMap<u64, SteeredMessage>,
+        steer: u64,
+        returned: &mut Vec<(u64, String)>,
+    ) {
+        let Some(message) = steered.remove(&steer) else {
+            return;
+        };
+        if let Some(message_id) = message.row {
+            let _ = self.inner.store.delete_message(chat_id, message_id);
+            if let Ok(mut state) = progress.state.lock() {
+                state
+                    .items
+                    .retain(|item| item["message_id"].as_i64() != Some(message_id));
             }
         }
+        self.requeue_steer(chat_id, steer, &message.prompt, returned);
+        self.inner
+            .events
+            .publish(json!({"event": "changed", "chat": chat_id}));
     }
 
     fn write_rpc(&self, chat_id: &str, frame: &Value) -> Result<(), String> {
@@ -799,10 +846,8 @@ impl TurnRuntime {
                             && !process.progress.ready.load(Ordering::Acquire)
                     })
                 });
-                if starting {
-                    if let Ok(mut child) = child.lock() {
-                        let _ = terminate_agent(&mut child);
-                    }
+                if starting && let Ok(mut child) = child.lock() {
+                    let _ = terminate_agent(&mut child);
                 }
             });
         }
@@ -1087,6 +1132,7 @@ impl TurnRuntime {
     /// A kept process is reused only when the turn wants exactly what it was
     /// started with, and only when it is still alive and not mid-turn. Anything
     /// else takes its place.
+    #[allow(clippy::type_complexity)]
     fn session_for(
         &self,
         chat_id: &str,
@@ -1270,6 +1316,7 @@ impl TurnRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         turn: TurnSpec,
@@ -1311,8 +1358,13 @@ impl TurnRuntime {
         let store = self.inner.store.clone();
         let workdir = turn.workdir.clone();
         let mut keep_image = move |path: &str| store.keep_reply_image(&workdir, path);
-        // Messages sent into this turn, with their stored rows.
-        let mut steered: Vec<(String, i64)> = Vec::new();
+        // Messages sent into this turn, by the turn's number for each.
+        let mut steered: HashMap<u64, SteeredMessage> = HashMap::new();
+        let mut next_steer = 0;
+        let mut returned_steers = Vec::new();
+        // When waiting to hear what became of a steer runs out. Output from
+        // elsewhere can't put it off, so this is a limit and not a silence.
+        let mut settle_deadline: Option<Instant> = None;
 
         let mut line = String::new();
         // Stores the reply streamed so far as its own message, which a tool
@@ -1352,19 +1404,43 @@ impl TurnRuntime {
             };
         }
         loop {
-            source.set_patience(parser.settling().then_some(STEER_SETTLE_LIMIT));
-            match source.next(&mut line) {
+            let now = Instant::now();
+            settle_deadline = parser
+                .settling()
+                .then(|| settle_deadline.unwrap_or(now + STEER_SETTLE_LIMIT));
+            source.set_patience(settle_deadline.map(|deadline| deadline - now.min(deadline)));
+            let next = if settle_deadline.is_some_and(|deadline| now >= deadline) {
+                NextLine::Quiet
+            } else {
+                source.next(&mut line)
+            };
+            match next {
                 NextLine::Line => {}
                 NextLine::Steer(prompt) => {
                     close_segment!();
                     // Whatever the agent was saying no longer stands, so a
                     // question in it is not the question this turn ends on.
                     assistant_text.clear();
-                    let written = parser
-                        .steer_frame(&prompt)
-                        .is_some_and(|frame| self.write_rpc(&turn.chat_id, &frame).is_ok());
-                    if !written {
-                        self.requeue_steers(&turn.chat_id, std::slice::from_ref(&prompt));
+                    next_steer += 1;
+                    let steer = next_steer;
+                    let Some(frame) = parser.steer_frame(steer, &prompt) else {
+                        self.requeue_steer(&turn.chat_id, steer, &prompt, &mut returned_steers);
+                        continue;
+                    };
+                    steered.insert(
+                        steer,
+                        SteeredMessage {
+                            prompt: prompt.clone(),
+                            row: None,
+                        },
+                    );
+                    // It can't be told anything more, whether or not it has died
+                    // and whatever is still holding its output open. Ending it
+                    // ends the turn, which gives back what it did not read.
+                    if self.write_rpc(&turn.chat_id, &frame).is_err() {
+                        if let Ok(mut child) = child.lock() {
+                            let _ = terminate_agent(&mut child);
+                        }
                         continue;
                     }
                     match self
@@ -1374,7 +1450,9 @@ impl TurnRuntime {
                     {
                         Ok(message_id) => {
                             had_activity = true;
-                            steered.push((prompt.clone(), message_id));
+                            if let Some(message) = steered.get_mut(&steer) {
+                                message.row = Some(message_id);
+                            }
                             self.publish_sequenced(
                                 "tool",
                                 &turn,
@@ -1384,6 +1462,7 @@ impl TurnRuntime {
                                     "text": format!("{STEER_ROW_PREFIX}{prompt}"),
                                     "workdir": turn.workdir,
                                     "context": turn.workdir,
+                                    "message_id": message_id,
                                 }),
                             );
                         }
@@ -1400,6 +1479,7 @@ impl TurnRuntime {
                     for event in settled {
                         match event {
                             AgentEvent::Completed => completed = true,
+                            AgentEvent::Resumable => cut_short = true,
                             AgentEvent::Error(error) => latest_error = Some(error),
                             _ => {}
                         }
@@ -1467,13 +1547,13 @@ impl TurnRuntime {
                     AgentEvent::InteractionResolved(id) => {
                         let request_id =
                             format!("{}:{turn_id}:{}", self.inner.interaction_epoch, id);
-                        if let Ok(mut interactions) = self.inner.interactions.lock() {
-                            if let Some(pending) = interactions.get_mut(&turn.chat_id) {
-                                pending.requests.remove(&request_id);
-                                pending.revision =
-                                    self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
-                                self.inner.events.publish(json!({"event":"interaction-resolved", "chat":turn.chat_id, "request_id":request_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
-                            }
+                        if let Ok(mut interactions) = self.inner.interactions.lock()
+                            && let Some(pending) = interactions.get_mut(&turn.chat_id)
+                        {
+                            pending.requests.remove(&request_id);
+                            pending.revision =
+                                self.inner.next_interaction.fetch_add(1, Ordering::Relaxed);
+                            self.inner.events.publish(json!({"event":"interaction-resolved", "chat":turn.chat_id, "request_id":request_id,"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision}));
                         }
                     }
                     AgentEvent::Session(session) => {
@@ -1646,22 +1726,13 @@ impl TurnRuntime {
                     }
                     AgentEvent::Resumable => cut_short = true,
                     AgentEvent::Error(error) => latest_error = Some(error),
-                    AgentEvent::SteerRejected(prompt) => {
-                        if let Some(index) = steered.iter().position(|(sent, _)| *sent == prompt) {
-                            let (_, message_id) = steered.remove(index);
-                            let _ = self.inner.store.delete_message(&turn.chat_id, message_id);
-                            let row = format!("{STEER_ROW_PREFIX}{prompt}");
-                            if let Ok(mut state) = progress.state.lock() {
-                                state
-                                    .items
-                                    .retain(|item| item["text"].as_str() != Some(row.as_str()));
-                            }
-                        }
-                        self.requeue_steers(&turn.chat_id, std::slice::from_ref(&prompt));
-                        self.inner
-                            .events
-                            .publish(json!({"event": "changed", "chat": turn.chat_id}));
-                    }
+                    AgentEvent::SteerRejected(steer) => self.return_steer(
+                        &turn.chat_id,
+                        &progress,
+                        &mut steered,
+                        steer,
+                        &mut returned_steers,
+                    ),
                     AgentEvent::Usage {
                         input,
                         output,
@@ -1706,6 +1777,10 @@ impl TurnRuntime {
             }
         }
 
+        // Nothing will answer these now. The process may still read them later,
+        // so it has to go before they can be sent again.
+        let unread_steers = parser.take_unread_steers();
+
         let was_cancelled = cancelled.load(Ordering::Acquire);
         let success = if keeps_process {
             // Nothing to wait for: it is still up, ready for the next turn.
@@ -1715,13 +1790,33 @@ impl TurnRuntime {
                 .ok()
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_none();
-            let stranded = if alive && completed && !was_cancelled {
+            let stranded = if alive && completed && !was_cancelled && unread_steers.is_empty() {
                 self.detach_feed(&turn.chat_id, source)
             } else {
+                // Closed before the drain, under the lock a steer sends with, or
+                // one arriving between the two would land where nothing reads it.
+                if let Some(router) = self.router(&turn.chat_id)
+                    && let Ok(mut router) = router.lock()
+                {
+                    router.sink = None;
+                }
                 self.drop_session(&turn.chat_id);
                 source.stranded_steers()
             };
-            self.requeue_steers(&turn.chat_id, &stranded);
+            for steer in &unread_steers {
+                self.return_steer(
+                    &turn.chat_id,
+                    &progress,
+                    &mut steered,
+                    *steer,
+                    &mut returned_steers,
+                );
+            }
+            // These never reached the turn, so they follow everything that did.
+            for prompt in &stranded {
+                next_steer += 1;
+                self.requeue_steer(&turn.chat_id, next_steer, prompt, &mut returned_steers);
+            }
             was_cancelled || completed
         } else {
             let status = child.lock().ok().and_then(|mut child| child.wait().ok());
@@ -1838,6 +1933,7 @@ impl TurnRuntime {
         Ok(todos.clone())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
         turn: TurnSpec,
@@ -2063,6 +2159,8 @@ impl TurnRuntime {
 
     /// A background agent's progress while no turn is running: its card is
     /// updated in place, and the chat stays free for the user.
+    // The write below is the condition, so it stays out of a match guard.
+    #[allow(clippy::collapsible_match)]
     fn idle_subagent(&self, chat_id: &str, workdir: &str, patch: SubagentPatch) {
         match self.fold_subagent(chat_id, workdir, patch) {
             Some(RecordWrite::Update {
@@ -2160,7 +2258,9 @@ impl TurnRuntime {
                 let mut item = json!({"tool":true,"text":fields["text"]});
                 if let Some(record) = fields.get("record") {
                     item["record"] = record.clone();
-                    item["message_id"] = fields["message_id"].clone();
+                }
+                if let Some(message_id) = fields.get("message_id") {
+                    item["message_id"] = message_id.clone();
                 }
                 state.items.push(item);
             } else if name == "record" {
@@ -2874,28 +2974,274 @@ read never
         });
     }
 
-    /// The turn ended just as the steer was written, and the agent never starts
-    /// on it. The turn must still end rather than wait forever.
+    /// The turn ended just as the steers were written, and the agent never
+    /// starts on them. The turn must end rather than wait forever, and they must
+    /// still get answered, in order and only once, by a process that can't also
+    /// read the first copy.
     #[cfg(unix)]
     #[test]
-    fn a_turn_finishing_as_a_steer_arrives_still_ends() {
+    fn steers_the_agent_never_read_are_sent_again_in_order() {
         let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
         let fixture = SteerFixture::start(
             r#"#!/bin/sh
+if [ -e "$HEARD" ]; then
+  while read again; do
+    echo '{"type":"system","subtype":"init","session_id":"s1"}'
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Answered again."}]}}'
+    echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Answered again."}'
+  done
+  exit 0
+fi
+: > "$HEARD"
 read first
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
-echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on it."}]}}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
 read steer
+read another
 echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Working on it."}'
 read next
 "#,
         );
         fixture.wait_for_streamed("Working on it.");
         assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
-        wait_for("the turn to end", || {
-            fixture.runtime.live_turn(&fixture.chat).is_none()
+        assert!(fixture.runtime.steer(&fixture.chat, "And this"));
+        wait_for("both to be answered", || {
+            fixture.store.chat(&fixture.chat).unwrap()["working"] == false
+                && fixture
+                    .transcript()
+                    .iter()
+                    .filter(|(_, content)| content == "Answered again.")
+                    .count()
+                    == 2
         });
-        assert_eq!(fixture.store.chat(&fixture.chat).unwrap()["working"], false);
+        assert_eq!(
+            fixture.transcript(),
+            [
+                ("user", "first"),
+                ("assistant", "Working on it."),
+                ("user", "Do this instead"),
+                ("assistant", "Answered again."),
+                ("user", "And this"),
+                ("assistant", "Answered again."),
+            ]
+            .map(|(role, text)| (role.to_owned(), text.to_owned()))
+        );
+    }
+
+    /// Two steers with the same text: taking back the first must leave the second
+    /// alone, in the live view as well as in the transcript.
+    #[cfg(unix)]
+    #[test]
+    fn taking_back_a_steer_leaves_one_with_the_same_text_in_the_live_view() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+read release
+"#,
+        );
+        let store = &fixture.store;
+        let chat = &fixture.chat;
+        let row = |text: &str| store.append_turn_message(chat, "user", text, None).unwrap();
+        let (first, second) = (row("Same text"), row("Same text"));
+        let progress = TurnProgress::default();
+        {
+            let mut state = progress.state.lock().unwrap();
+            for id in [first, second] {
+                state
+                    .items
+                    .push(json!({"tool":true, "text":"steer\nSame text", "message_id":id}));
+            }
+        }
+        let mut steered = HashMap::from([(
+            1,
+            SteeredMessage {
+                prompt: "Same text".into(),
+                row: Some(first),
+            },
+        )]);
+        fixture
+            .runtime
+            .return_steer(chat, &progress, &mut steered, 1, &mut Vec::new());
+        let state = progress.state.lock().unwrap();
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0]["message_id"], second);
+        let remaining = fixture
+            .transcript()
+            .iter()
+            .filter(|(_, content)| content == "Same text")
+            .count();
+        assert_eq!(remaining, 1);
+        assert_eq!(store.chat(chat).unwrap()["queue"], json!(["Same text"]));
+    }
+
+    /// However they come back, and whatever the user has since dropped from the
+    /// queue, returned steers wait in the order they were sent, ahead of the rest.
+    #[cfg(unix)]
+    #[test]
+    fn returned_steers_keep_the_order_they_were_sent_in() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+read release
+"#,
+        );
+        let store = &fixture.store;
+        let chat = &fixture.chat;
+        let queue = || store.chat(chat).unwrap()["queue"].clone();
+        store.requeue_front(chat, "queued").unwrap();
+        let mut returned = Vec::new();
+        for (steer, prompt) in [(3, "three"), (1, "one"), (4, "four"), (2, "two")] {
+            fixture
+                .runtime
+                .requeue_steer(chat, steer, prompt, &mut returned);
+        }
+        assert_eq!(queue(), json!(["one", "two", "three", "four", "queued"]));
+
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "one"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "two"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "three"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "four"}))
+            .unwrap();
+        fixture
+            .runtime
+            .requeue_steer(chat, 5, "five", &mut returned);
+        assert_eq!(queue(), json!(["five", "queued"]));
+    }
+
+    /// Other output, such as a background agent's progress, must not put off the
+    /// end of a turn that finished without reading a steer.
+    #[cfg(unix)]
+    #[test]
+    fn output_from_elsewhere_does_not_extend_the_wait_for_a_new_run() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+if [ -e "$HEARD" ]; then
+  while read again; do
+    echo '{"type":"system","subtype":"init","session_id":"s1"}'
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Answered again."}]}}'
+    echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Answered again."}'
+  done
+  exit 0
+fi
+: > "$HEARD"
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
+read steer
+echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Working on it."}'
+while :; do
+  echo '{"type":"rate_limit_event"}'
+  sleep 0.05
+done
+"#,
+        );
+        fixture.wait_for_streamed("Working on it.");
+        assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
+        fixture.wait_for_text("Answered again.");
+    }
+
+    /// Two steers with the same text: the first is answered and the second is
+    /// never read. The first must keep its row and the second alone is sent again.
+    #[cfg(unix)]
+    #[test]
+    fn a_returned_steer_does_not_take_the_row_of_one_with_the_same_text() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+if [ -e "$HEARD" ]; then
+  while read again; do
+    echo '{"type":"system","subtype":"init","session_id":"s1"}'
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Second answer."}]}}'
+    echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Second answer."}'
+  done
+  exit 0
+fi
+: > "$HEARD"
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
+read steer
+read same
+echo '{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}'
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"First answer."}]}}'
+echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"First answer."}'
+read next
+"#,
+        );
+        fixture.wait_for_streamed("Working on it.");
+        assert!(fixture.runtime.steer(&fixture.chat, "Same text"));
+        assert!(fixture.runtime.steer(&fixture.chat, "Same text"));
+        wait_for("both to be answered", || {
+            fixture.store.chat(&fixture.chat).unwrap()["working"] == false
+                && fixture
+                    .transcript()
+                    .iter()
+                    .any(|(_, content)| content == "Second answer.")
+        });
+        assert_eq!(
+            fixture.transcript(),
+            [
+                ("user", "first"),
+                ("assistant", "Working on it."),
+                ("user", "Same text"),
+                ("assistant", "First answer."),
+                ("user", "Same text"),
+                ("assistant", "Second answer."),
+            ]
+            .map(|(role, text)| (role.to_owned(), text.to_owned()))
+        );
+    }
+
+    /// An agent that has stopped reading can't be told anything more. The turn
+    /// must end even though something still holds its output open, and the message
+    /// must still get an answer.
+    #[cfg(unix)]
+    #[test]
+    fn a_steer_the_agent_cannot_be_sent_ends_its_process_and_is_sent_again() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+if [ -e "$HEARD" ]; then
+  while read again; do
+    echo '{"type":"system","subtype":"init","session_id":"s1"}'
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Answered again."}]}}'
+    echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Answered again."}'
+  done
+  exit 0
+fi
+: > "$HEARD"
+read first
+exec 0<&-
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
+sleep 30
+"#,
+        );
+        fixture.wait_for_streamed("Working on it.");
+        assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
+        fixture.wait_for_text("Answered again.");
+        wait_for("the turn to end", || {
+            fixture.store.chat(&fixture.chat).unwrap()["working"] == false
+        });
+        assert_eq!(
+            fixture
+                .transcript()
+                .iter()
+                .filter(|(_, content)| content == "Do this instead")
+                .count(),
+            1
+        );
     }
 
     /// Before the agent has begun, a steer could be mistaken for the turn's own

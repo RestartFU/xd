@@ -875,6 +875,11 @@ impl LimitWindow {
             .map(|elapsed| ((1.0 - elapsed) * 100.0).round() as i64)
     }
 
+    pub fn pace(&self, now: i64) -> Option<Pace> {
+        self.elapsed_share(now)
+            .map(|elapsed| pace_of_shares(self.used_percent, elapsed))
+    }
+
     pub fn resets_in(&self, now: i64) -> Option<String> {
         let resets_at = self.resets_at_ms?;
         Some(if resets_at <= now {
@@ -900,6 +905,14 @@ impl Pace {
             Self::Ahead => "Ahead of pace: spending faster than the window elapses",
             Self::On => "On pace with the window",
             Self::Under => "Under pace: headroom left for the rest of the window",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Ahead => "Ahead of pace",
+            Self::On => "On pace",
+            Self::Under => "Under pace",
         }
     }
 }
@@ -1664,6 +1677,16 @@ mod tests {
     }
 
     const HOUR: i64 = 3_600_000;
+
+    #[test]
+    fn a_window_reports_its_own_pace() {
+        // Half of the window has elapsed at time zero.
+        let clocked = |used| window("a", "session", used, Some(150 * 60_000), Some(300));
+        assert_eq!(clocked(90.0).pace(0), Some(Pace::Ahead));
+        assert_eq!(clocked(50.0).pace(0), Some(Pace::On));
+        assert_eq!(clocked(10.0).pace(0), Some(Pace::Under));
+        assert_eq!(window("a", "monthly", 10.0, None, None).pace(0), None);
+    }
 
     #[test]
     fn window_pace_compares_spend_to_elapsed_time() {

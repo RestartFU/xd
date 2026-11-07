@@ -569,52 +569,6 @@ fn wsl_attach_script(session: &str, workdir: &Path, agent: &AgentCommand) -> Str
     )
 }
 
-#[cfg(test)]
-mod wsl_tests {
-    use super::*;
-
-    #[test]
-    fn wsl_sessions_share_the_linux_host_runtime_and_preserve_workdirs() {
-        let host = SessionHost::wsl();
-        let spec = host.attach(
-            "terminal-one",
-            Path::new("/home/user/a project's files"),
-            &AgentCommand::new("codex", ["--no-alt-screen"])
-                .resume_with(["resume", "--last"])
-                .record_codex_session(),
-        );
-        assert_eq!(spec.program, PathBuf::from("wsl.exe"));
-        let script = spec
-            .arguments
-            .iter()
-            .position(|value| value == "-c")
-            .unwrap()
-            + 1;
-        let script = &spec.arguments[script];
-        assert!(script.contains(&format!(
-            "$HOME/.local/share/{}/runtime/v1",
-            crate::channel::data_name().to_string_lossy(),
-        )));
-        assert!(script.contains("WORKDIR='/home/user/a project'\"'\"'s files'"));
-        assert!(script.contains("XD_AGENT_SESSION_MARKER"));
-        assert!(script.contains("-c \"$WORKDIR\""));
-        let kill = host.kill_process("terminal-one");
-        assert!(
-            kill.arguments
-                .iter()
-                .any(|argument| argument.contains("kill-session"))
-        );
-    }
-
-    #[test]
-    fn wsl_global_shell_resolves_its_home_inside_the_distribution() {
-        let script = wsl_attach_script("test", Path::new("~"), &AgentCommand::user_shell());
-        assert!(script.contains("WORKDIR='~'"));
-        assert!(script.contains("WORKDIR=\"$HOME\""));
-        assert!(script.contains("${SHELL:-/bin/sh}"));
-    }
-}
-
 fn session_name(id: &str) -> String {
     let hash = id
         .as_bytes()
@@ -1345,5 +1299,51 @@ mod tests {
         )));
         assert!(remote.contains("-S \"$RUNTIME/tmux.sock\" -f \"$CONF\""));
         assert!(remote.contains("new-session -A -s 'xd-f2c795031a96bd79'"));
+    }
+}
+
+#[cfg(test)]
+mod wsl_tests {
+    use super::*;
+
+    #[test]
+    fn wsl_sessions_share_the_linux_host_runtime_and_preserve_workdirs() {
+        let host = SessionHost::wsl();
+        let spec = host.attach(
+            "terminal-one",
+            Path::new("/home/user/a project's files"),
+            &AgentCommand::new("codex", ["--no-alt-screen"])
+                .resume_with(["resume", "--last"])
+                .record_codex_session(),
+        );
+        assert_eq!(spec.program, PathBuf::from("wsl.exe"));
+        let script = spec
+            .arguments
+            .iter()
+            .position(|value| value == "-c")
+            .unwrap()
+            + 1;
+        let script = &spec.arguments[script];
+        assert!(script.contains(&format!(
+            "$HOME/.local/share/{}/runtime/v1",
+            crate::channel::data_name().to_string_lossy(),
+        )));
+        assert!(script.contains("WORKDIR='/home/user/a project'\"'\"'s files'"));
+        assert!(script.contains("XD_AGENT_SESSION_MARKER"));
+        assert!(script.contains("-c \"$WORKDIR\""));
+        let kill = host.kill_process("terminal-one");
+        assert!(
+            kill.arguments
+                .iter()
+                .any(|argument| argument.contains("kill-session"))
+        );
+    }
+
+    #[test]
+    fn wsl_global_shell_resolves_its_home_inside_the_distribution() {
+        let script = wsl_attach_script("test", Path::new("~"), &AgentCommand::user_shell());
+        assert!(script.contains("WORKDIR='~'"));
+        assert!(script.contains("WORKDIR=\"$HOME\""));
+        assert!(script.contains("${SHELL:-/bin/sh}"));
     }
 }

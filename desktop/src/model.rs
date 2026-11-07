@@ -447,6 +447,8 @@ pub struct AppModel {
     pub sessions: Vec<SessionSummary>,
     /// The connected host can settle sessions.
     pub settlement_supported: bool,
+    /// The connected host refuses a folder reorder that would move it on disk.
+    pub folder_reorder_supported: bool,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -506,6 +508,10 @@ struct TreeSnapshot {
     /// The host can settle sessions; older hosts leave this out.
     #[serde(default)]
     settlement: bool,
+    /// The host refuses a folder reorder that would move it on disk; older
+    /// hosts leave this out.
+    #[serde(default)]
+    folder_reorder: bool,
     #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
@@ -758,6 +764,7 @@ impl AppModel {
         self.chats = snapshot.chats;
         self.sessions = snapshot.sessions;
         self.settlement_supported = snapshot.settlement;
+        self.folder_reorder_supported = snapshot.folder_reorder;
         self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
@@ -1022,10 +1029,12 @@ impl AppModel {
             }
         } else {
             self.working = snapshot_working;
-            if self.working && self.live_text.is_empty() && self.live_items.is_empty() {
-                if let Some(segment) = body.get("segment").and_then(Value::as_str) {
-                    self.live_text = segment.to_owned();
-                }
+            if self.working
+                && self.live_text.is_empty()
+                && self.live_items.is_empty()
+                && let Some(segment) = body.get("segment").and_then(Value::as_str)
+            {
+                self.live_text = segment.to_owned();
             }
             if !self.working {
                 self.live_text.clear();
@@ -1197,30 +1206,29 @@ impl AppModel {
     pub fn apply_event(&mut self, name: &str, body: &Value) {
         if matches!(name, "turn-started" | "text" | "tool" | "turn-finished")
             && self.event_is_active(body)
-        {
-            if let (Some(id), Some(sequence)) = (
+            && let (Some(id), Some(sequence)) = (
                 body.get("turn_id").and_then(Value::as_u64),
                 body.get("turn_sequence").and_then(Value::as_u64),
-            ) {
-                let epoch = body
-                    .get("turn_epoch")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if epoch != self.turn_epoch {
-                    self.turn_epoch = epoch.to_owned();
-                    self.turn_watermark_id = 0;
-                    self.turn_watermark_sequence = 0;
-                    self.live_items.clear();
-                    self.live_text.clear();
-                }
-                if id < self.turn_watermark_id
-                    || (id == self.turn_watermark_id && sequence <= self.turn_watermark_sequence)
-                {
-                    return;
-                }
-                self.turn_watermark_id = id;
-                self.turn_watermark_sequence = sequence;
+            )
+        {
+            let epoch = body
+                .get("turn_epoch")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if epoch != self.turn_epoch {
+                self.turn_epoch = epoch.to_owned();
+                self.turn_watermark_id = 0;
+                self.turn_watermark_sequence = 0;
+                self.live_items.clear();
+                self.live_text.clear();
             }
+            if id < self.turn_watermark_id
+                || (id == self.turn_watermark_id && sequence <= self.turn_watermark_sequence)
+            {
+                return;
+            }
+            self.turn_watermark_id = id;
+            self.turn_watermark_sequence = sequence;
         }
 
         if matches!(
@@ -1554,6 +1562,7 @@ impl AppModel {
     pub fn demo() -> Self {
         let mut model = Self {
             settlement_supported: true,
+            folder_reorder_supported: true,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -1702,6 +1711,21 @@ mod tests {
         assert_eq!(model.chats[0].settled_at, Some(1234));
         assert!(model.chats[0].auto_settle_disabled);
         assert_eq!(model.chats[1].settled_at, None);
+    }
+
+    #[test]
+    fn the_tree_says_whether_the_host_can_reorder_folders_safely() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert!(
+            !model.folder_reorder_supported,
+            "an older host leaves it out"
+        );
+
+        let mut tree = grouped_tree();
+        tree["folder_reorder"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.folder_reorder_supported);
     }
 
     #[test]
@@ -2730,9 +2754,11 @@ mod tests {
 
     #[test]
     fn catalog_names_are_scoped_to_the_current_assistant() {
-        let mut model = AppModel::default();
-        model.backend = "codex".into();
-        model.model = Some("shared-id".into());
+        let mut model = AppModel {
+            backend: "codex".into(),
+            model: Some("shared-id".into()),
+            ..Default::default()
+        };
         model.apply_agent_catalog(&json!({"backends":[
             {"id":"claude","name":"Claude Code","default_model":"shared-id","models":[{"id":"shared-id","name":"Other assistant model"}],"efforts":[]},
             {"id":"codex","name":"Codex","default_model":"shared-id","models":[{"id":"shared-id","name":"My team model"}],"efforts":["high"]}

@@ -247,6 +247,7 @@ pub(crate) struct ChatTitleSpec {
     pub model: String,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum SendDisposition {
     Queued { reply: Value, event: Value },
     Start { reply: Value, turn: TurnSpec },
@@ -730,6 +731,7 @@ impl StateStore {
             "chats": chats,
             "sessions": sessions,
             "settlement": true,
+            "folder_reorder": true,
         }))
     }
 
@@ -1373,12 +1375,12 @@ impl StateStore {
                 changed
             }
             "effort" => {
-                if let Some(effort) = value {
-                    if !effort_supported(&previous.0, effort) {
-                        return Err(StorageError::InvalidRequest(
-                            "That reasoning effort is not available for this assistant.".into(),
-                        ));
-                    }
+                if let Some(effort) = value
+                    && !effort_supported(&previous.0, effort)
+                {
+                    return Err(StorageError::InvalidRequest(
+                        "That reasoning effort is not available for this assistant.".into(),
+                    ));
                 }
                 remember_backend_choice(&transaction, &previous.0, "effort", value)?;
                 transaction.execute(
@@ -3300,6 +3302,12 @@ impl StateStore {
         let requested_parent_id = optional_string(request, "parent")?;
         let before_id = optional_string(request, "before")?;
         let after_id = optional_string(request, "after")?;
+        let keep_parent = match request.get("keep_parent") {
+            None | Some(Value::Null) => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                StorageError::InvalidRequest("keep_parent must be true or false".into())
+            })?,
+        };
         if before_id.is_some() && after_id.is_some() {
             return Err(StorageError::InvalidRequest(
                 "Choose either a workspace before or after which to move.".into(),
@@ -3358,6 +3366,11 @@ impl StateStore {
         let source = self.workspace_root.join(&relative);
         let parent = self.workspace_root.join(&parent_relative);
         if source.parent() != Some(parent.as_path()) {
+            if keep_parent {
+                return Err(StorageError::InvalidRequest(
+                    "Reordering would move this folder to another directory.".into(),
+                ));
+            }
             if parent.join(".git").exists() {
                 return Err(StorageError::InvalidRequest(
                     "A folder cannot be moved inside a repository.".into(),
@@ -4349,8 +4362,22 @@ impl StateStore {
 
     /// Puts a message at the front of the queue and returns the queue's event.
     pub fn requeue_front(&self, chat_id: &str, text: &str) -> Result<Value, StorageError> {
+        self.requeue_after(chat_id, &[], text)
+    }
+
+    /// Puts a message back at the front of the queue, behind those of `earlier`
+    /// still waiting there. One the user has since dropped or moved holds no place.
+    pub fn requeue_after(
+        &self,
+        chat_id: &str,
+        earlier: &[&str],
+        text: &str,
+    ) -> Result<Value, StorageError> {
         let (_, event) = self.mutate_queue(chat_id, |queue| {
-            queue.insert(0, text.to_owned());
+            let index = earlier.iter().fold(0, |index, message| {
+                index + usize::from(queue.get(index).map(String::as_str) == Some(*message))
+            });
+            queue.insert(index, text.to_owned());
             Ok(true)
         })?;
         Ok(event)
@@ -5946,15 +5973,15 @@ fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
     let mut prunable = false;
     for token in output.split('\0') {
         if token.is_empty() {
-            if let Some(path) = path.take() {
-                if !prunable {
-                    worktrees.push(GitWorktree {
-                        path,
-                        head: head.take(),
-                        branch: branch.take(),
-                        detached,
-                    });
-                }
+            if let Some(path) = path.take()
+                && !prunable
+            {
+                worktrees.push(GitWorktree {
+                    path,
+                    head: head.take(),
+                    branch: branch.take(),
+                    detached,
+                });
             }
             branch = None;
             head = None;
@@ -6088,8 +6115,7 @@ fn checked_git(
     let detail = detail
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()
+        .rfind(|line| !line.is_empty())
         .unwrap_or("Git could not read repository changes.")
         .trim_start_matches("fatal: ");
     Err(StorageError::InvalidRequest(
@@ -6538,8 +6564,7 @@ pub(crate) fn clone_repository(url: &str, destination: &Path) -> Result<(), Stor
     let detail = stderr
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()
+        .rfind(|line| !line.is_empty())
         .unwrap_or("Git could not clone that repository.")
         .trim_start_matches("fatal: ");
     let truncated = detail.chars().count() > 200;
@@ -8912,6 +8937,53 @@ mod tests {
     }
 
     #[test]
+    fn keep_parent_refuses_a_reorder_that_would_move_the_folder_on_disk() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(store.tree().unwrap()["folder_reorder"], true);
+        let sibling = store.new_folder(&json!({"name": "Sibling"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let top = store.new_folder(&json!({"name": "Top"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let parent = store.new_folder(&json!({"name": "Parent"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child = store
+            .new_folder(&json!({"name": "Child", "parent": parent}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        for keep_parent in [json!(true), json!("true"), json!(1)] {
+            store
+                .move_folder(&json!({"folder": top, "before": child, "keep_parent": keep_parent}))
+                .unwrap_err();
+        }
+        assert!(fixture.workspaces.join("Top").is_dir());
+        assert!(!fixture.workspaces.join("Parent/Top").exists());
+        let ids = || {
+            store.tree().unwrap()["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|folder| folder["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(), vec![sibling.clone(), top.clone(), parent, child]);
+
+        store
+            .move_folder(&json!({"folder": top, "before": sibling, "keep_parent": true}))
+            .unwrap();
+        assert_eq!(ids()[..2], [top, sibling]);
+    }
+
+    #[test]
     fn reordering_around_a_nested_workspace_adopts_its_parent() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
@@ -9712,6 +9784,24 @@ mod tests {
         );
         let event = store.requeue_front("chat-1", "edited").unwrap();
         assert_eq!(event["queue"], json!(["edited", "first"]));
+        let event = store
+            .requeue_after("chat-1", &["edited"], "second")
+            .unwrap();
+        assert_eq!(event["queue"], json!(["edited", "second", "first"]));
+        // One no longer waiting holds no place, wherever it was.
+        let event = store
+            .requeue_after("chat-1", &["dropped", "edited"], "third")
+            .unwrap();
+        assert_eq!(
+            event["queue"],
+            json!(["edited", "third", "second", "first"])
+        );
+        store
+            .take_queued(&json!({"chat": "chat-1", "index": 1, "text": "third"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": "chat-1", "index": 1, "text": "second"}))
+            .unwrap();
         let (_, event) = store
             .drop_queue(&json!({"chat": "chat-1", "index": 0}))
             .unwrap();

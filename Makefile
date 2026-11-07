@@ -1,6 +1,6 @@
 # Everything runs in Docker; the host only needs docker itself.
 
-.PHONY: build test run clean mobile-test mobile-android
+.PHONY: build test clippy run clean mobile-test mobile-android
 
 ## build: compile in Docker and export the runnable bundle to ./dist
 build:
@@ -9,6 +9,10 @@ build:
 ## test: run the headless test suite in Docker
 test:
 	@./scripts/test.sh
+
+## clippy: check formatting and lint every Rust crate in Docker
+clippy:
+	@./scripts/clippy.sh
 
 ## run: rebuild (cached, so cheap when nothing changed) and launch
 run: build

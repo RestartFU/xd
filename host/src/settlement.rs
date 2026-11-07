@@ -449,7 +449,7 @@ mod tests {
             ));
             let workspaces = root.join("Workspaces");
             std::fs::create_dir_all(&workspaces).unwrap();
-            let store = StateStore::open(&root.join("chats.db"), &workspaces).unwrap();
+            let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
             let folder = store.new_folder(&json!({"name": "Project"})).unwrap()["id"].clone();
             let chat = store
                 .new_chat(&json!({"folder": folder, "title": "Task"}))
@@ -657,8 +657,8 @@ mod tests {
         assert_eq!(off.after_days, None);
         assert!(off.keep_pull_requests, "members left out keep their value");
         let reopened = StateStore::open(
-            &fixture.root.join("chats.db"),
-            &fixture.root.join("Workspaces"),
+            fixture.root.join("chats.db"),
+            fixture.root.join("Workspaces"),
         )
         .unwrap();
         assert_eq!(reopened.auto_settle_settings().unwrap(), off);
@@ -966,10 +966,12 @@ mod tests {
     fn a_pull_request_lookup_serves_several_sweeps() {
         // The merge came before the user's latest message, so the session
         // stays active and each sweep needs the answer again.
+        // The stand-in counts only this test's calls: a test elsewhere that asks
+        // for pull requests without the lock can reach it while it is installed.
         let merged_at = now_seconds() - DAY_SECONDS * 5;
         with_fake_gh(
             &format!(
-                "echo x >> \"$(dirname \"$0\")/calls\"; \
+                "case \"$PWD\" in */xd-settlement-test-*) echo x >> \"$(dirname \"$0\")/calls\";; esac; \
                  echo '{{\"state\":\"MERGED\",\"finished_at\":{merged_at}}}'"
             ),
             |fixture, _| {
@@ -1048,8 +1050,8 @@ mod tests {
              ALTER TABLE workspace_sessions DROP COLUMN auto_settle_disabled_at;",
         );
         let reopened = StateStore::open(
-            &fixture.root.join("chats.db"),
-            &fixture.root.join("Workspaces"),
+            fixture.root.join("chats.db"),
+            fixture.root.join("Workspaces"),
         )
         .unwrap();
         assert!(reopened.tree().unwrap()["chats"][0]["settled_at"].is_null());

@@ -155,10 +155,10 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
             peer_server.listen(bind, port).map_err(|e| e.to_string())
         })
         .map_err(io::Error::other)?;
-    if let Some((bind, port)) = engine.remote_listener() {
-        if let Err(error) = peers.listen(&bind, port) {
-            eprintln!("xd-host: cannot restore remote listener: {error}");
-        }
+    if let Some((bind, port)) = engine.remote_listener()
+        && let Err(error) = peers.listen(&bind, port)
+    {
+        eprintln!("xd-host: cannot restore remote listener: {error}");
     }
     unsafe {
         libc::signal(

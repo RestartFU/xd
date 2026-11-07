@@ -5,10 +5,16 @@ use crate::{
     subagent::{SubagentPatch, SubagentStatus, SubagentStep},
 };
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// RPC ids from here up answer a `turn/steer`; those below are the handshake.
 const FIRST_STEER_RPC: u64 = 100;
+/// A process outlives its turns and so may answer a steer from an earlier one.
+/// Ids are never reused, so that answer can't be taken for a later steer's.
+static NEXT_STEER_RPC: AtomicU64 = AtomicU64::new(FIRST_STEER_RPC);
 
 pub(crate) struct CodexAppParser {
     thread: Option<String>,
@@ -20,9 +26,9 @@ pub(crate) struct CodexAppParser {
     children: HashSet<String>,
     /// The running native turn, which a steer has to name.
     turn: Option<String>,
-    next_steer: u64,
-    /// Steers Codex has not answered yet, by RPC id.
-    pending_steers: HashMap<u64, String>,
+    /// Steers Codex has not answered yet, the turn's number for each by RPC id,
+    /// so oldest first.
+    pending_steers: BTreeMap<u64, u64>,
     /// How the turn ended, held back until those answers are in: Codex refuses
     /// a steer that arrives too late only after reporting the turn finished.
     held_outcome: Vec<AgentEvent>,
@@ -56,8 +62,7 @@ impl CodexAppParser {
             streamed: HashSet::new(),
             children: HashSet::new(),
             turn: None,
-            next_steer: FIRST_STEER_RPC,
-            pending_steers: HashMap::new(),
+            pending_steers: BTreeMap::new(),
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),
@@ -72,15 +77,14 @@ impl CodexAppParser {
         json!({"id":3, "method":"turn/start", "params":params})
     }
     /// Sends `prompt` into the running turn, if there is one to name yet.
-    pub(crate) fn steer_request(&mut self, prompt: &str) -> Option<Value> {
+    pub(crate) fn steer_request(&mut self, steer: u64, prompt: &str) -> Option<Value> {
         let thread = self.thread.as_ref()?;
         let turn = self.turn.as_ref()?;
-        let id = self.next_steer;
+        let id = NEXT_STEER_RPC.fetch_add(1, Ordering::Relaxed);
         let frame = json!({"id":id, "method":"turn/steer", "params":{
             "threadId":thread, "expectedTurnId":turn, "input":input_items(prompt),
         }});
-        self.next_steer += 1;
-        self.pending_steers.insert(id, prompt.to_owned());
+        self.pending_steers.insert(id, steer);
         if let Some(item) = self.streaming_item.take() {
             self.superseded.insert(item);
         }
@@ -92,13 +96,18 @@ impl CodexAppParser {
     pub(crate) fn take_settled(&mut self) -> Vec<AgentEvent> {
         std::mem::take(&mut self.held_outcome)
     }
+    pub(crate) fn take_unread_steers(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.pending_steers)
+            .into_values()
+            .collect()
+    }
     fn steer_reply(&mut self, id: u64, refused: bool) -> Vec<AgentEvent> {
         let mut events = Vec::new();
-        if let Some(prompt) = self.pending_steers.remove(&id)
+        if let Some(steer) = self.pending_steers.remove(&id)
             && refused
         {
             self.superseded.clear();
-            events.push(AgentEvent::SteerRejected(prompt));
+            events.push(AgentEvent::SteerRejected(steer));
         }
         if self.pending_steers.is_empty() {
             events.append(&mut self.held_outcome);
@@ -434,8 +443,7 @@ mod tests {
             streamed: HashSet::new(),
             children: HashSet::new(),
             turn: None,
-            next_steer: FIRST_STEER_RPC,
-            pending_steers: HashMap::new(),
+            pending_steers: BTreeMap::new(),
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),
@@ -448,7 +456,7 @@ mod tests {
     fn a_steer_names_the_running_turn_and_carries_images() {
         let mut parser = running_parser();
         let frame = parser
-            .steer_request("Instead\n[image: /tmp/a.png]")
+            .steer_request(1, "Instead\n[image: /tmp/a.png]")
             .unwrap();
         assert_eq!(frame["method"], "turn/steer");
         assert_eq!(frame["params"]["threadId"], "thread-1");
@@ -459,43 +467,43 @@ mod tests {
         );
         assert_eq!(frame["params"]["input"][1]["path"], "/tmp/a.png");
         // Each needs its own id for its answer to find it.
-        assert_ne!(parser.steer_request("Again").unwrap()["id"], frame["id"]);
+        assert_ne!(parser.steer_request(2, "Again").unwrap()["id"], frame["id"]);
     }
 
     #[test]
     fn a_steer_needs_a_turn_to_name() {
         let mut parser = running_parser();
         parser.turn = None;
-        assert_eq!(parser.steer_request("Instead"), None);
+        assert_eq!(parser.steer_request(1, "Instead"), None);
         parser.feed(
             r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2"}}}"#,
         );
         assert_eq!(
-            parser.steer_request("Instead").unwrap()["params"]["expectedTurnId"],
+            parser.steer_request(1, "Instead").unwrap()["params"]["expectedTurnId"],
             "turn-2"
         );
         parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}"#);
-        assert_eq!(parser.steer_request("Too late"), None);
+        assert_eq!(parser.steer_request(9, "Too late"), None);
     }
 
     #[test]
     fn a_refused_steer_comes_back_and_does_not_fail_the_turn() {
         let mut parser = running_parser();
-        let id = parser.steer_request("Instead").unwrap()["id"]
+        let id = parser.steer_request(1, "Instead").unwrap()["id"]
             .as_u64()
             .unwrap();
         assert_eq!(
             parser.feed(&format!(
                 r#"{{"id":{id},"error":{{"message":"no active turn"}}}}"#
             )),
-            [AgentEvent::SteerRejected("Instead".into())]
+            [AgentEvent::SteerRejected(1)]
         );
     }
 
     #[test]
     fn an_accepted_steer_keeps_the_turn_running() {
         let mut parser = running_parser();
-        let id = parser.steer_request("Instead").unwrap()["id"]
+        let id = parser.steer_request(1, "Instead").unwrap()["id"]
             .as_u64()
             .unwrap();
         assert_eq!(
@@ -514,7 +522,7 @@ mod tests {
     #[test]
     fn the_end_of_a_turn_waits_for_the_answer_to_a_steer() {
         let mut parser = running_parser();
-        let id = parser.steer_request("Instead").unwrap()["id"]
+        let id = parser.steer_request(1, "Instead").unwrap()["id"]
             .as_u64()
             .unwrap();
         assert_eq!(
@@ -526,18 +534,18 @@ mod tests {
             parser.feed(&format!(
                 r#"{{"id":{id},"error":{{"message":"no active turn"}}}}"#
             )),
-            [
-                AgentEvent::SteerRejected("Instead".into()),
-                AgentEvent::Completed
-            ]
+            [AgentEvent::SteerRejected(1), AgentEvent::Completed]
         );
         assert!(!parser.settling());
 
-        // An answer that never comes still lets the turn end.
+        // An answer that never comes still lets the turn end, and the message
+        // goes back to the user, in the order it was sent.
         let mut parser = running_parser();
-        parser.steer_request("Instead").unwrap();
+        parser.steer_request(1, "Instead").unwrap();
+        parser.steer_request(2, "And this").unwrap();
         parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"failed","error":{"message":"Boom"}}}}"#);
         assert_eq!(parser.take_settled(), [AgentEvent::Error("Boom".into())]);
+        assert_eq!(parser.take_unread_steers(), [1, 2]);
     }
 
     /// The reply a steer cut short is still arriving when the steer lands. It
@@ -554,7 +562,7 @@ mod tests {
             parser.feed(&delta("old", "Bridges")),
             [AgentEvent::TextDelta("Bridges".into())]
         );
-        parser.steer_request("Instead").unwrap();
+        parser.steer_request(1, "Instead").unwrap();
         assert_eq!(parser.feed(&delta("old", " are old")), []);
         assert_eq!(
             parser.feed(&delta("new", "Understood")),
@@ -564,7 +572,7 @@ mod tests {
         // A steer Codex refused cut nothing short.
         let mut parser = running_parser();
         parser.feed(&delta("old", "Bridges"));
-        let id = parser.steer_request("Instead").unwrap()["id"]
+        let id = parser.steer_request(1, "Instead").unwrap()["id"]
             .as_u64()
             .unwrap();
         parser.feed(&format!(r#"{{"id":{id},"error":{{"message":"no"}}}}"#));
@@ -572,6 +580,26 @@ mod tests {
             parser.feed(&delta("old", " are old")),
             [AgentEvent::TextDelta(" are old".into())]
         );
+    }
+
+    /// A process outlives its turns, so an answer to one turn's steer must not
+    /// be taken for the answer to a later turn's.
+    #[test]
+    fn steer_ids_are_not_reused_across_turns() {
+        let mut first = running_parser();
+        let late = first.steer_request(1, "Old").unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        let mut second = running_parser();
+        let id = second.steer_request(2, "New").unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        assert_ne!(late, id);
+        assert_eq!(
+            second.feed(&format!(r#"{{"id":{late},"error":{{"message":"no"}}}}"#)),
+            []
+        );
+        assert_eq!(second.take_unread_steers(), [2]);
     }
 
     /// An answer that outlived its turn reaches the next turn's parser, which
@@ -596,8 +624,7 @@ mod tests {
             streamed: HashSet::new(),
             children: HashSet::new(),
             turn: None,
-            next_steer: FIRST_STEER_RPC,
-            pending_steers: HashMap::new(),
+            pending_steers: BTreeMap::new(),
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),
@@ -652,8 +679,7 @@ mod tests {
             streamed: HashSet::new(),
             children: HashSet::new(),
             turn: None,
-            next_steer: FIRST_STEER_RPC,
-            pending_steers: HashMap::new(),
+            pending_steers: BTreeMap::new(),
             held_outcome: Vec::new(),
             streaming_item: None,
             superseded: HashSet::new(),

@@ -225,10 +225,7 @@ fn read_version(executable: &Path, timeout: Duration) -> Result<String, String> 
 fn read_limited(mut stream: impl Read) -> Vec<u8> {
     let mut output = Vec::new();
     let mut buffer = [0_u8; 1024];
-    loop {
-        let Ok(count) = stream.read(&mut buffer) else {
-            break;
-        };
+    while let Ok(count) = stream.read(&mut buffer) {
         if count == 0 {
             break;
         }

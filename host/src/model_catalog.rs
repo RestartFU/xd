@@ -176,10 +176,10 @@ fn probe(
             if line.len() > 2 * 1024 * 1024 {
                 break;
             }
-            if let Ok(value) = serde_json::from_slice::<Value>(&line) {
-                if sender.send(value).is_err() {
-                    break;
-                }
+            if let Ok(value) = serde_json::from_slice::<Value>(&line)
+                && sender.send(value).is_err()
+            {
+                break;
             }
         }
     });

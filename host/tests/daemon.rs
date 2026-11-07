@@ -132,7 +132,9 @@ for line in sys.stdin:
             child,
         };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !daemon.socket.exists() {
+        // The socket file appears a moment before it accepts connections, so
+        // only a connection shows that the daemon is ready for a client.
+        while UnixStream::connect(&daemon.socket).is_err() {
             assert!(Instant::now() < deadline, "daemon startup timed out");
             thread::sleep(Duration::from_millis(10));
         }

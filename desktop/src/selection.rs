@@ -86,6 +86,7 @@ pub fn selectable_in_document(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn selectable_links_in_document(
     block: u64,
     document: u64,
@@ -637,7 +638,6 @@ mod tests {
                 head: 9,
                 dragging: false,
                 pressed_link: None,
-                ..Default::default()
             });
         });
         let link = point(px(10.0), px(10.0));
@@ -716,7 +716,6 @@ mod tests {
             head: 11,
             dragging: false,
             pressed_link: None,
-            ..Default::default()
         };
         let backward = TextSelection {
             anchor: 11,
@@ -746,7 +745,6 @@ mod tests {
             head: 2,
             dragging: false,
             pressed_link: None,
-            ..Default::default()
         };
         assert_eq!(empty.range(), 2..2);
         assert!(empty.text.get(empty.range()).unwrap().is_empty());

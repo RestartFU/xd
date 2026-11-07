@@ -30,10 +30,11 @@ impl TerminalActivityParser {
         let mut activity = Vec::new();
         for &byte in data {
             match self.state {
-                ParseState::Ground => match byte {
-                    ESCAPE => self.state = ParseState::Escape,
-                    _ => {}
-                },
+                ParseState::Ground => {
+                    if byte == ESCAPE {
+                        self.state = ParseState::Escape;
+                    }
+                }
                 ParseState::Escape => match byte {
                     b']' => {
                         self.payload.clear();

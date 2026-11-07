@@ -1,4 +1,11 @@
 #![deny(dead_code, unused_imports)]
+// Collapsing these would move a condition into a match guard, where a false one
+// falls through to the later arms instead of doing nothing.
+#![allow(clippy::collapsible_match)]
+// One range in a Vec is what these mean: a single line, or a single link.
+#![allow(clippy::single_range_in_vec_init)]
+// Tests read this file as text and rely on main coming after the test module.
+#![allow(clippy::items_after_test_module)]
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
@@ -43,8 +50,8 @@ use xd_desktop::{
     },
     markdown,
     model::{
-        AppModel, Attachment, AutoSettleRules, ChatSummary, MAX_MESSAGE_IMAGE_BYTES, Message,
-        MessageImage, MessagePageDirection, ToolView, Worktree,
+        AppModel, Attachment, AutoSettleRules, ChatSummary, Folder, MAX_MESSAGE_IMAGE_BYTES,
+        Message, MessageImage, MessagePageDirection, ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -108,8 +115,8 @@ use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
 use usage_view::{
-    ALERT_ICON, GAUGE_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON,
-    TICKET_ICON, TRENDING_DOWN_ICON, TRENDING_UP_ICON, USAGE_ICON, UsagePage,
+    ALERT_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON, TICKET_ICON,
+    USAGE_ICON, UsagePage,
 };
 
 pub(crate) const UI_FONT: &str = "Inter";
@@ -1555,10 +1562,10 @@ impl TranscriptSnapshot {
             return Some(item);
         }
         live_index = live_index.saturating_sub(self.live_items.len());
-        if let Some(live_text) = self.live_text.as_deref() {
-            if live_index == 0 {
-                return Some(live_text);
-            }
+        if let Some(live_text) = self.live_text.as_deref()
+            && live_index == 0
+        {
+            return Some(live_text);
         }
         None
     }
@@ -1619,6 +1626,52 @@ struct SessionDragPayload {
     project_id: String,
     source_index: usize,
     title: String,
+}
+
+/// A project being dragged to a new place in the sidebar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectDragPayload {
+    project_id: String,
+    title: String,
+}
+
+/// A row-sized ghost beside the pointer, which leaves the drop line in view.
+struct ProjectDragPreview {
+    title: String,
+    position: Point<Pixels>,
+    colors: ThemeColors,
+}
+
+impl Render for ProjectDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .pl(self.position.x + px(14.0))
+            .pt(self.position.y - px(15.0))
+            .child(
+                div()
+                    .h(px(30.0))
+                    .max_w(px(200.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(rgb(self.colors.border))
+                    .bg(rgb(self.colors.surface_high))
+                    .shadow_md()
+                    .child(workspace_icon(None, 13.0, self.colors.muted))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(self.colors.text))
+                            .child(self.title.clone()),
+                    ),
+            )
+    }
 }
 
 struct SessionDragPreview {
@@ -2399,6 +2452,8 @@ impl XdDesktop {
             cli_versions_loading: false,
             cli_versions_error: None,
             auth_input_text: String::new(),
+            // A unit struct on Windows only.
+            #[allow(clippy::default_constructed_unit_structs)]
             speech_output: SpeechOutput::default(),
             pending_speech: None,
             host: None,
@@ -2941,8 +2996,10 @@ impl XdDesktop {
                         this.host = Some(host);
                         this._started_host = Some(started_host);
                         this.reconnect_attempt = 0;
-                        this.endpoint_model_mut(ChatEndpoint::Local)
-                            .connection_error = None;
+                        let local_model = this.endpoint_model_mut(ChatEndpoint::Local);
+                        local_model.connection_error = None;
+                        // Until its tree says otherwise, this host may be older.
+                        local_model.folder_reorder_supported = false;
                         this.listen_for_host(updates, generation, cx);
                     }
                     Err(error) => {
@@ -3059,6 +3116,8 @@ impl XdDesktop {
         let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
         remote_model.connected = true;
         remote_model.connection_error = None;
+        // Until its tree says otherwise, this host may be older.
+        remote_model.folder_reorder_supported = false;
         if let Some(panel) = &mut self.remote_panel {
             panel.submitting = false;
             panel.error = None;
@@ -3260,11 +3319,11 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        if self.active_endpoint == ChatEndpoint::Local {
-            if !self.switch_active_endpoint(ChatEndpoint::Remote, cx) {
-                cx.notify();
-                return;
-            }
+        if self.active_endpoint == ChatEndpoint::Local
+            && !self.switch_active_endpoint(ChatEndpoint::Remote, cx)
+        {
+            cx.notify();
+            return;
         }
         if self.remote_state == RemoteState::Connected {
             if let Some(host) = &self.remote_host {
@@ -4929,17 +4988,15 @@ impl XdDesktop {
                     .as_ref()
                     .is_some_and(|pending| pending.chat_id == chat_id)
                     && let Some(pending) = self.pending_speech.take()
+                    && self.settings.speech
+                    && let Some(message) = self.model.messages.iter().rev().find(|message| {
+                        message.role == "assistant"
+                            && message.id.is_some()
+                            && message.id != pending.previous_assistant_id
+                    })
+                    && let Some(text) = markdown::spoken_text(&message.content)
                 {
-                    if self.settings.speech
-                        && let Some(message) = self.model.messages.iter().rev().find(|message| {
-                            message.role == "assistant"
-                                && message.id.is_some()
-                                && message.id != pending.previous_assistant_id
-                        })
-                        && let Some(text) = markdown::spoken_text(&message.content)
-                    {
-                        self.speech_output.speak(&text);
-                    }
+                    self.speech_output.speak(&text);
                 }
                 match direction {
                     MessagePageDirection::Tail => {
@@ -5317,10 +5374,10 @@ impl XdDesktop {
                 .chats
                 .iter()
                 .any(|chat| chat.id == chat_id)
-            && !self
+            && self
                 .terminal_panel
                 .as_ref()
-                .is_some_and(|panel| panel.chat_id == chat_id)
+                .is_none_or(|panel| panel.chat_id != chat_id)
             && !self
                 .terminal_panel_cache
                 .contains_key(&(endpoint, chat_id.clone()))
@@ -5532,36 +5589,35 @@ impl XdDesktop {
                 };
                 if !expected.is_empty()
                     && body.get("request").and_then(Value::as_str) == Some(expected.as_str())
+                    && let Some(diff) = &mut self.diff_panel
                 {
-                    if let Some(diff) = &mut self.diff_panel {
-                        diff.action = None;
-                        if body.get("success").and_then(Value::as_bool) == Some(true) {
-                            diff.action_error = None;
-                            let title = body
-                                .get("title")
+                    diff.action = None;
+                    if body.get("success").and_then(Value::as_bool) == Some(true) {
+                        diff.action_error = None;
+                        let title = body
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        if kind == "commit" {
+                            self.git_commit_message = title.clone();
+                            self.git_commit_input
+                                .update(cx, |input, cx| input.set_text(title, cx));
+                        } else {
+                            diff.pr_title = Some(title);
+                            diff.pr_body = body
+                                .get("body")
                                 .and_then(Value::as_str)
                                 .unwrap_or_default()
                                 .to_owned();
-                            if kind == "commit" {
-                                self.git_commit_message = title.clone();
-                                self.git_commit_input
-                                    .update(cx, |input, cx| input.set_text(title, cx));
-                            } else {
-                                diff.pr_title = Some(title);
-                                diff.pr_body = body
-                                    .get("body")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or_default()
-                                    .to_owned();
-                            }
-                        } else {
-                            diff.action_error = Some(
-                                body.get("error")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("The assistant could not write a commit message.")
-                                    .to_owned(),
-                            );
                         }
+                    } else {
+                        diff.action_error = Some(
+                            body.get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("The assistant could not write a commit message.")
+                                .to_owned(),
+                        );
                     }
                 }
             }
@@ -5720,10 +5776,10 @@ impl XdDesktop {
     }
 
     fn request_tree(&mut self) {
-        if let Some(host) = self.active_host() {
-            if let Err(error) = host.tree() {
-                self.model.connection_error = Some(error);
-            }
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.tree()
+        {
+            self.model.connection_error = Some(error);
         }
     }
 
@@ -5965,12 +6021,11 @@ impl XdDesktop {
         }
     }
 
+    /// The native browser sits above GPUI's surface, so anything counted here
+    /// also hides the page; otherwise the page would paint over the popup.
     fn minimal_popup_is_open(&self) -> bool {
-        self.minimal_theme_open || self.browser_occluded_by_popup()
-    }
-
-    fn browser_occluded_by_popup(&self) -> bool {
-        self.image_preview.is_some()
+        self.minimal_theme_open
+            || self.image_preview.is_some()
             || self.image_viewer.is_some()
             || self.auth_open
             || self.update_popup_open
@@ -6071,12 +6126,6 @@ impl XdDesktop {
 
     // --- the file tree and its tabs -----------------------------------------
 
-    /// Starts the tree over for the chat now selected.
-    ///
-    /// Open files are dropped with it: their paths are relative to a working
-    /// directory that has just changed, so keeping them would leave tabs
-    /// pointing at files in a repository nobody is looking at.
-
     fn list_tree_directory(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
@@ -6093,10 +6142,6 @@ impl XdDesktop {
         }
         cx.notify();
     }
-
-    /// Opens or closes a folder, fetching its entries the first time.
-
-    /// Brings a file to the front, reading it only if it is not open yet.
 
     fn save_file_tab(&mut self, cx: &mut Context<Self>) {
         let Some(file) = self.open_files.current() else {
@@ -6278,10 +6323,10 @@ impl XdDesktop {
             .entry(key)
             .or_default()
             .push(chat_id.clone());
-        if self.model.selected_chat.as_deref() == Some(chat_id.as_str()) {
-            if let Some(agent) = AgentCli::from_backend(&next.backend) {
-                self.open_minimal_session(next.folder.clone(), next.id.clone(), agent, window, cx);
-            }
+        if self.model.selected_chat.as_deref() == Some(chat_id.as_str())
+            && let Some(agent) = AgentCli::from_backend(&next.backend)
+        {
+            self.open_minimal_session(next.folder.clone(), next.id.clone(), agent, window, cx);
         }
         let _ = self.settings.save();
         cx.notify();
@@ -7219,7 +7264,7 @@ impl XdDesktop {
     ) -> Option<Entity<BrowserPane>> {
         let key = self.browser_scope_key();
         let open = self.browser_is_open();
-        let visible = open && !self.browser_occluded_by_popup();
+        let visible = open && !self.minimal_popup_is_open();
         for (scope, pane) in &self.browser_panes {
             pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
         }
@@ -7769,10 +7814,10 @@ impl XdDesktop {
             panel.loading = true;
             panel.error = None;
         }
-        if let Some(host) = self.active_host() {
-            if let Err(error) = host.terminal_list(&chat_id) {
-                self.model.connection_error = Some(error);
-            }
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.terminal_list(&chat_id)
+        {
+            self.model.connection_error = Some(error);
         }
         cx.notify();
     }
@@ -8219,13 +8264,12 @@ impl XdDesktop {
                     diff.loading = false;
                     diff.error = Some(error);
                 }
-                if !files_mode {
-                    if let Err(error) = host.git_status(&chat_id, generation)
-                        && let Some(diff) = &mut self.diff_panel
-                    {
-                        diff.status_loading = false;
-                        diff.action_error = Some(error);
-                    }
+                if !files_mode
+                    && let Err(error) = host.git_status(&chat_id, generation)
+                    && let Some(diff) = &mut self.diff_panel
+                {
+                    diff.status_loading = false;
+                    diff.action_error = Some(error);
                 }
             }
             None => {
@@ -8503,6 +8547,40 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// Sends the placement the drop line showed, as long as the two projects
+    /// are still siblings in the latest tree.
+    fn reorder_project_from_drop(&mut self, reorder: ProjectReorder, cx: &mut Context<Self>) {
+        if !self.model.folder_reorder_supported
+            || project_reorder_for_drop(
+                &self.model.folders,
+                &reorder.project_id,
+                &reorder.anchor_id,
+            )
+            .is_none()
+        {
+            return;
+        }
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| {
+                host.reorder_folder(&reorder.project_id, &reorder.anchor_id, reorder.after)
+            });
+        match result {
+            Ok(()) => {
+                reorder_around_anchor(
+                    &mut self.model.folders,
+                    |folder| &folder.id,
+                    &reorder.project_id,
+                    &reorder.anchor_id,
+                    reorder.after,
+                );
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn close_sidebar_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sidebar_context_menu = None;
         self.restore_minimal_popup_focus(window);
@@ -8617,10 +8695,10 @@ impl XdDesktop {
     }
 
     fn request_chat(&mut self, chat_id: &str) {
-        if let Some(host) = self.active_host() {
-            if let Err(error) = host.chat(chat_id) {
-                self.model.connection_error = Some(error);
-            }
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.chat(chat_id)
+        {
+            self.model.connection_error = Some(error);
         }
     }
 
@@ -9446,31 +9524,27 @@ impl XdDesktop {
             .iter()
             .find(|p| p["method"] == "item/tool/requestUserInput")
             .cloned()
-        {
-            if let Some(id) = pending["request_id"].as_str() {
-                if let Some(question) =
-                    pending["params"]["questions"]
-                        .as_array()
-                        .and_then(|questions| {
-                            questions.iter().find(|q| {
-                                !self.interaction_answers.contains_key(&format!(
-                                    "{id}/{}",
-                                    q["id"].as_str().unwrap_or_default()
-                                ))
-                            })
+            && let Some(id) = pending["request_id"].as_str()
+            && let Some(question) =
+                pending["params"]["questions"]
+                    .as_array()
+                    .and_then(|questions| {
+                        questions.iter().find(|q| {
+                            !self.interaction_answers.contains_key(&format!(
+                                "{id}/{}",
+                                q["id"].as_str().unwrap_or_default()
+                            ))
                         })
-                {
-                    if let Some(qid) = question["id"].as_str() {
-                        self.answer_interaction(
-                            id.to_owned(),
-                            qid.to_owned(),
-                            self.question_answer.clone(),
-                            cx,
-                        );
-                        return;
-                    }
-                }
-            }
+                    })
+            && let Some(qid) = question["id"].as_str()
+        {
+            self.answer_interaction(
+                id.to_owned(),
+                qid.to_owned(),
+                self.question_answer.clone(),
+                cx,
+            );
+            return;
         }
         self.answer_question(self.question_answer.trim().to_owned(), cx);
     }
@@ -11074,6 +11148,7 @@ impl XdDesktop {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_session_card(
         &mut self,
         colors: ThemeColors,
@@ -11537,6 +11612,7 @@ impl XdDesktop {
         let current_project = self.selected_minimal_project_id();
         let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
+        let folders: Rc<[Folder]> = self.model.folders.clone().into();
 
         let query = self.catalog_query.clone();
         let mut matches = 0usize;
@@ -11592,6 +11668,16 @@ impl XdDesktop {
             let context_project = project.id.clone();
             let context_name = project.name.clone();
             let create_project = project.id.clone();
+            let drag_payload = ProjectDragPayload {
+                project_id: project.id.clone(),
+                title: project.name.clone(),
+            };
+            let drop_project = project.id.clone();
+            let can_drop_project = project.id.clone();
+            let can_drop_folders = folders.clone();
+            let line_project = project.id.clone();
+            let line_folders = folders.clone();
+            let drop_folders = folders.clone();
             let name = div()
                 .min_w_0()
                 .flex_shrink()
@@ -11616,6 +11702,15 @@ impl XdDesktop {
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.toggle_drawer(toggle_project.clone(), current, cx);
                 }))
+                .when(self.model.folder_reorder_supported, |header| {
+                    header.on_drag(drag_payload, move |drag, position, _, cx| {
+                        cx.new(|_| ProjectDragPreview {
+                            title: drag.title.clone(),
+                            position,
+                            colors,
+                        })
+                    })
+                })
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -11689,6 +11784,7 @@ impl XdDesktop {
             drawers.push(
                 div()
                     .id(("minimal-session-group", project_index))
+                    .relative()
                     .w_full()
                     .flex()
                     .flex_col()
@@ -11719,7 +11815,50 @@ impl XdDesktop {
                                     )
                                 }),
                         )
-                    }),
+                    })
+                    // Covers the open drawer too, so its sessions are not a
+                    // dead zone. It only marks where the project will land:
+                    // a drop line on the edge it would be placed against.
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .can_drop(move |value, _, _| {
+                                value
+                                    .downcast_ref::<ProjectDragPayload>()
+                                    .is_some_and(|drag| {
+                                        project_reorder_for_drop(
+                                            &can_drop_folders,
+                                            &drag.project_id,
+                                            &can_drop_project,
+                                        )
+                                        .is_some()
+                                    })
+                            })
+                            .drag_over::<ProjectDragPayload>(move |style, drag, _, _| {
+                                let after = project_reorder_for_drop(
+                                    &line_folders,
+                                    &drag.project_id,
+                                    &line_project,
+                                )
+                                .is_some_and(|reorder| reorder.after);
+                                let style = if after {
+                                    style.border_b_2()
+                                } else {
+                                    style.border_t_2()
+                                };
+                                style.border_color(rgb(colors.accent))
+                            })
+                            .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
+                                if let Some(reorder) = project_reorder_for_drop(
+                                    &drop_folders,
+                                    &drag.project_id,
+                                    &drop_project,
+                                ) {
+                                    this.reorder_project_from_drop(reorder, cx);
+                                }
+                            })),
+                    ),
             );
         }
 
@@ -13213,6 +13352,7 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_native_message(
         colors: ThemeColors,
         message: &Message,
@@ -13301,9 +13441,11 @@ impl XdDesktop {
         };
         // A reply's images sit among its blocks, where it named them; anyone
         // else's follow the text they were sent with.
-        let attached = (role != "assistant")
-            .then_some(message.image_paths())
-            .unwrap_or_default();
+        let attached = if role != "assistant" {
+            message.image_paths()
+        } else {
+            Default::default()
+        };
         let body = div()
             .w_full()
             .flex()
@@ -13437,10 +13579,9 @@ impl XdDesktop {
 
     fn respond_interaction(&mut self, request_id: String, response: Value, cx: &mut Context<Self>) {
         if let (Some(chat), Some(host)) = (self.model.selected_chat.as_deref(), self.active_host())
+            && let Err(error) = host.respond(chat, &request_id, response)
         {
-            if let Err(error) = host.respond(chat, &request_id, response) {
-                self.model.connection_error = Some(error);
-            }
+            self.model.connection_error = Some(error);
         }
         cx.notify();
     }
@@ -13767,7 +13908,7 @@ impl XdDesktop {
                     let near_start = event.visible_range.start <= 8;
                     let near_end = event.visible_range.end.saturating_add(8) >= event.count;
                     let visible = event.visible_range.clone();
-                    let _ = desktop.update(cx, |this, cx| {
+                    desktop.update(cx, |this, cx| {
                         if this.transcript_visible != visible {
                             this.transcript_visible = visible;
                             cx.notify();
@@ -14146,7 +14287,7 @@ impl XdDesktop {
                 .text_size(px(12.0))
                 .max_w(px(if option == "model" { 240.0 } else { 170.0 }))
                 .min_w_0()
-                .debug_selector(move || format!("native-option-{option}").into())
+                .debug_selector(move || format!("native-option-{option}"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     this.native_option_open = Some(option);
@@ -15503,7 +15644,8 @@ impl XdDesktop {
                 .when_some(panel.error, |card, error| card.child(div().text_sm().text_color(rgb(colors.danger)).child(error)))
                 .child(div().flex().gap_3()
                     .child(ui_button("copy-pairing-code", if can_copy { ButtonKind::Primary } else { ButtonKind::Secondary }, colors).on_click(cx.listener(move |_, _, _, cx| { if let Some(code) = &pairing_code { cx.write_to_clipboard(ClipboardItem::new_string(code.clone())); } })).child("Copy pairing code"))
-                    .child(ui_button("refresh-pairing-code", ButtonKind::Secondary, colors).on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; } if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
+                    .child(ui_button("refresh-pairing-code", ButtonKind::Secondary, colors).on_click(cx.listener(|this, _, _, cx| { if let Some(panel) = &mut this.share_panel { panel.loading = true; }
+                    if let Some(host) = &this.host { let _ = host.peer_pairing(); } cx.notify(); })).child("New code"))
                     .child(div().flex_1())
                     .child(ui_button("close-pairing", ButtonKind::Ghost, colors).on_click(cx.listener(|this, _, _, cx| { this.share_panel = None; cx.notify(); })).child("Close")))
             ).into_any_element()
@@ -15857,8 +15999,8 @@ impl XdDesktop {
                                 .text_color(rgb(colors.accent_ink))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(host) = this.active_host() {
-                                        if let Err(error) = host.agent_auth_action(
+                                    if let Some(host) = this.active_host()
+                                        && let Err(error) = host.agent_auth_action(
                                             if signing_in {
                                                 "agent-auth-cancel"
                                             } else {
@@ -15866,9 +16008,9 @@ impl XdDesktop {
                                             },
                                             &id,
                                             None,
-                                        ) {
-                                            this.model.connection_error = Some(error);
-                                        }
+                                        )
+                                    {
+                                        this.model.connection_error = Some(error);
                                     }
                                     cx.notify();
                                 }))
@@ -16202,6 +16344,7 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
+        #[allow(clippy::bind_instead_of_map)]
         let sidebar_rename_overlay = self.sidebar_edit.clone().and_then(|edit| {
             let (heading, cancel_id, save_id) = match &edit.target {
                 SidebarTarget::Folder(_) => (
@@ -17364,9 +17507,6 @@ impl Render for XdDesktop {
     }
 }
 
-/// Highlight the source portion of a diff line while leaving its `+`, `-`, or
-/// context marker in the diff color supplied by the surrounding element.
-
 fn parse_unified_diff(output: &str) -> Result<(Vec<DiffFile>, bool), String> {
     const MAX_FILES: usize = 500;
     const MAX_LINES: usize = 1_600;
@@ -17548,9 +17688,6 @@ fn decode_git_path(value: &str) -> Result<String, String> {
     String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
 }
 
-/// The vendor mark for an agent, and the colour it is drawn in. GPUI paints an
-/// SVG as a mask, so the colour lives here rather than in the file.
-
 /// Serves the agent marks compiled into the binary, so a bundle needs no icon
 /// theme on the host.
 struct EmbeddedIcons;
@@ -17620,15 +17757,6 @@ impl AssetSource for EmbeddedIcons {
             )),
             SETTINGS_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/settings.svg").as_slice(),
-            )),
-            GAUGE_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/gauge.svg").as_slice(),
-            )),
-            TRENDING_UP_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/trending-up.svg").as_slice(),
-            )),
-            TRENDING_DOWN_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/trending-down.svg").as_slice(),
             )),
             REFRESH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/refresh.svg").as_slice(),
@@ -17895,9 +18023,6 @@ fn scoped_element_id(scope: &str, index: usize) -> u64 {
     hasher.finish()
 }
 
-/// Flattens the rendered text blocks into the text Ctrl+C should receive and
-/// records where each separately laid-out block lives inside it.
-
 fn sidebar_edit_applied(model: &AppModel, edit: &SidebarEdit) -> bool {
     if !edit.submitting {
         return false;
@@ -17973,23 +18098,69 @@ fn chat_reorder_for_drop(
 }
 
 fn apply_optimistic_chat_reorder(chats: &mut Vec<ChatSummary>, reorder: &ChatReorder) -> bool {
-    let Some(source_index) = chats.iter().position(|chat| chat.id == reorder.chat_id) else {
+    reorder_around_anchor(
+        chats,
+        |chat| &chat.id,
+        &reorder.chat_id,
+        &reorder.anchor_id,
+        reorder.after,
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectReorder {
+    project_id: String,
+    anchor_id: String,
+    after: bool,
+}
+
+/// Where a dropped project goes in this order. The drop line and the drop both
+/// read it from the order on screen, so a project lands where the line showed.
+///
+/// Only siblings can be reordered, since the sidebar lists every project in one
+/// flat column and a drop should not move a folder on disk by surprise. The host
+/// has the final say, because this tree can be stale: see `keep_parent` in
+/// `HostHandle::reorder_folder`.
+fn project_reorder_for_drop(
+    folders: &[Folder],
+    project_id: &str,
+    target_id: &str,
+) -> Option<ProjectReorder> {
+    if project_id == target_id {
+        return None;
+    }
+    let position = |id: &str| folders.iter().position(|folder| folder.id == id);
+    let source_index = position(project_id)?;
+    let target_index = position(target_id)?;
+    if folders[source_index].parent != folders[target_index].parent {
+        return None;
+    }
+    Some(ProjectReorder {
+        project_id: project_id.to_owned(),
+        anchor_id: target_id.to_owned(),
+        after: source_index < target_index,
+    })
+}
+
+fn reorder_around_anchor<T>(
+    items: &mut Vec<T>,
+    id: impl Fn(&T) -> &String,
+    source_id: &str,
+    anchor_id: &str,
+    after: bool,
+) -> bool {
+    let Some(source_index) = items.iter().position(|item| id(item) == source_id) else {
         return false;
     };
-    if !chats.iter().any(|chat| chat.id == reorder.anchor_id) {
+    if source_id == anchor_id || !items.iter().any(|item| id(item) == anchor_id) {
         return false;
     }
-    let chat = chats.remove(source_index);
-    let anchor_index = chats
+    let item = items.remove(source_index);
+    let anchor_index = items
         .iter()
-        .position(|candidate| candidate.id == reorder.anchor_id)
-        .expect("the checked reorder anchor remains after removing another chat");
-    let insert_at = if reorder.after {
-        anchor_index + 1
-    } else {
-        anchor_index
-    };
-    chats.insert(insert_at, chat);
+        .position(|candidate| id(candidate) == anchor_id)
+        .expect("the checked reorder anchor remains after removing another item");
+    items.insert(anchor_index + usize::from(after), item);
     true
 }
 
@@ -18013,6 +18184,7 @@ fn strip_source_build_controls(text: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 mod tests {
     #[test]
     fn a_patch_names_each_file_once_and_keeps_its_lines() {
@@ -18102,7 +18274,7 @@ Binary files /dev/null and b/image.png differ\n";
         // A one-pixel PNG: enough to decode, nothing to look at.
         const AVATAR: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
 
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             assert!(desktop.owner_avatar(Some("RestartFU")).is_none());
             assert!(desktop.owner_avatar(None).is_none());
@@ -18155,7 +18327,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn catalog_groups_chats_and_restores_the_sessions_active_tab(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop.model = grouped_workspace_fixture();
             desktop.settings.session_chats.clear();
@@ -18176,7 +18348,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn sibling_chat_navigation_preserves_shared_tools_and_clears_the_previous_composer(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model = grouped_workspace_fixture();
             desktop.model.select_chat("implementation");
@@ -18207,7 +18379,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn closing_a_chat_tab_preserves_history_and_can_reopen_it(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.model = grouped_workspace_fixture();
             desktop.model.select_chat("implementation");
@@ -18997,7 +19169,7 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(first_line("```rust\nfn main() {}"), "fn main() {}");
         assert_eq!(first_line(""), "");
     }
-    use xd_desktop::model::{ChatSummary, Folder};
+    use xd_desktop::model::ChatSummary;
 
     #[gpui::test]
     fn bundled_ui_font_can_be_registered(cx: &mut gpui::TestAppContext) {
@@ -19034,8 +19206,11 @@ Binary files /dev/null and b/image.png differ\n";
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
         cx.simulate_click(point(px(82.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
-        // A press on the page stays on it; one on the backdrop dismisses it.
-        cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
+        // A press on the flyout stays on it; one beside it dismisses it.
+        cx.simulate_click(
+            point(px(100.0), footer_y - px(34.0)),
+            gpui::Modifiers::default(),
+        );
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
         cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).usage_open));
@@ -19121,7 +19296,7 @@ Binary files /dev/null and b/image.png differ\n";
             })
         };
 
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             // A closing chat leaves no room, so an undrawn image goes, and what
             // the latest frame drew stays.
@@ -19191,7 +19366,7 @@ Binary files /dev/null and b/image.png differ\n";
             )
         };
 
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
 
         // Only one is taken at a time, and one nobody waits for is passed over.
         let answer_a = answer.clone();
@@ -19776,7 +19951,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn opening_links_preserves_the_chats_open_tabs(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.active_endpoint = ChatEndpoint::Local;
             desktop.set_browser_open(false);
@@ -19835,7 +20010,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn bottom_terminal_and_side_tools_keep_independent_state(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             desktop.show_native_pane(NativePane::Terminal, cx);
@@ -19895,7 +20070,7 @@ Binary files /dev/null and b/image.png differ\n";
         let shell = |id: &str| {
             XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": id})).unwrap()
         };
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             desktop.show_native_pane(NativePane::Terminal, cx);
@@ -19947,7 +20122,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn repository_updates_preserve_hidden_tools_and_file_edits(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop.model.selected_chat = Some("tool-chat".into());
             desktop.minimal_route = MinimalRoute::Cli {
@@ -19981,7 +20156,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn global_side_pane_ignores_the_previous_chats_tools(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update(|window, cx| {
             desktop.update(cx, |desktop, cx| {
                 desktop.model.selected_chat = Some("tool-chat".into());
@@ -20010,7 +20185,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn reopening_bottom_after_last_shell_closed_starts_a_shell(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             let mut panel = XdDesktop::new_terminal_panel("dock-chat".into());
@@ -20027,7 +20202,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn closing_and_readding_files_requests_a_new_listing(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("dock-chat".into());
             desktop.native_pane = NativePane::Files;
@@ -20365,7 +20540,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn browser_panes_preserve_each_chats_tabs_toggle_and_settings_visibility(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.active_endpoint = ChatEndpoint::Local;
             desktop.model.folders = vec![
@@ -20445,8 +20620,10 @@ Binary files /dev/null and b/image.png differ\n";
 
             desktop.minimal_theme_open = true;
             desktop.sync_browser_pane(window, cx);
-            assert!(a.read(cx).is_visible());
+            assert!(!a.read(cx).is_visible());
             desktop.minimal_theme_open = false;
+            desktop.sync_browser_pane(window, cx);
+            assert!(a.read(cx).is_visible());
             desktop.creating_workspace = true;
             desktop.sync_browser_pane(window, cx);
             assert!(!a.read(cx).is_visible());
@@ -20487,7 +20664,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn removed_chats_release_their_browser_tabs_without_affecting_other_connections(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.browser_sessions.clear();
             desktop.active_endpoint = ChatEndpoint::Local;
@@ -20625,7 +20802,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn clicking_a_transcript_image_opens_it_and_a_click_closes_it(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         let target = cx.update(|window, _| window.window_handle());
         desktop.update(cx, |desktop, _| {
             Arc::make_mut(&mut desktop.message_images)
@@ -20640,7 +20817,6 @@ Binary files /dev/null and b/image.png differ\n";
         desktop.update(cx, |desktop, _| {
             assert_eq!(desktop.image_viewer.as_deref(), Some("/kept/a.png"));
             assert!(desktop.minimal_popup_is_open());
-            assert!(desktop.browser_occluded_by_popup());
         });
 
         cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
@@ -20653,7 +20829,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_image_viewer_fits_an_image_inside_the_window(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         // Proportioned differently from the window, so either side could overflow.
         for (width, height) in [(1200, 800), (800, 1200), (4000, 100)] {
             cx.update_window_entity(&desktop, |desktop, window, cx| {
@@ -20694,7 +20870,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn escape_closes_the_image_viewer_before_anything_under_it(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.auth_open = true;
             Arc::make_mut(&mut desktop.message_images)
@@ -20713,7 +20889,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn an_image_that_is_not_ready_does_not_open(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.open_image_viewer("/gone.png".into(), window, cx);
             assert!(desktop.image_viewer.is_none());
@@ -20723,7 +20899,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_viewed_image_outlives_eviction_and_leaves_with_its_chat(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.message_image_frame = 5;
             desktop.message_images_closing = MESSAGE_IMAGE_BUDGET;
@@ -20744,7 +20920,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn minimal_popup_focus_is_taken_and_restored(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             let terminal_focus = desktop.terminal_input.read(cx).focus_handle(cx);
             window.focus(&terminal_focus);
@@ -20769,7 +20945,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn switching_sessions_uses_native_chat_and_stashes_shell_panes(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![
                 ChatSummary {
@@ -20832,7 +21008,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn failed_draft_persistence_keeps_the_native_chat_selected(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat-a".into());
             desktop.composer = "unsaved".into();
@@ -20853,7 +21029,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn authoritative_tree_reconciliation_stops_removed_chat_processes(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop
                 .terminal_runtime
@@ -20884,7 +21060,7 @@ Binary files /dev/null and b/image.png differ\n";
     #[gpui::test]
     #[cfg(unix)]
     fn deleting_a_chat_stops_only_that_endpoints_terminal_processes(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             for (chat_id, terminal_id) in [
                 ("chat-removed", "terminal-removed"),
@@ -20942,7 +21118,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn session_click_focuses_the_native_composer(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.model.chats = vec![ChatSummary {
                 id: "chat-a".into(),
@@ -20975,7 +21151,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn plain_terminal_events_update_the_active_panel(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
             panel.loading = false;
@@ -21130,7 +21306,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn selecting_a_tree_primed_session_opens_native_chat(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![ChatSummary {
                 id: "chat".into(),
@@ -21167,7 +21343,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn background_terminal_output_keeps_a_cached_session_current(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat-b".into());
             let mut panel = XdDesktop::new_agent_terminal_panel("chat-a".into(), AgentCli::Codex);
@@ -21265,7 +21441,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn switching_remote_and_back_keeps_the_local_runtime_subscribed(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.settings.remote_ssh_command = Some("ssh dev.example".into());
             desktop.settings.remote_credentials = Some(xd_transport::RemoteCredentials {
@@ -21305,7 +21481,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_remote_status_keeps_a_live_connection(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21323,7 +21499,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_returns_to_the_saved_host_after_disconnecting(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21360,7 +21536,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_retries_now_but_never_races_a_running_attempt(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21385,7 +21561,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_asks_for_pairing_only_when_it_is_needed(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.reconnect_remote(window, cx);
             assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
@@ -21413,7 +21589,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_status_leaves_a_pairing_in_flight_alone(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21433,7 +21609,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn closing_a_failed_pairing_returns_to_the_saved_host(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.settings.remote_credentials = Some(saved_remote_credentials());
             desktop.remote_state = RemoteState::Connected;
@@ -21467,7 +21643,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn passive_remote_tree_never_overrides_the_explicit_local_runtime(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.remote_state = RemoteState::Connected;
             desktop.handle_remote_update(
@@ -21664,6 +21840,121 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(chat_reorder_for_drop(&drag, "workspace", 1, "chat-b"), None);
     }
 
+    fn project(id: &str, parent: Option<&str>) -> Folder {
+        Folder {
+            id: id.into(),
+            name: id.into(),
+            parent: parent.map(str::to_owned),
+            owner: None,
+        }
+    }
+
+    #[test]
+    fn project_drop_places_the_project_on_the_side_it_came_from() {
+        let folders = [project("a", None), project("b", None), project("c", None)];
+
+        assert_eq!(
+            project_reorder_for_drop(&folders, "b", "a"),
+            Some(ProjectReorder {
+                project_id: "b".into(),
+                anchor_id: "a".into(),
+                after: false,
+            })
+        );
+        assert_eq!(
+            project_reorder_for_drop(&folders, "b", "c"),
+            Some(ProjectReorder {
+                project_id: "b".into(),
+                anchor_id: "c".into(),
+                after: true,
+            })
+        );
+        assert_eq!(project_reorder_for_drop(&folders, "b", "b"), None);
+        assert_eq!(project_reorder_for_drop(&folders, "b", "gone"), None);
+        assert_eq!(project_reorder_for_drop(&folders, "gone", "b"), None);
+    }
+
+    #[test]
+    fn project_drop_never_moves_a_project_to_another_parent() {
+        let folders = [
+            project("root", None),
+            project("parent", None),
+            project("child", Some("parent")),
+            project("sibling", Some("parent")),
+            project("elsewhere", Some("root")),
+        ];
+
+        assert_eq!(project_reorder_for_drop(&folders, "root", "child"), None);
+        assert_eq!(project_reorder_for_drop(&folders, "child", "root"), None);
+        assert_eq!(
+            project_reorder_for_drop(&folders, "child", "elsewhere"),
+            None
+        );
+        assert!(project_reorder_for_drop(&folders, "child", "sibling").is_some());
+    }
+
+    #[gpui::test]
+    fn dropping_a_project_without_a_host_keeps_the_order_and_says_why(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.folders =
+                vec![project("a", None), project("b", None), project("c", None)];
+            let order = |desktop: &XdDesktop| {
+                desktop
+                    .model
+                    .folders
+                    .iter()
+                    .map(|folder| folder.id.clone())
+                    .collect::<Vec<_>>()
+            };
+            desktop.host = None;
+            desktop.remote_host = None;
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.model.connection_error = None;
+            let reorder = |project: &str, anchor: &str| ProjectReorder {
+                project_id: project.into(),
+                anchor_id: anchor.into(),
+                after: false,
+            };
+
+            // An older host could move the folder on disk, so nothing is sent.
+            desktop.model.folder_reorder_supported = false;
+            desktop.reorder_project_from_drop(reorder("c", "a"), cx);
+            assert_eq!(order(desktop), ["a", "b", "c"]);
+            assert!(desktop.model.connection_error.is_none());
+
+            desktop.model.folder_reorder_supported = true;
+            desktop.reorder_project_from_drop(reorder("c", "gone"), cx);
+            assert!(desktop.model.connection_error.is_none());
+            desktop.reorder_project_from_drop(reorder("c", "a"), cx);
+            assert_eq!(order(desktop), ["a", "b", "c"]);
+            assert!(desktop.model.connection_error.is_some());
+        });
+    }
+
+    #[test]
+    fn reordering_around_an_anchor_handles_both_sides_and_missing_ids() {
+        let mut items = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let ordered = |items: &mut Vec<String>, source: &str, anchor: &str, after: bool| {
+            let moved = reorder_around_anchor(items, |item| item, source, anchor, after);
+            (moved, items.join(""))
+        };
+
+        assert_eq!(ordered(&mut items, "c", "a", false), (true, "cab".into()));
+        assert_eq!(ordered(&mut items, "c", "b", true), (true, "abc".into()));
+        assert_eq!(
+            ordered(&mut items, "gone", "a", true),
+            (false, "abc".into())
+        );
+        assert_eq!(
+            ordered(&mut items, "a", "gone", true),
+            (false, "abc".into())
+        );
+        assert_eq!(ordered(&mut items, "a", "a", true), (false, "abc".into()));
+    }
+
     #[test]
     fn optimistic_chat_reorder_preserves_other_workspace_positions() {
         let chat = |id: &str, folder: &str| ChatSummary {
@@ -21739,7 +22030,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn background_turn_start_updates_the_session_board(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("foreground".into());
             desktop.model.chats = vec![
@@ -21789,7 +22080,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn background_terminal_activity_updates_the_session_board(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("foreground".into());
             desktop.model.chats = vec![
@@ -21892,7 +22183,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn closing_one_terminal_preserves_another_terminal_working_state(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.chats = vec![ChatSummary {
                 id: "chat-1".into(),
@@ -21944,7 +22235,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn inactive_endpoint_preserves_other_terminal_activity_on_close(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.inactive_model.chats = vec![ChatSummary {
                 id: "remote-chat".into(),
@@ -22950,7 +23241,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn terminal_list_keeps_a_known_good_screen_when_replay_is_malformed(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat".into());
             let existing = XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({
@@ -22997,7 +23288,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn terminal_list_replays_cold_pending_output_without_duplicates(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat".into());
             let mut panel = XdDesktop::new_terminal_panel("chat".into());
@@ -23072,7 +23363,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn terminal_close_tombstone_prevents_a_stale_list_from_resurrecting_it(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.selected_chat = Some("chat".into());
             let mut panel = XdDesktop::new_terminal_panel("chat".into());
@@ -23109,7 +23400,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn remote_navigation_state_is_cached_and_reconciled(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, _| {
             desktop.active_endpoint = ChatEndpoint::Remote;
             desktop.settings.remote_ssh_command = Some("ssh dev.example -p 22".into());
@@ -23397,7 +23688,7 @@ fn main() {
                                 .then(|| point(px(12.0), px(10.0))),
                         }),
                         window_decorations: Some(WindowDecorations::Client),
-                        app_id: Some(xd_desktop::channel::app_id().into()),
+                        app_id: Some(xd_desktop::channel::app_id()),
                         ..Default::default()
                     },
                     |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
