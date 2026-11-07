@@ -1211,8 +1211,14 @@ impl ChatPullRequest {
         self.lookup_token()
     }
 
+    /// Hosts broadcast these answers, so the token also says which client asked.
     fn lookup_token(&self) -> String {
-        format!("pull-request-{}", self.lookups)
+        static CLIENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            use std::hash::BuildHasher;
+            std::collections::hash_map::RandomState::new().hash_one(std::process::id())
+        });
+        format!("pull-request-{client:x}-{}", self.lookups)
     }
 
     /// Lookups overlap and can finish in any order, so only the latest counts.
@@ -20090,8 +20096,14 @@ Binary files /dev/null and b/image.png differ\n";
         known.apply(Some(&first), &serde_json::json!({"branch": "a", "url": ""}));
         assert_eq!(known.url_for("a"), Some(url));
 
-        // Nor does an answer nobody here asked for count.
+        // Nor does an answer nobody here asked for count, such as another
+        // client's lookup with the same sequence number.
         known.apply(None, &serde_json::json!({"branch": "a", "url": ""}));
+        assert_eq!(known.url_for("a"), Some(url));
+        known.apply(
+            Some(&format!("pull-request-0-{}", known.lookups)),
+            &serde_json::json!({"branch": "a", "url": ""}),
+        );
         assert_eq!(known.url_for("a"), Some(url));
     }
 
