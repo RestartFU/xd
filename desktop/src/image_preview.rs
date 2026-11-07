@@ -352,13 +352,17 @@ fn viewer_button(
 }
 
 impl XdDesktop {
-    fn remove_draft_attachment(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if index < self.model.draft_attachments.len() {
+    /// Where an image is in the draft now. A tile's position is from the last
+    /// draw, and a synchronized draft or a paste may have moved it since.
+    fn draft_attachment_index(&self, image: u64) -> Option<usize> {
+        self.model
+            .draft_attachments
+            .iter()
+            .position(|attachment| attachment.preview.id() == image)
+    }
+
+    fn remove_draft_attachment(&mut self, image: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.draft_attachment_index(image) {
             self.model.draft_attachments.remove(index);
             self.attachments_dirty = true;
             self.attachment_generation = self.attachment_generation.saturating_add(1);
@@ -382,6 +386,11 @@ impl XdDesktop {
         for attachment in &self.model.draft_attachments {
             let key = (attachment.preview.id(), side);
             if self.composer_thumbnails.contains_key(&key) {
+                continue;
+            }
+            // Unreadable, or a picture too large to be worth allocating.
+            if attachment.size.is_none() {
+                self.composer_thumbnails.insert(key, ThumbnailState::Failed);
                 continue;
             }
             self.composer_thumbnails
@@ -427,6 +436,7 @@ impl XdDesktop {
             .iter()
             .enumerate()
             .map(|(index, attachment)| {
+                let image = attachment.preview.id();
                 let thumbnail = self
                     .composer_thumbnails
                     .get(&(attachment.preview.id(), side));
@@ -464,7 +474,7 @@ impl XdDesktop {
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.open_image_preview(index, window, cx);
+                                this.open_image_preview(image, window, cx);
                             }))
                             .child(content),
                     )
@@ -496,7 +506,7 @@ impl XdDesktop {
                             .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.remove_draft_attachment(index, window, cx);
+                                this.remove_draft_attachment(image, window, cx);
                             }))
                             .child(icon(CLOSE_ICON, 14.0, MEDIA_FOREGROUND)),
                     )
@@ -514,8 +524,11 @@ impl XdDesktop {
         )
     }
 
-    fn open_image_preview(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_image_preview(&mut self, image: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(index) = self.draft_attachment_index(image) else {
             return;
         };
         let images = self
@@ -528,9 +541,6 @@ impl XdDesktop {
                 size: attachment.size,
             })
             .collect::<Vec<_>>();
-        if index >= images.len() {
-            return;
-        }
         let viewport = window.viewport_size();
         let window_size = (f32::from(viewport.width), f32::from(viewport.height));
         self.image_preview = Some(ImagePreview::new(chat, images, index, window_size));
@@ -1341,6 +1351,92 @@ mod tests {
                 assert_eq!(preview.zoom, zoom);
             });
         }
+    }
+
+    /// Press, let a synchronized draft put an image in front with no redraw, and
+    /// release. A press draws a frame, so this is when a tile's position is stale.
+    fn click_while_an_image_arrives(
+        desktop: &Entity<XdDesktop>,
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+        arriving: &str,
+    ) {
+        let arrived = Attachment::from_png(arriving, png(300, 300, |_, _| [9, 9, 9, 255])).unwrap();
+        let target = cx.debug_bounds(selector).unwrap().center();
+        let modifiers = gpui::Modifiers::default();
+        cx.simulate_mouse_down(target, MouseButton::Left, modifiers);
+        desktop.update(cx, |desktop, _| {
+            desktop.model.draft_attachments.insert(0, arrived);
+        });
+        cx.simulate_mouse_up(target, MouseButton::Left, modifiers);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn a_tile_opens_its_own_image_when_the_draft_changes_during_the_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = composer_with_images(cx, &[(800, 200), (200, 800)]);
+
+        click_while_an_image_arrives(&desktop, cx, "draft-image-0", "arrived.png");
+
+        desktop.read_with(cx, |desktop, _| {
+            let preview = desktop.image_preview.as_ref().expect("the viewer is open");
+            assert_eq!(preview.current().unwrap().name, "image-0.png");
+        });
+    }
+
+    #[gpui::test]
+    fn a_tile_removes_its_own_image_when_the_draft_changes_during_the_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = composer_with_images(cx, &[(800, 200), (200, 800)]);
+
+        click_while_an_image_arrives(&desktop, cx, "remove-draft-image-0", "arrived.png");
+
+        desktop.read_with(cx, |desktop, _| {
+            let names = desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["arrived.png", "image-1.png"]);
+        });
+    }
+
+    #[gpui::test]
+    fn an_image_too_large_to_decode_is_never_decoded(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        // Only the headers of an 8001x8000 PNG: past the limit, whatever the file size.
+        let oversized = (0..90)
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&"89504e470d0a1a0a0000000d4948445200001f4100001f400806000000e933c6ca000000004944415435af061e"[index..index + 2], 16).unwrap())
+            .collect();
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.draft_attachments =
+                vec![Attachment::from_png("huge.png", oversized).unwrap()];
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        cx.update(|_, cx| {
+            let thumbnails = &desktop.read(cx).composer_thumbnails;
+            assert_eq!(thumbnails.len(), 1);
+            assert!(matches!(
+                thumbnails.values().next(),
+                Some(ThumbnailState::Failed)
+            ));
+        });
+        click(cx, "draft-image-0");
+        desktop.read_with(cx, |desktop, _| {
+            let layout = desktop.image_preview.as_ref().unwrap().layout();
+            assert_eq!(
+                (layout.width, layout.height),
+                (UNAVAILABLE_WIDTH, UNAVAILABLE_HEIGHT),
+                "the viewer shows its panel rather than the image"
+            );
+        });
     }
 
     #[gpui::test]
