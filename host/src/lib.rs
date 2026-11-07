@@ -2434,6 +2434,10 @@ mod tests {
         let owners = HashSet::from([resource.clone()]);
         assert!(!engine.terminals.close_unused(&owners, old));
         engine.terminals.kill_chat(&resource);
+        assert!(
+            !engine.terminals.close_unused(&owners, old),
+            "a terminal closed since the sweep looked still counts"
+        );
         assert_eq!(
             engine.auto_delete_sweep(settlement::now_seconds(), &mut reported),
             0,

@@ -541,6 +541,23 @@ mod tests {
             [AutoDeletion::Deleted { worktrees, .. }] if worktrees.len() == 1
         ));
         assert!(!worktree.exists());
+
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        fixture.git(&worktree, &["checkout", "-q", "-b", "xd/manual"]);
+        fixture.sql("DROP TABLE generated_worktrees");
+        StateStore::open(
+            fixture.root.join("chats.db"),
+            fixture.root.join("Workspaces"),
+        )
+        .unwrap();
+        fixture.enable(1);
+        fixture.age(3);
+        assert!(matches!(
+            fixture.sweep().as_slice(),
+            [AutoDeletion::Deleted { worktrees, .. }] if worktrees.is_empty()
+        ));
+        assert!(worktree.exists(), "only xd's branch for the chat proves it");
     }
 
     #[test]

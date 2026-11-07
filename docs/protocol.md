@@ -482,8 +482,8 @@ uncommitted changes or untracked files, or a detached HEAD whose commits no
 branch or tag holds. A worktree xd did not generate, one now on a different
 branch from the one xd checked out there, or one another session or project
 works in, is left where it is. The host records each worktree it generates;
-worktrees from before that record count when they sit exactly where xd puts its
-own. If Git refuses a worktree after the session is
+worktrees from before that record count only when they sit exactly where xd
+puts its own and still have the branch xd named after their chat. If Git refuses a worktree after the session is
 deleted, the worktree stays on disk with everything in it. Each deletion
 broadcasts `tree`, and `worktrees-changed` when a worktree went with it.
 

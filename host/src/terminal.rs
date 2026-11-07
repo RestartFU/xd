@@ -98,6 +98,9 @@ struct TerminalSession {
     activity: Arc<TerminalActivityState>,
     /// When the terminal last took input or printed output, in seconds.
     last_used: AtomicI64,
+    /// Held while output is marked as use, so closing an idle terminal sees
+    /// it. Separate from `writer`, which a blocked input write can hold.
+    output_use: Mutex<()>,
 }
 
 impl TerminalManager {
@@ -438,25 +441,39 @@ impl TerminalManager {
     }
 
     /// Closes every terminal of these owners, unless one has been used after
-    /// `idle_since`. Input is refused from the moment the check begins, so a
-    /// command typed meanwhile cannot run in a session that is going away.
-    /// Opening a terminal waits on the engine's session lock, which the
-    /// caller holds. Returns whether they are closed.
+    /// `idle_since`, including one closed since [`Self::usage`] last looked.
+    /// Input and output are held off while it checks, and input is refused
+    /// from then on, so nothing typed meanwhile runs in a session that is going
+    /// away. A terminal busy taking input counts as used. Opening a terminal
+    /// waits on the engine's session lock, which the caller holds. Returns
+    /// whether they are closed.
     pub(crate) fn close_unused(&self, owners: &HashSet<String>, idle_since: i64) -> bool {
         let sessions = self.owned_by(owners);
         let mut writers = Vec::with_capacity(sessions.len());
+        let mut marking = Vec::with_capacity(sessions.len());
         for session in &sessions {
-            let Ok(writer) = session.writer.lock() else {
+            let Ok(writer) = session.writer.try_lock() else {
                 return false;
             };
             writers.push(writer);
+            let Ok(output) = session.output_use.lock() else {
+                return false;
+            };
+            marking.push(output);
         }
-        if sessions
-            .iter()
-            .any(|session| session.last_used.load(Ordering::Acquire) > idle_since)
+        let closed_recently = self.activity.closed_usage.lock().map_or(true, |closed| {
+            owners
+                .iter()
+                .any(|owner| closed.get(owner).is_some_and(|used| *used > idle_since))
+        });
+        if closed_recently
+            || sessions
+                .iter()
+                .any(|session| session.last_used.load(Ordering::Acquire) > idle_since)
         {
             return false;
         }
+        drop(marking);
         for writer in &mut writers {
             writer.take();
         }
@@ -638,6 +655,7 @@ impl TerminalSession {
             activity,
             state: Mutex::new(TerminalState::new(columns, rows)),
             last_used: AtomicI64::new(crate::settlement::now_seconds()),
+            output_use: Mutex::new(()),
         });
         Ok((session, reader))
     }
@@ -884,8 +902,7 @@ fn start_reader(
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
-                // Under the writer's lock, so closing an idle terminal sees it.
-                if let Ok(_writer) = session.writer.lock() {
+                if let Ok(_marking) = session.output_use.lock() {
                     session.mark_used();
                 }
                 let data = buffer[..count].to_vec();
