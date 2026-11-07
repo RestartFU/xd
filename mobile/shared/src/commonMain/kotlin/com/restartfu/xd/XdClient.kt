@@ -18,7 +18,19 @@ import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.ChatTitleSettingsReply
 import com.restartfu.xd.protocol.FolderContextReply
 import com.restartfu.xd.protocol.ResumeInterruptedReply
+import com.restartfu.xd.protocol.UsageAccountReply
+import com.restartfu.xd.protocol.UsagePriceReply
+import com.restartfu.xd.protocol.UsagePricesReply
+import com.restartfu.xd.protocol.UsageSummaryReply
+import com.restartfu.xd.protocol.WireJson
 import com.restartfu.xd.store.ProviderStates
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.longOrNull
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
@@ -585,6 +597,81 @@ public class XdClient(
     public suspend fun resumeInterrupted(resume: Boolean): List<String> =
         actor.decodeReply(actor.call(Ops.resumeInterrupted(resume))) { it.decodeReply<ResumeInterruptedReply>() }.resumed
 
+    private val usageGenerations = MutableStateFlow(0L)
+
+    /**
+     * Sends a request the host answers with an event to this connection only,
+     * matched by [match], and waits for that event. Subscribed before sending,
+     * so the answer cannot slip past; a dropped connection loses it, which
+     * the timeout reports.
+     */
+    private suspend fun awaitAnswer(
+        request: kotlinx.serialization.json.JsonObject,
+        match: (kotlinx.serialization.json.JsonObject) -> Boolean,
+    ): kotlinx.serialization.json.JsonObject = coroutineScope {
+        val answer = async(start = CoroutineStart.UNDISPATCHED) {
+            actor.events.first { match(it.value) }.value
+        }
+        try {
+            actor.call(request)
+            withTimeout(USAGE_TIMEOUT_MILLIS) { answer.await() }
+        } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
+            answer.cancel()
+            throw RemoteProtocolException("The host did not answer in time. Try again.")
+        } catch (error: Throwable) {
+            answer.cancel()
+            throw error
+        }
+    }
+
+    private fun failure(value: kotlinx.serialization.json.JsonObject): String? =
+        (value["error"] as? JsonPrimitive)?.contentOrNull
+
+    /** Cost and tokens over [days], read on the host. [refresh] fetches prices again. */
+    public suspend fun usageSummary(days: Int, timeZone: String, refresh: Boolean = false): UsageSummaryReply {
+        val generation = usageGenerations.updateAndGet { it + 1 }
+        val event = awaitAnswer(Ops.usageSummary(days, timeZone, generation, refresh)) {
+            (it["event"] as? JsonPrimitive)?.contentOrNull == "usage-summary" &&
+                (it["generation"] as? JsonPrimitive)?.longOrNull == generation
+        }
+        failure(event)?.let { throw RemoteProtocolException(it) }
+        val summary = event["summary"] as? kotlinx.serialization.json.JsonObject
+            ?: throw RemoteProtocolException("The usage answer had no summary")
+        return WireJson.decodeFromJsonElement(UsageSummaryReply.serializer(), summary)
+    }
+
+    /** Each signed-in assistant account's subscription limits. */
+    public suspend fun usageLimits(timeZone: String): List<UsageAccountReply> {
+        val generation = usageGenerations.updateAndGet { it + 1 }
+        val event = awaitAnswer(Ops.usageLimits(timeZone, generation)) {
+            (it["event"] as? JsonPrimitive)?.contentOrNull == "usage-limits" &&
+                (it["generation"] as? JsonPrimitive)?.longOrNull == generation
+        }
+        failure(event)?.let { throw RemoteProtocolException(it) }
+        val accounts = event["accounts"] ?: return emptyList()
+        return WireJson.decodeFromJsonElement(ListSerializer(UsageAccountReply.serializer()), accounts)
+    }
+
+    /**
+     * Spends one Codex reset credit and answers the host's outcome: `reset`,
+     * `nothingToReset`, `noCredit`, or `alreadyRedeemed`.
+     */
+    public suspend fun consumeResetCredit(accountKey: String, idempotencyKey: String): String {
+        val event = awaitAnswer(Ops.usageConsumeResetCredit(accountKey, idempotencyKey)) {
+            (it["event"] as? JsonPrimitive)?.contentOrNull == "usage-reset-credit" &&
+                ((it["idempotency_key"] as? JsonPrimitive)?.contentOrNull == idempotencyKey || "error" in it)
+        }
+        failure(event)?.let { throw RemoteProtocolException(it) }
+        return (event["outcome"] as? JsonPrimitive)?.contentOrNull
+            ?: throw RemoteProtocolException("The reset answer had no outcome")
+    }
+
+    public suspend fun usagePrices(): UsagePricesReply =
+        actor.decodeReply(actor.call(Ops.usagePrices())) { it.decodeReply<UsagePricesReply>() }
+
+    public suspend fun setUsagePrices(prices: Map<String, UsagePriceReply>, aliases: Map<String, String>): UsagePricesReply =
+        actor.decodeReply(actor.call(Ops.setUsagePrices(prices, aliases))) { it.decodeReply<UsagePricesReply>() }
+
     /** Reads the rules into [autoSettleSettings]. */
     public suspend fun loadAutoSettleSettings() {
         autoSettleCall(Ops.autoSettleSettings())
@@ -793,6 +880,8 @@ public class XdClient(
     }
 
     private companion object {
+        /** Reading 90 days of transcripts can take a while on a busy host. */
+        const val USAGE_TIMEOUT_MILLIS = 120_000L
         val TURN_LIFECYCLE_EVENTS = setOf("turn-started", "turn-finished")
     }
 

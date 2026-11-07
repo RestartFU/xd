@@ -68,6 +68,13 @@ back. A project's **⋮** menu edits its **Project context** and its own secrets
 time this phone connects; with it off the phone does not answer, so a desktop set
 to resume them still can. Paired devices can only be managed on the host itself.
 
+**Usage**, beside Terminal in the navigation, reads the host's assistant
+transcripts as the desktop's Usage page does: cost, processed tokens, and sessions
+over the past 24 hours or 7, 30, or 90 days, a cost chart, and cost by model. Its
+Limits section shows each signed-in account's subscription windows and, for Codex,
+spends a banked reset credit after asking. **Model prices** edits the host's custom
+per-model prices.
+
 Older hosts appear as one chat per session. Update the connected host before
 adding another chat inside an existing session; Android displays an update
 message instead of creating a separate session. The host automatically deletes

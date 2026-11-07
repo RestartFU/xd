@@ -96,6 +96,7 @@ import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.mobile.TerminalViewModel
+import com.restartfu.xd.mobile.UsageViewModel
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.model.MinimalProject
 import com.restartfu.xd.model.MinimalSession
@@ -120,6 +121,7 @@ private enum class MobileDestination {
     PROJECTS,
     SESSIONS,
     TERMINAL,
+    USAGE,
 }
 
 private const val GLOBAL_TERMINAL_CHAT_ID = "global:mobile"
@@ -143,6 +145,8 @@ internal class MobileWorkspaceModels : ViewModel() {
 
     fun chat(id: String): ViewModelStoreOwner = chats.getOrPut(id) { SessionViewModelOwner() }
     fun workspace(id: String): ViewModelStoreOwner = workspaces.getOrPut(id) { SessionViewModelOwner() }
+    private var usageOwner: SessionViewModelOwner? = null
+    fun usage(): ViewModelStoreOwner = usageOwner ?: SessionViewModelOwner().also { usageOwner = it }
 
     fun retain(chatIds: Set<String>, sessionIds: Set<String>) {
         // Panes can reference a chat connection, so release them first.
@@ -151,6 +155,8 @@ internal class MobileWorkspaceModels : ViewModel() {
     }
 
     private fun clearStores() {
+        usageOwner?.viewModelStore?.clear()
+        usageOwner = null
         workspaces.values.forEach { it.viewModelStore.clear() }
         chats.values.forEach { it.viewModelStore.clear() }
         workspaces.clear()
@@ -237,6 +243,7 @@ internal fun MinimalMobileApp(
         mobileDestination = if (sessions.isEmpty()) MobileDestination.PROJECTS else MobileDestination.SESSIONS
     }
     val showTerminal = { mobileDestination = MobileDestination.TERMINAL }
+    val showUsage = { mobileDestination = MobileDestination.USAGE }
     val addChat: (MinimalSession) -> Unit = { session ->
         if (session.terminalChatId.startsWith("session:")) {
             createChatIn = session
@@ -270,7 +277,7 @@ internal fun MinimalMobileApp(
     Box(Modifier.fillMaxSize()) {
     Row(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         if (expanded) {
-            XdNavigationRail(mobileDestination, showProjects, showSessions, showTerminal)
+            XdNavigationRail(mobileDestination, showProjects, showSessions, showTerminal, showUsage)
         }
         Column(Modifier.weight(1f)) {
             Box(Modifier.weight(1f)) {
@@ -278,6 +285,18 @@ internal fun MinimalMobileApp(
                     mobileDestination == MobileDestination.TERMINAL -> MinimalGlobalTerminal(
                         model, settings, link, showProjects, showSessions,
                     )
+                    mobileDestination == MobileDestination.USAGE -> Column(
+                        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+                    ) {
+                        ProductHeader(link = link, title = "Usage", onSettings = { settingsOpen = true })
+                        // Kept with the other per-host stores, so leaving Usage keeps what it read.
+                        val usage: UsageViewModel = viewModel(
+                            key = "usage",
+                            viewModelStoreOwner = stores.usage(),
+                            factory = UsageViewModel.Factory(model.client),
+                        )
+                        UsageContent(usage)
+                    }
                     mobileDestination == MobileDestination.SESSIONS && activeSession != null -> {
                         val tabStrip: @Composable () -> Unit = {
                             SessionTabStrip(
@@ -354,7 +373,7 @@ internal fun MinimalMobileApp(
                 }
             }
             if (showBottomNavigation) {
-                XdNavigationBar(mobileDestination, showProjects, showSessions, showTerminal)
+                XdNavigationBar(mobileDestination, showProjects, showSessions, showTerminal, showUsage)
             }
         }
     }
@@ -907,11 +926,13 @@ private fun XdNavigationBar(
     onProjects: () -> Unit,
     onSessions: () -> Unit,
     onTerminal: () -> Unit,
+    onUsage: () -> Unit,
 ) {
     NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
         NavItem("Projects", R.drawable.ic_projects, active = active == MobileDestination.PROJECTS, onClick = onProjects)
         NavItem("Sessions", R.drawable.ic_sessions, active = active == MobileDestination.SESSIONS, onClick = onSessions)
         NavItem("Terminal", R.drawable.ic_terminal, active = active == MobileDestination.TERMINAL, onClick = onTerminal)
+        NavItem("Usage", R.drawable.ic_usage, active = active == MobileDestination.USAGE, onClick = onUsage)
     }
 }
 
@@ -921,6 +942,7 @@ private fun XdNavigationRail(
     onProjects: () -> Unit,
     onSessions: () -> Unit,
     onTerminal: () -> Unit,
+    onUsage: () -> Unit,
 ) {
     NavigationRail(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
         Spacer(Modifier.height(16.dp))
@@ -928,6 +950,7 @@ private fun XdNavigationRail(
             Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects),
             Triple(MobileDestination.SESSIONS, "Sessions", R.drawable.ic_sessions),
             Triple(MobileDestination.TERMINAL, "Terminal", R.drawable.ic_terminal),
+            Triple(MobileDestination.USAGE, "Usage", R.drawable.ic_usage),
         ).forEach { (destination, label, icon) ->
             NavigationRailItem(
                 selected = active == destination,
@@ -935,6 +958,7 @@ private fun XdNavigationRail(
                     MobileDestination.PROJECTS -> onProjects
                     MobileDestination.SESSIONS -> onSessions
                     MobileDestination.TERMINAL -> onTerminal
+                    MobileDestination.USAGE -> onUsage
                 },
                 icon = { Icon(painterResource(icon), contentDescription = null) },
                 label = { Text(label) },

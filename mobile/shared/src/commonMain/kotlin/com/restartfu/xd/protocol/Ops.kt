@@ -498,6 +498,60 @@ public object Ops {
         put("resume", resume)
     }
 
+    /**
+     * Asks for a usage summary over [days]; the host answers `pending` and
+     * sends a `usage-summary` event carrying [generation].
+     */
+    public fun usageSummary(days: Int, timeZone: String, generation: Long, refresh: Boolean = false): JsonObject = buildJsonObject {
+        require(days in USAGE_DAYS) { "Usage covers 1, 7, 30, or 90 days" }
+        put("op", "usage-summary")
+        put("days", days)
+        put("time_zone", timeZone)
+        put("generation", generation)
+        if (refresh) put("refresh", true)
+    }
+
+    public val USAGE_DAYS: List<Int> = listOf(1, 7, 30, 90)
+
+    /** Asks each assistant for its limits; answered by a `usage-limits` event carrying [generation]. */
+    public fun usageLimits(timeZone: String, generation: Long): JsonObject = buildJsonObject {
+        put("op", "usage-limits")
+        put("time_zone", timeZone)
+        put("generation", generation)
+    }
+
+    /**
+     * Spends one banked Codex reset credit on [accountKey]. [idempotencyKey]
+     * names the attempt and is reused when retrying it. This cannot be undone.
+     */
+    public fun usageConsumeResetCredit(accountKey: String, idempotencyKey: String): JsonObject = buildJsonObject {
+        require(accountKey.isNotBlank() && idempotencyKey.isNotBlank()) { "A reset needs the account and an attempt key" }
+        put("op", "usage-consume-reset-credit")
+        put("provider", "codex")
+        put("account_key", accountKey)
+        put("idempotency_key", idempotencyKey)
+    }
+
+    public fun usagePrices(): JsonObject = op("usage-prices")
+
+    /** Replaces the custom prices and aliases. A blank cache rate uses the input rate. */
+    public fun setUsagePrices(prices: Map<String, UsagePriceReply>, aliases: Map<String, String>): JsonObject = buildJsonObject {
+        put("op", "set-usage-prices")
+        put("prices", buildJsonObject {
+            prices.forEach { (model, price) ->
+                require(model.isNotBlank()) { "A price needs a model" }
+                require(price.input >= 0 && price.output >= 0) { "Prices cannot be negative" }
+                put(model, buildJsonObject {
+                    put("input", price.input)
+                    put("output", price.output)
+                    price.cacheRead?.let { put("cache_read", it) }
+                    price.cacheWrite?.let { put("cache_write", it) }
+                })
+            }
+        })
+        put("aliases", buildJsonObject { aliases.forEach { (model, target) -> put(model, target) } })
+    }
+
     public fun gitStatus(chatId: String): JsonObject = withChat("git-status", chatId)
 
     /** Commits every change in the chat's checkout with [message], as the desktop's Commit does. */

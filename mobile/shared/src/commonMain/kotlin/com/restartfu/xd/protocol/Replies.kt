@@ -199,6 +199,107 @@ public data class ResumeInterruptedReply(
     val resumed: List<String> = emptyList(),
 )
 
+/** Token counts for one bucket of usage. */
+@Serializable
+public data class UsageTotalsReply(
+    @SerialName("uncached_input") val uncachedInput: Long = 0,
+    @SerialName("cached_input") val cachedInput: Long = 0,
+    @SerialName("cache_creation") val cacheCreation: Long = 0,
+    val output: Long = 0,
+    val reasoning: Long = 0,
+) {
+    /** Everything sent and received, the way the desktop totals tokens. */
+    val all: Long get() = uncachedInput + cachedInput + cacheCreation + output
+}
+
+/** One provider and model's usage in one day or hour of the window. */
+@Serializable
+public data class UsageBucketReply(
+    val day: String,
+    @SerialName("hour_start") val hourStart: String? = null,
+    val provider: String,
+    val model: String,
+    val totals: UsageTotalsReply = UsageTotalsReply(),
+    @SerialName("cost_usd") val costUsd: Double = 0.0,
+    @SerialName("cost_source") val costSource: String = "",
+    val records: Long = 0,
+    @SerialName("unpriced_records") val unpricedRecords: Long = 0,
+    @SerialName("unpriced_tokens") val unpricedTokens: Long = 0,
+) {
+    /** The period it falls in: its hour in an hourly window, else its day. */
+    val period: String get() = hourStart ?: day
+}
+
+@Serializable
+public data class UsagePeriodReply(
+    val key: String,
+    val label: String,
+    val tooltip: String = label,
+)
+
+/** Cost and tokens over a window, read from the host's assistant transcripts. */
+@Serializable
+public data class UsageSummaryReply(
+    @SerialName("read_at_ms") val readAtMs: Long = 0,
+    /** `hour` or `day`. */
+    val resolution: String = "day",
+    @SerialName("window_label") val windowLabel: String = "",
+    val periods: List<UsagePeriodReply> = emptyList(),
+    val buckets: List<UsageBucketReply> = emptyList(),
+    /** Sessions in the window, by provider. */
+    val sessions: Map<String, Int> = emptyMap(),
+)
+
+@Serializable
+public data class UsageWindowReply(
+    val id: String,
+    val kind: String = "",
+    val label: String,
+    @SerialName("used_percent") val usedPercent: Double = 0.0,
+    @SerialName("resets_at_ms") val resetsAtMs: Long? = null,
+    @SerialName("resets_at_label") val resetsAtLabel: String? = null,
+)
+
+@Serializable
+public data class ResetCreditsReply(
+    @SerialName("available_count") val availableCount: Int = 0,
+    @SerialName("next_expires_at_ms") val nextExpiresAtMs: Long? = null,
+)
+
+@Serializable
+public data class UsageUnavailableReply(
+    val reason: String = "",
+    val message: String? = null,
+)
+
+/** One signed-in assistant account's subscription limits. */
+@Serializable
+public data class UsageAccountReply(
+    val provider: String,
+    @SerialName("account_key") val accountKey: String? = null,
+    val plan: String? = null,
+    @SerialName("checked_at_ms") val checkedAtMs: Long = 0,
+    val windows: List<UsageWindowReply> = emptyList(),
+    @SerialName("reset_credits") val resetCredits: ResetCreditsReply? = null,
+    val unavailable: UsageUnavailableReply? = null,
+)
+
+/** A model's custom price, in USD per million tokens. */
+@Serializable
+public data class UsagePriceReply(
+    val input: Double,
+    val output: Double,
+    @SerialName("cache_read") val cacheRead: Double? = null,
+    @SerialName("cache_write") val cacheWrite: Double? = null,
+)
+
+@Serializable
+public data class UsagePricesReply(
+    val ok: Boolean = true,
+    val prices: Map<String, UsagePriceReply> = emptyMap(),
+    val aliases: Map<String, String> = emptyMap(),
+)
+
 /** The host's rules for settling sessions by itself. */
 @Serializable
 public data class AutoSettleSettingsReply(

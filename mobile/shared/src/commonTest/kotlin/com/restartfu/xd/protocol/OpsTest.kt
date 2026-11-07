@@ -75,6 +75,27 @@ class OpsTest {
     }
 
     @Test
+    fun usageRequestsCarryTheirGenerationAndRefuseUnknownWindows() {
+        val summary = Ops.usageSummary(7, "Europe/Paris", generation = 3)
+        assertEquals("usage-summary", summary["op"]!!.jsonPrimitive.content)
+        assertEquals(7, summary["days"]!!.jsonPrimitive.int)
+        assertEquals(3, summary["generation"]!!.jsonPrimitive.int)
+        assertFalse("refresh" in summary)
+        assertEquals(true, Ops.usageSummary(1, "UTC", 4, refresh = true)["refresh"]!!.jsonPrimitive.boolean)
+        assertFailsWith<IllegalArgumentException> { Ops.usageSummary(14, "UTC", 5) }
+        assertEquals("usage-limits", Ops.usageLimits("UTC", 6)["op"]!!.jsonPrimitive.content)
+        val reset = Ops.usageConsumeResetCredit("account", "attempt")
+        assertEquals("codex", reset["provider"]!!.jsonPrimitive.content)
+        assertEquals("attempt", reset["idempotency_key"]!!.jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.usageConsumeResetCredit("", "attempt") }
+        val prices = Ops.setUsagePrices(mapOf("local" to UsagePriceReply(2.0, 4.0)), mapOf("alias" to "local"))
+        val local = prices["prices"]!!.jsonObject["local"]!!.jsonObject
+        assertFalse("cache_read" in local)
+        assertEquals("local", prices["aliases"]!!.jsonObject["alias"]!!.jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.setUsagePrices(mapOf("m" to UsagePriceReply(-1.0, 1.0)), emptyMap()) }
+    }
+
+    @Test
     fun sessionOperationsNameTheSession() {
         assertEquals("settle-session", Ops.settleSession("s")["op"]!!.jsonPrimitive.content)
         assertEquals("s", Ops.unsettleSession("s")["session"]!!.jsonPrimitive.content)
