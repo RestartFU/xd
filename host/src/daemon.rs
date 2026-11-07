@@ -19,6 +19,7 @@ use std::{
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -142,6 +143,19 @@ fn singleton(paths: &Paths, wait: Duration) -> io::Result<Option<Singleton>> {
 }
 
 fn daemon_answers(socket: &Path) -> bool {
+    // A Unix socket has no connect timeout, and connecting to a full queue
+    // blocks. A thread left waiting ends with the listener or with this process.
+    let socket = socket.to_owned();
+    let (answered, answer) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = answered.send(ask_for_an_answer(&socket));
+    });
+    answer
+        .recv_timeout(LOCK_HOLDER_ANSWER_WAIT)
+        .unwrap_or(false)
+}
+
+fn ask_for_an_answer(socket: &Path) -> bool {
     let Ok(mut stream) = UnixStream::connect(socket) else {
         return false;
     };
@@ -677,6 +691,31 @@ mod tests {
         );
         assert!(began.elapsed() < Duration::from_secs(5));
         running.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asking_a_listener_with_a_full_queue_does_not_hang() {
+        let (root, paths, _holder) = lock_fixture();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        // Never accepting, with the shortest queue, so further connects block.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        for _ in 0..4 {
+            let socket = paths.socket.clone();
+            thread::spawn(move || {
+                let _connection = UnixStream::connect(socket);
+                thread::sleep(Duration::from_secs(30));
+            });
+        }
+        thread::sleep(Duration::from_millis(100));
+
+        let (answered, answer) = mpsc::channel();
+        let socket = paths.socket.clone();
+        thread::spawn(move || {
+            let _ = answered.send(daemon_answers(&socket));
+        });
+        assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(false));
+        drop(listener);
         fs::remove_dir_all(root).unwrap();
     }
 
