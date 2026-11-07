@@ -2,11 +2,13 @@ name: mobile
 
 on:
   pull_request:
-    # Only what these jobs read: they build from mobile/ alone, so a change
-    # anywhere else cannot alter their result.
+    # Only what these jobs read: they build from mobile/ alone with these
+    # scripts, so a change anywhere else cannot alter their result.
     paths:
       - 'mobile/**'
       - 'scripts/mobile-*.sh'
+      - 'scripts/runner-docker-build.sh'
+      - 'scripts/runner-jobs.sh'
       - '.github/workflows/mobile.yml'
   workflow_dispatch:
 
