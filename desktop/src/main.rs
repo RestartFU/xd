@@ -1318,6 +1318,8 @@ enum ImageViewer {
 const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
 /// What the image viewer leaves around an image, showing the window it is over.
 const IMAGE_VIEWER_MARGIN: f32 = 32.0;
+/// Past this a column stops narrowing and its table scrolls sideways instead.
+const TABLE_COLUMN_MIN_WIDTH: f32 = 88.0;
 
 /// How much memory images in a chat may hold. Scrolling through a long chat
 /// should not keep every image it passes.
@@ -12198,20 +12200,72 @@ impl XdDesktop {
                 .text_color(rgb(colors.text))
                 .child(code.code.clone())
                 .into_any_element(),
-            markdown::Block::Table(table) => div()
-                .id(("native-table", index))
-                .w_full()
-                .p_3()
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgb(colors.border))
-                .bg(rgb(colors.surface))
-                .font_family(MONO)
-                .text_size(px(12.5))
-                .line_height(px(19.0))
-                .text_color(rgb(colors.text))
-                .child(table.text.clone())
-                .into_any_element(),
+            markdown::Block::Table(table) => {
+                let weights = table.column_weights();
+                let row_count = table.rows.len();
+                let row = |row_index: usize, cells: &[markdown::InlineText]| {
+                    let scope = format!("native-table:{index}:{row_index}");
+                    div()
+                        .w_full()
+                        .flex()
+                        .when(row_index < row_count, |row| {
+                            row.border_b_1().border_color(rgb(colors.border))
+                        })
+                        .children(cells.iter().zip(&weights).enumerate().map(
+                            |(column, (cell, weight))| {
+                                // Every row divides its width by the same weights
+                                // and limits, which is what lines the columns up.
+                                let mut element = div()
+                                    .debug_selector(move || {
+                                        format!("native-table-cell-{row_index}-{column}")
+                                    })
+                                    .flex_basis(relative(0.0))
+                                    .min_w(px(TABLE_COLUMN_MIN_WIDTH))
+                                    .px_3()
+                                    .py(px(7.0))
+                                    .child(Self::render_native_inline(
+                                        cell,
+                                        colors,
+                                        scoped_element_id(&scope, column) as usize,
+                                    ));
+                                element.style().flex_grow = Some(*weight);
+                                element
+                            },
+                        ))
+                };
+                let mut table_element = div()
+                    .id(("native-table", index))
+                    .debug_selector(|| "native-table".into())
+                    .w_full()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.surface))
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .text_color(rgb(colors.text))
+                    .overflow_x_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w(px(TABLE_COLUMN_MIN_WIDTH * weights.len() as f32))
+                            .flex()
+                            .flex_col()
+                            .child(row(0, &table.header).font_weight(FontWeight::SEMIBOLD))
+                            .children(
+                                table
+                                    .rows
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(row_index, cells)| row(row_index + 1, cells)),
+                            ),
+                    );
+                // A vertical wheel keeps moving the transcript. Only a sideways
+                // gesture, which Shift makes of a wheel, moves a table that does
+                // not fit.
+                table_element.style().restrict_scroll_to_axis = Some(true);
+                table_element.into_any_element()
+            }
             markdown::Block::Analysis(blocks) => div()
                 .id(("native-analysis", index))
                 .w_full()
@@ -18295,6 +18349,82 @@ mod tests {
             assert!(text.contains("before upgrade"));
             assert!(text.contains("after upgrade"));
         });
+    }
+
+    fn table_transcript<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        width: f32,
+        table: &str,
+    ) -> &'a mut gpui::VisualTestContext {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages =
+                Arc::new(vec![Message::new(Some(1), "assistant", table, None)]);
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(width), px(800.0)));
+        cx.run_until_parked();
+        cx
+    }
+
+    #[gpui::test]
+    fn a_table_too_long_for_one_line_wraps_inside_aligned_columns(cx: &mut gpui::TestAppContext) {
+        let prose = "A cell with far more to say than one line of the column can hold. ".repeat(3);
+        let table = format!(
+            "| Check | Result | Empty |\n|---|---|---|\n| Review | Clean | |\n| {prose} | {prose} | |"
+        );
+        let cx = table_transcript(cx, 1100.0, &table);
+
+        let bounds = cx.debug_bounds("native-table").unwrap();
+        for column in 0..3 {
+            let header = cx
+                .debug_bounds(format!("native-table-cell-0-{column}").leak())
+                .unwrap();
+            for row in 1..3 {
+                let cell = cx
+                    .debug_bounds(format!("native-table-cell-{row}-{column}").leak())
+                    .unwrap();
+                assert_eq!(cell.left(), header.left());
+                assert_eq!(cell.size.width, header.size.width);
+            }
+        }
+        let last = cx.debug_bounds("native-table-cell-2-2").unwrap();
+        assert!(
+            last.right() <= bounds.right(),
+            "the table fits its reading column"
+        );
+        let short = cx.debug_bounds("native-table-cell-1-0").unwrap();
+        let wrapped = cx.debug_bounds("native-table-cell-2-0").unwrap();
+        assert!(
+            wrapped.size.height > short.size.height,
+            "a long cell wraps in place"
+        );
+    }
+
+    #[gpui::test]
+    fn a_table_with_too_many_columns_scrolls_instead_of_crushing_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let row = |cell: &str| format!("|{}", format!(" {cell} |").repeat(14));
+        let table = format!("{}\n{}\n{}", row("head"), row("---"), row("cell"));
+        let cx = table_transcript(cx, 900.0, &table);
+
+        let bounds = cx.debug_bounds("native-table").unwrap();
+        let first = cx.debug_bounds("native-table-cell-1-0").unwrap();
+        assert_eq!(first.size.width, px(TABLE_COLUMN_MIN_WIDTH));
+        assert!(first.left() + px(TABLE_COLUMN_MIN_WIDTH * 14.0) > bounds.right());
     }
 
     #[gpui::test]
