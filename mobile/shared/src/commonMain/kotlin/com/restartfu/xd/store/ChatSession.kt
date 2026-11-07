@@ -17,6 +17,9 @@ import com.restartfu.xd.protocol.WireJson
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.DiffReply
 import com.restartfu.xd.protocol.FileEntryReply
+import com.restartfu.xd.protocol.GitStatusReply
+import com.restartfu.xd.protocol.PullRequestLookup
+import com.restartfu.xd.protocol.RemoteProtocolException
 import com.restartfu.xd.protocol.ImageReply
 import com.restartfu.xd.protocol.Limits
 import kotlin.io.encoding.Base64
@@ -42,10 +45,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -57,6 +65,9 @@ public class ChatSession internal constructor(
     private val release: () -> Unit,
 ) : AutoCloseable {
     public val state: StateFlow<ChatState> = core.state
+
+    /** Counts Git changes the host reported for this chat's checkout. */
+    public val gitChanges: StateFlow<Long> = core.gitChanges
     /** Complete assistant `<speak>` blocks from this live turn. */
     public val speech: Flow<String> = core.speech
     private var closed = false
@@ -116,6 +127,20 @@ public class ChatSession internal constructor(
         after: Boolean,
         revision: Long? = null,
     ): Unit = core.call(Ops.reorderQueue(core.chatId, source, sourceText, anchor, anchorText, after, revision))
+
+    /** The checkout's branch and uncommitted changes. */
+    public suspend fun gitStatus(): GitStatusReply =
+        core.read(Ops.gitStatus(core.chatId)) { it.decodeReply<GitStatusReply>() }
+
+    /** Commits every change with [message] and answers with the new state. */
+    public suspend fun commitAll(message: String): GitStatusReply =
+        core.read(Ops.gitCommit(core.chatId, message)) { it.decodeReply<GitStatusReply>() }
+
+    /**
+     * The checked-out branch's pull request, tagged with that branch. Null
+     * outside a branch, or when HEAD moved while GitHub was asked.
+     */
+    public suspend fun pullRequest(): PullRequestLookup? = core.pullRequest()
 
     /** Continues the chat's cut-short turn; see [Ops.resumeTurn]. */
     public suspend fun resumeTurn(): Unit = core.call(Ops.resumeTurn(core.chatId))
@@ -423,6 +448,37 @@ internal class ChatSessionCore(
      * failed diff or directory listing is not a chat error and must not
      * surface as one.
      */
+    private var gitStateRequests = 0L
+    private val _gitChanges = MutableStateFlow(0L)
+    val gitChanges: StateFlow<Long> = _gitChanges.asStateFlow()
+
+    /**
+     * Sends `git-state` and waits for the event carrying its correlation
+     * string. Subscribed before sending, so the event cannot slip past.
+     */
+    suspend fun pullRequest(): PullRequestLookup? = coroutineScope {
+        ensureActive()
+        val token = "mobile-pr-$chatId-${++gitStateRequests}"
+        val answer = async(start = CoroutineStart.UNDISPATCHED) {
+            actor.events.first {
+                (it.value["event"] as? JsonPrimitive)?.contentOrNull == "git-state" &&
+                    (it.value["request"] as? JsonPrimitive)?.contentOrNull == token
+            }.value
+        }
+        try {
+            actor.decodeReply(actor.call(Ops.gitState(chatId, token))) { it }
+            // A timeout is an ordinary failure here, not a cancellation of the
+            // caller, so callers can keep what they already read.
+            val event = withTimeoutOrNull(GIT_STATE_TIMEOUT_MILLIS) { answer.await() }
+                ?: throw RemoteProtocolException("GitHub did not answer in time")
+            (event["pull_request"] as? JsonObject)?.let {
+                WireJson.decodeFromJsonElement(PullRequestLookup.serializer(), it)
+            }
+        } finally {
+            answer.cancel()
+        }
+    }
+
     suspend fun <T> read(
         request: JsonObject,
         decode: (JsonObject) -> T,
@@ -437,6 +493,13 @@ internal class ChatSessionCore(
         val value = event.value
         val eventName = (value["event"] as? JsonPrimitive)?.contentOrNull
         val eventChat = (value["chat"] as? JsonPrimitive)?.contentOrNull
+        // A commit, push, or pull request made from any chat: another chat may
+        // share its checkout, and events say nothing of which ones do, so what
+        // depends on the checkout, such as its pull request, is looked up again.
+        if (eventName == "git-action-finished" || eventName == "repository-changed") {
+            _gitChanges.update { it + 1 }
+            return
+        }
         if (eventName in CHAT_SCOPED_EVENTS && eventChat == null) return
         if (eventChat != null && eventChat != chatId) return
 
@@ -697,3 +760,6 @@ internal class ChatSessionCore(
         val input: TranscriptInput,
     )
 }
+
+/** GitHub can be slow; past this the header and Changes just keep what they showed. */
+private const val GIT_STATE_TIMEOUT_MILLIS = 60_000L

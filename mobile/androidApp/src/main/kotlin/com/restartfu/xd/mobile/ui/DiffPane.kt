@@ -1,5 +1,13 @@
 package com.restartfu.xd.mobile.ui
 
+import com.restartfu.xd.protocol.GitStatusReply
+import com.restartfu.xd.mobile.DiffPane
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Button
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,6 +44,22 @@ internal fun DiffPaneContent(model: DiffViewModel) {
     val state by model.state.collectAsStateWithLifecycle()
 
     Column(Modifier.fillMaxSize()) {
+        state.git?.let { git -> GitSummary(git, state, model) }
+        state.gitError?.let { error ->
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (state.git == null) "Git status could not be read: $error"
+                    else "This may be out of date: Git status could not be read again ($error)",
+                    modifier = Modifier.weight(1f),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = model::refresh) { Text("Try again") }
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -96,6 +120,71 @@ internal fun DiffPaneContent(model: DiffViewModel) {
         }
     }
 }
+
+/**
+ * The checkout's branch and changes, a commit box while there is something
+ * to commit, and the branch's pull request: the desktop Changes pane's header.
+ */
+@Composable
+private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewModel) {
+    val signals = LocalXdSignals.current
+    val openLink = rememberLinkOpener()
+    Column(
+        Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                git.branch.ifBlank { "No branch" },
+                modifier = Modifier.weight(1f, fill = false),
+                fontFamily = XdMonoFamily,
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (git.ahead > 0) Text("↑${git.ahead}", color = signals.faint, style = MaterialTheme.typography.labelMedium)
+            if (git.behind > 0) Text("↓${git.behind}", color = signals.faint, style = MaterialTheme.typography.labelMedium)
+            Text(
+                when {
+                    git.conflicted > 0 -> "${git.conflicted} in conflict"
+                    git.clean -> "No uncommitted changes"
+                    else -> "${git.changed} changed"
+                },
+                color = if (git.conflicted > 0) MaterialTheme.colorScheme.error else signals.faint,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Box(Modifier.weight(1f))
+            state.pullRequestUrl?.let { url ->
+                TextButton(onClick = { openLink(url) }) {
+                    Text(pullRequestLabel(url))
+                }
+            }
+        }
+        if (git.canCommit) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = state.commitMessage,
+                    onValueChange = model::editCommitMessage,
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text("Commit message") },
+                    singleLine = true,
+                    enabled = !state.committing,
+                )
+                Button(
+                    onClick = model::commit,
+                    enabled = !state.committing && state.commitMessage.isNotBlank(),
+                ) { Text(if (state.committing) "Committing…" else "Commit all") }
+            }
+        }
+        state.commitError?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+/** "#123" for a GitHub pull request address, and a plain label otherwise. */
+internal fun pullRequestLabel(url: String): String =
+    url.trimEnd('/').substringAfterLast('/').toLongOrNull()?.let { "#$it" } ?: "Pull request"
 
 @Composable
 private fun DiffFileSection(

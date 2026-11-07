@@ -57,6 +57,38 @@ class RepliesTest {
     }
 
     @Test
+    fun gitStatusSaysWhenToCommitAndWhenToLookForAPullRequest() {
+        fun status(json: String) = WireJson.parseToJsonElement(json).jsonObject.decodeReply<GitStatusReply>()
+        val dirty = status("""{"ok":true,"branch":"fix","base":"main","upstream":"origin/fix","ahead":0,"behind":0,"staged":1,"unstaged":2,"untracked":1,"conflicted":0,"clean":false}""")
+        assertEquals(4, dirty.changed)
+        assertEquals(true, dirty.canCommit)
+        assertEquals(false, dirty.mayHavePullRequest)
+        val conflicted = dirty.copy(conflicted = 1)
+        assertEquals(false, conflicted.canCommit)
+        val pushed = status("""{"ok":true,"branch":"fix","base":"main","upstream":"origin/fix","ahead":0,"behind":0,"staged":0,"unstaged":0,"untracked":0,"conflicted":0,"clean":true}""")
+        assertEquals(true, pushed.mayHavePullRequest)
+        assertEquals(false, pushed.copy(ahead = 1).mayHavePullRequest)
+        assertEquals(false, pushed.copy(upstream = "").mayHavePullRequest)
+        assertEquals(false, pushed.copy(branch = "main").mayHavePullRequest)
+        assertEquals(false, pushed.copy(branch = "(detached)").mayHavePullRequest)
+    }
+
+    @Test
+    fun newChatSourcesListBranchesAndPullRequests() {
+        val sources = WireJson.parseToJsonElement(
+            """{"ok":true,"branches":[{"name":"feature","reference":"refs/heads/feature","oid":"abc"}],"pull_requests":[{"number":7,"title":"Fix","oid":"def"}],"pull_request_error":null}""",
+        ).jsonObject.decodeReply<NewChatSourcesReply>()
+        assertEquals("refs/heads/feature", sources.branches.single().reference)
+        assertEquals(7L, sources.pullRequests.single().number)
+        assertNull(sources.pullRequestError)
+        val settings = WireJson.parseToJsonElement(
+            """{"ok":true,"can_create_worktree":true,"effective_workdir":"/repo","worktrees":[{"path":"/repo","branch":"main","detached":false,"main":true,"current":true}]}""",
+        ).jsonObject.decodeReply<FolderSettingsReply>()
+        assertEquals(true, settings.canCreateWorktree)
+        assertEquals("/repo", settings.worktrees.single().path)
+    }
+
+    @Test
     fun settlementMembersAreOptional() {
         val legacy = WireJson.parseToJsonElement(
             """{"ok":true,"folders":[],"chats":[],"sessions":[{"id":"s","folder":"p","title":"W","chats":[]}]}""",

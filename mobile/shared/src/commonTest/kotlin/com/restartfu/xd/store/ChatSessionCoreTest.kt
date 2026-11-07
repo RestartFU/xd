@@ -40,6 +40,25 @@ class ChatSessionCoreTest {
     }
 
     @Test
+    fun gitEventsFromAnyChatRefreshWhatDependsOnTheCheckout() = runTest {
+        val core = ChatSessionCore("chat", testActor(backgroundScope), backgroundScope) { 10_000L }
+        fun gitEvent(sequence: Long, name: String, chat: String) = SequencedEvent(
+            sequence = sequence,
+            value = buildJsonObject {
+                put("event", name)
+                put("chat", chat)
+            },
+        )
+
+        core.onEvent(gitEvent(1, "git-action-finished", "chat"))
+        // A sibling chat can share this chat's checkout.
+        core.onEvent(gitEvent(2, "git-action-finished", "sibling"))
+        core.onEvent(gitEvent(3, "repository-changed", "sibling"))
+
+        assertEquals(3L, core.gitChanges.value)
+    }
+
+    @Test
     fun eventCoveredByCompletedSnapshotIsDiscarded() = runTest {
         val factory = FakeSocketFactory()
         val actor = ConnectionActor(

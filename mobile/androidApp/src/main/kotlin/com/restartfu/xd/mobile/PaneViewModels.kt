@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile
 
+import com.restartfu.xd.protocol.GitStatusReply
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -19,6 +20,18 @@ public data class DiffPane(
     val collapsedFiles: Set<String> = emptySet(),
     val loading: Boolean = false,
     val error: String? = null,
+    /** The checkout's branch and uncommitted changes; null outside a repository. */
+    val git: GitStatusReply? = null,
+    /** Why the last status read failed; [git] is then the last one known, and may be old. */
+    val gitError: String? = null,
+    /** The branch's pull request, when it has one. */
+    val pullRequestUrl: String? = null,
+    /** The branch [pullRequestUrl] was looked up for. */
+    val pullRequestBranch: String? = null,
+    val committing: Boolean = false,
+    val commitError: String? = null,
+    /** The commit message being typed; kept here so a refresh cannot lose it. */
+    val commitMessage: String = "",
 )
 
 /**
@@ -32,6 +45,10 @@ class DiffViewModel(
 ) : ViewModel() {
     private val _state = MutableStateFlow(DiffPane())
     val state: StateFlow<DiffPane> = _state.asStateFlow()
+
+    // Declared before init: it reads them, and properties initialise in order.
+    private var gitReads = 0L
+    private var patchReads = 0L
 
     init {
         refresh()
@@ -50,9 +67,109 @@ class DiffViewModel(
         )
     }
 
+    /**
+     * Commits every change with [message], as the desktop's Changes pane does,
+     * then reads the patch again.
+     */
+    fun editCommitMessage(message: String) {
+        _state.value = _state.value.copy(commitMessage = message)
+    }
+
+    fun commit() {
+        val current = _state.value
+        val message = current.commitMessage
+        if (current.committing || current.git?.canCommit != true || message.isBlank()) return
+        _state.value = current.copy(committing = true, commitError = null)
+        viewModelScope.launch {
+            try {
+                val git = session().commitAll(message)
+                // Clear only what was committed; anything typed since stays.
+                // The checkout may have moved to another branch meanwhile, and
+                // its link goes in this update rather than beside that branch.
+                _state.value = _state.value.let { latest ->
+                    latest.copy(
+                        git = git,
+                        gitError = null,
+                        pullRequestUrl = latest.pullRequestUrl.takeIf { latest.pullRequestBranch == git.branch },
+                        committing = false,
+                        commitMessage = latest.commitMessage.takeIf { it != message }.orEmpty(),
+                    )
+                }
+                refresh()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    committing = false,
+                    commitError = error.message ?: "Could not commit",
+                )
+            }
+        }
+    }
+
+    /** Branch, changes, and pull request; a checkout outside Git just shows none of them. */
+    private fun refreshGit() {
+        val read = ++gitReads
+        viewModelScope.launch {
+            var gitError: String? = null
+            val git = try {
+                session().gitStatus()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // Keep what was known: a dropped request should not hide the
+                // commit box, and a checkout outside Git never had a status.
+                // The failure is shown, so what is kept reads as possibly old.
+                gitError = error.message ?: "Could not read the Git status"
+                _state.value.git
+            }
+            // The status is shown at once; the pull request lookup can take a
+            // while, or never answer, and must not hold it back.
+            // A link for another branch goes in the same update, never shown beside this one.
+            if (read == gitReads) {
+                _state.value = _state.value.let { current ->
+                    current.copy(
+                        git = git,
+                        gitError = gitError,
+                        pullRequestUrl = current.pullRequestUrl.takeIf { current.pullRequestBranch == git?.branch },
+                    )
+                }
+            }
+            val branch = git?.branch
+            // The last link is kept only while it is this branch's and GitHub
+            // could not say otherwise.
+            val known = _state.value.pullRequestUrl.takeIf { _state.value.pullRequestBranch == branch }
+            val pullRequest = if (git?.mayHavePullRequest == true) {
+                try {
+                    // The answer names the branch it is for, so it is paired by
+                    // name rather than trusting the checkout to have held still.
+                    val lookup = session().pullRequest()
+                    val url = lookup?.url
+                    when {
+                        lookup == null || lookup.branch != branch -> null
+                        url == null -> known
+                        else -> url.ifBlank { null }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    known
+                }
+            } else {
+                null
+            }
+            // An older read finishing late must not replace a newer answer.
+            if (read == gitReads) {
+                _state.value = _state.value.copy(git = git, pullRequestUrl = pullRequest, pullRequestBranch = branch)
+            }
+        }
+    }
+
     fun refresh() {
         val branch = _state.value.branch
+        val read = ++patchReads
         _state.value = _state.value.copy(loading = true, error = null)
+        refreshGit()
         viewModelScope.launch {
             try {
                 val patch = if (branch) {
@@ -60,14 +177,17 @@ class DiffViewModel(
                 } else {
                     session().diff("working-all")
                 }
-                _state.value = _state.value.copy(patch = patch, loading = false)
+                // A slower, older read (before a commit, or of the other scope) must not win.
+                if (read == patchReads) _state.value = _state.value.copy(patch = patch, loading = false)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _state.value = _state.value.copy(
-                    loading = false,
-                    error = error.message ?: "Could not read the diff",
-                )
+                if (read == patchReads) {
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        error = error.message ?: "Could not read the diff",
+                    )
+                }
             }
         }
     }

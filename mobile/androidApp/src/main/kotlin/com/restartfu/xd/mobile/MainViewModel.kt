@@ -292,6 +292,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         title: String,
         agent: DirectAgent,
         sessionId: String? = null,
+        worktree: Ops.NewSessionWorktree? = null,
     ) {
         if (_creatingChat.value) return
         _creatingChat.value = true
@@ -303,6 +304,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     title = title.takeIf(String::isNotBlank),
                     backend = agent.wire,
                     sessionId = sessionId,
+                    worktree = worktree,
                 )
                 _createdDirectSession.value = CreatedDirectSession(
                     folderId,
@@ -972,6 +974,52 @@ class ChatViewModel(
             session.reorderQueued(index, text, anchor, queue[anchor], after = !up, revision = opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != queue }
+            }
+        }
+    }
+
+    private val _pullRequest = MutableStateFlow<String?>(null)
+    private var pullRequestReads = 0L
+    private var pullRequestBranch: String? = null
+
+    /** The pull request of the branch this chat works on, for the session header. */
+    val pullRequest: StateFlow<String?> = _pullRequest.asStateFlow()
+
+    /** Bumped when the host reports a Git change to this chat's checkout. */
+    val gitChanges: StateFlow<Long> = session.gitChanges
+
+    /**
+     * Asks GitHub, through the host, whether the checked-out branch has a pull
+     * request. A failure on the same branch leaves the last answer.
+     */
+    fun refreshPullRequest(branch: String?, fetch: Boolean = true) {
+        // Another branch's pull request is never right, even if this lookup
+        // fails or waits; any lookup still out was for the old branch.
+        if (branch != pullRequestBranch) {
+            pullRequestBranch = branch
+            _pullRequest.value = null
+            pullRequestReads++
+        }
+        if (!fetch) return
+        val read = ++pullRequestReads
+        viewModelScope.launch {
+            try {
+                // The answer names its branch; one for another branch than the
+                // session's is not shown, and "GitHub could not say" keeps the
+                // last link rather than erasing it.
+                val lookup = session.pullRequest()
+                val url = lookup?.url
+                if (read == pullRequestReads) {
+                    when {
+                        lookup == null || lookup.branch != branch -> _pullRequest.value = null
+                        url == null -> Unit
+                        else -> _pullRequest.value = url.ifBlank { null }
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // Leave whatever was shown.
             }
         }
     }

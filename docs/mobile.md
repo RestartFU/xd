@@ -52,6 +52,13 @@ ended by a usage limit, the send button becomes a play button while the composer
 is empty, and pressing it continues the chat. Tap a queued message to move it
 earlier or later.
 
+**New session** chooses where the session works, as on the desktop: one of the
+project's checkouts, a new worktree, or a branch or open pull request, which the
+host checks out in its own managed worktree. **Changes** shows the branch, how far
+it is ahead or behind, and what is uncommitted; **Commit all** commits every change
+with the message typed beside it. When the pushed branch has a pull request, its
+number links to it from Changes and from the session header.
+
 Older hosts appear as one chat per session. Update the connected host before
 adding another chat inside an existing session; Android displays an update
 message instead of creating a separate session. The host automatically deletes

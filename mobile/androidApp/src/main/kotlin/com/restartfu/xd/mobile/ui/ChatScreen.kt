@@ -1,5 +1,8 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -135,6 +138,10 @@ internal fun ChatScreen(
     goBack: () -> Unit,
     sessionTitle: String = "",
     projectName: String = "",
+    /** The session's checked-out branch, as the tree reports it. */
+    branch: String? = null,
+    /** Any chat or shell in the session is busy; they share one checkout. */
+    sessionWorking: Boolean = false,
     workspaceId: String = model.state.value.chatId,
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
@@ -177,6 +184,18 @@ internal fun ChatScreen(
             currentEffort = state.effort,
             onDismiss = { choosingModel = false },
         )
+    }
+    val pullRequest by model.pullRequest.collectAsStateWithLifecycle()
+    val openLink = rememberLinkOpener()
+    // A finished turn may have pushed a branch or opened its pull request.
+    // A sibling chat's turn shares the checkout, so the whole session counts,
+    // and so does a branch switched under an idle session.
+    val busy = state.working || sessionWorking
+    // And so does a pull request another device made: the host reports it.
+    val gitChanges by model.gitChanges.collectAsStateWithLifecycle()
+    LaunchedEffect(state.chatId, busy, branch, gitChanges) {
+        // While a turn runs the branch may still move, so only forget a stale link.
+        model.refreshPullRequest(branch, fetch = !busy)
     }
     val listState = rememberLazyListState()
     val items = state.visibleItems
@@ -235,13 +254,26 @@ internal fun ChatScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
-                                if (projectName.isNotBlank()) Text(
-                                    projectName,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (projectName.isNotBlank()) Text(
+                                        projectName,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    // The branch's pull request, as the desktop's session header shows it.
+                                    pullRequest?.let { url ->
+                                        Text(
+                                            pullRequestLabel(url),
+                                            modifier = Modifier.clickable(role = Role.Button) { openLink(url) },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = LocalXdSignals.current.link,
+                                            textDecoration = TextDecoration.Underline,
+                                        )
+                                    }
+                                }
                             }
                         }
                     },
