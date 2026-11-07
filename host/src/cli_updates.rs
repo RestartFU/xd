@@ -20,7 +20,7 @@ use crate::{
     EventBus,
     agent::{resolve_claude, resolve_codex},
     background_process::command as background_command,
-    cli_versions::{clean_output, read_version},
+    cli_versions::clean_output,
 };
 
 const REGISTRY_URL: &str = "https://registry.npmjs.org";
@@ -205,9 +205,7 @@ impl CliUpdates {
                 _ => return,
             }
         };
-        let version = read_version(&provider.executable, VERSION_TIMEOUT)
-            .ok()
-            .and_then(|output| release_in(&output));
+        let version = installed_version(&provider.executable);
         let latest = version
             .as_ref()
             .and_then(|_| (self.inner.latest_version)(provider.package).ok())
@@ -270,9 +268,7 @@ impl CliUpdates {
             .name(format!("xd-cli-update-{id}"))
             .spawn(move || {
                 let result = run_update(&provider.executable, updates.inner.update_timeout);
-                let version = read_version(&provider.executable, VERSION_TIMEOUT)
-                    .ok()
-                    .and_then(|output| release_in(&output));
+                let version = installed_version(&provider.executable);
                 updates.change(id, |entry| {
                     finish_update(entry, previous, version, result);
                 });
@@ -451,11 +447,11 @@ fn latest_package_version(package: &str) -> Result<String, String> {
         .ok_or_else(|| "The package registry returned invalid data.".to_owned())
 }
 
-/// Whether the CLI's help lists an `update` command. Asking first matters: a
-/// release without one can treat the word as a prompt instead of a command.
-fn supports_update_command(executable: &Path) -> bool {
-    let Ok(mut child) = background_command(executable)
-        .arg("--help")
+/// Asks the CLI something without running its updater. Bounded even if the CLI
+/// hangs or leaves a helper holding its output open.
+fn query(executable: &Path, argument: &str) -> Option<String> {
+    let mut child = background_command(executable)
+        .arg(argument)
         .env("DISABLE_AUTOUPDATER", "1")
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
@@ -464,12 +460,20 @@ fn supports_update_command(executable: &Path) -> bool {
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
-    else {
-        return false;
-    };
+        .ok()?;
     let stdout = child.stdout.take().map(drain);
-    let succeeded = wait_with_timeout(&mut child, VERSION_TIMEOUT).is_ok_and(|s| s.success());
-    succeeded && lists_update_command(&collect_output(stdout))
+    let status = wait_with_timeout(&mut child, VERSION_TIMEOUT).ok()?;
+    status.success().then(|| collect_output(stdout))
+}
+
+fn installed_version(executable: &Path) -> Option<String> {
+    query(executable, "--version").and_then(|output| release_in(&output))
+}
+
+/// Whether the CLI's help lists an `update` command. Asking first matters: a
+/// release without one can treat the word as a prompt instead of a command.
+fn supports_update_command(executable: &Path) -> bool {
+    query(executable, "--help").is_some_and(|help| lists_update_command(&help))
 }
 
 /// Commands sit at a two-space indent. Wrapped descriptions are indented further
@@ -499,8 +503,8 @@ fn run_update(executable: &Path, timeout: Duration) -> Result<String, String> {
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
     let status = wait_with_timeout(&mut child, timeout);
-    let stdout = collect_output(stdout);
-    let stderr = collect_output(stderr);
+    let stdout = collect_output(stdout).trim().to_owned();
+    let stderr = collect_output(stderr).trim().to_owned();
     let status = status?;
     let output = if status.success() || stderr.is_empty() {
         stdout
@@ -521,7 +525,7 @@ fn run_update(executable: &Path, timeout: Duration) -> Result<String, String> {
 fn collect_output(output: Option<Receiver<Vec<u8>>>) -> String {
     output
         .and_then(|output| output.recv_timeout(OUTPUT_DRAIN_TIMEOUT).ok())
-        .map(|bytes| clean_output(&bytes).trim().to_owned())
+        .map(|bytes| clean_output(&bytes))
         .unwrap_or_default()
 }
 
@@ -852,6 +856,20 @@ mod tests {
         let output = read_tail(failing.as_slice(), OUTPUT_LIMIT);
         assert_eq!(output.len(), OUTPUT_LIMIT);
         assert!(output.ends_with(b"the reason"));
+    }
+
+    #[test]
+    fn a_query_is_not_held_up_by_a_helper_left_running() {
+        let cli = FakeCli::start(
+            "helper",
+            "#!/bin/sh\nif [ \"$1\" = update ]; then echo 2.0.0 > \"$DIR/version\"; exit 0; fi\nsleep 4 &\ncat \"$DIR/version\" 2>/dev/null || echo 1.0.0\n",
+            newer,
+            UPDATE_TIMEOUT,
+        );
+        let executable = cli.directory.join("assistant");
+        let started = Instant::now();
+        assert_eq!(installed_version(&executable), None);
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

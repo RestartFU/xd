@@ -172,7 +172,7 @@ fn snapshot_value(provider: &str, snapshot: &CliSnapshot) -> Value {
     value
 }
 
-pub(crate) fn read_version(executable: &Path, timeout: Duration) -> Result<String, String> {
+fn read_version(executable: &Path, timeout: Duration) -> Result<String, String> {
     let mut child = background_command(executable)
         .arg("--version")
         .env("DISABLE_AUTOUPDATER", "1")
