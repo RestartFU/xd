@@ -549,18 +549,12 @@ mod tests {
     fn connecting_asks_for_local_state_from_either_endpoint(cx: &mut gpui::TestAppContext) {
         use std::{
             io::{BufRead, BufReader},
-            os::unix::net::UnixListener,
+            net::{TcpListener, TcpStream},
         };
 
-        let directory = std::env::temp_dir().join(format!(
-            "xd-local-state-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
-        let socket = directory.join("host.sock");
-        let listener = UnixListener::bind(&socket).unwrap();
+        // Loopback TCP stands in for the host, as Windows has no Unix sockets.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             let mut seen = Vec::new();
@@ -577,9 +571,9 @@ mod tests {
             }
             seen
         });
-        let stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        let stream = TcpStream::connect(address).unwrap();
         let (host, updates) =
-            HostHandle::connect_io(stream.try_clone().unwrap(), stream, socket.clone());
+            HostHandle::connect_io(stream.try_clone().unwrap(), stream, "test-host".into());
         let connected = updates.recv_blocking().unwrap();
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
@@ -600,7 +594,6 @@ mod tests {
                 serde_json::json!(false),
             ]
         );
-        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[gpui::test]
