@@ -489,10 +489,9 @@ private fun Composer(
     // Another queue action still out would make these do nothing, so they wait.
     val queueBusy by model.queueBusy.collectAsStateWithLifecycle()
     editing?.let { (index, original, opened) ->
-        // Without the host's queue revision, a message is only told apart by
-        // its text, so the actions that check it wait for a unique one, and
-        // Drop, which older hosts do not check at all, needs the revision.
-        val identifiable = opened.revision != null || opened.messages.count { it == original } == 1
+        // Queued messages have no identity but their place, and texts can
+        // repeat, so changing one needs a host that keeps a queue revision.
+        val identifiable = opened.revision != null
         QueuedMessageDialog(
             draft = openDraft ?: original,
             onDraft = model::editQueuedDraft,
@@ -501,7 +500,7 @@ private fun Composer(
             working = state.working,
             canMoveUp = index > 0 && identifiable,
             canMoveDown = index < state.queue.lastIndex && identifiable,
-            canDrop = opened.revision != null,
+            canDrop = identifiable,
             canEdit = identifiable,
             onMove = { up ->
                 model.closeQueuedMessage()
@@ -846,6 +845,14 @@ private fun QueuedMessageDialog(
                             Text("Move later")
                         }
                     }
+                }
+                if (!canEdit) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Update the host to change queued messages from here.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
                 }
                 if (working) {
                     Spacer(Modifier.height(8.dp))

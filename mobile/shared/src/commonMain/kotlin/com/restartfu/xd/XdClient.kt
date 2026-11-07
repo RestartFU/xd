@@ -85,6 +85,20 @@ public class XdClient(
     private var autoSettleAppliedCall = 0L
     /** Guards the checks above together with the updates they allow. */
     private val autoSettleLock = Mutex()
+    /**
+     * A read shows the current rules but says nothing about whether a change
+     * was made, so a failed change keeps its own error until a newer change
+     * succeeds.
+     */
+    private var autoSettleWriteFailed = 0L
+    private var autoSettleWriteSucceeded = 0L
+    private val _autoSettleWriteError = MutableStateFlow<String?>(null)
+    public val autoSettleWriteError: StateFlow<String?> = _autoSettleWriteError.asStateFlow()
+
+    /** The person has seen the failed change; only their own Try again clears it without a newer change. */
+    public suspend fun dismissAutoSettleWriteError() {
+        autoSettleLock.withLock { _autoSettleWriteError.value = null }
+    }
     private val _autoSettleError = MutableStateFlow<String?>(null)
 
     /**
@@ -278,6 +292,9 @@ public class XdClient(
             autoSettleFailedCall = 0
             autoSettleAppliedCall = 0
             _autoSettleError.value = null
+            autoSettleWriteFailed = 0
+            autoSettleWriteSucceeded = 0
+            _autoSettleWriteError.value = null
         }
     }
 
@@ -412,7 +429,7 @@ public class XdClient(
         onMerge: Boolean? = null,
         keepPullRequests: Boolean? = null,
     ) {
-        autoSettleCall(Ops.setAutoSettleSettings(afterDays, onMerge, keepPullRequests))
+        autoSettleCall(Ops.setAutoSettleSettings(afterDays, onMerge, keepPullRequests), write = true)
     }
 
     /**
@@ -423,6 +440,7 @@ public class XdClient(
         request: kotlinx.serialization.json.JsonObject,
         background: Boolean = false,
         counted: Boolean = false,
+        write: Boolean = false,
     ) {
         if (!counted) _autoSettleInFlight.update { it + 1 }
         try {
@@ -441,6 +459,12 @@ public class XdClient(
                 // Only the newest failure counts: an older one finishing last
                 // must not replace its error.
                 autoSettleLock.withLock {
+                    if (write && generation == _sessionGeneration.value && call > autoSettleWriteFailed) {
+                        autoSettleWriteFailed = call
+                        if (call > autoSettleWriteSucceeded) {
+                            _autoSettleWriteError.value = error.message ?: "The change was not made"
+                        }
+                    }
                     if (generation == _sessionGeneration.value && call > autoSettleFailedCall) {
                         autoSettleFailedCall = call
                         if (call > autoSettleAppliedCall) {
@@ -457,6 +481,10 @@ public class XdClient(
             // Only an answer to a newer request than the one shown: an older
             // reply arriving last must not bring back older rules.
             autoSettleLock.withLock {
+                if (write && generation == _sessionGeneration.value && call > autoSettleWriteSucceeded) {
+                    autoSettleWriteSucceeded = call
+                    if (call > autoSettleWriteFailed) _autoSettleWriteError.value = null
+                }
                 if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value &&
                     call > autoSettleAppliedCall
                 ) {

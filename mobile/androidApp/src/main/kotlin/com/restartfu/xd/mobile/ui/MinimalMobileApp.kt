@@ -1587,8 +1587,11 @@ private fun MinimalSettingsDialog(
 @Composable
 private fun AutoSettleSettings(model: MainViewModel) {
     val rules by model.autoSettle.collectAsStateWithLifecycle()
-    val error by model.autoSettleError.collectAsStateWithLifecycle()
-    LaunchedEffect(Unit) { model.loadAutoSettle() }
+    val readError by model.autoSettleError.collectAsStateWithLifecycle()
+    val writeError by model.autoSettleWriteError.collectAsStateWithLifecycle()
+    // A failed change stays shown even after a read brings the rules back.
+    val error = writeError ?: readError
+    LaunchedEffect(Unit) { model.refreshAutoSettle() }
     val current = rules
     // Edits wait until no request is out, so none is computed from rules that
     // are about to change and no tap is lost.

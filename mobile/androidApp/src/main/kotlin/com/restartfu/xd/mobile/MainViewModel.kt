@@ -138,6 +138,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val autoSettle: StateFlow<AutoSettleSettingsReply?> = client.autoSettleSettings
     /** The client orders failures and answers by request, so a superseded failure never shows. */
     val autoSettleError: StateFlow<String?> = client.autoSettleError
+    /** A change that failed, kept until a newer change succeeds; a read does not clear it. */
+    val autoSettleWriteError: StateFlow<String?> = client.autoSettleWriteError
     val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
 
     init {
@@ -435,7 +437,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         client.trashFolder(folderId)
     }
 
+    /** Reads the rules on opening Settings, leaving any failed change shown. */
+    fun refreshAutoSettle() = autoSettleRequest("Could not read the auto-settle rules") {
+        client.loadAutoSettleSettings()
+    }
+
+    /** Reads the rules again; pressed by the person, it also acknowledges a failed change. */
     fun loadAutoSettle() = autoSettleRequest("Could not read the auto-settle rules") {
+        client.dismissAutoSettleWriteError()
         client.loadAutoSettleSettings()
     }
 
@@ -899,8 +908,7 @@ class ChatViewModel(
     }
 
     fun editQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
-        if (!sameQueue(state.value.queue, opened)) return
-        if (!identifiable(opened, oldText)) return
+        if (!sameQueue(state.value.queue, opened) || opened.revision == null) return
         launchGuarded(_droppingQueued) {
             session.editQueued(index, oldText, text, opened.revision)
         }
@@ -921,17 +929,7 @@ class ChatViewModel(
      */
     fun steerQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
         val before = state.value
-        if (!sameQueue(before.queue, opened)) return
-        if (!identifiable(opened, oldText)) return
-        // The steer names the message by its new text, so on a host without
-        // revisions that text must stay unique too, or the steer could take
-        // another message that already has it.
-        if (opened.revision == null && text != oldText &&
-            opened.messages.filterIndexed { at, _ -> at != index }.contains(text)
-        ) {
-            _queueNotice.value = "Another queued message already says that. Edit it differently, or update the host."
-            return
-        }
+        if (!sameQueue(before.queue, opened) || opened.revision == null) return
         launchGuarded(_steering) {
             // Each step names the queue it expects, so a message another device
             // moved or dropped meanwhile is never mistaken for an equal one.
@@ -969,7 +967,7 @@ class ChatViewModel(
         // Swapping two equal messages changes nothing, and the queue would never
         // look changed for the wait below to end.
         if (queue[anchor] == text) return
-        if (opened.revision == null && queue.count { it == text } != 1) return
+        if (opened.revision == null) return
         launchGuarded(_droppingQueued) {
             session.reorderQueued(index, text, anchor, queue[anchor], after = !up, revision = opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
@@ -987,7 +985,6 @@ class ChatViewModel(
     fun dropQueued(index: Int, text: String, opened: OpenedQueue) {
         val before = state.value.queue
         if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
-        // A host without queue revisions does not check what it drops.
         if (opened.revision == null) return
         launchGuarded(_droppingQueued) {
             session.dropQueued(index, text, opened.revision)
@@ -1012,10 +1009,6 @@ class ChatViewModel(
         _queueNotice.value = QUEUE_CHANGED
         return false
     }
-
-    /** Whether the host can tell [text] apart: by revision, or by being unique. */
-    private fun identifiable(opened: OpenedQueue, text: String): Boolean =
-        opened.revision != null || opened.messages.count { it == text } == 1
 
     /** The queue changed while a message was open, so its dialog closed. */
     fun queueChanged() {
