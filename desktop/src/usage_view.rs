@@ -500,7 +500,7 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
         .text_color(rgb(colors.muted))
         .child(
             div()
-                .w(px(116.0))
+                .w(px(148.0))
                 .flex_none()
                 .truncate()
                 .when(row.nested, |label| label.pl_3())
@@ -3773,9 +3773,12 @@ impl XdDesktop {
                 .id(gpui::ElementId::Name(
                     format!("usage-pool-{}-{}", pool.provider, window.id).into(),
                 ))
-                .when_some(window.pace, |row, pace| {
-                    row.tooltip(usage_tooltip(vec![pace.label().to_owned()], colors))
-                })
+                .tooltip(usage_tooltip(
+                    std::iter::once(window.label.clone())
+                        .chain(window.pace.map(|pace| pace.label().to_owned()))
+                        .collect(),
+                    colors,
+                ))
                 .into_any_element(),
             );
         }
@@ -3832,10 +3835,14 @@ impl XdDesktop {
         let credits = account_credits(account);
         let key = format!("{}:{}:{}", pool.provider, pool_window.id, account.key);
         let pace = window.pace(now);
-        let mut lines = vec![format!(
-            "{remaining}% left{}",
-            time_left.map_or_else(String::new, |left| format!(" · {left}% of the window left"))
-        )];
+        // The row may clip a long name, so the tooltip leads with all of it.
+        let mut lines = vec![
+            label.clone(),
+            format!(
+                "{remaining}% left{}",
+                time_left.map_or_else(String::new, |left| format!(" · {left}% of the window left"))
+            ),
+        ];
         if let Some(pace) = pace {
             lines.push(pace.label().to_owned());
         }
