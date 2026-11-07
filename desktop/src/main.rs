@@ -5474,10 +5474,12 @@ impl XdDesktop {
         };
         self.settings.build_source = self.source_build_panel.text.clone();
         let _ = self.settings.save();
-        self.run_source_build(target, cx);
+        self.run_source_build(target, false, cx);
     }
 
-    fn run_source_build(&mut self, target: SourceTarget, cx: &mut Context<Self>) {
+    /// `is_update` marks a build the update popup started. Only those count as
+    /// installing the update: a manual build may be any branch or commit.
+    fn run_source_build(&mut self, target: SourceTarget, is_update: bool, cx: &mut Context<Self>) {
         if self.source_build_panel.running {
             return;
         }
@@ -5493,15 +5495,17 @@ impl XdDesktop {
                 self.source_build_generation = self.source_build_generation.saturating_add(1);
                 self.schedule_source_build_poll(self.source_build_generation, cx);
                 let panel = self.self_update_panel.get_or_insert_with(Default::default);
-                panel.source_building = true;
+                panel.source_building = is_update;
                 panel.source_installed = false;
                 panel.source_error = None;
             }
             Err(error) => {
                 self.source_build_panel.message = Some(error.clone());
-                self.self_update_panel
-                    .get_or_insert_with(Default::default)
-                    .source_error = Some(error);
+                if is_update {
+                    self.self_update_panel
+                        .get_or_insert_with(Default::default)
+                        .source_error = Some(error);
+                }
             }
         }
         cx.notify();
@@ -5530,18 +5534,17 @@ impl XdDesktop {
                             finished = true;
                             this.source_build_panel.running = false;
                             this.source_build_panel.stopping = false;
-                            let panel = this.self_update_panel.get_or_insert_with(Default::default);
-                            panel.source_building = false;
+                            this.self_update_panel
+                                .get_or_insert_with(Default::default)
+                                .finish_source_build(&result);
                             match result {
                                 Ok(()) => {
-                                    panel.source_installed = true;
                                     this.source_build_panel.installed = true;
                                     this.source_build_panel.message = Some(
                                         "Installed. Quit and reopen xd to run this build.".into(),
                                     );
                                 }
                                 Err(error) => {
-                                    panel.source_error = Some(error.clone());
                                     this.source_build_panel.message = Some(error);
                                 }
                             }

@@ -37,6 +37,17 @@ impl SelfUpdatePanel {
             .is_some_and(|status| status.channel == "dev")
     }
 
+    /// Records the end of a source build, if it was the update's own.
+    pub(super) fn finish_source_build(&mut self, result: &Result<(), String>) {
+        if !std::mem::take(&mut self.source_building) {
+            return;
+        }
+        match result {
+            Ok(()) => self.source_installed = true,
+            Err(error) => self.source_error = Some(error.clone()),
+        }
+    }
+
     fn app_state(&self) -> &str {
         if self.builds_from_source() {
             if self.source_building {
@@ -235,15 +246,18 @@ impl XdDesktop {
             .as_ref()
             .and_then(|status| status.latest.as_deref())
             .and_then(source_build::parse_target);
-        match target {
-            Some(target) => self.run_source_build(target, cx),
-            None => {
-                if let Some(panel) = self.self_update_panel.as_mut() {
-                    panel.source_error = Some("Cannot tell which commit to build.".into());
-                }
-                cx.notify();
-            }
+        let refused = if self.source_build_panel.running {
+            "A source build is already running. Wait for it or stop it in Settings."
+        } else if let Some(target) = target {
+            self.run_source_build(target, true, cx);
+            return;
+        } else {
+            "Cannot tell which commit to build."
+        };
+        if let Some(panel) = self.self_update_panel.as_mut() {
+            panel.source_error = Some(refused.into());
         }
+        cx.notify();
     }
 
     /// Starts everything the popup listed. Each action is refused by the host
@@ -729,6 +743,28 @@ mod tests {
         assert!(dev.app_installed());
         assert!(dev.offers_update());
         assert!(!dev.has_pending_update());
+    }
+
+    #[test]
+    fn a_manual_source_build_is_not_taken_for_the_update() {
+        let mut status = app("idle", true);
+        status.channel = "dev".into();
+        let mut dev = panel(Some(status), Vec::new());
+        dev.finish_source_build(&Ok(()));
+        assert!(!dev.source_installed);
+        assert!(dev.app_pending());
+        dev.finish_source_build(&Err("no docker".into()));
+        assert_eq!(dev.source_error, None);
+
+        dev.source_building = true;
+        dev.finish_source_build(&Err("no docker".into()));
+        assert_eq!(dev.source_error.as_deref(), Some("no docker"));
+        assert!(!dev.source_installed);
+        assert!(dev.app_pending());
+
+        dev.source_building = true;
+        dev.finish_source_build(&Ok(()));
+        assert!(dev.app_installed());
     }
 
     #[test]
