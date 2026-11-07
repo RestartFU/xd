@@ -27,6 +27,9 @@ use crate::{
 /// keeps most of its text without turning every token into a database write.
 const PARK_STREAMED_REPLY_EVERY: Duration = Duration::from_millis(500);
 
+/// What the chat shows for a stopped turn the agent never recorded.
+const CUT_OFF_TURN: &str = "Stopped before this turn was saved. Its work is lost, and the agent only knows what you asked.";
+
 /// How much of a process's stderr is kept for the message that reports it.
 const STDERR_KEPT_BYTES: usize = 64 * 1024;
 
@@ -1205,6 +1208,7 @@ impl TurnRuntime {
         let mut latest_error = None;
         let mut cut_short = false;
         let mut had_activity = false;
+        let mut recorded = false;
         let mut streamed_text = String::new();
         let mut assistant_text = String::new();
         let mut visible_streamed_bytes = 0;
@@ -1334,6 +1338,7 @@ impl TurnRuntime {
                         }
                     }
                     AgentEvent::Session(session) => {
+                        recorded = true;
                         if let Err(error) = self.inner.store.set_session(
                             &turn.chat_id,
                             &turn.session_backend,
@@ -1565,8 +1570,18 @@ impl TurnRuntime {
             .lock()
             .map(|said| said.clone())
             .unwrap_or_default();
+        // Claude holds `init` back until a forked skill finishes, and until then
+        // keeps nothing of the turn in its session: not even the request.
+        // Saving its id would not help, since it cannot resume an empty session.
+        let cut_off = turn.backend == "claude" && !background && !completed && !recorded;
+        if cut_off {
+            let _ = self
+                .inner
+                .store
+                .mark_cut_off_turn(&turn.chat_id, &turn.prompt);
+        }
         let error = if success {
-            None
+            cut_off.then(|| CUT_OFF_TURN.to_owned())
         } else {
             latest_error.or_else(|| {
                 let stderr = stderr.trim();
@@ -2656,6 +2671,139 @@ read third
             idle_child.lock().unwrap().try_wait().unwrap().is_some(),
             "deleting a conversation must stop its retained idle process"
         );
+        drop(runtime);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_stopped_before_claude_recorded_it_is_passed_to_the_next_turn() {
+        use std::{env, fs, os::unix::fs::PermissionsExt};
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = env::temp_dir().join(format!("xd-cut-off-turn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        let log = root.join("calls");
+        // The first run behaves like a forked skill: a task starts, carrying
+        // the session id, but `init` never comes. The second answers, and the
+        // third is an ordinary turn, stopped after its `init`.
+        fs::write(
+            &agent,
+            format!(
+                r#"#!/bin/sh
+log='{}'
+read first
+printf 'args:%s\nprompt:%s\n' "$*" "$first" >> "$log"
+runs=$(grep -c '^args:' "$log")
+if [ "$runs" = 1 ]; then
+  echo '{{"type":"system","subtype":"task_started","task_id":"fork","skip_transcript":true,"session_id":"lost"}}'
+  sleep 30
+elif [ "$runs" = 2 ]; then
+  echo '{{"type":"system","subtype":"init","session_id":"kept"}}'
+  echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Answered."}}]}}}}'
+  echo '{{"type":"result","subtype":"success","result":"Answered."}}'
+  read second
+else
+  echo '{{"type":"system","subtype":"init","session_id":"kept"}}'
+  sleep 30
+fi
+"#,
+                log.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "claude"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let runtime = TurnRuntime::new(
+            store.clone(),
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        );
+        let send = |text: &str| match store
+            .prepare_send(&json!({"chat": chat, "text": text}))
+            .unwrap()
+        {
+            crate::storage::SendDisposition::Start { turn, .. } => runtime.start(turn).unwrap(),
+            crate::storage::SendDisposition::Queued { .. } => panic!("{text} was queued"),
+        };
+        let calls = || fs::read_to_string(&log).unwrap_or_default();
+        let notices = || {
+            contents(&store, &chat)
+                .iter()
+                .filter(|(role, content)| role == "error" && content == CUT_OFF_TURN)
+                .count()
+        };
+
+        send("/code-review the pull request");
+        wait_for("the fork to start", || calls().contains("prompt:"));
+        wait_for("the stop to land", || runtime.cancel(&chat));
+        wait_for("the stop to finish", || {
+            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
+        });
+        assert_eq!(notices(), 1, "{:?}", contents(&store, &chat));
+
+        send("are you ok?");
+        wait_for("the answer", || {
+            contents(&store, &chat)
+                .iter()
+                .any(|(_, content)| content == "Answered.")
+        });
+        wait_for("the turn to end", || runtime.live_turn(&chat).is_none());
+        let second = calls();
+        let second = second.split("args:").nth(2).unwrap();
+        assert!(!second.contains("--resume"), "{second}");
+        assert!(second.contains("/code-review the pull request"), "{second}");
+        assert!(
+            second.contains("cut off before it was recorded"),
+            "{second}"
+        );
+        assert!(second.contains("are you ok?"), "{second}");
+        let shown = contents(&store, &chat);
+        assert!(
+            shown
+                .iter()
+                .any(|(role, content)| role == "user" && content == "are you ok?"),
+            "the user sees their own message, not the note: {shown:?}"
+        );
+
+        // A stop after `init` has its request in the session already. Dropping
+        // the kept process makes this run the third, and it resumes.
+        runtime.discard_chat(&chat);
+        send("another");
+        wait_for("the third run", || calls().matches("args:").count() == 3);
+        let third = calls();
+        let third = third.split("args:").nth(3).unwrap();
+        assert!(third.contains("--resume kept"), "{third}");
+        assert!(!third.contains("cut off before"), "{third}");
+        // The third run writes nothing the turn could be read as finished by,
+        // so give it a moment to read `init` before stopping it.
+        wait_for("the third turn's session", || {
+            std::thread::sleep(Duration::from_millis(200));
+            runtime.cancel(&chat)
+        });
+        wait_for("the last stop to finish", || {
+            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
+        });
+        assert_eq!(notices(), 1, "{:?}", contents(&store, &chat));
+
         drop(runtime);
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };

@@ -46,6 +46,8 @@ Speech is played as each block closes, not at the end of the turn, so a <speak> 
 To show the user an image file from this machine, such as a screenshot or chart you made, put it on a line of its own in your reply, outside any code block, in exactly this form:
 [image: /absolute/path/to/image.png]
 The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files."#;
+/// Long enough for any typed request; a pasted log does not need to repeat whole.
+const MAX_CUT_OFF_REQUEST_CHARS: usize = 8_000;
 const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
 /// Sent as a normal message, so the transcript shows why the agent carried on.
 /// What the composer's resume button says on the user's behalf.
@@ -2173,6 +2175,21 @@ impl StateStore {
             next,
             queue_event: next_text.map(|_| queued_event(chat_id, &queue)),
         })
+    }
+
+    /// Remembers a request the agent never recorded, so the next turn can tell
+    /// it what happened. Resuming cannot: the request is not in its session.
+    pub fn mark_cut_off_turn(&self, chat_id: &str, request: &str) -> Result<(), StorageError> {
+        let request = match request.char_indices().nth(MAX_CUT_OFF_REQUEST_CHARS) {
+            Some((end, _)) => format!("{}...", &request[..end]),
+            None => request.to_owned(),
+        };
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chats SET cut_off_turn = ? WHERE id = ?",
+            params![request, chat_id],
+        )?;
+        Ok(())
     }
 
     /// Streamed replies only become a message once the turn ends, so a host
@@ -4414,7 +4431,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            session_mode TEXT NOT NULL DEFAULT 'chat', \
            host_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
-           partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, \
+           partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, cut_off_turn TEXT, \
            sort_order INTEGER NOT NULL DEFAULT 0, \
            last_user_message_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, \
            updated_at INTEGER NOT NULL, FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
@@ -4762,6 +4779,9 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             "ALTER TABLE chats ADD COLUMN turn_resumable INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
+    }
+    if !columns.contains("cut_off_turn") {
+        database.execute("ALTER TABLE chats ADD COLUMN cut_off_turn TEXT", [])?;
     }
     Ok(())
 }
@@ -6800,6 +6820,40 @@ fn write_browsable_file(
         })
 }
 
+/// Puts a cut-off request in front of the next message, where it stays in the
+/// agent's session from then on. A slash command only runs when it opens the
+/// message, so one leaves the request waiting for the message after it.
+fn with_cut_off_note(
+    transaction: &rusqlite::Transaction<'_>,
+    chat_id: &str,
+    text: &str,
+) -> Result<String, StorageError> {
+    if text.trim_start().starts_with('/') {
+        return Ok(text.to_owned());
+    }
+    let request = transaction
+        .query_row(
+            "SELECT cut_off_turn FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(request) = request else {
+        return Ok(text.to_owned());
+    };
+    transaction.execute(
+        "UPDATE chats SET cut_off_turn = NULL WHERE id = ?",
+        [chat_id],
+    )?;
+    Ok(format!(
+        "<xd-note>\nYour previous turn in this chat was cut off before it was recorded, so it \
+         is missing from your history and none of its work was saved. The request was:\n\n\
+         {request}\n\nIt produced no reply. Do not redo it unless asked, and if the user asks \
+         what happened, tell them this.\n</xd-note>\n\n{text}"
+    ))
+}
+
 fn prepare_turn(
     transaction: &rusqlite::Transaction<'_>,
     workspace_root: &Path,
@@ -6904,10 +6958,11 @@ fn prepare_turn(
         params![now, now_microseconds(), chat_id],
     )?;
     clear_session_settlement(transaction, chat_id)?;
+    let prompt = with_cut_off_note(transaction, chat_id, text)?;
     Ok(TurnSpec {
         chat_id: chat_id.into(),
         backend: chat.1.clone(),
-        prompt: text.into(),
+        prompt,
         system_prompt,
         workdir,
         model: model.clone(),
@@ -11323,5 +11378,65 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn a_cut_off_request_reaches_the_next_message_once() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let start = |text: &str| match store
+            .prepare_send(&json!({"chat": "chat-1", "text": text}))
+            .unwrap()
+        {
+            SendDisposition::Start { turn, .. } => turn,
+            SendDisposition::Queued { .. } => panic!("{text} was queued"),
+        };
+        store
+            .mark_cut_off_turn("chat-1", "/code-review 1193")
+            .unwrap();
+
+        // A slash command must still open its message, so the note waits.
+        let command = start("/compact");
+        assert_eq!(command.prompt, "/compact");
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+
+        let next = start("are you ok?");
+        assert!(next.prompt.contains("/code-review 1193"), "{}", next.prompt);
+        assert!(next.prompt.ends_with("\n\nare you ok?"), "{}", next.prompt);
+        let finish = store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        assert!(finish.next.is_none());
+
+        assert_eq!(start("and now").prompt, "and now");
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        let stored = store.messages(&json!({"chat": "chat-1"})).unwrap();
+        let texts = stored["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .map(|message| message["content"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["/compact", "are you ok?", "and now"]);
+
+        // Steering goes through the queue, and the turn it starts is told too.
+        start("long job");
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "steered"}))
+            .unwrap();
+        let huge = "é".repeat(MAX_CUT_OFF_REQUEST_CHARS + 5);
+        store.mark_cut_off_turn("chat-1", &huge).unwrap();
+        let finish = store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        let next = finish.next.expect("the queued message starts");
+        assert!(next.prompt.ends_with("\n\nsteered"), "{}", next.prompt);
+        assert_eq!(
+            next.prompt.matches('é').count(),
+            MAX_CUT_OFF_REQUEST_CHARS,
+            "a long request is cut on a character boundary"
+        );
     }
 }
