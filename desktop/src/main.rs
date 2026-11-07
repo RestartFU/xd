@@ -6496,7 +6496,7 @@ impl XdDesktop {
                         13.0,
                         colors.muted,
                     ))
-                    .child(div().min_w_0().truncate().child(title))
+                    .child(truncating_label(title))
                     .when(self.model.is_waiting(&chat.id), |tab| {
                         tab.child(icon(STOP_ICON, 9.0, colors.waiting))
                     })
@@ -18721,6 +18721,116 @@ Binary files /dev/null and b/image.png differ\n";
             hugs.size.width
         );
         assert!(hugs.size.width > px(0.0), "the text still takes up room");
+    }
+
+    /// A title laid out as a chat tab lays one out: in a width-capped box beside
+    /// the things that keep their size, inside a horizontal scroller.
+    struct SessionChatTabProbe {
+        shaped: std::rc::Rc<std::cell::RefCell<Option<gpui::TextLayout>>>,
+    }
+
+    impl Render for SessionChatTabProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            const TITLE: &str = "A conversation title far too long to fit in one tab";
+            let shown = StyledText::new(TITLE);
+            *self.shaped.borrow_mut() = Some(shown.layout().clone());
+            div()
+                .id("probe-scroll")
+                .size_full()
+                .flex()
+                .items_center()
+                .overflow_x_scroll()
+                .child(
+                    div()
+                        .debug_selector(|| "tab".into())
+                        .max_w(px(210.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .px_2()
+                        .text_size(px(12.0))
+                        .child(div().size(px(13.0)).flex_none())
+                        .child(truncating_box(TITLE, shown))
+                        .child(
+                            div()
+                                .debug_selector(|| "close".into())
+                                .size(px(22.0))
+                                .flex_none(),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn chat_tab_title_gets_an_ellipsis_inside_the_scroller(cx: &mut gpui::TestAppContext) {
+        let shaped = std::rc::Rc::<std::cell::RefCell<Option<gpui::TextLayout>>>::default();
+        let probe_shaped = std::rc::Rc::clone(&shaped);
+        let (_, cx) = cx.add_window_view(move |_, _| SessionChatTabProbe {
+            shaped: probe_shaped,
+        });
+        cx.simulate_resize(size(px(1180.0), px(560.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear();
+        });
+        let title = shaped.borrow().as_ref().unwrap().text();
+        assert!(title.starts_with("A conv"), "shaped {title:?}");
+        assert!(title.ends_with('…'), "shaped {title:?}");
+        let tab = cx.debug_bounds("tab").unwrap();
+        let close = cx.debug_bounds("close").unwrap();
+        assert_eq!(tab.size.width, px(210.0));
+        assert!(
+            close.right() <= tab.right(),
+            "the close button keeps its room"
+        );
+    }
+
+    #[gpui::test]
+    fn chat_tab_fits_its_title_up_to_the_maximum_width(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model.apply_tree(&serde_json::json!({
+                "folders":[{"id":"atlas","name":"Atlas"}],
+                "chats":[
+                    {"id":"short","folder":"atlas","title":"Short","backend":"codex"},
+                    {"id":"long","folder":"atlas","title":"A conversation title far too long to fit in one tab","backend":"codex"},
+                    {"id":"broken","folder":"atlas","title":"First line\nsecond line","backend":"codex"}
+                ],
+                "sessions":[{"id":"workspace","folder":"atlas","title":"Workspace","chats":["short","long","broken"],"terminal_chat":"session:workspace"}]
+            })).unwrap();
+            desktop.model.select_chat("short");
+            desktop.minimal_route = MinimalRoute::Cli { project_id:"atlas".into(), chat_id:"short".into(), agent:AgentCli::Codex };
+            desktop.settings.hidden_chat_tabs.clear();
+        });
+        cx.simulate_resize(size(px(1180.0), px(560.0)));
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear();
+            });
+        }
+        desktop.update(cx, |desktop, _| {
+            let scroll = &desktop.session_chat_tabs_scroll;
+            let width = |index| f32::from(scroll.bounds_for_item(index).unwrap().size.width);
+            assert!(width(0) < 210.0, "a short title keeps a narrow tab");
+            assert_eq!(width(1), 210.0);
+        });
+    }
+
+    #[test]
+    fn chat_tabs_build_their_titles_with_the_truncating_label() {
+        let source = include_str!("main.rs");
+        let tabs = source
+            .split_once("fn render_session_chat_tabs(")
+            .expect("chat tab renderer")
+            .1
+            .split_once("fn begin_chat_create(")
+            .expect("end of chat tab renderer")
+            .0;
+        assert!(tabs.contains(".child(truncating_label(title))"));
     }
 
     #[gpui::test]
