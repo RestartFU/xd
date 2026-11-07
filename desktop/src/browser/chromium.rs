@@ -163,6 +163,8 @@ unsafe impl Send for SharedBrowser {}
 struct Shared {
     /// GPUI's window, which takes the keyboard back from the page.
     parent: XWindow,
+    /// The root of GPUI's screen, where a host waiting on CEF is kept.
+    root: XWindow,
     /// Sits between GPUI's window and Chromium's; see [`create_host_window`].
     host: XWindow,
     colormap: u32,
@@ -256,6 +258,17 @@ fn apply_window_state(shared: &Shared) {
     let _ = connection.flush();
 }
 
+/// Move a host whose browser CEF has not finished with out from under GPUI's
+/// window, hidden, so destroying GPUI's window cannot destroy Chromium's with
+/// it. The round trip makes sure the server has done so before GPUI goes on.
+fn detach_windows(shared: &Shared) {
+    if let Some(connection) = x11() {
+        let _ = connection.unmap_window(shared.host);
+        let _ = connection.reparent_window(shared.host, shared.root, 0, 0);
+        let _ = connection.get_input_focus().map(|cookie| cookie.reply());
+    }
+}
+
 /// Destroy the host window and its colormap, once, after Chromium is done.
 fn release_windows(shared: &mut Shared) {
     if std::mem::replace(&mut shared.released, true) {
@@ -272,13 +285,22 @@ fn release_windows(shared: &mut Shared) {
 /// screen's default visual, which X11 rejects as a direct child of a window of
 /// another depth unless a colormap and border are given, so parent it here.
 /// Chromium inherits the colormap, so it must outlive Chromium's window.
-fn create_host_window(parent: XWindow) -> Result<(XWindow, u32), String> {
+fn create_host_window(parent: XWindow) -> Result<(XWindow, u32, XWindow), String> {
     let error = |error: String| format!("Could not embed the browser: {error}");
     let connection = x11().ok_or_else(|| error("no X11 connection".into()))?;
+    // The visual and colormap must come from the screen GPUI's window is on,
+    // which need not be the first on a server with several.
+    let root = connection
+        .get_geometry(parent)
+        .map_err(|e| error(e.to_string()))?
+        .reply()
+        .map_err(|e| error(e.to_string()))?
+        .root;
     let screen = connection
         .setup()
         .roots
-        .first()
+        .iter()
+        .find(|screen| screen.root == root)
         .ok_or_else(|| error("no X11 screen".into()))?;
     let host = connection.generate_id().map_err(|e| error(e.to_string()))?;
     let colormap = connection.generate_id().map_err(|e| error(e.to_string()))?;
@@ -313,7 +335,7 @@ fn create_host_window(parent: XWindow) -> Result<(XWindow, u32), String> {
         .check()
         .map_err(|e| error(e.to_string()))?;
     let _ = connection.flush();
-    Ok((host, colormap))
+    Ok((host, colormap, root))
 }
 
 fn intern(connection: &RustConnection, name: &[u8]) -> Result<u32, ()> {
@@ -657,9 +679,10 @@ impl ChromiumView {
     }
 
     fn create_in(parent: XWindow, events: NativeEvents) -> Result<Self, String> {
-        let (host, colormap) = create_host_window(parent)?;
+        let (host, colormap, root) = create_host_window(parent)?;
         let shared = SharedState::new(Mutex::new(Shared {
             parent,
+            root,
             host,
             colormap,
             ..Default::default()
@@ -851,6 +874,7 @@ impl ChromiumView {
             release_windows(&mut shared);
         } else {
             shared.release_pending = true;
+            detach_windows(&shared);
         }
     }
 }
