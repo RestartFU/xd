@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run clippy over every Rust crate in Docker.
+# Check the formatting of every Rust crate and run clippy over it, in Docker.
 
 set -euo pipefail
 

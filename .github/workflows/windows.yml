@@ -12,13 +12,6 @@ on:
       ref:
         type: string
         default: ''
-      # Both default off so a caller has to ask: an empty value still packages.
-      skip_package:
-        type: boolean
-        default: false
-      lint:
-        type: boolean
-        default: false
   workflow_dispatch:
     inputs:
       profile:
@@ -86,7 +79,7 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: >-
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
-          --component clippy --target x86_64-pc-windows-msvc --no-self-update
+          --target x86_64-pc-windows-msvc --no-self-update
 
       - uses: actions/cache/restore@v4
         id: cargo_cache
@@ -149,22 +142,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows terminal tests failed.' }
 
       - name: Build and smoke-test the native Windows package
-        if: ${{ !inputs.skip_package }}
+        id: native_package
         run: |
           ./scripts/build-windows.ps1 -Profile '${{ inputs.profile }}' -HostPayload .build-cache/windows-host/xd-host-linux
+          "GPUI_FXC_PATH=$env:GPUI_FXC_PATH" >> $env:GITHUB_ENV
           $name = if ('${{ inputs.profile }}' -eq 'nightly') { 'xd-nightly' } else { 'xd' }
           ./scripts/smoke-windows.ps1 -Archive "dist/windows/$name-windows-x86_64.zip"
-
-      # What the tests below need whether or not a package was built. WebView2
-      # still installs after the smoke test, so that test's conditions don't change.
-      - name: Prepare the native test environment
-        id: native_test_environment
-        run: |
-          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
-          $fxc = Get-ChildItem -Path "$sdkRoot/*/x64/fxc.exe" -File |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if ($null -eq $fxc) { throw 'The Windows SDK HLSL compiler (fxc.exe) is required.' }
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
           ./installer/windows/install-webview2.ps1
 
       - name: Test the native Windows desktop
@@ -176,7 +159,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows desktop tests failed.' }
 
       - name: Test the native desktop to WSL connection
-        if: ${{ !cancelled() && steps.native_test_environment.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.native_package.outcome == 'success' }}
         env:
           XD_BUILD_PROFILE: ${{ inputs.profile }}
         run: |
@@ -185,25 +168,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows to WSL host integration failed.' }
 
       - uses: actions/upload-artifact@v4
-        if: ${{ !inputs.skip_package }}
         with:
           name: windows
           path: |
             dist/windows/*-windows-x86_64.zip
             dist/windows/*-windows-x86_64.zip.sha256
           if-no-files-found: error
-
-      # Last, and despite a failure above, so one push reports tests and lints
-      # together. The WSL host is compiled for Linux and linted there.
-      - name: Lint the native Windows targets
-        if: ${{ inputs.lint && !cancelled() }}
-        run: |
-          $failed = $false
-          foreach ($crate in 'terminal-core', 'transport-core', 'desktop') {
-            cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc --manifest-path "$crate/Cargo.toml" -- -D warnings
-            if ($LASTEXITCODE -ne 0) { $failed = $true }
-          }
-          if ($failed) { throw 'Windows lints failed.' }
 
       # Keep the dependency compile even if a test fails. A failed first run
       # otherwise leaves the next runner rebuilding every native dependency.

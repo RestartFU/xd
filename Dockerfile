@@ -58,7 +58,8 @@ RUN cargo fmt --check \
 
 FROM terminal-core-source AS terminal-core-clippy
 
-RUN cargo clippy --locked --all-targets -- -D warnings \
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
  && touch /terminal-core-clippy-passed
 
 FROM gpui-toolchain AS transport-core-clippy
@@ -66,7 +67,8 @@ FROM gpui-toolchain AS transport-core-clippy
 WORKDIR /src/transport-core
 COPY transport-core/Cargo.toml transport-core/Cargo.lock ./
 COPY transport-core/src ./src
-RUN cargo clippy --locked --all-targets -- -D warnings \
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
  && touch /transport-core-clippy-passed
 
 FROM gpui-toolchain AS gpui-desktop-source
@@ -94,7 +96,8 @@ RUN cargo fmt --check \
 
 FROM gpui-desktop-source AS gpui-desktop-clippy
 
-RUN cargo clippy --locked --all-targets -- -D warnings \
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
  && touch /gpui-clippy-passed
 
 FROM gpui-desktop-source AS gpui-desktop-release
@@ -147,7 +150,8 @@ FROM rust-host-source AS rust-host-clippy
 
 COPY host/tests ./tests
 
-RUN cargo clippy --locked --all-targets -- -D warnings \
+RUN cargo fmt --check \
+ && cargo clippy --locked --all-targets -- -D warnings \
  && touch /rust-host-clippy-passed
 
 FROM rust-host-source AS rust-host-release
@@ -203,8 +207,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Keep the established CI target name, now backed entirely by Rust.
 FROM gpui-desktop-check AS test
 
-# Every crate's lints. Built only on request, so a lint can hold up a pull
-# request without ever holding up a nightly or a release.
+# Every crate's formatting and lints: all a pull request waits for. Built only
+# on request, so a lint can't hold up a nightly or a release.
 FROM scratch AS clippy
 
 COPY --from=terminal-core-clippy /terminal-core-clippy-passed /terminal-core-clippy-passed

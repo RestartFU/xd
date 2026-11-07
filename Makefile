@@ -10,7 +10,7 @@ build:
 test:
 	@./scripts/test.sh
 
-## clippy: lint every Rust crate in Docker
+## clippy: check formatting and lint every Rust crate in Docker
 clippy:
 	@./scripts/clippy.sh
 

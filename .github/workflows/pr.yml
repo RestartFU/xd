@@ -1,16 +1,16 @@
-# Every commit pushed to a pull request, tested and linted on each platform.
+# Every commit pushed to a pull request, formatted and linted on each platform.
 #
-# Packaging only runs when the pull request touches something packaging reads,
-# because tests catch nearly everything a package build would and the package
-# is most of the wait. The nightly packages every platform after a merge, and
-# dispatching this workflow on a branch packages it regardless.
+# This is deliberately all a pull request waits for, so merging stays quick.
+# Clippy type-checks the code, and platform-specific code only on its own
+# platform, but builds no binaries and runs no tests. The nightly tests and
+# packages every platform after a merge, and a failure there is fixed on master.
 #
 # Nothing is published. A branch is tried by building it: the nightly's own
-# build button fetches it, builds the bundle the same way a packaged run here
-# does and installs the result over itself, so there is no rolling release to
-# keep moving and no third kind of build that can break on its own.
+# build button fetches it, builds the bundle and installs the result over
+# itself, so there is no rolling release to keep moving and no third kind of
+# build that can break on its own.
 #
-# Built from the pull request's head commit rather than the merge commit GitHub
+# Checks the pull request's head commit rather than the merge commit GitHub
 # hands to `pull_request` runs: what is checked is the code that was pushed.
 
 name: pr
@@ -30,50 +30,7 @@ permissions:
   contents: read
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      package: ${{ steps.packaging.outputs.package }}
-
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      # Whole directories, so a new script or asset is covered without anyone
-      # remembering this list. Anything but a clean "no difference" packages,
-      # including a dispatch, which has no pull request to compare, and any
-      # error from git: a needless package only costs minutes.
-      - name: Detect packaging changes
-        id: packaging
-        env:
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          package=true
-          if [ -n "$PR_BASE" ]; then
-            status=0
-            git diff --quiet "$PR_BASE...$PR_HEAD" -- \
-              .dockerignore \
-              .github/workflows \
-              Dockerfile \
-              data \
-              desktop/assets \
-              installer \
-              scripts \
-              '*/Cargo.lock' \
-              '*/Cargo.toml' \
-              || status=$?
-            if [ "$status" -eq 0 ]; then
-              package=false
-            fi
-          fi
-          echo "package=$package" | tee -a "$GITHUB_OUTPUT"
-
   linux:
-    needs: changes
     # GitHub's runner for every branch and fork: this repository is public,
     # and a pull request runs whatever it contains, so it never gets a
     # machine of ours.
@@ -85,43 +42,13 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # GitHub's runner starts with about 14 GB free; the Docker builds need
-      # more, so drop the preinstalled toolchains nothing here uses.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          docker system prune -af >/dev/null
-          df -h /
-
-      # Everything is built in Docker, so the runner needs nothing else.
-      - name: Run the headless tests
-        run: ./scripts/test.sh
-
-      - name: Build the bundle
-        if: ${{ needs.changes.outputs.package == 'true' }}
-        run: ./scripts/build.sh --build-arg PROFILE=nightly
-
-      # Last, and despite a failure above, so one push reports tests and lints
-      # together.
-      - name: Lint the Rust crates
-        if: ${{ !cancelled() }}
+      # Everything happens in Docker, so the runner needs nothing else.
+      - name: Check formatting and lint the Rust crates
         run: ./scripts/clippy.sh
 
-  windows:
-    needs: changes
-    uses: ./.github/workflows/windows.yml
-    with:
-      profile: nightly
-      ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      skip_package: ${{ needs.changes.outputs.package != 'true' }}
-      lint: true
-
   macos:
-    needs: changes
-    # Apple desktop code must be compiled on Apple hardware because GPUI links
-    # native frameworks. This gate covers the Rust app and local helpers, plus
-    # the complete ad-hoc-signed bundle when packaging inputs changed.
+    # Apple desktop code must be checked on Apple hardware because GPUI links
+    # native frameworks.
     runs-on: macos-15
 
     steps:
@@ -134,7 +61,6 @@ jobs:
         run: >-
           rustup toolchain install 1.95.0
           --profile minimal
-          --component rustfmt
           --component clippy
           --no-self-update
 
@@ -144,60 +70,8 @@ jobs:
           echo "CARGO_BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "CMAKE_BUILD_PARALLEL_LEVEL=$jobs" >> "$GITHUB_ENV"
 
-      # The dependency compile is most of this job, and a hosted runner keeps
-      # nothing between runs. Keyed on the lockfiles, so unchanged dependencies
-      # come back already built and cargo works out the rest.
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            desktop/target
-            host/target
-            terminal-core/target
-          key: >-
-            cargo-${{ runner.os }}-arm64-1.95.0-${{
-            hashFiles('desktop/Cargo.lock', 'host/Cargo.lock', 'terminal-core/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-arm64-1.95.0-
-
-      # Native packaging inputs are pinned by the scripts that put them here.
-      - uses: actions/cache@v4
-        if: ${{ needs.changes.outputs.package == 'true' }}
-        with:
-          path: .build-cache
-          key: >-
-            payload-${{ runner.os }}-arm64-${{ hashFiles('scripts/build-macos.sh') }}
-          restore-keys: payload-${{ runner.os }}-arm64-
-
-      - name: Install native test dependencies
-        run: brew install tmux
-
-      - name: Test the native Rust targets
-        env:
-          RUSTUP_TOOLCHAIN: 1.95.0
-        run: |
-          cargo fmt --check --manifest-path terminal-core/Cargo.toml
-          cargo test --locked --manifest-path terminal-core/Cargo.toml
-          cargo fmt --check --manifest-path desktop/Cargo.toml
-          cargo test --locked --manifest-path desktop/Cargo.toml
-          cargo fmt --check --manifest-path host/Cargo.toml
-          cargo test --locked --manifest-path host/Cargo.toml
-
-      - name: Build and smoke-test the native app bundle
-        if: ${{ needs.changes.outputs.package == 'true' }}
-        env:
-          PROFILE: nightly
-          RUSTUP_TOOLCHAIN: 1.95.0
-        run: |
-          brew install librsvg
-          ./scripts/build-macos.sh
-          ./scripts/smoke-macos.sh dist/macos/xd-nightly.app
-
-      # Last, and despite a failure above, so one push reports tests and lints
-      # together.
+      # Every crate even after a failure, so one push reports all of them.
       - name: Lint the native Rust targets
-        if: ${{ !cancelled() }}
         env:
           RUSTUP_TOOLCHAIN: 1.95.0
         run: |
@@ -206,3 +80,42 @@ jobs:
             cargo clippy --locked --all-targets --manifest-path "$crate/Cargo.toml" -- -D warnings || status=1
           done
           exit "$status"
+
+  windows:
+    # The host is left out: on Windows it only ever runs inside WSL, so the
+    # Linux job covers it.
+    runs-on: windows-2025
+    env:
+      RUSTUP_TOOLCHAIN: 1.95.0
+      CARGO_BUILD_JOBS: 3
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install the pinned Rust toolchain
+        run: >-
+          rustup toolchain install 1.95.0 --profile minimal --component clippy
+          --target x86_64-pc-windows-msvc --no-self-update
+
+      # GPUI's build script compiles its shaders, even for a lint.
+      - name: Locate the HLSL compiler
+        run: |
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin'
+          $fxc = Get-ChildItem -Path "$sdkRoot/*/x64/fxc.exe" -File |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $fxc) { throw 'The Windows SDK HLSL compiler (fxc.exe) is required.' }
+          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+
+      # Every crate even after a failure, so one push reports all of them.
+      - name: Lint the native Windows targets
+        run: |
+          $failed = $false
+          foreach ($crate in 'terminal-core', 'transport-core', 'desktop') {
+            cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc --manifest-path "$crate/Cargo.toml" -- -D warnings
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { throw 'Windows lints failed.' }
