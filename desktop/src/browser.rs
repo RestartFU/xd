@@ -1652,6 +1652,22 @@ impl NativeBrowser {
 #[cfg(target_os = "linux")]
 const NATIVE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Shut the browser engine down before the process exits, once every pane has
+/// been shut down, so Chromium writes out website data such as sign-ins.
+#[cfg(target_os = "linux")]
+pub fn shutdown_engine() {
+    let (reply, done) = std::sync::mpsc::channel();
+    browser_thread::post(move || {
+        chromium::shutdown();
+        let _ = reply.send(());
+    });
+    let _ = done.recv_timeout(NATIVE_REPLY_TIMEOUT);
+}
+
+/// The system web views on macOS and Windows need no engine shutdown.
+#[cfg(not(target_os = "linux"))]
+pub fn shutdown_engine() {}
+
 /// How long closing a view waits for CEF. Shorter than GPUI's own wait, so a
 /// stuck close still answers GPUI before it gives up on the browser thread.
 #[cfg(target_os = "linux")]

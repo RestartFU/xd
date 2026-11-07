@@ -9,7 +9,11 @@
 use std::{
     os::unix::fs::MetadataExt,
     path::PathBuf,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -117,11 +121,20 @@ wrap_app! {
     }
 }
 
+/// Whether CEF started, decided by the first browser.
+static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+/// Set once CEF has been shut down, after which no browser can be created.
+static SHUT_DOWN: AtomicBool = AtomicBool::new(false);
+/// Browsers CEF has created and not yet finished closing.
+static LIVE_BROWSERS: AtomicUsize = AtomicUsize::new(0);
+
 /// CEF allows one initialization per process, so the first browser's scale
 /// applies to all of them. GPUI's X11 scale is also per process.
 fn ensure_initialized(scale: f32) -> Result<(), String> {
-    static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
-    RESULT
+    if SHUT_DOWN.load(Ordering::SeqCst) {
+        return Err("The browser has shut down.".into());
+    }
+    INITIALIZED
         .get_or_init(|| {
             check_sandbox()?;
             let directory = browser_data_directory().join("chromium");
@@ -151,6 +164,20 @@ fn ensure_initialized(scale: f32) -> Result<(), String> {
             Ok(())
         })
         .clone()
+}
+
+/// Shut CEF down so it writes out the profile, such as recent sign-ins, before
+/// the process exits. Call on the thread that created the browsers, after
+/// closing them. A browser CEF has not finished closing would make shutting
+/// down unsafe, so then CEF is left running and the process exits around it.
+pub fn shutdown() {
+    if SHUT_DOWN.swap(true, Ordering::SeqCst)
+        || !matches!(INITIALIZED.get(), Some(Ok(())))
+        || LIVE_BROWSERS.load(Ordering::SeqCst) != 0
+    {
+        return;
+    }
+    cef::shutdown();
 }
 
 /// CEF's browser object is reference counted atomically, and these calls are
@@ -314,7 +341,7 @@ fn create_host_window(parent: XWindow) -> Result<(XWindow, u32, XWindow), String
         .map_err(|e| error(e.to_string()))?
         .check()
         .map_err(|e| error(e.to_string()))?;
-    connection
+    let created = connection
         .create_window(
             screen.root_depth,
             host,
@@ -331,9 +358,13 @@ fn create_host_window(parent: XWindow) -> Result<(XWindow, u32, XWindow), String
                 .border_pixel(screen.black_pixel)
                 .colormap(colormap),
         )
-        .map_err(|e| error(e.to_string()))?
-        .check()
-        .map_err(|e| error(e.to_string()))?;
+        .map_err(|e| error(e.to_string()))
+        .and_then(|cookie| cookie.check().map_err(|e| error(e.to_string())));
+    if let Err(error) = created {
+        let _ = connection.free_colormap(colormap);
+        let _ = connection.flush();
+        return Err(error);
+    }
     let _ = connection.flush();
     Ok((host, colormap, root))
 }
@@ -362,6 +393,7 @@ wrap_life_span_handler! {
             let Some(browser) = browser else {
                 return;
             };
+            LIVE_BROWSERS.fetch_add(1, Ordering::SeqCst);
             let mut shared = lock(&self.shared);
             if shared.closed.is_some() {
                 let host = browser.host();
@@ -404,6 +436,7 @@ wrap_life_span_handler! {
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            LIVE_BROWSERS.fetch_sub(1, Ordering::SeqCst);
             let mut shared = lock(&self.shared);
             shared.browser = None;
             shared.browser_gone = true;
@@ -710,6 +743,7 @@ impl ChromiumView {
             None,
         );
         if created != 1 {
+            release_windows(&mut lock(&shared));
             return Err("Could not create the browser.".into());
         }
         Ok(Self { shared })
