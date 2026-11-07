@@ -1,0 +1,140 @@
+package com.restartfu.xd.mobile.ui
+
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.restartfu.xd.protocol.DirectoryListReply
+
+/**
+ * Browses folders on the connected host, so a project's repository can be
+ * picked rather than typed out on a phone keyboard.
+ */
+@Composable
+internal fun RepositoryPickerDialog(
+    listDirectories: suspend (String?) -> DirectoryListReply,
+    initialPath: String?,
+    onDismiss: () -> Unit,
+    onChoose: (String) -> Unit,
+) {
+    var requestedPath by rememberSaveable { mutableStateOf(initialPath?.takeIf(String::isNotBlank)) }
+    var currentPath by rememberSaveable { mutableStateOf("") }
+    var entries by remember { mutableStateOf(emptyList<String>()) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(requestedPath) {
+        loading = true
+        error = null
+        try {
+            val result = listDirectories(requestedPath)
+            currentPath = result.path
+            entries = result.entries
+        } catch (failure: kotlinx.coroutines.CancellationException) {
+            throw failure
+        } catch (failure: Throwable) {
+            error = failure.message ?: "Could not list that folder"
+            entries = emptyList()
+        } finally {
+            loading = false
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Choose repository") },
+        text = {
+            Column {
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        currentPath.ifBlank { "Loading…" },
+                        modifier = Modifier.weight(1f).padding(top = 12.dp),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        fontFamily = XdMonoFamily,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    parentDirectory(currentPath)?.let { parent ->
+                        TextButton(
+                            onClick = { requestedPath = parent },
+                            enabled = !loading,
+                        ) { Text("Up") }
+                    }
+                }
+                error?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                when {
+                    loading -> CircularProgressIndicator(Modifier.padding(vertical = 20.dp))
+                    entries.isEmpty() -> Text(
+                        "No folders inside this one.",
+                        modifier = Modifier.padding(vertical = 20.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    else -> LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                        items(entries, key = { it }) { entry ->
+                            Text(
+                                entry,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
+                                    .clickable { requestedPath = joinDirectory(currentPath, entry) }
+                                    .padding(vertical = 14.dp),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onChoose(currentPath) },
+                enabled = !loading && error == null && currentPath.isNotBlank(),
+            ) { Text("Use this folder") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+internal fun joinDirectory(parent: String, child: String): String = when {
+    parent.endsWith('/') || parent.endsWith('\\') -> parent + child
+    else -> "$parent/$child"
+}
+
+internal fun parentDirectory(path: String): String? {
+    if (path.isBlank()) return null
+    val trimmed = path.trimEnd('/', '\\')
+    if (trimmed.isEmpty()) return null
+    val separator = maxOf(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+    if (separator < 0) return null
+    if (separator == 0) return trimmed.substring(0, 1)
+    if (separator == 2 && trimmed.getOrNull(1) == ':') return trimmed.substring(0, 3)
+    return trimmed.substring(0, separator)
+}

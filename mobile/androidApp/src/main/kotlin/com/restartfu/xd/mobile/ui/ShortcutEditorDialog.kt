@@ -44,9 +44,9 @@ internal fun ShortcutEditorDialog(
             ) {
                 Text(
                     if (state.folderId == null) {
-                        "These prompt buttons appear in every workspace on this host."
+                        "These prompt buttons appear in every project on this host."
                     } else {
-                        "These prompt buttons appear in this workspace and its children."
+                        "These prompt buttons appear in this project, after the ones every project shares."
                     },
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,

@@ -66,8 +66,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
     private val _creatingWorkspace = MutableStateFlow(false)
-    private val _moving = MutableStateFlow(false)
-    private val _createdChat = MutableStateFlow<String?>(null)
     private val _createdDirectSession = MutableStateFlow<CreatedDirectSession?>(null)
     private val _deletingChat = MutableStateFlow(false)
     private val _renamingChat = MutableStateFlow(false)
@@ -77,12 +75,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val connecting: StateFlow<Boolean> = _connecting.asStateFlow()
     val pendingHostKey: StateFlow<PendingHostKeyConfirmation?> = _pendingHostKey.asStateFlow()
     val privateKeyName: StateFlow<String?> = _privateKeyName.asStateFlow()
-    val createdChat: StateFlow<String?> = _createdChat.asStateFlow()
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
-    val moving: StateFlow<Boolean> = _moving.asStateFlow()
     val shortcutEditor: StateFlow<ShortcutEditorState?> = _shortcutEditor.asStateFlow()
     private val _host = MutableStateFlow<HostUpdateReply?>(null)
     private val _hostError = MutableStateFlow<String?>(null)
@@ -220,23 +216,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createChat(folderId: String) {
-        if (_creatingChat.value) return
-        _creatingChat.value = true
-        _error.value = null
-        viewModelScope.launch {
-            try {
-                _createdChat.value = client.createChat(folderId = folderId, title = null)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not create a chat"
-            } finally {
-                _creatingChat.value = false
-            }
-        }
-    }
-
     fun createDirectSession(
         folderId: String,
         title: String,
@@ -288,40 +267,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _error.value = error.message ?: "Could not create the workspace"
             } finally {
                 _creatingWorkspace.value = false
-            }
-        }
-    }
-
-    fun moveFolder(folderId: String, parentId: String?) {
-        if (_moving.value) return
-        _moving.value = true
-        _error.value = null
-        viewModelScope.launch {
-            try {
-                client.moveFolder(folderId, parentId)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not move the folder"
-            } finally {
-                _moving.value = false
-            }
-        }
-    }
-
-    fun moveChat(chatId: String, folderId: String) {
-        if (_moving.value) return
-        _moving.value = true
-        _error.value = null
-        viewModelScope.launch {
-            try {
-                client.moveChat(chatId, folderId)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not move the chat"
-            } finally {
-                _moving.value = false
             }
         }
     }
@@ -413,7 +358,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Drives the host update from the tree screen.
+     * Drives the host update from Settings.
      *
      * Install and restart are separate calls because they differ in cost:
      * replacing files is safe while turns run, restarting drops every attached
@@ -438,10 +383,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun clearHostUpdate() {
         _host.value = null
         _hostError.value = null
-    }
-
-    fun consumeCreatedChat(chatId: String) {
-        _createdChat.compareAndSet(chatId, null)
     }
 }
 
