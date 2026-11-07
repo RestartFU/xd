@@ -46,6 +46,35 @@ class OpsTest {
     }
 
     @Test
+    fun hostSettingOperationsMatchTheHostsRules() {
+        val start = Ops.agentAuthAction(Ops.AuthAction.START, "claude")
+        assertEquals("agent-auth-start", start["op"]!!.jsonPrimitive.content)
+        assertFalse("input" in start)
+        assertEquals("1234", Ops.agentAuthAction(Ops.AuthAction.INPUT, "codex", "1234")["input"]!!.jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.agentAuthAction(Ops.AuthAction.INPUT, "codex", "") }
+        assertFailsWith<IllegalArgumentException> { Ops.agentAuthAction(Ops.AuthAction.START, "jcode") }
+        assertFailsWith<IllegalArgumentException> { Ops.agentCliUpdates("install") }
+        assertEquals("codex", Ops.agentCliUpdates("install", "codex")["provider"]!!.jsonPrimitive.content)
+        assertTrue(Ops.setChatTitleModel("codex", null)["model"] is JsonNull)
+        assertFailsWith<IllegalArgumentException> { Ops.setChatTitleModel("jcode", "x") }
+        assertTrue(Ops.setFolderContext("f", "   ")["context"] is JsonNull)
+        assertEquals("notes", Ops.setFolderContext("f", " notes ")["context"]!!.jsonPrimitive.content)
+        assertEquals(true, Ops.resumeInterrupted(true)["resume"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun secretsKeepStoredValuesBySendingNamesAlone() {
+        val request = Ops.setAgentSecrets("f", listOf(Ops.SecretEntry("KEPT"), Ops.SecretEntry("NEW_ONE", "value")))
+        val entries = request["entries"]!!.jsonArray.map { it.jsonObject }
+        assertFalse("value" in entries[0])
+        assertEquals("value", entries[1]["value"]!!.jsonPrimitive.content)
+        assertFalse("folder" in Ops.setAgentSecrets(null, emptyList()))
+        assertFailsWith<IllegalArgumentException> { Ops.setAgentSecrets(null, listOf(Ops.SecretEntry("1BAD", "v"))) }
+        assertFailsWith<IllegalArgumentException> { Ops.setAgentSecrets(null, listOf(Ops.SecretEntry("A", "v"), Ops.SecretEntry("A", "w"))) }
+        assertFailsWith<IllegalArgumentException> { Ops.setAgentSecrets(null, listOf(Ops.SecretEntry("A", ""))) }
+    }
+
+    @Test
     fun sessionOperationsNameTheSession() {
         assertEquals("settle-session", Ops.settleSession("s")["op"]!!.jsonPrimitive.content)
         assertEquals("s", Ops.unsettleSession("s")["session"]!!.jsonPrimitive.content)

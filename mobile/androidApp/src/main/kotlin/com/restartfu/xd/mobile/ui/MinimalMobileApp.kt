@@ -493,6 +493,11 @@ private fun MinimalProjectsHome(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     var shelfOpen by rememberSaveable { mutableStateOf(false) }
+    // Saved by project id, so an open editor survives recreating the activity.
+    var contextForId by rememberSaveable { mutableStateOf<String?>(null) }
+    var secretsForId by rememberSaveable { mutableStateOf<String?>(null) }
+    val contextFor = projects.firstOrNull { it.id == contextForId }
+    val secretsFor = projects.firstOrNull { it.id == secretsForId }
     val settled = if (actions.settlement) tree.settledSessions() else emptyList()
     val operationError by model.error.collectAsStateWithLifecycle()
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -574,6 +579,8 @@ private fun MinimalProjectsHome(
                                         },
                                         onRename = { onRenameProject(project) },
                                         onDelete = { onDeleteProject(project) },
+                                        onContext = { contextForId = project.id },
+                                        onSecrets = { secretsForId = project.id },
                                     )
                                 },
                             )
@@ -624,6 +631,16 @@ private fun MinimalProjectsHome(
                 model.createWorkspace(name, repository)
             },
         )
+    }
+    contextFor?.let { project ->
+        key(project.id) {
+            ProjectContextDialog(model, project.id, project.name, onDismiss = { contextForId = null })
+        }
+    }
+    secretsFor?.let { project ->
+        key(project.id) {
+            AgentSecretsDialog(model, project.id, "${project.name} secrets", onDismiss = { secretsForId = null })
+        }
     }
     val creatingIn = projects.firstOrNull { it.id == createSessionIn }
     LaunchedEffect(createSessionIn, creatingIn == null, loading) {
@@ -1069,6 +1086,8 @@ private fun ProjectMenu(
     onShortcuts: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    onContext: () -> Unit,
+    onSecrets: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     Box {
@@ -1088,6 +1107,14 @@ private fun ProjectMenu(
             DropdownMenuItem(
                 text = { Text("Prompt shortcuts") },
                 onClick = { open = false; onShortcuts() },
+            )
+            DropdownMenuItem(
+                text = { Text("Project context") },
+                onClick = { open = false; onContext() },
+            )
+            DropdownMenuItem(
+                text = { Text("Agent secrets") },
+                onClick = { open = false; onSecrets() },
             )
             HorizontalDivider()
             DropdownMenuItem(
@@ -1787,7 +1814,10 @@ private fun MinimalSettingsDialog(
     val allPermissions by settings.allowAllPermissions.collectAsStateWithLifecycle()
     val speech by settings.speechEnabled.collectAsStateWithLifecycle()
     val tree by model.client.tree.collectAsStateWithLifecycle()
+    val resumeChats by settings.resumeChats.collectAsStateWithLifecycle()
     var updatingHost by rememberSaveable { mutableStateOf(false) }
+    var accountsOpen by rememberSaveable { mutableStateOf(false) }
+    var secretsOpen by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Settings") },
@@ -1843,6 +1873,12 @@ private fun MinimalSettingsDialog(
                     checked = allPermissions,
                     onCheckedChange = settings::setAllowAllPermissions,
                 )
+                SettingSwitch(
+                    title = "Resume chats after a restart",
+                    detail = "Continue turns a restart cut off. Agents start working without asking.",
+                    checked = resumeChats,
+                    onCheckedChange = settings::setResumeChats,
+                )
                 HorizontalDivider()
                 Text("Host", style = MaterialTheme.typography.titleSmall)
                 SettingAction(
@@ -1853,7 +1889,18 @@ private fun MinimalSettingsDialog(
                     onDismiss()
                     model.openShortcutEditor(null, "Prompt shortcuts")
                 }
+                ChatTitleSettings(model)
                 if (tree.settlement) AutoSettleSettings(model)
+                SettingAction(
+                    title = "Assistant accounts",
+                    detail = "Manage sign-in and the installed assistant CLIs.",
+                    action = "Open",
+                ) { accountsOpen = true }
+                SettingAction(
+                    title = "Agent secrets",
+                    detail = "Environment variables the host gives every agent.",
+                    action = "Edit",
+                ) { secretsOpen = true }
                 SettingAction(
                     title = "Host updates",
                     detail = "Check for a new xd build on the connected machine.",
@@ -1868,6 +1915,12 @@ private fun MinimalSettingsDialog(
     )
     if (updatingHost) {
         HostUpdateDialog(model = model, onDismiss = { updatingHost = false })
+    }
+    if (accountsOpen) {
+        AssistantAccountsDialog(model = model, onDismiss = { accountsOpen = false })
+    }
+    if (secretsOpen) {
+        AgentSecretsDialog(model = model, folderId = null, title = "Agent secrets", onDismiss = { secretsOpen = false })
     }
 }
 

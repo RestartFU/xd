@@ -324,7 +324,7 @@ boundary, not an event cursor.
 | `chat-title-settings` | none | `enabled: boolean`, `models: {codex, claude}`, each the model that will title that assistant's chats, or `null` if its CLI offers none of the choices |
 | `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to host home, lists non-hidden directories |
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
-| `agent-secrets` | none | `names: string[]`; values never cross the wire |
+| `agent-secrets` | optional `folder` | `names: string[]` for that project's own set, or the host-wide set without `folder`; values never cross the wire |
 | `agent-clis` | none | detected assistant versions |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
 | `agent-cli-updates` | optional `action` of `status`, `check`, `install`; `install` requires `provider` | `providers:[{provider,display_name,state,available,updatable, optional version, latest, detail}]`; `state` is `idle`, `updating`, `updated`, or `failed`; each change is also sent as an `agent-cli-update` event holding one provider |
@@ -820,6 +820,12 @@ for Claude unless another was chosen, and then publishes `tree` and `changed`. T
 title replaces only a placeholder name such as `New Chat`, on the chat and on its
 session; a name given in the meantime stays. A failed attempt leaves the name as it
 was. JCode chats are not titled.
+
+`set-agent-secrets` replaces one secret set: the host-wide set, or a project's own
+with `folder`. It takes `entries:[{name, value}]` of at most 256 unique environment
+variable names. An entry without `value` keeps the stored value, so a client can keep
+a secret without ever reading it; a new name needs a value. Agents get the host-wide
+set with each enclosing project's set laid over it.
 
 `set-shortcuts` replies with the resulting shortcut sets and broadcasts a
 `shortcuts-changed` event so open chats can refresh their buttons.

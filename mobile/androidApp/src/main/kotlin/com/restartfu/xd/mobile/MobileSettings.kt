@@ -22,6 +22,22 @@ public class MobileSettings(context: Context) {
     private val _allowAllPermissions = MutableStateFlow(
         preferences.getBoolean(KEY_ALLOW_ALL_PERMISSIONS, false),
     )
+    private val _resumeChats = MutableStateFlow(
+        preferences.getBoolean(KEY_RESUME_CHATS, false),
+    )
+
+    /**
+     * Continue the turns a host restart cut off, the next time this phone
+     * connects. Off by default, as on the desktop: the agent starts working
+     * without being asked.
+     */
+    public val resumeChats: StateFlow<Boolean> = _resumeChats.asStateFlow()
+
+    public fun setResumeChats(enabled: Boolean) {
+        preferences.edit().putBoolean(KEY_RESUME_CHATS, enabled).apply()
+        _resumeChats.value = enabled
+    }
+
     private val _theme = MutableStateFlow(
         MinimalThemePreset.fromKey(preferences.getString(KEY_THEME, null)),
     )
@@ -57,5 +73,6 @@ public class MobileSettings(context: Context) {
         const val KEY_SPEECH_ENABLED = "speech_enabled"
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
+        const val KEY_RESUME_CHATS = "resume_chats"
     }
 }

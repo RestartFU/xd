@@ -59,6 +59,15 @@ it is ahead or behind, and what is uncommitted; **Commit all** commits every cha
 with the message typed beside it. When the pushed branch has a pull request, its
 number links to it from Changes and from the session header.
 
+Settings also manages the host as the desktop does: **Chat titles** turns titling
+on and picks each assistant's title model, **Assistant accounts** signs the host's
+Codex and Claude CLIs in and updates them, and **Agent secrets** edits the
+environment variables agents get; secret values are write-only and never sent
+back. A project's **⋮** menu edits its **Project context** and its own secrets.
+**Resume chats after a restart** continues turns a host restart cut off the next
+time this phone connects; with it off the phone does not answer, so a desktop set
+to resume them still can. Paired devices can only be managed on the host itself.
+
 Older hosts appear as one chat per session. Update the connected host before
 adding another chat inside an existing session; Android displays an update
 message instead of creating a separate session. The host automatically deletes

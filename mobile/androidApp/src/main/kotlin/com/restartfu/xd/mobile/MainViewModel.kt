@@ -13,8 +13,11 @@ import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.parsePairingInvitation
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
+import com.restartfu.xd.protocol.AgentAuthProviderReply
 import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
+import com.restartfu.xd.net.Link
+import com.restartfu.xd.protocol.ChatTitleSettingsReply
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
@@ -141,6 +144,267 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** A change that failed, kept until a newer change succeeds; a read does not clear it. */
     val autoSettleWriteError: StateFlow<String?> = client.autoSettleWriteError
     val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
+
+    private val _accountsError = MutableStateFlow<String?>(null)
+    val accountsError: StateFlow<String?> = _accountsError.asStateFlow()
+    val agentAuth = client.agentAuth
+    val agentClis = client.agentClis
+    val agentAuthStale = client.agentAuthStale
+    val agentClisStale = client.agentClisStale
+    private val _chatTitles = MutableStateFlow<ChatTitleSettingsReply?>(null)
+    private val _chatTitlesError = MutableStateFlow<String?>(null)
+    private val _catalog = MutableStateFlow<List<BackendReply>>(emptyList())
+    private val _catalogError = MutableStateFlow<String?>(null)
+    private var catalogReads = 0L
+    /** Why the models could not be listed; the last list stays meanwhile. */
+    val hostCatalogError: StateFlow<String?> = _catalogError.asStateFlow()
+    val chatTitles: StateFlow<ChatTitleSettingsReply?> = _chatTitles.asStateFlow()
+    val chatTitlesError: StateFlow<String?> = _chatTitlesError.asStateFlow()
+    private val _chatTitlesWriteError = MutableStateFlow<String?>(null)
+    /** A change that failed, kept until a newer change succeeds; a read does not clear it. */
+    val chatTitlesWriteError: StateFlow<String?> = _chatTitlesWriteError.asStateFlow()
+    private var chatTitleWrites = 0L
+    private var chatTitleWriteSucceeded = 0L
+    private var chatTitleWriteFailed = 0L
+    private var accountActions = 0L
+    private val _signInDrafts = MutableStateFlow<Map<String, SignInDraft>>(emptyMap())
+    /**
+     * Each assistant's sign-in code being typed and whether it is out, kept
+     * here so recreating the activity neither loses a code nor sends it twice.
+     */
+    val signInDrafts: StateFlow<Map<String, SignInDraft>> = _signInDrafts.asStateFlow()
+    private var accountActionSucceeded = 0L
+    private var accountActionFailed = 0L
+    /** Each assistant's models, for choosing a title model. */
+    val hostCatalog: StateFlow<List<BackendReply>> = _catalog.asStateFlow()
+    private var chatTitleRequests = 0L
+    /** Settings has asked for the title settings, so a reconnect reads them again. */
+    private var chatTitlesWanted = false
+
+    init {
+        // Answer for chats a host restart cut off, when this phone is set to
+        // continue them. With the setting off it does not answer at all, so
+        // another device set to resume them still can.
+        viewModelScope.launch {
+            var wasUp = false
+            client.link.collect { link ->
+                val up = link is Link.Up
+                // A change made elsewhere while this phone was away was not broadcast to it.
+                if (up && !wasUp && chatTitlesWanted) loadChatTitles()
+                if (up && !wasUp && (application as XdApplication).settings.resumeChats.value) {
+                    // Off the watcher, so a reconnect during the request is still seen.
+                    launch {
+                        try {
+                            client.resumeInterrupted(resume = true)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            // The play button on each chat still continues it.
+                        }
+                    }
+                }
+                wasUp = up
+            }
+        }
+        // A code belongs to one sign-in: once that ends, whether or not its
+        // dialog is open, the code goes, and the next attempt starts with none.
+        viewModelScope.launch {
+            client.agentAuth.collect {
+                _signInDrafts.update { drafts -> drafts.filter { (name, draft) -> draft.sending || signInLive(name, draft) } }
+            }
+        }
+        // Per-host state belongs to the host it came from.
+        viewModelScope.launch {
+            client.sessionGeneration.collect {
+                _accountsError.value = null
+                _signInDrafts.value = emptyMap()
+                _chatTitles.value = null
+                _chatTitlesError.value = null
+                _chatTitlesWriteError.value = null
+                _catalog.value = emptyList()
+                _catalogError.value = null
+                catalogReads++
+                chatTitleRequests++
+                chatTitlesWanted = false
+            }
+        }
+    }
+
+    /**
+     * Runs one assistant-account action, reporting a failure in the accounts
+     * dialog until a newer action succeeds. An older failure arriving late, or
+     * one from a host since forgotten, is set aside.
+     */
+    private fun accountsAction(failure: String, done: (Boolean) -> Unit = {}, action: suspend () -> Unit) {
+        val serial = ++accountActions
+        val generation = client.sessionGeneration.value
+        viewModelScope.launch {
+            try {
+                action()
+                done(true)
+                if (generation != client.sessionGeneration.value) return@launch
+                accountActionSucceeded = maxOf(accountActionSucceeded, serial)
+                if (serial > accountActionFailed) _accountsError.value = null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                done(false)
+                // Nor does it replace a newer action's failure.
+                if (generation != client.sessionGeneration.value || serial < accountActionSucceeded || serial < accountActionFailed) return@launch
+                accountActionFailed = serial
+                _accountsError.value = error.message ?: failure
+            }
+        }
+    }
+
+    /**
+     * Reads both lists again. A failed read shows as the client's stale flags,
+     * which order failures and answers by request, so a late failure never
+     * hides a newer answer.
+     */
+    fun loadAccounts() {
+        viewModelScope.launch { quietly { client.loadAgentAuth() } }
+        viewModelScope.launch { quietly { client.agentCliUpdates("status") } }
+    }
+
+    /** Pressed by the person: reads again, and acknowledges a failed action. */
+    fun retryAccounts() {
+        _accountsError.value = null
+        loadAccounts()
+    }
+
+    private suspend fun quietly(read: suspend () -> Unit) {
+        try {
+            read()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            // Reported through the stale flags.
+        }
+    }
+
+    fun checkCliUpdates() = accountsAction("Could not check for updates") { client.agentCliUpdates("check") }
+
+    fun installCliUpdate(provider: String) =
+        accountsAction("Could not start the update") { client.agentCliUpdates("install", provider) }
+
+    fun signIn(provider: String) =
+        accountsAction("Could not start signing in") { client.agentAuthAction(Ops.AuthAction.START, provider) }
+
+    fun editSignInInput(provider: AgentAuthProviderReply, text: String) {
+        val attempt = provider.signInAttempt()
+        _signInDrafts.update { drafts ->
+            val draft = drafts[provider.provider]?.takeIf { it.attempt == attempt } ?: SignInDraft(attempt = attempt)
+            if (draft.sending) drafts else drafts + (provider.provider to draft.copy(text = text))
+        }
+    }
+
+    /** Whether [draft] still belongs to the sign-in the host is running for [provider]. */
+    private fun signInLive(provider: String, draft: SignInDraft): Boolean =
+        client.agentAuth.value?.get(provider)
+            ?.let { it.state == "signing-in" && it.signInAttempt() == draft.attempt } == true
+
+    /** Sends the typed code, keeping it until the host takes it, so a failure can be sent again. */
+    fun sendSignInInput(provider: AgentAuthProviderReply) {
+        val attempt = provider.signInAttempt()
+        val draft = _signInDrafts.value[provider.provider]?.takeIf { it.attempt == attempt } ?: return
+        val sent = draft.text.trim()
+        if (draft.sending || sent.isEmpty()) return
+        val name = provider.provider
+        _signInDrafts.update { it + (name to draft.copy(sending = true)) }
+        val generation = client.sessionGeneration.value
+        accountsAction(
+            "Could not send that",
+            done = { taken ->
+                // Forgotten with its host meanwhile: the drafts now are another host's.
+                if (generation == client.sessionGeneration.value) _signInDrafts.update { drafts ->
+                    val current = drafts[name]?.takeIf { it.attempt == attempt } ?: return@update drafts
+                    // A failed code is kept to send again, while its sign-in lasts.
+                    if (taken || !signInLive(name, current)) drafts - name
+                    else drafts + (name to current.copy(sending = false))
+                }
+            },
+        ) { client.agentAuthAction(Ops.AuthAction.INPUT, name, sent) }
+    }
+
+    fun cancelSignIn(provider: String) =
+        accountsAction("Could not cancel signing in") { client.agentAuthAction(Ops.AuthAction.CANCEL, provider) }
+
+    /**
+     * Only the newest request's answer, or a read's failure, is shown. A
+     * change's failure is kept apart, until a newer change succeeds, since a
+     * read answering afterwards says nothing of whether the change was made.
+     */
+    private fun chatTitleRequest(failure: String, write: Boolean = false, request: suspend () -> ChatTitleSettingsReply) {
+        val serial = ++chatTitleRequests
+        val writeSerial = if (write) ++chatTitleWrites else 0L
+        val generation = client.sessionGeneration.value
+        _chatTitlesError.value = null
+        viewModelScope.launch {
+            try {
+                val reply = request()
+                if (generation != client.sessionGeneration.value) return@launch
+                if (write) {
+                    chatTitleWriteSucceeded = maxOf(chatTitleWriteSucceeded, writeSerial)
+                    if (writeSerial > chatTitleWriteFailed) _chatTitlesWriteError.value = null
+                }
+                if (serial == chatTitleRequests) _chatTitles.value = reply
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (generation != client.sessionGeneration.value) return@launch
+                if (write && writeSerial > chatTitleWriteSucceeded && writeSerial > chatTitleWriteFailed) {
+                    chatTitleWriteFailed = writeSerial
+                    _chatTitlesWriteError.value = error.message ?: failure
+                }
+                if (serial != chatTitleRequests) return@launch
+                if (!write) {
+                    _chatTitlesError.value = error.message ?: failure
+                    return@launch
+                }
+                // An earlier change may have landed even though this one did
+                // not, and its answer was set aside for this one; ask again.
+                try {
+                    val fresh = client.chatTitleSettings()
+                    if (serial == chatTitleRequests) _chatTitles.value = fresh
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    // Keep the error shown; the next request reads again.
+                }
+            }
+        }
+    }
+
+    fun loadChatTitles() {
+        chatTitlesWanted = true
+        chatTitleRequest("Could not read the chat title settings") { client.chatTitleSettings() }
+        val read = ++catalogReads
+        _catalogError.value = null
+        viewModelScope.launch {
+            try {
+                val catalog = client.agentCatalog()
+                if (read == catalogReads) _catalog.value = catalog
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (read == catalogReads) _catalogError.value = error.message ?: "Could not list the models"
+            }
+        }
+    }
+
+    /** Pressed by the person, it also acknowledges a failed change. */
+    fun retryChatTitles() {
+        _chatTitlesWriteError.value = null
+        loadChatTitles()
+    }
+
+    fun setChatTitlesEnabled(enabled: Boolean) =
+        chatTitleRequest("Could not change chat titles", write = true) { client.setChatTitlesEnabled(enabled) }
+
+    /** Null goes back to the host's built-in choice, which follows its default as that changes. */
+    fun setChatTitleModel(backend: String, model: String?) =
+        chatTitleRequest("Could not change the title model", write = true) { client.setChatTitleModel(backend, model) }
 
     init {
         viewModelScope.launch {
@@ -1152,3 +1416,12 @@ class ChatViewModel(
 }
 
 private const val QUEUE_CHANGED = "The queue changed on another device. Open the message again."
+
+/** A sign-in code being typed, and whether it has been sent and not yet answered. */
+data class SignInDraft(val text: String = "", val sending: Boolean = false, val attempt: String = "")
+
+/**
+ * Tells one sign-in attempt from the next: each has its own sign-in page
+ * address or device code, so a code typed for one never reaches another.
+ */
+internal fun AgentAuthProviderReply.signInAttempt(): String = "${loginUrl.orEmpty()}\n${deviceCode.orEmpty()}"
