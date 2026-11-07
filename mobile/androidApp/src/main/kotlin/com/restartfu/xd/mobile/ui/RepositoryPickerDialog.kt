@@ -41,8 +41,9 @@ internal fun RepositoryPickerDialog(
     var entries by remember { mutableStateOf(emptyList<String>()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    var attempt by remember { mutableStateOf(0) }
 
-    LaunchedEffect(requestedPath) {
+    LaunchedEffect(requestedPath, attempt) {
         loading = true
         error = null
         try {
@@ -86,9 +87,17 @@ internal fun RepositoryPickerDialog(
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    Row {
+                        TextButton(onClick = { attempt++ }, enabled = !loading) { Text("Try again") }
+                        // A typed path that is wrong would otherwise leave nowhere to go.
+                        if (requestedPath != null) {
+                            TextButton(onClick = { requestedPath = null }, enabled = !loading) { Text("Home folder") }
+                        }
+                    }
                 }
                 when {
                     loading -> CircularProgressIndicator(Modifier.padding(vertical = 20.dp))
+                    error != null -> Unit
                     entries.isEmpty() -> Text(
                         "No folders inside this one.",
                         modifier = Modifier.padding(vertical = 20.dp),
