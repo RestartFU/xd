@@ -893,12 +893,13 @@ class ChatViewModel(
      */
     fun moveQueued(index: Int, text: String, up: Boolean) {
         val queue = state.value.queue
-        val anchor = if (up) index - 1 else index + 1
         // The queue may have changed on another device since the message was
-        // opened; moving whatever now sits at its old place would be wrong.
-        if (queue.getOrNull(index) != text || anchor !in queue.indices) return
+        // opened, so it is found again by its text; the host checks both texts.
+        val at = queuedAt(queue, index, text) ?: return
+        val anchor = if (up) at - 1 else at + 1
+        if (anchor !in queue.indices) return
         launchGuarded(_droppingQueued) {
-            session.reorderQueued(index, queue[index], anchor, queue[anchor], after = !up)
+            session.reorderQueued(at, text, anchor, queue[anchor], after = !up)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != queue }
             }
@@ -913,10 +914,11 @@ class ChatViewModel(
 
     fun dropQueued(index: Int, text: String) {
         val before = state.value.queue
-        // Another device may have changed the queue since this message was opened.
-        if (before.getOrNull(index) != text) return
+        // Found again by its text if another device changed the queue since it
+        // was opened; already gone means there is nothing left to drop.
+        val at = queuedAt(before, index, text) ?: return
         launchGuarded(_droppingQueued) {
-            session.dropQueued(index, text)
+            session.dropQueued(at, text)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }
@@ -926,6 +928,11 @@ class ChatViewModel(
     fun loadOlder() {
         launchGuarded { session.loadOlder() }
     }
+
+    /** Where [text] sits now: its old [index] if unchanged, else its nearest copy. */
+    private fun queuedAt(queue: List<String>, index: Int, text: String): Int? =
+        if (queue.getOrNull(index) == text) index
+        else queue.indices.filter { queue[it] == text }.minByOrNull { kotlin.math.abs(it - index) }
 
     private fun launchGuarded(
         guard: MutableStateFlow<Boolean>? = null,

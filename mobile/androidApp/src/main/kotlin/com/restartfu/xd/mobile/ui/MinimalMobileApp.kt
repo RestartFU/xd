@@ -1583,7 +1583,10 @@ private fun AutoSettleSettings(model: MainViewModel) {
     // Edits wait until no request is out, so none is computed from rules that
     // are about to change and no tap is lost.
     val busy by model.autoSettleBusy.collectAsStateWithLifecycle()
-    val editable = busy == 0
+    val stale by model.autoSettleStale.collectAsStateWithLifecycle()
+    // Nor while the rules shown are known to be out of date: a relative
+    // change such as one more day must start from the host's value.
+    val editable = busy == 0 && !stale
     if (current == null) {
         Text(
             error ?: "Reading auto-settle rules…",
@@ -1639,7 +1642,6 @@ private fun AutoSettleSettings(model: MainViewModel) {
         onCheckedChange = { model.setAutoSettle(keepPullRequests = it) },
         enabled = editable,
     )
-    val stale by model.autoSettleStale.collectAsStateWithLifecycle()
     // Any failure keeps Try again in reach, including a failed retry.
     if (stale || error != null) {
         Row(verticalAlignment = Alignment.CenterVertically) {
