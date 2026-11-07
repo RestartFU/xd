@@ -923,8 +923,8 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn a_chat_on_the_default_branch_does_not_ask_github() {
-        with_fake_gh("exit 1", |fixture, workdir| {
+    fn a_chat_on_the_default_branch_can_have_a_pull_request() {
+        with_fake_gh("echo https://github.com/o/r/pull/8", |fixture, workdir| {
             let status = std::process::Command::new("git")
                 .args(["checkout", "-q", "-b", "main"])
                 .current_dir(workdir)
@@ -933,9 +933,34 @@ mod tests {
             assert!(status.success());
             assert_eq!(
                 fixture.store.chat_pull_request(&fixture.chat),
-                Some(json!({"branch": "main", "url": ""})),
+                Some(json!({"branch": "main", "url": "https://github.com/o/r/pull/8"})),
             );
         });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_chat_on_a_detached_head_has_no_pull_request_to_report() {
+        with_fake_gh("echo https://github.com/o/r/pull/9", |fixture, workdir| {
+            let status = std::process::Command::new("git")
+                .args(["checkout", "-q", "--detach"])
+                .current_dir(workdir)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert_eq!(fixture.store.chat_pull_request(&fixture.chat), None);
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_checkout_during_the_lookup_discards_the_answer() {
+        with_fake_gh(
+            "git checkout -q -b other; echo https://github.com/o/r/pull/10",
+            |fixture, _| {
+                assert_eq!(fixture.store.chat_pull_request(&fixture.chat), None);
+            },
+        );
     }
 
     #[test]
