@@ -15,7 +15,7 @@ read init
 printf '%s\n' '{"id":1,"result":{}}'
 read initialized
 read list
-printf '%s\n' '{"id":2,"result":{"data":[{"model":"future-codex","displayName":"Future Codex","isDefault":true}]}}'
+printf '%s\n' '{"id":2,"result":{"data":[{"model":"future-codex","displayName":"Future Codex"},{"model":"future-everyday","displayName":"Future Everyday","isDefault":true}]}}'
 read unexpected
 "#).unwrap();
     fs::write(&claude, r#"#!/bin/sh

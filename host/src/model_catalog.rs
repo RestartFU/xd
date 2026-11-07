@@ -16,30 +16,69 @@ pub(crate) struct Model {
     pub name: String,
     pub context_window: i64,
     pub is_default: bool,
+    /// The reasoning effort the assistant itself starts this model on, when it says.
+    pub default_effort: Option<String>,
 }
 
 #[derive(Default)]
-struct Cache {
-    checked: Option<Instant>,
-    models: Vec<Model>,
+struct Catalog {
+    /// Serializes discovery and records when it last ran.
+    refreshed: Mutex<Option<Instant>>,
+    /// Held only to read or replace the list, so a reader never waits on a probe.
+    models: Mutex<Vec<Model>>,
 }
 
-static CODEX: OnceLock<Mutex<Cache>> = OnceLock::new();
-static CLAUDE: OnceLock<Mutex<Cache>> = OnceLock::new();
+static CODEX: OnceLock<Catalog> = OnceLock::new();
+static CLAUDE: OnceLock<Catalog> = OnceLock::new();
 
+#[cfg(test)]
+thread_local! {
+    static TEST_MODELS: std::cell::RefCell<std::collections::HashMap<String, Vec<Model>>> =
+        Default::default();
+}
+
+/// Stands in for discovery on the calling test's thread.
+#[cfg(test)]
+pub(crate) fn set_test_models(backend: &str, models: Vec<Model>) {
+    TEST_MODELS.with(|test| test.borrow_mut().insert(backend.to_owned(), models));
+}
+
+/// The last discovered models, without ever waiting for a probe to finish.
 pub(crate) fn cached_models(backend: &str) -> Vec<Model> {
-    let cache = match backend {
+    #[cfg(test)]
+    if let Some(models) = TEST_MODELS.with(|test| test.borrow().get(backend).cloned()) {
+        return models;
+    }
+    let catalog = match backend {
         "codex" => CODEX.get(),
         "claude" => CLAUDE.get(),
         _ => None,
     };
-    cache
-        .and_then(|cache| cache.try_lock().ok().map(|cache| cache.models.clone()))
+    catalog
+        .and_then(|catalog| catalog.models.lock().ok().map(|models| models.clone()))
         .unwrap_or_default()
 }
 
+/// The model the assistant itself reports as its default, if it has been discovered.
+pub(crate) fn cached_default_model(backend: &str) -> Option<Model> {
+    cached_models(backend)
+        .into_iter()
+        .find(|model| model.is_default)
+}
+
+/// Discovers without blocking the caller, for when only the cache may be read.
+pub(crate) fn refresh_in_background(backend: &str) {
+    if cfg!(test) {
+        return;
+    }
+    let backend = backend.to_owned();
+    thread::spawn(move || {
+        models(&backend);
+    });
+}
+
 pub(crate) fn models(backend: &str) -> Vec<Model> {
-    let cache = match backend {
+    let catalog = match backend {
         "codex" => &CODEX,
         "claude" => &CLAUDE,
         _ => return Vec::new(),
@@ -48,19 +87,24 @@ pub(crate) fn models(backend: &str) -> Vec<Model> {
     if cfg!(test) {
         return Vec::new();
     }
-    let Ok(mut cache) = cache.get_or_init(Default::default).lock() else {
+    let catalog = catalog.get_or_init(Default::default);
+    let Ok(mut refreshed) = catalog.refreshed.lock() else {
         return Vec::new();
     };
-    if cache
-        .checked
-        .is_none_or(|checked| checked.elapsed() >= Duration::from_secs(300))
-    {
-        if let Some(models) = discover(backend) {
-            cache.models = models;
+    if refreshed.is_none_or(|checked| checked.elapsed() >= Duration::from_secs(300)) {
+        if let Some(discovered) = discover(backend)
+            && let Ok(mut models) = catalog.models.lock()
+        {
+            *models = discovered;
         }
-        cache.checked = Some(Instant::now());
+        *refreshed = Some(Instant::now());
     }
-    cache.models.clone()
+    drop(refreshed);
+    catalog
+        .models
+        .lock()
+        .map(|models| models.clone())
+        .unwrap_or_default()
 }
 
 struct Probe(Child);
@@ -231,6 +275,10 @@ fn parse_models(backend: &str, values: &Value) -> Option<Vec<Model>> {
                 .filter(|n| *n > 0)
                 .unwrap_or(0),
             is_default,
+            default_effort: value["defaultReasoningEffort"]
+                .as_str()
+                .filter(|effort| !effort.trim().is_empty())
+                .map(str::to_owned),
         });
     }
     (!models.is_empty()).then_some(models)
@@ -256,6 +304,23 @@ mod tests {
         assert_eq!(models[0].name, "New model");
         assert!(models[0].is_default);
         assert_eq!(models[0].context_window, 0);
+        assert_eq!(models[0].default_effort, None);
+    }
+
+    #[test]
+    fn codex_reports_each_models_own_default_effort() {
+        let models = parse_models(
+            "codex",
+            &json!([
+                {"model":"everyday", "isDefault":true, "defaultReasoningEffort":"low"},
+                {"model":"frontier", "defaultReasoningEffort":"medium"},
+                {"model":"unstated", "defaultReasoningEffort":" "}
+            ]),
+        )
+        .unwrap();
+        assert_eq!(models[0].default_effort.as_deref(), Some("low"));
+        assert_eq!(models[1].default_effort.as_deref(), Some("medium"));
+        assert_eq!(models[2].default_effort, None);
     }
 
     #[test]

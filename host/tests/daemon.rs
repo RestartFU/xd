@@ -308,11 +308,27 @@ fn installed_cli_reuses_sessions_and_resumes_after_process_loss() {
             reply["working"] == false
         });
     };
+    // Only processes that opened a thread ran turns: the host also starts short
+    // ones to ask the assistant for its models.
     let requests = || -> Vec<Value> {
-        fs::read_to_string(daemon.root.join("codex.requests"))
+        let frames: Vec<Value> = fs::read_to_string(daemon.root.join("codex.requests"))
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let turn_processes: Vec<Value> = frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    frame["frame"]["method"].as_str(),
+                    Some("thread/start" | "thread/resume")
+                )
+            })
+            .map(|frame| frame["pid"].clone())
+            .collect();
+        frames
+            .into_iter()
+            .filter(|frame| turn_processes.contains(&frame["pid"]))
             .collect()
     };
     send(&mut client);

@@ -756,7 +756,7 @@ impl StateStore {
             "draft_revision": row.14,
             "shortcuts": shortcuts,
             "working": row.11,
-            "effort": row.5.unwrap_or_else(|| "high".into()),
+            "effort": row.5.unwrap_or_else(|| default_effort(&row.2, row.4.as_deref())),
             "new_worktree": row.10,
             "has_messages": has_messages,
         });
@@ -1197,14 +1197,8 @@ impl StateStore {
 
     pub fn agent_catalog(&self) -> Result<Value, StorageError> {
         let backends = [
-            catalog_backend(
-                "claude",
-                "Claude Code",
-                "claude-opus-5",
-                CLAUDE_MODELS,
-                "ultracode",
-            ),
-            catalog_backend("codex", "Codex", "gpt-5.6-sol", CODEX_MODELS, "ultra"),
+            catalog_backend("claude", "Claude Code", CLAUDE_MODELS, "ultracode"),
+            catalog_backend("codex", "Codex", CODEX_MODELS, "ultra"),
             json!({
                 "id": "jcode",
                 "name": "JCode",
@@ -1273,6 +1267,7 @@ impl StateStore {
                     "UPDATE chats SET model = ?, effort = ?, updated_at = ? WHERE id = ?",
                     params![model, effort, now, chat_id],
                 )?;
+                remember_backend_choice(&transaction, backend, "model", Some(model))?;
                 if previous.1.as_deref() != Some(model) {
                     transaction.execute(
                         "INSERT INTO messages (chat_id, role, content, created_at) \
@@ -1294,6 +1289,7 @@ impl StateStore {
                         ));
                     }
                 }
+                remember_backend_choice(&transaction, &previous.0, "effort", value)?;
                 transaction.execute(
                     "UPDATE chats SET effort = ?, updated_at = ? WHERE id = ?",
                     params![value, now, chat_id],
@@ -1527,7 +1523,7 @@ impl StateStore {
                     .then(|| chat_model.clone())
                     .flatten()
             })
-            .unwrap_or_else(|| default_model(&backend).into());
+            .unwrap_or_else(|| default_model(&backend));
         validate_model(&backend, &model)?;
         let effort = (backend == chat_backend)
             .then_some(chat_effort)
@@ -2431,7 +2427,7 @@ impl StateStore {
                     .then(|| chat_model.clone())
                     .flatten()
             })
-            .unwrap_or_else(|| default_model(&backend).into());
+            .unwrap_or_else(|| default_model(&backend));
         validate_model(&backend, &model)?;
         let effort = (backend == chat_backend)
             .then_some(chat_effort)
@@ -2986,22 +2982,19 @@ impl StateStore {
         }
         let defaults = transaction
             .query_row(
-                "SELECT backend, model, effort, access, plan, fast \
-                 FROM agent_defaults WHERE singleton = 1",
+                "SELECT backend, access, plan, fast FROM agent_defaults WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, bool>(4)?,
-                        row.get::<_, bool>(5)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
                     ))
                 },
             )
             .optional()?
-            .unwrap_or_else(|| ("claude".into(), None, None, None, false, false));
+            .unwrap_or_else(|| ("claude".into(), None, false, false));
         let folder_values = resolved_folder_values(&folder_setting_chain(
             &transaction,
             &self.workspace_root,
@@ -3012,15 +3005,13 @@ impl StateStore {
             .or(folder_values.backend)
             .unwrap_or(defaults.0);
         validate_backend(&backend)?;
-        let model = if backend_override.is_some() {
-            Some(default_model(&backend).to_owned())
-        } else {
-            match folder_values.model {
-                Some(model) if validate_model(&backend, &model).is_ok() => Some(model),
-                Some(_) => None,
-                None => defaults.1,
-            }
-        };
+        let (model, effort) = new_chat_model_and_effort(
+            &transaction,
+            &backend,
+            folder_values.model.filter(|model| {
+                backend_override.is_none() && validate_model(&backend, model).is_ok()
+            }),
+        )?;
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
         let (workdir, original_workdir) = if let Some(shared) = &shared {
@@ -3116,10 +3107,10 @@ impl StateStore {
                 title,
                 backend,
                 model,
+                effort,
+                defaults.1,
                 defaults.2,
                 defaults.3,
-                defaults.4,
-                defaults.5,
                 false,
                 workdir,
                 original_workdir,
@@ -3612,6 +3603,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             disable_claude_mode(database)?;
             remove_terminal_chats(database)?;
             ensure_workspace_sessions(database)?;
+            ensure_backend_choices(database)?;
             return Ok(());
         }
     }
@@ -3704,6 +3696,19 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     disable_claude_mode(database)?;
     remove_terminal_chats(database)?;
     ensure_workspace_sessions(database)?;
+    ensure_backend_choices(database)?;
+    Ok(())
+}
+
+/// The model and effort last picked for each assistant, which new chats on it
+/// start with. `agent_defaults` cannot serve this: it holds one row for every
+/// assistant and also records values nobody picked, so it starts empty here
+/// rather than carrying a retired built-in default forward as a choice.
+fn ensure_backend_choices(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_backend_choices (backend TEXT PRIMARY KEY, \
+         model TEXT, effort TEXT);",
+    )?;
     Ok(())
 }
 
@@ -4453,7 +4458,6 @@ fn clean_shortcuts(value: &Value) -> Result<Vec<String>, StorageError> {
 fn catalog_backend(
     id: &str,
     name: &str,
-    default_model: &str,
     models: &[(&str, &str, i64)],
     extra_effort: &str,
 ) -> Value {
@@ -4462,7 +4466,7 @@ fn catalog_backend(
         .iter()
         .find(|model| model.is_default)
         .map(|model| model.id.as_str())
-        .unwrap_or(default_model);
+        .unwrap_or_else(|| fallback_model(id));
     let models = if discovered.is_empty() {
         models
         .iter()
@@ -4492,12 +4496,92 @@ fn validate_backend(backend: &str) -> Result<(), StorageError> {
     }
 }
 
-fn default_model(backend: &str) -> &'static str {
+/// The model a chat runs on before one is picked for it: the assistant's own
+/// default, or a built-in one when the assistant has not been reachable.
+fn default_model(backend: &str) -> String {
+    crate::model_catalog::cached_default_model(backend)
+        .map(|model| model.id)
+        .unwrap_or_else(|| fallback_model(backend).into())
+}
+
+fn fallback_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
         "jcode" => "default",
         _ => "gpt-5.6-sol",
     }
+}
+
+/// The effort a chat runs on before one is picked for it. Codex reports one per
+/// model; Claude Code does not report any, so it runs on the built-in choice.
+fn default_effort(backend: &str, model: Option<&str>) -> String {
+    let discovered = crate::model_catalog::cached_models(backend);
+    discovered
+        .iter()
+        .find(|known| match model {
+            Some(model) => known.id == model,
+            None => known.is_default,
+        })
+        .and_then(|known| known.default_effort.clone())
+        .filter(|effort| effort_supported(backend, effort))
+        .unwrap_or_else(|| "high".into())
+}
+
+/// A new chat starts on its workspace's model, else the last one picked for this
+/// assistant, else the assistant's own default. Effort stays unset until one has
+/// been picked, so that it follows whichever model the chat is on.
+///
+/// This runs with the database locked, so it only reads the discovery cache. A
+/// model stays unset if nothing is cached yet: clients then show the default from
+/// the catalog, and the turn resolves it once discovery has finished.
+fn new_chat_model_and_effort(
+    transaction: &rusqlite::Transaction<'_>,
+    backend: &str,
+    workspace_model: Option<String>,
+) -> Result<(Option<String>, Option<String>), StorageError> {
+    let (picked_model, picked_effort) = transaction
+        .query_row(
+            "SELECT model, effort FROM agent_backend_choices WHERE backend = ?",
+            [backend],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or_default();
+    let discovered = crate::model_catalog::cached_models(backend);
+    // An undiscovered catalog says nothing about whether the pick still exists.
+    let picked_model = picked_model.filter(|picked| {
+        discovered.is_empty() || discovered.iter().any(|known| known.id == *picked)
+    });
+    let model = workspace_model
+        .or(picked_model)
+        .or_else(|| crate::model_catalog::cached_default_model(backend).map(|model| model.id));
+    if model.is_none() {
+        crate::model_catalog::refresh_in_background(backend);
+    }
+    let effort = picked_effort.filter(|effort| effort_supported(backend, effort));
+    Ok((model, effort))
+}
+
+fn remember_backend_choice(
+    transaction: &rusqlite::Transaction<'_>,
+    backend: &str,
+    column: &str,
+    value: Option<&str>,
+) -> Result<(), StorageError> {
+    // The column is chosen only by the closed match in set_option.
+    transaction.execute(
+        &format!(
+            "INSERT INTO agent_backend_choices (backend, {column}) VALUES (?, ?) \
+             ON CONFLICT(backend) DO UPDATE SET {column} = excluded.{column}"
+        ),
+        params![backend, value],
+    )?;
+    Ok(())
 }
 
 fn validate_model(backend: &str, model: &str) -> Result<(), StorageError> {
@@ -5830,12 +5914,10 @@ fn prepare_turn(
             ));
         }
     }
-    let model = chat.3.unwrap_or_else(|| match chat.1.as_str() {
-        "claude" => "claude-opus-5".into(),
-        "jcode" => "default".into(),
-        _ => "gpt-5.6-sol".into(),
-    });
-    let effort = chat.4.unwrap_or_else(|| "high".into());
+    let model = chat.3.unwrap_or_else(|| default_model(&chat.1));
+    let effort = chat
+        .4
+        .unwrap_or_else(|| default_effort(&chat.1, Some(&model)));
     let access = if chat.6 {
         "plan".into()
     } else {
@@ -7730,7 +7812,6 @@ mod tests {
             .unwrap()
             .to_owned();
         assert_eq!(store.chat(&chat_id).unwrap()["backend"], "codex");
-        assert_eq!(store.chat(&chat_id).unwrap()["model"], "gpt-5");
         store
             .rename_chat(&json!({"chat": chat_id, "title": "Renamed"}))
             .unwrap();
@@ -7779,6 +7860,247 @@ mod tests {
                 .to_string()
                 .contains("No such assistant")
         );
+    }
+
+    fn discovered(id: &str, is_default: bool, effort: Option<&str>) -> crate::model_catalog::Model {
+        crate::model_catalog::Model {
+            id: id.into(),
+            name: id.into(),
+            context_window: 0,
+            is_default,
+            default_effort: effort.map(str::to_owned),
+        }
+    }
+
+    fn new_chat_on(store: &StateStore, folder: &str, backend: &str) -> Value {
+        let id = store
+            .new_chat(&json!({"folder": folder, "backend": backend}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut chat = store.chat(&id).unwrap();
+        chat["id"] = json!(id);
+        chat
+    }
+
+    fn workspace(store: &StateStore) -> String {
+        store.new_folder(&json!({"name": "Workspace"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn pick(store: &StateStore, chat: &Value, option: &str, value: &str) {
+        store
+            .set_option(&json!({"chat": chat["id"], "option": option, "value": value}))
+            .unwrap();
+    }
+
+    #[test]
+    fn new_chats_start_on_the_defaults_the_assistant_reports() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-frontier", false, Some("medium")),
+                discovered("cli-everyday", true, Some("low")),
+            ],
+        );
+        crate::model_catalog::set_test_models("claude", vec![discovered("cli-claude", true, None)]);
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        assert_eq!(codex["model"], "cli-everyday");
+        assert_eq!(codex["effort"], "low");
+        let claude = new_chat_on(&store, &folder, "claude");
+        assert_eq!(claude["model"], "cli-claude");
+        assert_eq!(claude["effort"], "high");
+
+        // Effort is still unset, so it follows the model the chat moves to.
+        pick(&store, &codex, "model", "cli-frontier");
+        let codex = store.chat(codex["id"].as_str().unwrap()).unwrap();
+        assert_eq!(codex["effort"], "medium");
+    }
+
+    #[test]
+    fn new_chats_start_on_the_last_choice_made_for_their_assistant() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        crate::model_catalog::set_test_models(
+            "claude",
+            vec![
+                discovered("cli-claude", true, None),
+                discovered("cli-claude-big", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        pick(&store, &codex, "model", "cli-frontier");
+        pick(&store, &codex, "effort", "high");
+        let claude = new_chat_on(&store, &folder, "claude");
+        assert_eq!(claude["model"], "cli-claude", "Codex's pick stays on Codex");
+        pick(&store, &claude, "model", "cli-claude-big");
+        pick(&store, &claude, "effort", "ultracode");
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        assert_eq!(codex["model"], "cli-frontier");
+        assert_eq!(codex["effort"], "high");
+        let claude = new_chat_on(&store, &folder, "claude");
+        assert_eq!(claude["model"], "cli-claude-big");
+        assert_eq!(claude["effort"], "ultracode");
+
+        // Choices survive a restart.
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let codex = new_chat_on(&store, &folder, "codex");
+        assert_eq!(codex["model"], "cli-frontier");
+        assert_eq!(codex["effort"], "high");
+    }
+
+    fn first_turn(store: &StateStore, chat: &Value) -> TurnSpec {
+        match store
+            .prepare_send(&json!({"chat": chat["id"], "text": "hello"}))
+            .unwrap()
+        {
+            SendDisposition::Start { turn, .. } => turn,
+            SendDisposition::Queued { .. } => panic!("a first message starts a turn"),
+        }
+    }
+
+    #[test]
+    fn turns_run_on_the_defaults_and_choices_the_chat_shows() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("Workspace")).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let turn = first_turn(&store, &new_chat_on(&store, &folder, "codex"));
+        assert_eq!(
+            (turn.model.as_str(), turn.effort.as_str()),
+            ("cli-everyday", "low")
+        );
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        pick(&store, &chat, "model", "cli-frontier");
+        pick(&store, &chat, "effort", "high");
+        let turn = first_turn(&store, &new_chat_on(&store, &folder, "codex"));
+        assert_eq!(
+            (turn.model.as_str(), turn.effort.as_str()),
+            ("cli-frontier", "high")
+        );
+    }
+
+    #[test]
+    fn only_an_explicit_choice_is_remembered() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let old = new_chat_on(&store, &folder, "codex");
+        pick(&store, &old, "access", "edit");
+        pick(&store, &old, "plan", "true");
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        assert_eq!(chat["model"], "cli-everyday");
+        assert_eq!(chat["effort"], "low");
+    }
+
+    #[test]
+    fn a_choice_the_assistant_no_longer_offers_falls_back_to_its_default() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+        // Nothing has been discovered yet, so a built-in model can be picked.
+        pick(&store, &chat, "model", "gpt-5.5");
+        pick(&store, &chat, "effort", "ultra");
+        assert_eq!(new_chat_on(&store, &folder, "codex")["model"], "gpt-5.5");
+
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("cli-everyday", true, Some("low"))],
+        );
+        let chat = new_chat_on(&store, &folder, "codex");
+        assert_eq!(chat["model"], "cli-everyday");
+        assert_eq!(chat["effort"], "ultra");
+    }
+
+    #[test]
+    fn a_workspace_model_outranks_the_last_choice() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+        pick(&store, &chat, "model", "cli-frontier");
+        store
+            .set_folder_settings(&json!({
+                "folder": folder,
+                "backend": "codex",
+                "model": "cli-everyday",
+                "workdir": null,
+                "repo": null,
+            }))
+            .unwrap();
+
+        let id = store.new_chat(&json!({"folder": folder})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(store.chat(&id).unwrap()["model"], "cli-everyday");
+        // Asking for an assistant by name skips the workspace's choice, as before.
+        assert_eq!(
+            new_chat_on(&store, &folder, "codex")["model"],
+            "cli-frontier"
+        );
+    }
+
+    #[test]
+    fn an_undiscovered_assistant_leaves_the_model_for_the_turn_to_resolve() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+        assert!(chat.get("model").is_none());
+        assert_eq!(chat["effort"], "high");
+        assert_eq!(default_model("codex"), fallback_model("codex"));
+
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("cli-everyday", true, Some("low"))],
+        );
+        assert_eq!(default_model("codex"), "cli-everyday");
+        assert_eq!(default_effort("codex", None), "low");
     }
 
     #[test]
