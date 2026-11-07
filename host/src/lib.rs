@@ -247,9 +247,7 @@ impl Engine {
             Some("daemon-info") => {
                 json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str)})
             }
-            Some("resume-interrupted") if self.pairing.is_local(owner) => {
-                self.resume_interrupted(&request)
-            }
+            Some("resume-interrupted") => self.resume_interrupted(&request),
             Some("daemon-stop") if self.pairing.is_local(owner) => {
                 self.shutdown.store(true, Ordering::Release);
                 json!({"ok": true})

@@ -96,7 +96,9 @@ installed until you confirm. **Settings → Updates** checks manually. Restart i
 blocked while chats are running or terminal tabs are open; close the terminal tabs
 first. Stored conversations can resume afterward. Turn on **Settings → General →
 Resume chats after a restart** to have xd continue any turn that a crash, reboot, or
-daemon stop cut off, the next time the app connects to the local daemon. It posts a
+daemon stop cut off, the next time the app connects to that daemon, local or paired. With
+the setting off, connecting drops those waiting chats instead, so a later change of mind
+does not restart old work; the play button below still works. It posts a
 visible message in the chat and the agent continues with no prompt from you, so it
 is off by default. A resumed turn that is cut off again waits for you. After a turn is
 stopped, cut off, or ended by a usage limit, the composer's send button becomes a play

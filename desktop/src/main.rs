@@ -2961,6 +2961,9 @@ impl XdDesktop {
         }
         if let Some(host) = &self.remote_host {
             let _ = host.agent_catalog();
+            // A host without a desktop of its own has nobody else to answer. An
+            // older host refuses this, and the refusal is not shown.
+            let _ = host.resume_interrupted(self.settings.auto_resume_chats);
         }
         if self.active_endpoint == ChatEndpoint::Remote {
             self.refresh_selected_chat_after_connect(cx);
@@ -19308,6 +19311,15 @@ mod tests {
             .split_once("let workspace_overlay =")
             .expect("end of remote overlay")
             .0;
+
+        let connect = production
+            .split_once("fn install_remote_session(")
+            .expect("remote connection")
+            .1
+            .split_once("fn listen_for_remote(")
+            .expect("end of remote connection")
+            .0;
+        assert!(connect.contains("host.resume_interrupted(self.settings.auto_resume_chats)"));
 
         assert!(overlay.contains("Pair with a host"));
         assert!(overlay.contains("self.remote_address_input.clone()"));

@@ -498,6 +498,54 @@ fn a_restart_continues_cut_off_turns_only_when_asked() {
 }
 
 #[test]
+fn a_paired_device_continues_turns_a_restart_cut_off() {
+    let mut daemon = Daemon::start();
+    let mut local = daemon.client();
+    let chat = daemon.chat(&mut local);
+    let pairing = local.call(json!({"op":"peer-pairing", "bind":"127.0.0.1", "port":0}));
+    assert_eq!(pairing["ok"], true, "{pairing}");
+    let (mut remote, session) = daemon.remote(&pairing, None);
+
+    // Before it authenticates, a device has no say.
+    let refused = remote.call(json!({"op":"resume-interrupted", "resume":true}));
+    assert_eq!(refused["ok"], false, "{refused}");
+    let paired = remote.call(json!({"op":"pair", "code":pairing["code"], "name":"Test device"}));
+    assert_eq!(paired["ok"], true, "{paired}");
+    let sent = remote.call(json!({"op":"send", "chat":chat, "text":"forever"}));
+    assert_eq!(sent["ok"], true, "{sent}");
+    drop(remote);
+    drop(session);
+    drop(local);
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
+    daemon.restart();
+
+    // The daemon restores its listener before it starts serving the socket.
+    assert_eq!(daemon.client().call(json!({"op":"ping"}))["ok"], true);
+    let (mut remote, _session) = daemon.remote(&pairing, None);
+    let hello = remote.call(json!({"op":"hello", "token":paired["token"]}));
+    assert_eq!(hello["ok"], true, "{hello}");
+    let reply = remote.call(json!({"op":"resume-interrupted", "resume":true}));
+    assert_eq!(reply["resumed"], json!([chat]), "{reply}");
+    let messages = remote.call(json!({"op":"messages", "chat":chat}));
+    assert!(
+        messages["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "user"
+                && message["content"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Continue where")),
+        "{messages}"
+    );
+    // Answered once, so another device connecting later does nothing.
+    let again = remote.call(json!({"op":"resume-interrupted", "resume":true}));
+    assert_eq!(again["resumed"], json!([]), "{again}");
+}
+
+#[test]
 fn update_restart_protects_open_shells() {
     let daemon = Daemon::start();
     let mut client = daemon.client();

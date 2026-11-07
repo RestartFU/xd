@@ -46,7 +46,8 @@ Clients share the same chats, drafts, queues, pending approvals, and running
 turns. Disconnecting or closing a client leaves the daemon running. Reconnecting
 takes fresh snapshots and reconciles live output using turn watermarks. A daemon
 restart interrupts active turns, preserves recorded history and backend thread
-IDs, and reports interrupted work rather than silently continuing it.
+IDs, and reports interrupted work. It continues that work only if the first desktop to
+connect afterward has **Resume chats after a restart** on.
 
 The host must have xd and the assistant CLIs installed. Starting the desktop
 starts its daemon automatically. For a headless host, run:
