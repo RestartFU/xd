@@ -38,7 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 
-if sudo sysctl -n "$restriction" >/dev/null 2>&1; then
+# Put the host's own setting back however the script ends, so running it
+# locally cannot leave the restriction switched off.
+if original=$(sudo sysctl -n "$restriction" 2>/dev/null); then
+  trap 'sudo sysctl -w "$restriction=$original" >/dev/null' EXIT
   sudo sysctl -w "$restriction=1"
   run sandbox-unavailable
   sudo sysctl -w "$restriction=0"

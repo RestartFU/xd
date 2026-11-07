@@ -1004,6 +1004,12 @@ impl ChromiumView {
     pub fn close(&self, timeout: Duration) {
         let (closed, done) = mpsc::channel();
         let mut shared = lock(&self.shared);
+        // A page can close itself, with `window.close()`; then nothing is left
+        // to wait for.
+        if shared.browser_gone {
+            release_windows(&mut shared);
+            return;
+        }
         shared.closed = Some(closed);
         let host = shared.browser.as_ref().and_then(|browser| browser.0.host());
         drop(shared);
