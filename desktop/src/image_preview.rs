@@ -352,22 +352,36 @@ fn viewer_button(
 }
 
 impl XdDesktop {
+    /// Each attachment's key: its id, and how many equal ones come before it,
+    /// so two copies of one file are still two tiles.
+    fn draft_keys(&self) -> Vec<DraftKey> {
+        let attachments = &self.model.draft_attachments;
+        attachments
+            .iter()
+            .enumerate()
+            .map(|(index, attachment)| {
+                let earlier = attachments[..index]
+                    .iter()
+                    .filter(|other| other.id == attachment.id)
+                    .count();
+                (attachment.id, earlier)
+            })
+            .collect()
+    }
+
     /// Where an attachment is in the draft now. A tile's position is from the
     /// last draw, and a synchronized draft or a paste may have moved it since.
-    fn draft_attachment_index(&self, id: u64) -> Option<usize> {
-        self.model
-            .draft_attachments
-            .iter()
-            .position(|attachment| attachment.id == id)
+    fn draft_attachment_index(&self, key: DraftKey) -> Option<usize> {
+        self.draft_keys().iter().position(|other| *other == key)
     }
 
     pub(super) fn remove_draft_attachment(
         &mut self,
-        id: u64,
+        key: DraftKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.draft_attachment_index(id) {
+        if let Some(index) = self.draft_attachment_index(key) {
             self.model.draft_attachments.remove(index);
             self.attachments_dirty = true;
             self.attachment_generation = self.attachment_generation.saturating_add(1);
@@ -439,15 +453,16 @@ impl XdDesktop {
         if self.model.draft_attachments.is_empty() {
             return None;
         }
+        let keys = self.draft_keys();
         let tiles = self
             .model
             .draft_attachments
             .iter()
-            .filter(|attachment| attachment.preview.is_some())
+            .zip(keys.iter().copied())
+            .filter(|(attachment, _)| attachment.preview.is_some())
             .enumerate()
-            .map(|(index, attachment)| {
-                let image = attachment.id;
-                let thumbnail = self.composer_thumbnails.get(&(image, side));
+            .map(|(index, (attachment, image))| {
+                let thumbnail = self.composer_thumbnails.get(&(attachment.id, side));
                 let content = match thumbnail {
                     Some(ThumbnailState::Ready(thumbnail)) => img(thumbnail.clone())
                         .size_full()
@@ -524,10 +539,11 @@ impl XdDesktop {
             .model
             .draft_attachments
             .iter()
-            .filter(|attachment| attachment.preview.is_none())
+            .zip(keys.iter().copied())
+            .filter(|(attachment, _)| attachment.preview.is_none())
             .enumerate()
-            .map(|(index, attachment)| {
-                self.render_draft_file(colors, index, attachment, cx)
+            .map(|(index, (attachment, key))| {
+                self.render_draft_file(colors, index, key, attachment, cx)
                     .into_any_element()
             });
         Some(
@@ -549,10 +565,10 @@ impl XdDesktop {
         &self,
         colors: ThemeColors,
         index: usize,
+        id: DraftKey,
         attachment: &Attachment,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let id = attachment.id;
         div()
             .id(("draft-file", index))
             .debug_selector(move || format!("draft-file-{index}"))
@@ -611,17 +627,22 @@ impl XdDesktop {
             )
     }
 
-    fn open_image_preview(&mut self, image_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_image_preview(
+        &mut self,
+        image_id: DraftKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(chat) = self.model.selected_chat.clone() else {
             return;
         };
+        let keys = self.draft_keys();
         let shown = self
             .model
             .draft_attachments
             .iter()
-            .filter_map(|attachment| {
-                Some((attachment.id, attachment.preview.clone()?, attachment))
-            });
+            .zip(keys)
+            .filter_map(|(attachment, key)| Some((key, attachment.preview.clone()?, attachment)));
         let mut index = None;
         let mut images = Vec::new();
         for (position, (id, image, attachment)) in shown.enumerate() {
@@ -897,6 +918,9 @@ impl XdDesktop {
         )
     }
 }
+
+/// An attachment's id and how many equal ones precede it in the draft.
+pub(super) type DraftKey = (u64, usize);
 
 /// A file's size as the composer shows it: "812 B", "14 KB", "3.2 MB".
 pub(super) fn file_size_label(bytes: usize) -> String {
@@ -1313,6 +1337,38 @@ mod tests {
             assert!(desktop.attachments_dirty);
         });
         assert!(composer_is_focused(&desktop, cx));
+    }
+
+    #[gpui::test]
+    fn two_copies_of_one_attachment_are_two_tiles(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[(40, 40)]);
+        desktop.update(cx, |desktop, cx| {
+            let copy = desktop.model.draft_attachments[0].clone();
+            desktop.model.draft_attachments.push(copy);
+            let notes = Attachment::from_file("notes.txt", b"same".to_vec());
+            desktop.model.draft_attachments.push(notes.clone());
+            desktop.model.draft_attachments.push(notes);
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        click(cx, "draft-image-1");
+        cx.update(|_, cx| {
+            let preview = desktop
+                .read(cx)
+                .image_preview
+                .as_ref()
+                .expect("the viewer is open");
+            assert_eq!(preview.index, 1);
+        });
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| desktop.close_image_preview(window, cx));
+        });
+        click(cx, "remove-draft-file-1");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.model.draft_attachments.len(), 3);
+            assert_eq!(desktop.draft_keys()[2].1, 0);
+        });
     }
 
     #[gpui::test]
