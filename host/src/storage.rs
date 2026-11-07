@@ -3248,6 +3248,15 @@ impl StateStore {
                     "There is already a project of that name there.".into()
                 }));
             }
+            // Adding an organization over a folder of its name makes that
+            // folder the organization's, so it shows the account's avatar.
+            if let Some(owner) = owner {
+                database.execute(
+                    "UPDATE workspace_folders SET owner = ?, updated_at = ? \
+                     WHERE id = ? AND owner IS NOT ?",
+                    params![owner, now_seconds(), id, owner],
+                )?;
+            }
             let mut reply = json!({"ok": true, "id": id});
             if let Some(repo_url) = repo_url {
                 reply["cloning"] = Value::String(repo_url);
@@ -9622,6 +9631,16 @@ mod tests {
             organization,
             "asking again answers with the same folder"
         );
+        let plain = id(store
+            .new_folder(&json!({"name": "rust-lang", "group": true}))
+            .unwrap());
+        assert_eq!(
+            id(store
+                .new_folder(&json!({"name": "rust-lang", "owner": "rust-lang"}))
+                .unwrap()),
+            plain,
+            "an organization adopts a folder of its name"
+        );
 
         let tree = store.tree().unwrap();
         let folder = |wanted: &str| {
@@ -9635,6 +9654,7 @@ mod tests {
         };
         assert_eq!(folder(&organization)["group"], true);
         assert_eq!(folder(&organization)["owner"], "acme-inc");
+        assert_eq!(folder(&plain)["owner"], "rust-lang");
         assert_eq!(folder(&clients)["group"], true);
         assert_eq!(folder(&clients)["parent"], organization.as_str());
         assert!(folder(&clients).get("owner").is_none());
