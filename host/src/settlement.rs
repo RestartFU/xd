@@ -131,6 +131,8 @@ pub(crate) struct SettlementCandidate {
 
 /// A pull request that finished before the user's latest message records work
 /// the user has since resumed, so it says nothing about this session any more.
+/// GitHub reports whole seconds, so the same second proves nothing either way,
+/// and it is not taken as a reason to hide a session the user just spoke in.
 fn pull_request_settles(
     candidate: &SettlementCandidate,
     pull_request: &PullRequestSnapshot,
@@ -144,7 +146,7 @@ fn pull_request_settles(
     counts
         && pull_request
             .finished_at
-            .is_some_and(|finished_at| finished_at >= candidate.user_anchor_at)
+            .is_some_and(|finished_at| finished_at > candidate.user_anchor_at)
 }
 
 /// When the rules say this session settled, or `None` if they leave it active.
@@ -232,8 +234,7 @@ fn sweep(
     pull_requests: &mut PullRequestCache,
     now: i64,
 ) -> Result<usize, crate::StorageError> {
-    let settings = store.auto_settle_settings()?;
-    if !settings.configured() {
+    if !store.auto_settle_settings()?.configured() {
         return Ok(0);
     }
     pull_requests.retain(|_, (read_at, _)| read_at.elapsed() < PULL_REQUEST_LIFETIME);
@@ -241,6 +242,12 @@ fn sweep(
     for candidate in store.settlement_candidates()? {
         if candidate.chats.iter().any(|chat| has_interaction(chat)) {
             continue;
+        }
+        // Read for each session, since a pull request lookup can outlast a
+        // change in Settings. The update below refuses if one still slips in.
+        let settings = store.auto_settle_settings()?;
+        if !settings.configured() {
+            return Ok(settled);
         }
         // Inactivity alone decides unless the pull request could veto it, so
         // the network is only asked about sessions that are still in doubt.
@@ -259,7 +266,7 @@ fn sweep(
         let Some(settled_at) = settled_at else {
             continue;
         };
-        if store.auto_settle_session(&candidate, settled_at)? {
+        if store.auto_settle_session(&candidate, settled_at, &settings)? {
             settled += 1;
         }
     }
@@ -285,6 +292,11 @@ fn pull_request_for(
     }
     match store.pull_request_snapshot(workdir) {
         Ok(pull_request) => {
+            // The lookup takes a while, and it answers for the branch that was
+            // checked out when it began. If that has changed, ask again later.
+            if store.checked_out_branch(workdir).as_ref() != Some(&key.1) {
+                return None;
+            }
             cache.insert(key, (Instant::now(), pull_request));
             Some(pull_request)
         }
@@ -344,8 +356,8 @@ mod tests {
     fn a_merge_settles_at_once_unless_turned_off_but_a_close_always_does() {
         let settings = AutoSettleSettings::default();
         let idle = candidate(0);
-        let merged = pull_request(PullRequestState::Merged, NOW);
-        let closed = pull_request(PullRequestState::Closed, NOW);
+        let merged = pull_request(PullRequestState::Merged, NOW + 1);
+        let closed = pull_request(PullRequestState::Closed, NOW + 1);
         assert!(auto_settled_at(&idle, Some(&merged), NOW, &settings).is_some());
         let keep_merged = AutoSettleSettings {
             on_merge: false,
@@ -364,6 +376,12 @@ mod tests {
         let resumed = candidate(0);
         let old = pull_request(PullRequestState::Merged, resumed.user_anchor_at - 1);
         assert_eq!(auto_settled_at(&resumed, Some(&old), NOW, &settings), None);
+        let same_second = pull_request(PullRequestState::Merged, resumed.user_anchor_at);
+        assert_eq!(
+            auto_settled_at(&resumed, Some(&same_second), NOW, &settings),
+            None,
+            "the same second cannot show the merge came after the message"
+        );
         let unknown_time = PullRequestSnapshot {
             state: PullRequestState::Merged,
             finished_at: None,
@@ -724,10 +742,60 @@ mod tests {
         assert!(
             !fixture
                 .store
-                .auto_settle_session(&candidate, candidate.activity_at)
+                .auto_settle_session(
+                    &candidate,
+                    candidate.activity_at,
+                    &AutoSettleSettings::default()
+                )
                 .unwrap()
         );
         assert_eq!(fixture.listed_settled_at(), None);
+    }
+
+    #[test]
+    fn rules_changed_after_the_sweep_decided_stop_it_settling() {
+        let fixture = Fixture::new();
+        fixture.age(10);
+        let candidate = fixture.store.settlement_candidates().unwrap().remove(0);
+        let decided_under = fixture.store.auto_settle_settings().unwrap();
+        let changed = fixture
+            .store
+            .set_auto_settle_settings(&json!({"after_days": null, "on_merge": false}))
+            .unwrap();
+        assert!(
+            !fixture
+                .store
+                .auto_settle_session(&candidate, candidate.activity_at, &decided_under)
+                .unwrap()
+        );
+        assert_eq!(fixture.listed_settled_at(), None);
+        assert!(
+            fixture
+                .store
+                .auto_settle_session(&candidate, candidate.activity_at, &changed)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_branch_switched_during_the_lookup_discards_its_answer() {
+        let merged_at = now_seconds() + 60;
+        with_fake_gh(
+            &format!(
+                "git checkout -q -b other; \
+                 echo '{{\"state\":\"MERGED\",\"finished_at\":{merged_at}}}'"
+            ),
+            |fixture, _| {
+                let mut cache = HashMap::new();
+                assert_eq!(
+                    sweep(&fixture.store, &|_| false, &mut cache, now_seconds()).unwrap(),
+                    0
+                );
+                assert!(cache.is_empty(), "the answer was for the branch it left");
+                assert_eq!(fixture.listed_settled_at(), None);
+            },
+        );
     }
 
     #[test]

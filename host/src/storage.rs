@@ -3764,13 +3764,18 @@ impl StateStore {
 
     /// Settles a session a sweep picked, unless anything about it changed since
     /// the sweep looked: what the user does always outranks the rules. One
-    /// statement both checks and updates, so no message can land between them.
+    /// statement both checks and updates, so no message can land between them,
+    /// and the rules the sweep decided under must still be the ones in force.
     pub(crate) fn auto_settle_session(
         &self,
         candidate: &SettlementCandidate,
         settled_at: i64,
+        decided_under: &AutoSettleSettings,
     ) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if read_auto_settle_settings(&database)? != *decided_under {
+            return Ok(false);
+        }
         let changed = database.execute(
             "UPDATE workspace_sessions SET settled_override = 'settled', settled_at = ?1, \
              updated_at = ?2 WHERE id = ?3 AND settled_override IS NULL \
