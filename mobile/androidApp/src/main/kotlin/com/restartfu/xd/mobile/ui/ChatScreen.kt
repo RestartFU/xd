@@ -479,7 +479,7 @@ private fun Composer(
             canMoveDown = index < state.queue.lastIndex,
             onMove = { up ->
                 editing = null
-                model.moveQueued(index, up)
+                model.moveQueued(index, original, up)
             },
             onDismiss = { editing = null },
             onSave = { text ->

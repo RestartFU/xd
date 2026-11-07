@@ -1097,7 +1097,10 @@ private fun OpenDrawer(
             )
         }
         sessions.forEach { session ->
-            SessionRow(session = session, signal = signalOf(session), onClick = { open(session) }, actions = actions)
+            // Keyed so a row's open menu stays with its session when others come and go.
+            key(session.id) {
+                SessionRow(session = session, signal = signalOf(session), onClick = { open(session) }, actions = actions)
+            }
         }
     }
 }
@@ -1269,13 +1272,15 @@ private fun SettledShelf(
         }
         if (expanded) {
             settled.forEach { entry ->
-                SessionRow(
-                    session = entry.session,
-                    signal = SessionSignal.IDLE,
-                    onClick = { open(entry) },
-                    actions = actions,
-                    subtitle = entry.project.name,
-                )
+                key(entry.session.id) {
+                    SessionRow(
+                        session = entry.session,
+                        signal = SessionSignal.IDLE,
+                        onClick = { open(entry) },
+                        actions = actions,
+                        subtitle = entry.project.name,
+                    )
+                }
             }
         }
     }

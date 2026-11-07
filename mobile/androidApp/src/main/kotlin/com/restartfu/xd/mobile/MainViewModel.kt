@@ -121,6 +121,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var autoSettleRequests = 0L
     val autoSettle: StateFlow<AutoSettleSettingsReply?> = _autoSettle.asStateFlow()
     val autoSettleError: StateFlow<String?> = _autoSettleError.asStateFlow()
+
+    init {
+        // The host broadcasts every change to the rules, from any device.
+        viewModelScope.launch {
+            client.autoSettleSettings.collect { broadcast ->
+                if (broadcast != null) {
+                    // It is newer than any answer still on its way.
+                    autoSettleRequests++
+                    _autoSettle.value = broadcast
+                    _autoSettleError.value = null
+                }
+            }
+        }
+    }
     val shortcutEditor: StateFlow<ShortcutEditorState?> = _shortcutEditor.asStateFlow()
     private val _host = MutableStateFlow<HostUpdateReply?>(null)
     private val _hostError = MutableStateFlow<String?>(null)
@@ -871,10 +885,12 @@ class ChatViewModel(
      * both texts, so a queue another device just changed is refused instead
      * of being shuffled wrongly.
      */
-    fun moveQueued(index: Int, up: Boolean) {
+    fun moveQueued(index: Int, text: String, up: Boolean) {
         val queue = state.value.queue
         val anchor = if (up) index - 1 else index + 1
-        if (index !in queue.indices || anchor !in queue.indices) return
+        // The queue may have changed on another device since the message was
+        // opened; moving whatever now sits at its old place would be wrong.
+        if (queue.getOrNull(index) != text || anchor !in queue.indices) return
         launchGuarded(_droppingQueued) {
             session.reorderQueued(index, queue[index], anchor, queue[anchor], after = !up)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {

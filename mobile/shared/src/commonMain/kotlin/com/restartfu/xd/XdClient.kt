@@ -68,6 +68,13 @@ public class XdClient(
     private val unreadTerminalOwners = MutableStateFlow<Set<String>>(emptySet())
     private val terminalBusy = MutableStateFlow<Set<String>>(emptySet())
     private val visibleChat = MutableStateFlow<String?>(null)
+    private val _autoSettleSettings = MutableStateFlow<AutoSettleSettingsReply?>(null)
+
+    /**
+     * The host's auto-settle rules as last broadcast. Another device changing
+     * them arrives here, so an open Settings screen never edits stale values.
+     */
+    public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> = _autoSettleSettings.asStateFlow()
 
     /** Chats with an approval or question waiting on the user, across every chat. */
     public val waitingChats: StateFlow<Set<String>> = _waitingChats.asStateFlow()
@@ -152,6 +159,10 @@ public class XdClient(
             actor.events.collect { event ->
                 val eventName =
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
+                if (eventName == "auto-settle-settings") {
+                    runCatching { event.value.decodeReply<AutoSettleSettingsReply>() }
+                        .onSuccess { _autoSettleSettings.value = it }
+                }
                 if (eventName == "tree") {
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
@@ -204,6 +215,7 @@ public class XdClient(
         unreadTerminalOwners.value = emptySet()
         terminalBusy.value = emptySet()
         visibleChat.value = null
+        _autoSettleSettings.value = null
         _sessionGeneration.update { it + 1 }
     }
 
