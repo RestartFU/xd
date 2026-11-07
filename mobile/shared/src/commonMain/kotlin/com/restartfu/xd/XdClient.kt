@@ -27,7 +27,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.getAndUpdate
@@ -69,28 +68,26 @@ public class XdClient(
     private val unreadTerminalOwners = MutableStateFlow<Set<String>>(emptySet())
     private val terminalBusy = MutableStateFlow<Set<String>>(emptySet())
     private val visibleChat = MutableStateFlow<String?>(null)
-    private val autoSettleState = MutableStateFlow<SequencedRules?>(null)
+    private val _autoSettleSettings = MutableStateFlow<AutoSettleSettingsReply?>(null)
+    /** Counts the host's auto-settle broadcasts, to tell whether one arrived during a request. */
+    private val autoSettleBroadcasts = MutableStateFlow(0L)
 
     /**
-     * The host's auto-settle rules, newest first by the host's own ordering:
-     * an answer to this device's request and a broadcast of another device's
-     * change can arrive in either order, and the later one in the host's
-     * sequence wins. Null until read, and again after forgetting the host.
+     * The host's auto-settle rules. Null until read, and again after
+     * forgetting the host.
+     *
+     * A reply and a concurrently published broadcast can reach the socket in
+     * either order (see the protocol's ordering caveat), so neither is trusted
+     * over the other. A broadcast only says the rules changed: it starts a
+     * fresh read, sent after it arrived and so reflecting at least that
+     * change. A reply is kept only when no broadcast arrived while it was in
+     * flight. Every change broadcasts, so the value always settles on the
+     * host's.
      */
-    public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> =
-        autoSettleState.map { it?.rules }.stateIn(scope, SharingStarted.Eagerly, null)
+    public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> = _autoSettleSettings.asStateFlow()
 
-    private data class SequencedRules(val sequence: Long, val generation: Long, val rules: AutoSettleSettingsReply)
-
-    private fun offerAutoSettle(sequence: Long, generation: Long, rules: AutoSettleSettingsReply) {
-        autoSettleState.update { current ->
-            when {
-                generation != _sessionGeneration.value -> current
-                current == null || current.generation != generation || sequence >= current.sequence ->
-                    SequencedRules(sequence, generation, rules)
-                else -> current
-            }
-        }
+    private fun rereadAutoSettle() {
+        scope.launch { runCatching { autoSettleCall(Ops.autoSettleSettings()) } }
     }
 
     /** Chats with an approval or question waiting on the user, across every chat. */
@@ -165,6 +162,8 @@ public class XdClient(
         scope.launch {
             actor.link.collect { value ->
                 if (value is Link.Up) {
+                    // Broadcasts sent while disconnected were missed.
+                    if (_autoSettleSettings.value != null) rereadAutoSettle()
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
                         entry.core.requestReload()
@@ -177,9 +176,8 @@ public class XdClient(
                 val eventName =
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
                 if (eventName == "auto-settle-settings") {
-                    val generation = _sessionGeneration.value
-                    runCatching { event.value.decodeReply<AutoSettleSettingsReply>() }
-                        .onSuccess { offerAutoSettle(event.sequence, generation, it) }
+                    autoSettleBroadcasts.update { it + 1 }
+                    rereadAutoSettle()
                 }
                 if (eventName == "tree") {
                     requestTreeRefresh()
@@ -234,7 +232,7 @@ public class XdClient(
         terminalBusy.value = emptySet()
         visibleChat.value = null
         _sessionGeneration.update { it + 1 }
-        autoSettleState.value = null
+        _autoSettleSettings.value = null
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -373,9 +371,13 @@ public class XdClient(
 
     private suspend fun autoSettleCall(request: kotlinx.serialization.json.JsonObject) {
         val generation = _sessionGeneration.value
-        val reply = actor.callSequenced(request)
-        val rules = actor.decodeReply(reply.value) { it.decodeReply<AutoSettleSettingsReply>() }
-        offerAutoSettle(reply.sequence, generation, rules)
+        val broadcasts = autoSettleBroadcasts.value
+        val value = actor.call(request)
+        val rules = actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+        // Otherwise the read that broadcast started decides the value.
+        if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
+            _autoSettleSettings.value = rules
+        }
     }
 
     public suspend fun renameFolder(folderId: String, name: String) {
