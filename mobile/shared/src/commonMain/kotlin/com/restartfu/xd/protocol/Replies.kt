@@ -248,6 +248,18 @@ public data class UsageSummaryReply(
     val buckets: List<UsageBucketReply> = emptyList(),
     /** Sessions in the window, by provider. */
     val sessions: Map<String, Int> = emptyMap(),
+    /** How each assistant's transcripts were read; a partial read means the totals miss some. */
+    val sources: List<UsageSourceReply> = emptyList(),
+)
+
+@Serializable
+public data class UsageSourceReply(
+    val provider: String,
+    /** `ok`, `missing` (not installed), or `partial`. */
+    val status: String = "ok",
+    val message: String? = null,
+    @SerialName("skipped_files") val skippedFiles: Long = 0,
+    @SerialName("malformed_records") val malformedRecords: Long = 0,
 )
 
 @Serializable
@@ -298,6 +310,8 @@ public data class UsagePricesReply(
     val ok: Boolean = true,
     val prices: Map<String, UsagePriceReply> = emptyMap(),
     val aliases: Map<String, String> = emptyMap(),
+    /** The host keeps its aliases when set-usage-prices leaves them out; older hosts clear them. */
+    @SerialName("aliases_optional") val aliasesOptional: Boolean = false,
 )
 
 /** The host's rules for settling sessions by itself. */

@@ -762,7 +762,8 @@ and a hard-coded list would be refused as soon as one is added or retired.
 
 Replaces the host's custom model prices and aliases. Takes `prices` and `aliases`
 in the shape `usage-prices` returns; leaving `aliases` out keeps the saved ones, so a
-client that edits only prices cannot revert another client's mappings; `input` and `output` are required, and a blank
+client that edits only prices cannot revert another client's mappings. Hosts that do this
+answer `usage-prices` and `set-usage-prices` with `aliases_optional: true`; `input` and `output` are required, and a blank
 cache rate uses the input rate. Answers with the saved values.
 
 ### `usage-consume-reset-credit`

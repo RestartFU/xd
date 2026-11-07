@@ -177,6 +177,15 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
             Stat("Processed tokens", compact(tokens))
             Stat("Sessions", summary.sessions.values.sum().toString())
         }
+        // Before the empty case too: a partial read is not "no activity".
+        summary.sources.filter { it.status == "partial" }.forEach { source ->
+            Text(
+                "Some ${if (source.provider == "claude") "Claude" else "Codex"} transcripts could not be read, " +
+                    "so these totals may be incomplete." + (source.message?.let { " $it" } ?: ""),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         if (summary.buckets.isEmpty()) {
             Text("No activity in this window.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             return@Column
@@ -335,16 +344,17 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
     var rows by rememberSaveable(stateSaver = PriceRowsSaver) { mutableStateOf<List<PriceRow>?>(null) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var attempt by remember { mutableStateOf(0) }
-    // The save runs in the view model; the editor closes when its own save lands.
-    val savesAtOpening = rememberSaveable { model.state.value.pricesSaves }
+    // The save runs in the view model; the editor closes when its own save
+    // lands, matched by an opening token that survives the process too.
+    val opening = rememberSaveable { java.util.UUID.randomUUID().toString() }
     val saving = usage.pricesSaving
-    val error = loadError ?: usage.pricesError
+    val error = loadError ?: usage.pricesError?.takeIf { it.first == opening }?.second
     val close = {
-        model.clearPricesError()
+        model.closePrices(opening)
         onDismiss()
     }
-    LaunchedEffect(usage.pricesSaves) {
-        if (usage.pricesSaves > savesAtOpening) close()
+    LaunchedEffect(opening in usage.pricesSaved) {
+        if (opening in usage.pricesSaved) close()
     }
     LaunchedEffect(attempt) {
         // A draft restored after recreation is kept, not replaced by the host's list.
@@ -424,7 +434,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = {
-                    model.savePrices(parsed.orEmpty().associate { (id, price) -> id to checkNotNull(price) })
+                    model.savePrices(opening, parsed.orEmpty().associate { (id, price) -> id to checkNotNull(price) })
                 },
                 enabled = valid && !saving,
             ) { Text(if (saving) "Saving…" else "Save changes") }

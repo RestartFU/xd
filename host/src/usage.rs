@@ -2633,6 +2633,8 @@ impl UsageService {
         let settings = self.shared.read_prices();
         let mut reply = settings.to_value();
         reply["ok"] = json!(true);
+        // Tells clients that leaving `aliases` out of set-usage-prices keeps them.
+        reply["aliases_optional"] = json!(true);
         Ok(reply)
     }
 
@@ -2656,6 +2658,7 @@ impl UsageService {
         write_private_atomic(&directory.join(PRICES_FILE), &settings.to_value())?;
         let mut reply = settings.to_value();
         reply["ok"] = json!(true);
+        reply["aliases_optional"] = json!(true);
         Ok(reply)
     }
 }
@@ -3620,6 +3623,7 @@ read e; case "$e" in *consume*) echo '{"id":2,"result":{"outcome":"reset"}}';; e
             .set_prices(&json!({"prices": {}, "aliases": {}}))
             .unwrap();
         assert_eq!(cleared["aliases"], json!({}));
+        assert_eq!(usage_service.prices().unwrap()["aliases_optional"], true);
         fs::remove_dir_all(directory).ok();
     }
 

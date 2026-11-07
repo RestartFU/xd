@@ -30,9 +30,10 @@ data class UsageState(
     /** Accounts with a reset attempt the host has not settled yet. */
     val unsettledResets: Set<String> = emptySet(),
     val pricesSaving: Boolean = false,
-    val pricesError: String? = null,
-    /** Counts saved price edits, so an editor can close on its own save. */
-    val pricesSaves: Int = 0,
+    /** A failed save, with the editor opening it belongs to. */
+    val pricesError: Pair<String, String>? = null,
+    /** Editor openings whose save landed, so each closes on its own save. */
+    val pricesSaved: Set<String> = emptySet(),
 )
 
 /**
@@ -171,24 +172,36 @@ class UsageViewModel(
      * are. Runs here rather than in the editor, so rotating the phone mid-save
      * neither loses its outcome nor skips reading usage again.
      */
-    fun savePrices(prices: Map<String, UsagePriceReply>) {
+    fun savePrices(opening: String, prices: Map<String, UsagePriceReply>) {
         if (_state.value.pricesSaving) return
         _state.update { it.copy(pricesSaving = true, pricesError = null) }
         viewModelScope.launch {
             try {
-                client.setUsagePrices(prices)
-                _state.update { it.copy(pricesSaving = false, pricesSaves = it.pricesSaves + 1) }
+                // A host that keeps omitted aliases gets none, so another client's
+                // are never reverted; an older one would clear them, so it gets
+                // the ones it holds right now.
+                val current = client.usagePrices()
+                if (current.aliasesOptional) client.setUsagePrices(prices)
+                else client.setUsagePrices(prices, current.aliases)
+                _state.update { it.copy(pricesSaving = false, pricesSaved = it.pricesSaved + opening) }
                 readSummary(refresh = false)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _state.update { it.copy(pricesSaving = false, pricesError = error.message ?: "Could not save the model prices") }
+                _state.update {
+                    it.copy(pricesSaving = false, pricesError = opening to (error.message ?: "Could not save the model prices"))
+                }
             }
         }
     }
 
-    fun clearPricesError() {
-        _state.update { it.copy(pricesError = null) }
+    fun closePrices(opening: String) {
+        _state.update {
+            it.copy(
+                pricesError = it.pricesError?.takeIf { (owner, _) -> owner != opening },
+                pricesSaved = it.pricesSaved - opening,
+            )
+        }
     }
 
     class Factory(
