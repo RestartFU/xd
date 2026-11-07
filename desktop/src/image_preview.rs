@@ -1441,14 +1441,14 @@ mod tests {
                     .contains("Wait")
             );
             desktop.sending = false;
-            desktop.awaiting_sent_clear = true;
+            desktop.awaiting_sent_clear = Some(5);
             assert!(
                 desktop
                     .add_attachment(extra())
                     .unwrap_err()
                     .contains("Wait")
             );
-            desktop.awaiting_sent_clear = false;
+            desktop.awaiting_sent_clear = None;
 
             // A restored draft keeps to the host's limits.
             let big =
@@ -1504,7 +1504,7 @@ mod tests {
         let (desktop, cx) = composer_with_images(cx, &[]);
         desktop.update(cx, |desktop, cx| {
             // As a send leaves it: the clear is out and nothing to upload.
-            desktop.awaiting_sent_clear = true;
+            desktop.awaiting_sent_clear = Some(5);
             desktop.attachments_dirty = false;
             desktop.attachment_generation = 5;
             let sent = Attachment::from_file("sent.pdf", b"%PDF".to_vec());
@@ -1543,7 +1543,31 @@ mod tests {
                 .map(|attachment| attachment.name.as_str())
                 .collect::<Vec<_>>();
             assert_eq!(names, ["added.txt"]);
-            assert!(!desktop.awaiting_sent_clear && !desktop.attachments_dirty);
+            assert!(desktop.awaiting_sent_clear.is_none() && !desktop.attachments_dirty);
+
+            // A failed send gives its attachments back and moves the list on;
+            // the clear's late reply still ends the wait, applying nothing.
+            desktop.awaiting_sent_clear = Some(6);
+            desktop.attachment_generation = 7;
+            desktop.attachments_dirty = true;
+            let mut reply = serde_json::Map::new();
+            reply.insert("ok".into(), true.into());
+            reply.insert("draft".into(), "".into());
+            reply.insert("draft_revision".into(), 92.into());
+            desktop.handle_reply(
+                RequestKind::SetDraft {
+                    chat_id: "implementation".into(),
+                    text: String::new(),
+                    attachment_generation: Some(6),
+                },
+                reply,
+                Some(Vec::new()),
+                cx,
+            );
+            assert!(desktop.awaiting_sent_clear.is_none());
+            assert_eq!(desktop.model.draft_attachments.len(), 1);
+            let extra = Attachment::from_file("extra.txt", vec![1]);
+            desktop.add_attachment(extra).unwrap();
         });
     }
 

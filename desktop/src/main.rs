@@ -2131,7 +2131,7 @@ struct XdDesktop {
     /// A send's clear is out: the attachment list is empty because the host
     /// took what was sent, not because the user emptied it, so it is not
     /// uploaded, and drafts arriving meanwhile do not bring the sent ones back.
-    awaiting_sent_clear: bool,
+    awaiting_sent_clear: Option<u64>,
     attachment_generation: u64,
     /// Batches of chosen files still being read. Sending waits for them, so a
     /// message never leaves without a file the user saw themselves choose.
@@ -2730,7 +2730,7 @@ impl XdDesktop {
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
-            awaiting_sent_clear: false,
+            awaiting_sent_clear: None,
             attachment_generation: 0,
             attachments_reading: 0,
             composer_thumbnails: HashMap::new(),
@@ -3359,7 +3359,7 @@ impl XdDesktop {
                     return;
                 }
                 // Its clear will not answer now; the reconnect reloads the draft.
-                self.awaiting_sent_clear = false;
+                self.awaiting_sent_clear = None;
                 self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
                 self.remote_host = None;
                 self.remote_bridge = None;
@@ -3711,7 +3711,7 @@ impl XdDesktop {
                     return;
                 }
                 // Its clear will not answer now; the reconnect reloads the draft.
-                self.awaiting_sent_clear = false;
+                self.awaiting_sent_clear = None;
                 self.terminal_cache_refresh.insert(ChatEndpoint::Local);
                 self.host = None;
                 self.model.connected = false;
@@ -3873,7 +3873,14 @@ impl XdDesktop {
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
                 // A clear that failed will not answer; attaching opens again.
-                RequestKind::SetDraft { .. } => self.awaiting_sent_clear = false,
+                RequestKind::SetDraft {
+                    attachment_generation,
+                    ..
+                } if attachment_generation.is_some()
+                    && *attachment_generation == self.awaiting_sent_clear =>
+                {
+                    self.awaiting_sent_clear = None;
+                }
                 RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -5115,8 +5122,9 @@ impl XdDesktop {
             RequestKind::MoveChat { .. } => self.request_tree(),
             RequestKind::DeleteChat { .. } => self.request_tree(),
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
-                let local_attachments = (self.attachments_dirty || self.awaiting_sent_clear)
-                    .then(|| self.model.draft_attachments.clone());
+                let local_attachments = (self.attachments_dirty
+                    || self.awaiting_sent_clear.is_some())
+                .then(|| self.model.draft_attachments.clone());
                 self.model.apply_chat(&value);
                 self.sync_active_auth_state();
                 self.transcript_snapshot.sync_live_items(&self.model);
@@ -5295,8 +5303,8 @@ impl XdDesktop {
                 let attachment_reply_is_current = attachment_generation
                     .is_some_and(|generation| generation == self.attachment_generation);
                 let local_attachments = (!attachment_reply_is_current
-                    && (self.attachments_dirty || self.awaiting_sent_clear))
-                    .then(|| self.model.draft_attachments.clone());
+                    && (self.attachments_dirty || self.awaiting_sent_clear.is_some()))
+                .then(|| self.model.draft_attachments.clone());
                 self.model.apply_draft_snapshot(&value);
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
@@ -5308,7 +5316,13 @@ impl XdDesktop {
                 }
                 if attachment_reply_is_current {
                     self.attachments_dirty = false;
-                    self.awaiting_sent_clear = false;
+                    self.awaiting_sent_clear = None;
+                }
+                // The clear has answered, whether or not the list moved on since.
+                if attachment_generation.is_some()
+                    && attachment_generation == self.awaiting_sent_clear
+                {
+                    self.awaiting_sent_clear = None;
                 }
             }
             RequestKind::TerminalOpen { chat_id, agent, .. }
@@ -5855,8 +5869,9 @@ impl XdDesktop {
                 }
             }
             "draft" if self.event_is_active(&body) => {
-                let local_attachments = (self.attachments_dirty || self.awaiting_sent_clear)
-                    .then(|| self.model.draft_attachments.clone());
+                let local_attachments = (self.attachments_dirty
+                    || self.awaiting_sent_clear.is_some())
+                .then(|| self.model.draft_attachments.clone());
                 self.model.apply_event(name, &body);
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
@@ -9699,7 +9714,8 @@ impl XdDesktop {
         // as a file another device added, comes back in the reply.
         self.awaiting_sent_clear = host
             .clear_sent_draft(&chat_id, self.attachment_generation)
-            .is_ok();
+            .is_ok()
+            .then_some(self.attachment_generation);
         cx.notify();
     }
 
@@ -10159,7 +10175,7 @@ impl XdDesktop {
     fn add_attachment(&mut self, attachment: Attachment) -> Result<(), String> {
         // Until the clear after a send returns, the draft may hold files from
         // elsewhere that this list does not show yet.
-        if self.sending || self.awaiting_sent_clear {
+        if self.sending || self.awaiting_sent_clear.is_some() {
             return Err("Wait for the message to send before attaching more.".into());
         }
         attachment_fits(&self.model.draft_attachments, &attachment)?;
@@ -10331,7 +10347,7 @@ impl XdDesktop {
         }
         self.draft_dirty = false;
         self.attachments_dirty = false;
-        self.awaiting_sent_clear = false;
+        self.awaiting_sent_clear = None;
         true
     }
 
@@ -10639,7 +10655,7 @@ impl XdDesktop {
             self.set_composer_text(String::new(), cx);
             self.draft_dirty = false;
             self.attachments_dirty = false;
-            self.awaiting_sent_clear = false;
+            self.awaiting_sent_clear = None;
             self.remember_last_chat(&chat_id);
             self.invalidate_live_render();
             self.forget_message_images(cx);
