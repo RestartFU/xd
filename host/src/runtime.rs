@@ -145,8 +145,8 @@ struct Router {
     quiet_since: Instant,
     /// It has timers of its own that only keep running while it does.
     wakes_itself: bool,
-    /// A background task finished between turns, and the agent has not yet had
-    /// a turn in which to report on it.
+    /// A background task has finished, and the agent has not yet begun the turn
+    /// in which it may report on it.
     report_due: bool,
     /// It was stopped for being idle, so what it said last has nowhere to go.
     released: bool,
@@ -283,11 +283,21 @@ fn claude_idle_line(line: &str) -> IdleLine {
     }
 }
 
-/// Whether a line of agent output says a background task has finished.
-fn finishes_a_task(line: &str) -> bool {
-    line.contains("task_notification")
-        && serde_json::from_str::<Value>(line)
-            .is_ok_and(|root| root["type"] == "system" && root["subtype"] == "task_notification")
+/// Whether the agent owes a report on a finished task after this line of output,
+/// given whether it did before. A task finishing sets that and only the start of
+/// a turn clears it, so a process that never starts one just waits longer.
+fn report_due_after(line: &str, due: bool) -> bool {
+    if !line.contains("task_notification") && !line.contains("init") {
+        return due;
+    }
+    let Ok(root) = serde_json::from_str::<Value>(line) else {
+        return due;
+    };
+    match (root["type"].as_str(), root["subtype"].as_str()) {
+        (Some("system"), Some("task_notification")) => true,
+        (Some("system"), Some("init")) => false,
+        _ => due,
+    }
 }
 
 /// Whether a line of agent output shows the agent setting a timer.
@@ -1002,7 +1012,7 @@ impl TurnRuntime {
                     };
                     router.quiet_since = Instant::now();
                     router.wakes_itself |= schedules_a_wakeup(&text);
-                    router.report_due |= router.sink.is_none() && finishes_a_task(&text);
+                    router.report_due = report_due_after(&text, router.report_due);
                     router.backlog.push_back(text);
                     runtime.pump(&chat_id, &mut router);
                 }
@@ -1054,7 +1064,6 @@ impl TurnRuntime {
         };
         router.sink = None;
         router.quiet_since = Instant::now();
-        router.report_due = false;
         let mut unread = Vec::new();
         let mut steers = Vec::new();
         while let Ok(feed) = lines.try_recv() {
@@ -3418,6 +3427,53 @@ read next"#,
             runtime.release_quiet_agents(Duration::ZERO, KeptAgent::LONG),
             1
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_task_finishing_as_a_turn_ends_still_waits_for_its_report() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+{}
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        agent
+            .store
+            .settle_session(&json!({"session": agent.session}))
+            .unwrap();
+        wait_for("the task to finish", || {
+            contents(&agent.store, &agent.chat)
+                .iter()
+                .filter_map(|(_, content)| crate::subagent::decode(content))
+                .any(|record| record["status"] == "completed")
+        });
+        assert_eq!(
+            agent
+                .runtime
+                .release_quiet_agents(KeptAgent::LONG, Duration::ZERO),
+            0
+        );
+    }
+
+    #[test]
+    fn a_report_is_due_from_a_task_finishing_until_a_turn_begins() {
+        let finished = r#"{"type":"system","subtype":"task_notification","task_id":"t1"}"#;
+        let begun = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"init"}]}}"#;
+        assert!(report_due_after(finished, false));
+        assert!(
+            report_due_after(text, true),
+            "only a turn's start clears it"
+        );
+        assert!(report_due_after("init", true));
+        assert!(!report_due_after(begun, true));
+        assert!(!report_due_after(text, false));
     }
 
     #[cfg(unix)]
