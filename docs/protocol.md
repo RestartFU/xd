@@ -582,10 +582,11 @@ file: the host writes it under its sent name, the last component of `name`, in
 a private directory of its own and appends `[file: <host path>]`, which the
 agent reads from disk. An unusable name becomes `file`.
 
-A client that shows files as well as images sends `"files":true` with a message
-that carries the draft's attachments. Without it, as from the Android app, an
-earlier desktop, or a message sent apart from the draft such as a shortcut, the
-message leaves the draft's files in the draft.
+A message takes from the chat's draft exactly the attachments it carries: each
+one removes one equal entry (same `mime` and `data`). Anything else in the draft
+stays, such as a file another device added meanwhile, or the files an image-only
+client never saw. A message sent apart from the draft, such as a shortcut,
+leaves the draft's attachments alone.
 
 Desktop clients may provide `worktree_name`, `worktree_backend`, and
 `worktree_model` when the chat is configured to create a new worktree. The
@@ -605,9 +606,13 @@ The host persists one composer draft per chat and broadcasts a `draft` event
 after every update. `text` is required but may be empty and is limited to 1
 MiB. Optional `attachments` replaces the synchronized attachment list, in the
 same form and limits as `send`; omit it for ordinary text edits so large payloads
-are not resent on every keystroke. An empty array clears them. Without
-`"files":true`, as for `send`, the list replaces only the draft's images: the
-files the client cannot see are kept after them. The client's own list keeps to
+are not resent on every keystroke. An empty array clears them. With
+`"return_attachments":true` and no `attachments`, the reply (not the event)
+carries `draft_attachments` and `draft_files` as they stand, which is how a
+client learns what its send left in the draft. Without
+`"files":true`, which a client that shows files as well as images sends, the
+list replaces only the draft's images: the files the client cannot see are kept
+after them. The client's own list keeps to
 a message's limits, but a draft may hold up to 14 attachments and 40 MiB, so
 files kept beside a client's images never refuse them; a message sent from it
 must still fit a message's limits. A

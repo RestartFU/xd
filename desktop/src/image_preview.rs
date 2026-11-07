@@ -1459,6 +1459,25 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn a_draft_too_large_for_one_message_says_so_instead_of_sending(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        desktop.update(cx, |desktop, cx| {
+            let big = |name: &str| Attachment::from_file(name, vec![0; MAX_ATTACHMENT_BYTES]);
+            desktop.model.draft_attachments =
+                vec![big("one.bin"), big("two.bin"), big("three.bin")];
+            desktop.model.connection_error = None;
+            desktop.send_composer(cx);
+            let error = desktop.model.connection_error.clone().unwrap_or_default();
+            assert!(
+                error.contains("20 MiB") && error.contains("Remove some"),
+                "{error}"
+            );
+            assert_eq!(desktop.model.draft_attachments.len(), 3);
+        });
+        assert!(message_fits(&[]).is_ok());
+    }
+
     #[test]
     fn file_sizes_read_the_way_people_write_them() {
         assert_eq!(file_size_label(812), "812 B");

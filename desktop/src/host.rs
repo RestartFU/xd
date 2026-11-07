@@ -1619,12 +1619,10 @@ impl HostHandle {
             "text": text,
             "generate_worktree_name": true,
         });
+        // The host takes exactly these from the draft, so a message sent
+        // without them, such as a shortcut, leaves the draft as it is.
         if !attachments.is_empty() {
             body["attachments"] = Value::Array(attachments);
-            // `files`: these are the draft's attachments, files included, so
-            // the host may clear them from the draft. A message sent without
-            // them, such as a shortcut, leaves the draft's files where they are.
-            body["files"] = Value::Bool(true);
         }
         if let Some(backend) = worktree_backend {
             body["worktree_backend"] = Value::String(backend.to_owned());
@@ -1772,6 +1770,24 @@ impl HostHandle {
                 attachment_generation,
             },
             body,
+        )
+    }
+
+    /// Clears the draft's text after a send and asks what the send left in its
+    /// attachments, such as a file another device added meanwhile, without
+    /// replacing them.
+    pub fn clear_sent_draft(
+        &self,
+        chat_id: &str,
+        attachment_generation: u64,
+    ) -> Result<(), String> {
+        self.send(
+            RequestKind::SetDraft {
+                chat_id: chat_id.to_owned(),
+                text: String::new(),
+                attachment_generation: Some(attachment_generation),
+            },
+            json!({"op": "set-draft", "chat": chat_id, "text": "", "return_attachments": true}),
         )
     }
 
@@ -2226,7 +2242,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn only_a_send_with_the_drafts_attachments_may_clear_its_files() {
+    fn a_send_names_only_what_it_takes_from_the_draft() {
         let directory = env::temp_dir().join(format!("xd-send-files-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(&directory).unwrap();
@@ -2257,14 +2273,14 @@ mod tests {
             .unwrap();
         host.send_message("chat-1", "a shortcut", &[], None, None, false)
             .unwrap();
-        // The clear after a send that carried no attachments leaves them be.
-        host.set_draft("chat-1", "", None, None).unwrap();
+        // The clear after a send asks what is left instead of replacing it.
+        host.clear_sent_draft("chat-1", 7).unwrap();
 
         let seen = server.join().unwrap();
-        assert_eq!(seen[0]["files"], true);
         assert_eq!(seen[0]["attachments"][0]["mime"], "application/pdf");
-        assert!(seen[1].get("files").is_none() && seen[1].get("attachments").is_none());
+        assert!(seen[1].get("attachments").is_none());
         assert_eq!(seen[2]["op"], "set-draft");
+        assert_eq!(seen[2]["return_attachments"], true);
         assert!(seen[2].get("attachments").is_none());
         let _ = fs::remove_dir_all(directory);
     }

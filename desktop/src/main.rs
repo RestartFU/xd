@@ -9638,7 +9638,15 @@ impl XdDesktop {
         }
         let text = self.composer.trim().to_owned();
         let attachments = self.model.draft_attachments.clone();
-        let carries_attachments = !attachments.is_empty();
+        // A draft can hold more than one message can send, when another
+        // device added to it; say so rather than let the host refuse it.
+        if let Err(error) = message_fits(&attachments) {
+            self.model.connection_error = Some(format!(
+                "{error} Remove some attachments and send them in another message."
+            ));
+            cx.notify();
+            return;
+        }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -9671,19 +9679,14 @@ impl XdDesktop {
             optimistic,
         });
         self.set_composer_text(String::new(), cx);
+        self.model.draft_attachments.clear();
         self.draft_dirty = true;
+        self.attachments_dirty = true;
+        self.attachment_generation = self.attachment_generation.saturating_add(1);
         self.draft_generation = self.draft_generation.saturating_add(1);
-        // Clearing the draft's attachments claims them all, files included, so
-        // only a send that carried them does; one that carried none clears the
-        // text and leaves any file another device added since.
-        if !carries_attachments {
-            let _ = host.set_draft(&chat_id, "", None, None);
-        } else {
-            self.model.draft_attachments.clear();
-            self.attachments_dirty = true;
-            self.attachment_generation = self.attachment_generation.saturating_add(1);
-            let _ = host.set_draft(&chat_id, "", Some(&[]), Some(self.attachment_generation));
-        }
+        // The host took what was sent; whatever else reached the draft, such
+        // as a file another device added, comes back in the reply.
+        let _ = host.clear_sent_draft(&chat_id, self.attachment_generation);
         cx.notify();
     }
 
@@ -19048,6 +19051,14 @@ fn decode_git_path(value: &str) -> Result<String, String> {
         index += 1;
     }
     String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
+}
+
+/// Whether the host would take a message with all of `attachments`.
+fn message_fits(attachments: &[Attachment]) -> Result<(), String> {
+    attachments
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, attachment)| attachment_fits(&attachments[..index], attachment))
 }
 
 /// Whether the host would take a message with `attachment` added to `draft`.
