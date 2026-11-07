@@ -2199,6 +2199,9 @@ impl StateStore {
     /// no stdio host still owns a turn. Normal stdio startup must not call this:
     /// desktop and mobile processes share the store and another process may be
     /// running those turns. Queued messages are preserved for a later turn.
+    ///
+    /// Agents still marked running died with that host too, whether or not a
+    /// turn was open, and nothing else would ever end their cards.
     pub fn recover_interrupted_turns(&self) -> Result<Vec<String>, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
@@ -2213,6 +2216,7 @@ impl StateStore {
             mark_chat_to_resume(&transaction, chat_id)?;
             end_interrupted_turn(&transaction, chat_id)?;
         }
+        stop_orphaned_agents(&transaction)?;
         transaction.commit()?;
         Ok(interrupted)
     }
@@ -6984,6 +6988,40 @@ fn end_interrupted_turn(
     Ok(())
 }
 
+/// Marks every stored agent record that says it is running as stopped. No run
+/// time is added: when the agent really ended is unknown.
+fn stop_orphaned_agents(transaction: &rusqlite::Transaction<'_>) -> Result<(), rusqlite::Error> {
+    let running = {
+        let mut statement = transaction.prepare(
+            "SELECT id, content FROM messages WHERE role = 'tool' \
+             AND content LIKE 'subagent_run%' AND content LIKE '%\"status\":\"running\"%'",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, content) in running {
+        let Some(mut record) = content
+            .strip_prefix(crate::subagent::PREFIX)
+            .and_then(|record| serde_json::from_str::<Value>(record).ok())
+            .filter(|record| record["status"] == "running")
+        else {
+            continue;
+        };
+        record["status"] = json!("stopped");
+        if let Some(fields) = record.as_object_mut() {
+            fields.remove("activity");
+        }
+        transaction.execute(
+            "UPDATE messages SET content = ? WHERE id = ?",
+            params![format!("{}{record}", crate::subagent::PREFIX), id],
+        )?;
+    }
+    Ok(())
+}
+
 fn queued_event(chat_id: &str, queue: &[String]) -> Value {
     let mut event = json!({"event": "queued", "chat": chat_id, "queue": queue});
     if let Some(first) = queue.first() {
@@ -9529,6 +9567,53 @@ mod tests {
         assert_eq!(event["queue"], json!([]));
         assert!(event.get("text").is_none());
         assert_eq!(store.chat("chat-1").unwrap()["queue"], json!([]));
+    }
+
+    #[test]
+    fn recovery_stops_agents_that_died_with_the_previous_host() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let running = store
+            .append_turn_message(
+                "chat-1",
+                "tool",
+                "subagent_run\n{\"key\":\"a\",\"status\":\"running\",\"activity\":\"Waiting\",\"started_at\":5}",
+                None,
+            )
+            .unwrap();
+        let finished = "subagent_run\n{\"key\":\"b\",\"prompt\":\"\\\"status\\\":\\\"running\\\"\",\"status\":\"completed\"}";
+        let done = store
+            .append_turn_message("chat-1", "tool", finished, None)
+            .unwrap();
+        let said = store
+            .append_turn_message("chat-1", "assistant", "\"status\":\"running\"", None)
+            .unwrap();
+
+        // The chat is idle, as it is when only a background command was left.
+        assert!(store.recover_interrupted_turns().unwrap().is_empty());
+
+        let database = Connection::open(&fixture.database).unwrap();
+        let content = |id: i64| {
+            database
+                .query_row("SELECT content FROM messages WHERE id = ?", [id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+        };
+        let stopped = content(running);
+        let record: Value =
+            serde_json::from_str(stopped.strip_prefix(crate::subagent::PREFIX).unwrap()).unwrap();
+        assert_eq!(record["status"], "stopped");
+        assert_eq!(record["key"], "a");
+        assert_eq!(record["started_at"], 5);
+        assert!(record.get("activity").is_none());
+        assert!(record.get("duration_ms").is_none());
+        assert_eq!(content(done), finished);
+        assert_eq!(content(said), "\"status\":\"running\"");
     }
 
     #[test]

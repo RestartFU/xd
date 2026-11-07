@@ -632,8 +632,10 @@ the newest snapshot.
  "latest":"…","summary":"…"}
 ```
 
-`status` is `running`, `completed`, `failed`, or `stopped`. `steps` keeps the
-newest 40 tool calls; `tool_uses` counts all of them. `started_at` is Unix
+`status` is `running`, `completed`, `failed`, or `stopped`. `running` holds only
+while the process reporting on the agent lives: the host marks the record
+`stopped` when that process ends, and on its next start if it died first.
+`steps` keeps the newest 40 tool calls; `tool_uses` counts all of them. `started_at` is Unix
 milliseconds, for a live elapsed time. `latest` is the agent's newest message
 and `summary` its final report. `model`, `prompt`, `activity`, `latest`,
 `summary`, `tokens`, `duration_ms`, and `started_at` are absent until known;

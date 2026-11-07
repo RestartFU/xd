@@ -852,10 +852,27 @@ impl TurnRuntime {
                     router.backlog.push_back(text);
                     runtime.pump(&chat_id, &mut router);
                 }
-                if let Ok(mut router) = router.lock()
-                    && let Some(sink) = router.sink.take()
-                {
-                    let _ = sink.send(Feed::End);
+                let idle = router
+                    .lock()
+                    .is_ok_and(|mut router| match router.sink.take() {
+                        Some(sink) => {
+                            let _ = sink.send(Feed::End);
+                            false
+                        }
+                        None => true,
+                    });
+                // A turn that holds the output settles its agents when it ends.
+                // Otherwise this is the only sign the process is gone. Holding
+                // the sessions keeps a new process from reporting first.
+                if idle && let Some(inner) = inner.upgrade() {
+                    let runtime = TurnRuntime { inner };
+                    if let Ok(sessions) = runtime.inner.sessions.lock()
+                        && sessions
+                            .get(&chat_id)
+                            .is_some_and(|session| Arc::ptr_eq(&session.router, &router))
+                    {
+                        runtime.settle_orphaned_agents(&chat_id);
+                    }
                 }
             });
     }
@@ -1043,6 +1060,7 @@ impl TurnRuntime {
             {
                 let _ = terminate_agent(&mut child);
             }
+            self.settle_orphaned_agents(chat_id);
         }
 
         let mut child = command
@@ -1120,6 +1138,40 @@ impl TurnRuntime {
         {
             let _ = terminate_agent(&mut child);
             let _ = child.wait();
+        }
+        self.settle_orphaned_agents(chat_id);
+    }
+
+    /// Stops the card of every agent still marked running, once the process
+    /// reporting on them is gone. A new process, even one resuming the same
+    /// session, never reports on them again, so nothing else would end them.
+    fn settle_orphaned_agents(&self, chat_id: &str) {
+        let orphans = self
+            .inner
+            .records
+            .lock()
+            .ok()
+            .and_then(|records| {
+                let book = records.get(chat_id)?;
+                Some(
+                    book.entries
+                        .values()
+                        .filter_map(|entry| entry.run.as_ref())
+                        .filter(|run| run.status == SubagentStatus::Running)
+                        .map(|run| run.key.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_default();
+        for key in orphans {
+            self.idle_subagent(
+                chat_id,
+                "",
+                SubagentPatch {
+                    status: Some(SubagentStatus::Stopped),
+                    ..SubagentPatch::new(key)
+                },
+            );
         }
     }
 
@@ -1506,6 +1558,7 @@ impl TurnRuntime {
             was_cancelled || completed
         } else {
             let status = child.lock().ok().and_then(|mut child| child.wait().ok());
+            self.settle_orphaned_agents(&turn.chat_id);
             was_cancelled || (completed && status.is_some_and(|status| status.success()))
         };
         let stderr = complaint
@@ -2371,6 +2424,102 @@ mod tests {
         }
         assert_eq!(streamed, reply);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A background command reports nothing more once its process dies, so its
+    /// card must stop rather than count up forever.
+    #[cfg(unix)]
+    #[test]
+    fn agents_stop_when_the_process_reporting_on_them_dies() {
+        use std::{env, fs, os::unix::fs::PermissionsExt};
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = env::temp_dir().join(format!(
+            "xd-runtime-orphans-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let agent = root.join("claude");
+        fs::write(
+            &agent,
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait for checks","task_type":"local_bash","is_backgrounded":true}'
+echo '{"type":"system","subtype":"task_started","task_id":"t2","tool_use_id":"toolu_done","description":"Print","task_type":"local_bash","is_backgrounded":true}'
+echo '{"type":"system","subtype":"task_notification","task_id":"t2","tool_use_id":"toolu_done","status":"completed"}'
+echo '{"type":"result","subtype":"success","result":"Started."}'
+read second
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "claude"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let runtime = TurnRuntime::new(
+            store.clone(),
+            Arc::new(EventBus::default()),
+            Arc::new(SecretsStore::new(None)),
+        );
+        let turn = match store
+            .prepare_send(&json!({"chat": chat, "text": "first"}))
+            .unwrap()
+        {
+            crate::storage::SendDisposition::Start { turn, .. } => turn,
+            crate::storage::SendDisposition::Queued { .. } => panic!("first was queued"),
+        };
+        runtime.start(turn).unwrap();
+        wait_for("the turn to end", || {
+            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
+        });
+        let statuses = || {
+            contents(&store, &chat)
+                .iter()
+                .filter_map(|(_, content)| crate::subagent::decode(content))
+                .map(|record| {
+                    (
+                        record["key"].as_str().unwrap().to_owned(),
+                        record["status"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        assert_eq!(statuses()["toolu_shell"], "running");
+
+        // Dies between turns, with nothing reading on behalf of a turn.
+        let child = runtime
+            .inner
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&chat)
+            .unwrap()
+            .child
+            .clone();
+        terminate_agent(&mut child.lock().unwrap()).unwrap();
+        wait_for("the orphaned card to stop", || {
+            statuses()["toolu_shell"] == "stopped"
+        });
+        assert_eq!(statuses()["toolu_done"], "completed");
+
+        drop(runtime);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = fs::remove_dir_all(root);
     }
 
     /// Claude ends a turn while a background agent still runs, then reports
