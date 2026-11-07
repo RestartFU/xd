@@ -30,8 +30,8 @@ use gpui::{
     ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render, ResizeEdge,
     ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer, TitlebarOptions,
     WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*, px, rgb, rgba,
-    size, svg,
+    WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*, px, relative, rgb,
+    rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -147,6 +147,7 @@ const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
 const BROWSER_ICON: &str = "icons/browser.svg";
 const TERMINAL_ICON: &str = "icons/terminal.svg";
+const SETTINGS_ICON: &str = "icons/settings.svg";
 const DOWNLOAD_ICON: &str = "icons/download.svg";
 const SEARCH_ICON: &str = "icons/search.svg";
 const MINIMIZE_ICON: &str = "icons/minimize.svg";
@@ -165,7 +166,7 @@ const CATALOG_MIN_WIDTH: f32 = 220.0;
 /// Widest the catalog sidebar can be dragged.
 const CATALOG_MAX_WIDTH: f32 = 480.0;
 /// Narrower than this, the catalog footer's Update button shows only its icon
-/// so Settings stays inside the catalog.
+/// so the settle notice beside it keeps its room.
 const CATALOG_UPDATE_LABEL_MIN_WIDTH: f32 = 256.0;
 /// Width the catalog always leaves for the session beside it.
 const CATALOG_SESSION_MIN_WIDTH: f32 = 384.0;
@@ -11231,9 +11232,11 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    /// The Settled shelf below the projects: collapsed by default, with only
-    /// the open session still listed then, so the sidebar always shows where
-    /// you are. Finding opens it, so a match cannot hide inside it.
+    /// The Settled shelf, pinned between the projects and the footer: collapsed
+    /// by default, with only the open session still listed then, so the sidebar
+    /// always shows where you are. Finding opens it, so a match cannot hide
+    /// inside it. Opened, it grows upward to half the sidebar and scrolls past
+    /// that, so the projects above it stay reachable.
     fn render_settled_shelf(
         &mut self,
         colors: ThemeColors,
@@ -11279,8 +11282,11 @@ impl XdDesktop {
         Some(
             div()
                 .id("minimal-settled-shelf")
+                .debug_selector(|| "catalog-settled-shelf".into())
                 .w_full()
-                .mt(px(6.0))
+                .flex_none()
+                .max_h(relative(0.5))
+                .px(px(8.0))
                 .flex()
                 .flex_col()
                 .child(
@@ -11288,6 +11294,7 @@ impl XdDesktop {
                         .id("minimal-settled-header")
                         .h(px(30.0))
                         .w_full()
+                        .flex_none()
                         .pl(px(4.0))
                         .pr(px(2.0))
                         .flex()
@@ -11330,37 +11337,49 @@ impl XdDesktop {
                                 .child(count.to_string()),
                         ),
                 )
-                .child(
-                    div()
-                        .mt(px(1.0))
-                        .mb(px(6.0))
-                        .pl(px(12.0))
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(1.0))
-                        .children(rows)
-                        .when(open && hidden > 0, |list| {
-                            list.child(
+                .when(!rows.is_empty(), |shelf| {
+                    shelf.child(
+                        div()
+                            .id("minimal-settled-list")
+                            .debug_selector(|| "catalog-settled-list".into())
+                            .w_full()
+                            .min_h_0()
+                            .mt(px(1.0))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .child(
                                 div()
-                                    .id("minimal-settled-more")
-                                    .h(px(CARD_HEIGHT))
-                                    .pl(px(10.0))
+                                    .w_full()
+                                    .flex_none()
+                                    .pl(px(12.0))
                                     .flex()
-                                    .items_center()
-                                    .rounded(px(7.0))
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(colors.faint))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.settled_visible += SETTLED_MORE_ROWS;
-                                        cx.notify();
-                                    }))
-                                    .child("Show more"),
-                            )
-                        }),
-                )
+                                    .flex_col()
+                                    .gap(px(1.0))
+                                    .children(rows)
+                                    .when(open && hidden > 0, |list| {
+                                        list.child(
+                                            div()
+                                                .id("minimal-settled-more")
+                                                .h(px(CARD_HEIGHT))
+                                                .pl(px(10.0))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(7.0))
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(colors.faint))
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.settled_visible += SETTLED_MORE_ROWS;
+                                                    cx.notify();
+                                                }))
+                                                .child("Show more"),
+                                        )
+                                    }),
+                            ),
+                    )
+                })
                 .into_any_element(),
         )
     }
@@ -11679,7 +11698,6 @@ impl XdDesktop {
                     .flex_col()
                     .gap(px(1.0))
                     .children(drawers)
-                    .children(settled_shelf)
                     .when(projects.is_empty(), |list| {
                         list.child(
                             div()
@@ -11707,14 +11725,66 @@ impl XdDesktop {
                         )
                     }),
             )
+            .children(settled_shelf)
             .child(
                 div()
+                    .id("minimal-catalog-footer")
+                    .debug_selector(|| "catalog-footer".into())
                     .flex_none()
-                    .px_3()
-                    .py(px(10.0))
+                    .pl(px(8.0))
+                    .pr_3()
+                    .pt(px(2.0))
+                    .pb(px(10.0))
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.0))
+                            .child(
+                                pane_icon_button(
+                                    "minimal-terminal-tab",
+                                    "Terminal",
+                                    TERMINAL_ICON,
+                                    terminal_active,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.show_minimal_terminal(window, cx),
+                                )),
+                            )
+                            .child(
+                                pane_icon_button(
+                                    "minimal-theme",
+                                    "Settings",
+                                    SETTINGS_ICON,
+                                    settings_open,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.toggle_minimal_theme_popup(window, cx)
+                                    },
+                                )),
+                            )
+                            .child(
+                                pane_icon_button(
+                                    "minimal-usage",
+                                    "Usage",
+                                    USAGE_ICON,
+                                    self.usage_open,
+                                    colors,
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.toggle_usage(window, cx)
+                                    }),
+                                ),
+                            ),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -11755,51 +11825,7 @@ impl XdDesktop {
                                     this.open_update_popup(window, cx)
                                 })),
                         )
-                    })
-                    .child(
-                        ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
-                            .when(terminal_active, |button| {
-                                button
-                                    .bg(rgb(colors.selected_surface))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .child(icon(
-                                TERMINAL_ICON,
-                                15.0,
-                                if terminal_active {
-                                    colors.text
-                                } else {
-                                    colors.muted
-                                },
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.show_minimal_terminal(window, cx)
-                            })),
-                    )
-                    .child(
-                        ui_button("minimal-theme", ButtonKind::Ghost, colors)
-                            .when(settings_open, |button| {
-                                button
-                                    .bg(rgb(colors.selected_surface))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .child("Settings")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.toggle_minimal_theme_popup(window, cx)
-                            })),
-                    )
-                    .child(
-                        pane_icon_button(
-                            "minimal-usage",
-                            "Usage",
-                            USAGE_ICON,
-                            self.usage_open,
-                            colors,
-                        )
-                        .w(px(30.0))
-                        .h(px(30.0))
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_usage(window, cx))),
-                    ),
+                    }),
             )
             .into_any_element()
     }
@@ -17314,6 +17340,9 @@ impl AssetSource for EmbeddedIcons {
             USAGE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/chart-no-axes-column.svg").as_slice(),
             )),
+            SETTINGS_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/settings.svg").as_slice(),
+            )),
             GAUGE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/gauge.svg").as_slice(),
             )),
@@ -18575,13 +18604,9 @@ mod tests {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.run_until_parked();
 
-        // The catalog footer holds Terminal, Settings, and Usage.
+        // The catalog footer holds Terminal, Settings, and Usage, from the left.
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
-        let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
-        cx.simulate_click(
-            point(px(catalog_width - 88.0), footer_y),
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_click(point(px(52.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
 
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
@@ -18597,11 +18622,7 @@ mod tests {
         cx.run_until_parked();
 
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
-        let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
-        cx.simulate_click(
-            point(px(catalog_width - 23.0), footer_y),
-            gpui::Modifiers::default(),
-        );
+        cx.simulate_click(point(px(82.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
         // A press on the page stays on it; one on the backdrop dismisses it.
         cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
@@ -19699,15 +19720,68 @@ mod tests {
         });
         cx.run_until_parked();
 
-        // The left of Settings, which an overflowing footer pushes aside.
-        let settings = cx.update(|window, _| {
-            point(
-                px(CATALOG_MIN_WIDTH - 80.0),
-                window.viewport_size().height - px(26.0),
-            )
-        });
+        // Settings stays where it always is, and Update fits inside the catalog.
+        let settings =
+            cx.update(|window, _| point(px(52.0), window.viewport_size().height - px(26.0)));
         cx.simulate_click(settings, gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
+        let footer = cx.debug_bounds("catalog-footer").unwrap();
+        assert!(footer.right() <= px(CATALOG_MIN_WIDTH));
+    }
+
+    #[gpui::test]
+    fn the_settled_shelf_sits_on_the_footer_and_scrolls_once_open(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.folders = vec![Folder {
+                id: "project".into(),
+                name: "project".into(),
+                parent: None,
+                owner: None,
+            }];
+            desktop.model.chats = (0..60)
+                .map(|index| ChatSummary {
+                    id: format!("settled-{index}"),
+                    folder: "project".into(),
+                    title: Some(format!("Settled {index}")),
+                    backend: "codex".into(),
+                    branch: None,
+                    working: false,
+                    terminal_working: false,
+                    settled_at: Some(index),
+                    auto_settle_disabled: false,
+                })
+                .collect();
+            desktop.settled_visible = 60;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let shelf = cx.debug_bounds("catalog-settled-shelf").unwrap();
+        let footer = cx.debug_bounds("catalog-footer").unwrap();
+        assert_eq!(shelf.bottom(), footer.top());
+        assert_eq!(shelf.size.height, px(30.0));
+        assert!(cx.debug_bounds("catalog-settled-list").is_none());
+
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.settled_shelf_expanded = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        // Sixty rows would run off the window; the shelf stops at half the
+        // sidebar and scrolls them, with the footer still in place below it.
+        let shelf = cx.debug_bounds("catalog-settled-shelf").unwrap();
+        let list = cx.debug_bounds("catalog-settled-list").unwrap();
+        let footer = cx.debug_bounds("catalog-footer").unwrap();
+        let height = cx.update(|window, _| window.viewport_size().height);
+        assert_eq!(footer.bottom(), height);
+        assert_eq!(shelf.bottom(), footer.top());
+        assert_eq!(list.bottom(), shelf.bottom());
+        assert!(list.size.height > px(CARD_HEIGHT));
+        assert!(shelf.size.height <= height * 0.5);
     }
 
     #[gpui::test]

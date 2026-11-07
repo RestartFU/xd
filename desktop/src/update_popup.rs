@@ -509,10 +509,10 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        // Left of Terminal and Settings, where the Update button sits.
+        // The right end of the footer, where the Update button sits.
         let button = cx.update(|window, cx| {
             point(
-                px(desktop.read(cx).catalog_width(window) - 170.0),
+                px(desktop.read(cx).catalog_width(window) - 40.0),
                 window.viewport_size().height - px(26.0),
             )
         });
