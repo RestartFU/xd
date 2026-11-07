@@ -52,6 +52,8 @@ data class ShortcutEditorState(
      * outlives recreating the activity and belongs to this opening alone.
      */
     val draft: List<DraftPrompt> = emptyList(),
+    /** The next row's id; only ever grows, so a removed row's id is never reused. */
+    val nextId: Long = 0,
 )
 
 /**
@@ -338,6 +340,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 opened.copy(
                     prompts = prompts,
                     draft = prompts.mapIndexed { index, text -> DraftPrompt(index.toLong(), text) },
+                    nextId = prompts.size.toLong(),
                     loading = false,
                     loaded = true,
                 )
@@ -355,21 +358,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * now rather than to the copy a callback last saw, so quick edits never
      * undo each other. Ignored while saving, which sends the draft as it was.
      */
-    private fun changeShortcutDraft(opening: Long, change: (List<DraftPrompt>) -> List<DraftPrompt>) {
+    private fun changeShortcutDraft(opening: Long, change: (ShortcutEditorState) -> ShortcutEditorState) {
         _shortcutEditor.update { current ->
-            if (current?.opening == opening && !current.saving) current.copy(draft = change(current.draft)) else current
+            if (current?.opening == opening && !current.saving) change(current) else current
         }
     }
 
-    fun setShortcutText(opening: Long, id: Long, text: String) =
-        changeShortcutDraft(opening) { draft -> draft.map { if (it.id == id) it.copy(text = text) else it } }
-
-    fun addShortcut(opening: Long) = changeShortcutDraft(opening) { draft ->
-        if (draft.size >= MAX_SHORTCUTS) draft else draft + DraftPrompt((draft.maxOfOrNull { it.id } ?: -1) + 1, "")
+    fun setShortcutText(opening: Long, id: Long, text: String) = changeShortcutDraft(opening) { editor ->
+        editor.copy(draft = editor.draft.map { if (it.id == id) it.copy(text = text) else it })
     }
 
-    fun removeShortcut(opening: Long, id: Long) =
-        changeShortcutDraft(opening) { draft -> draft.filterNot { it.id == id } }
+    fun addShortcut(opening: Long) = changeShortcutDraft(opening) { editor ->
+        if (editor.draft.size >= MAX_SHORTCUTS) editor
+        else editor.copy(draft = editor.draft + DraftPrompt(editor.nextId, ""), nextId = editor.nextId + 1)
+    }
+
+    fun removeShortcut(opening: Long, id: Long) = changeShortcutDraft(opening) { editor ->
+        editor.copy(draft = editor.draft.filterNot { it.id == id })
+    }
 
     fun closeShortcutEditor() {
         _shortcutEditor.value = null
@@ -410,12 +416,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun hostUpdate(action: String = "status") {
         if (_updating.value) return
         _updating.value = true
+        if (action == "check") hostCheckPending = true
         // A new attempt replaces the last failure; the dialog shows an error in
         // place of any status, so a stale one would hide what happened next.
         _hostError.value = null
         viewModelScope.launch {
             try {
                 _host.value = client.hostUpdate(action)
+                if (action == "check") hostCheckPending = false
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -426,9 +434,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * A check was asked for and no answer has confirmed the host took it.
+     * Until one does, following up asks for the check again, since a status
+     * read alone would report the old result as up to date.
+     */
+    private var hostCheckPending = false
+
+    /** Asks again about the update in progress, or the check that may not have happened. */
+    fun followHostUpdate() = hostUpdate(if (hostCheckPending) "check" else "status")
+
     fun clearHostUpdate() {
         _host.value = null
         _hostError.value = null
+        hostCheckPending = false
     }
 }
 

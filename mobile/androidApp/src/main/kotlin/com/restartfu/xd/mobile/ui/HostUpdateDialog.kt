@@ -41,7 +41,7 @@ internal fun HostUpdateDialog(
     LaunchedEffect(pending) {
         while (pending) {
             delay(HOST_UPDATE_POLL_MILLIS)
-            model.hostUpdate("status")
+            model.followHostUpdate()
         }
     }
 
