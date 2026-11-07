@@ -4,6 +4,8 @@
 #![allow(clippy::collapsible_match)]
 // One range in a Vec is what these mean: a single line, or a single link.
 #![allow(clippy::single_range_in_vec_init)]
+// Tests read this file as text and rely on main coming after the test module.
+#![allow(clippy::items_after_test_module)]
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
@@ -18244,274 +18246,6 @@ fn strip_source_build_controls(text: &str) -> String {
     String::from_utf8_lossy(&clean).into_owned()
 }
 
-fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
-    text_system
-        .add_fonts(EMBEDDED_UI_FONTS.into_iter().map(Cow::Borrowed).collect())
-        .map_err(|error| error.to_string())
-}
-
-fn main() {
-    #[cfg(target_os = "windows")]
-    windows::configure_environment();
-    browser::configure_platform();
-    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    if arguments
-        .iter()
-        .any(|argument| argument == "--version" || argument == "-v")
-    {
-        println!("xd {}", desktop_version());
-        return;
-    }
-    Application::new()
-        .with_assets(EmbeddedIcons)
-        .run(|cx: &mut App| {
-            install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
-            cx.bind_keys([
-                KeyBinding::new("ctrl-c", CopyRenderedSelection, Some("XdDesktop")),
-                KeyBinding::new("cmd-c", CopyRenderedSelection, Some("XdDesktop")),
-                KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
-                // No context: the shortcut also works before anything has focus. The
-                // terminal's own ctrl-u is bound deeper, so it still wins there.
-                KeyBinding::new("ctrl-u", ToggleUsage, None),
-                KeyBinding::new("cmd-u", ToggleUsage, None),
-                KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
-                KeyBinding::new("delete", Delete, Some("ComposerInput")),
-                KeyBinding::new("ctrl-backspace", DeleteWord, Some("ComposerInput")),
-                KeyBinding::new("alt-backspace", DeleteWord, Some("ComposerInput")),
-                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("ComposerInput")),
-                KeyBinding::new("alt-delete", DeleteWordForward, Some("ComposerInput")),
-                KeyBinding::new("left", Left, Some("ComposerInput")),
-                KeyBinding::new("right", Right, Some("ComposerInput")),
-                KeyBinding::new("ctrl-left", WordLeft, Some("ComposerInput")),
-                KeyBinding::new("alt-left", WordLeft, Some("ComposerInput")),
-                KeyBinding::new("ctrl-right", WordRight, Some("ComposerInput")),
-                KeyBinding::new("alt-right", WordRight, Some("ComposerInput")),
-                KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
-                KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
-                KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some("ComposerInput")),
-                KeyBinding::new("alt-shift-left", SelectWordLeft, Some("ComposerInput")),
-                KeyBinding::new("ctrl-shift-right", SelectWordRight, Some("ComposerInput")),
-                KeyBinding::new("alt-shift-right", SelectWordRight, Some("ComposerInput")),
-                KeyBinding::new("home", Home, Some("ComposerInput")),
-                KeyBinding::new("end", End, Some("ComposerInput")),
-                KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
-                KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
-                KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
-                KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
-                KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
-                KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
-                KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
-                KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
-                KeyBinding::new("enter", Submit, Some("ComposerInput")),
-                KeyBinding::new(
-                    "ctrl-cmd-space",
-                    ShowCharacterPalette,
-                    Some("ComposerInput"),
-                ),
-                KeyBinding::new("backspace", EditorBackspace, Some("FileEditor")),
-                KeyBinding::new("delete", EditorDelete, Some("FileEditor")),
-                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("FileEditor")),
-                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("FileEditor")),
-                KeyBinding::new("ctrl-delete", EditorDeleteWordForward, Some("FileEditor")),
-                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("FileEditor")),
-                KeyBinding::new("left", EditorLeft, Some("FileEditor")),
-                KeyBinding::new("right", EditorRight, Some("FileEditor")),
-                KeyBinding::new("ctrl-left", EditorWordLeft, Some("FileEditor")),
-                KeyBinding::new("alt-left", EditorWordLeft, Some("FileEditor")),
-                KeyBinding::new("ctrl-right", EditorWordRight, Some("FileEditor")),
-                KeyBinding::new("alt-right", EditorWordRight, Some("FileEditor")),
-                KeyBinding::new("up", EditorUp, Some("FileEditor")),
-                KeyBinding::new("down", EditorDown, Some("FileEditor")),
-                KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
-                KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
-                KeyBinding::new("ctrl-shift-left", EditorSelectWordLeft, Some("FileEditor")),
-                KeyBinding::new("alt-shift-left", EditorSelectWordLeft, Some("FileEditor")),
-                KeyBinding::new(
-                    "ctrl-shift-right",
-                    EditorSelectWordRight,
-                    Some("FileEditor"),
-                ),
-                KeyBinding::new("alt-shift-right", EditorSelectWordRight, Some("FileEditor")),
-                KeyBinding::new("home", EditorHome, Some("FileEditor")),
-                KeyBinding::new("end", EditorEnd, Some("FileEditor")),
-                KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
-                KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
-                KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
-                KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
-                KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
-                KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
-                KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
-                KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
-                KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
-                KeyBinding::new("tab", EditorTab, Some("FileEditor")),
-                KeyBinding::new("ctrl-s", EditorSave, Some("FileEditor")),
-                KeyBinding::new("cmd-s", EditorSave, Some("FileEditor")),
-                KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
-                KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
-                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("MessageEditor")),
-                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("MessageEditor")),
-                KeyBinding::new(
-                    "ctrl-delete",
-                    EditorDeleteWordForward,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("MessageEditor")),
-                KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
-                KeyBinding::new("right", EditorRight, Some("MessageEditor")),
-                KeyBinding::new("ctrl-left", EditorWordLeft, Some("MessageEditor")),
-                KeyBinding::new("alt-left", EditorWordLeft, Some("MessageEditor")),
-                KeyBinding::new("ctrl-right", EditorWordRight, Some("MessageEditor")),
-                KeyBinding::new("alt-right", EditorWordRight, Some("MessageEditor")),
-                KeyBinding::new("up", EditorUp, Some("MessageEditor")),
-                KeyBinding::new("down", EditorDown, Some("MessageEditor")),
-                KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
-                KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
-                KeyBinding::new(
-                    "ctrl-shift-left",
-                    EditorSelectWordLeft,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new(
-                    "alt-shift-left",
-                    EditorSelectWordLeft,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new(
-                    "ctrl-shift-right",
-                    EditorSelectWordRight,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new(
-                    "alt-shift-right",
-                    EditorSelectWordRight,
-                    Some("MessageEditor"),
-                ),
-                KeyBinding::new("home", EditorHome, Some("MessageEditor")),
-                KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
-                KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),
-                KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
-                KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
-                KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
-                KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
-                KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
-                KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
-                KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
-                KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
-                KeyBinding::new("ctrl-enter", EditorSubmitNow, Some("MessageEditor")),
-                KeyBinding::new("cmd-enter", EditorSubmitNow, Some("MessageEditor")),
-                KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
-                KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
-                KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
-                KeyBinding::new("delete", Delete, Some("TerminalInput")),
-                KeyBinding::new("ctrl-backspace", DeleteWord, Some("TerminalInput")),
-                KeyBinding::new("alt-backspace", DeleteWord, Some("TerminalInput")),
-                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("TerminalInput")),
-                KeyBinding::new("alt-delete", DeleteWordForward, Some("TerminalInput")),
-                KeyBinding::new("left", Left, Some("TerminalInput")),
-                KeyBinding::new("right", Right, Some("TerminalInput")),
-                KeyBinding::new("ctrl-left", WordLeft, Some("TerminalInput")),
-                KeyBinding::new("alt-left", WordLeft, Some("TerminalInput")),
-                KeyBinding::new("ctrl-right", WordRight, Some("TerminalInput")),
-                KeyBinding::new("alt-right", WordRight, Some("TerminalInput")),
-                KeyBinding::new("up", Up, Some("TerminalInput")),
-                KeyBinding::new("down", Down, Some("TerminalInput")),
-                KeyBinding::new("pageup", TerminalPageUp, Some("TerminalInput")),
-                KeyBinding::new("pagedown", TerminalPageDown, Some("TerminalInput")),
-                KeyBinding::new("home", Home, Some("TerminalInput")),
-                KeyBinding::new("end", End, Some("TerminalInput")),
-                KeyBinding::new("shift-enter", TerminalControlJ, Some("TerminalInput")),
-                KeyBinding::new("enter", Submit, Some("TerminalInput")),
-                KeyBinding::new("tab", Tab, Some("TerminalInput")),
-                KeyBinding::new("shift-tab", TerminalShiftTab, Some("TerminalInput")),
-                KeyBinding::new("escape", Escape, Some("TerminalInput")),
-                KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
-                KeyBinding::new("ctrl-a", TerminalControlA, Some("TerminalInput")),
-                KeyBinding::new("ctrl-b", TerminalControlB, Some("TerminalInput")),
-                KeyBinding::new("ctrl-d", TerminalEndOfFile, Some("TerminalInput")),
-                KeyBinding::new("ctrl-e", TerminalControlE, Some("TerminalInput")),
-                KeyBinding::new("ctrl-f", TerminalControlF, Some("TerminalInput")),
-                KeyBinding::new("ctrl-g", TerminalControlG, Some("TerminalInput")),
-                KeyBinding::new("ctrl-h", TerminalControlH, Some("TerminalInput")),
-                KeyBinding::new("ctrl-i", TerminalControlI, Some("TerminalInput")),
-                KeyBinding::new("ctrl-j", TerminalControlJ, Some("TerminalInput")),
-                KeyBinding::new("ctrl-k", TerminalControlK, Some("TerminalInput")),
-                KeyBinding::new("ctrl-l", TerminalClearScreen, Some("TerminalInput")),
-                KeyBinding::new("ctrl-m", TerminalControlM, Some("TerminalInput")),
-                KeyBinding::new("ctrl-n", TerminalControlN, Some("TerminalInput")),
-                KeyBinding::new("ctrl-o", TerminalControlO, Some("TerminalInput")),
-                KeyBinding::new("ctrl-p", TerminalControlP, Some("TerminalInput")),
-                KeyBinding::new("ctrl-q", TerminalControlQ, Some("TerminalInput")),
-                KeyBinding::new("ctrl-r", TerminalReverseSearch, Some("TerminalInput")),
-                KeyBinding::new("ctrl-s", TerminalControlS, Some("TerminalInput")),
-                KeyBinding::new("ctrl-t", TerminalControlT, Some("TerminalInput")),
-                KeyBinding::new("ctrl-u", TerminalControlU, Some("TerminalInput")),
-                KeyBinding::new("ctrl-w", TerminalControlW, Some("TerminalInput")),
-                KeyBinding::new("ctrl-x", TerminalControlX, Some("TerminalInput")),
-                KeyBinding::new("ctrl-y", TerminalControlY, Some("TerminalInput")),
-                KeyBinding::new("ctrl-z", TerminalSuspend, Some("TerminalInput")),
-                KeyBinding::new("ctrl-shift-c", Copy, Some("TerminalInput")),
-                KeyBinding::new("ctrl-shift-v", Paste, Some("TerminalInput")),
-                KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
-            ]);
-            let settings = AppSettings::load();
-            let bounds = Bounds::centered(
-                None,
-                size(
-                    px(f32::from(settings.window_width.max(760))),
-                    px(f32::from(settings.window_height.max(560))),
-                ),
-                cx,
-            );
-            let window_bounds = if settings.window_maximized {
-                WindowBounds::Maximized(bounds)
-            } else {
-                WindowBounds::Windowed(bounds)
-            };
-            let desktop_window = cx
-                .open_window(
-                    WindowOptions {
-                        focus: true,
-                        window_bounds: Some(window_bounds),
-                        is_resizable: true,
-                        window_min_size: Some(size(px(760.0), px(560.0))),
-                        window_background: WindowBackgroundAppearance::Opaque,
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("xd".into()),
-                            appears_transparent: true,
-                            traffic_light_position: cfg!(target_os = "macos")
-                                .then(|| point(px(12.0), px(10.0))),
-                        }),
-                        window_decorations: Some(WindowDecorations::Client),
-                        app_id: Some(xd_desktop::channel::app_id()),
-                        ..Default::default()
-                    },
-                    |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
-                )
-                .expect("open xd GPUI window");
-            cx.on_action(move |_: &ToggleUsage, cx| {
-                // The key is being dispatched inside this window's own update.
-                cx.defer(move |cx| {
-                    let _ = desktop_window
-                        .update(cx, |desktop, window, cx| desktop.toggle_usage(window, cx));
-                });
-            });
-            cx.activate(true);
-        });
-}
-
-fn desktop_version() -> String {
-    option_env!("XD_COMMIT")
-        .filter(|commit| !commit.is_empty() && *commit != "development")
-        .map(|commit| {
-            format!(
-                "{} ({})",
-                env!("CARGO_PKG_VERSION"),
-                &commit[..7.min(commit.len())]
-            )
-        })
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
-}
-
 #[cfg(test)]
 #[allow(clippy::arc_with_non_send_sync, clippy::field_reassign_with_default)]
 mod tests {
@@ -21129,7 +20863,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn clicking_a_transcript_image_opens_it_and_a_click_closes_it(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         let target = cx.update(|window, _| window.window_handle());
         desktop.update(cx, |desktop, _| {
             Arc::make_mut(&mut desktop.message_images)
@@ -21160,7 +20894,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_image_viewer_fits_an_image_inside_the_window(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         // Proportioned differently from the window, so either side could overflow.
         for (width, height) in [(1200, 800), (800, 1200), (4000, 100)] {
             cx.update_window_entity(&desktop, |desktop, window, cx| {
@@ -21201,7 +20935,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn escape_closes_the_image_viewer_before_anything_under_it(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.auth_open = true;
             Arc::make_mut(&mut desktop.message_images)
@@ -21220,7 +20954,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn an_image_that_is_not_ready_does_not_open(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.open_image_viewer(ImageViewer::Message("/gone.png".into()), window, cx);
             assert!(desktop.image_viewer.is_none());
@@ -21230,7 +20964,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[gpui::test]
     fn the_viewed_image_outlives_eviction_and_leaves_with_its_chat(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
             desktop.message_image_frame = 5;
             desktop.message_images_closing = MESSAGE_IMAGE_BUDGET;
@@ -23779,4 +23513,272 @@ Binary files /dev/null and b/image.png differ\n";
             );
         });
     }
+}
+
+fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> {
+    text_system
+        .add_fonts(EMBEDDED_UI_FONTS.into_iter().map(Cow::Borrowed).collect())
+        .map_err(|error| error.to_string())
+}
+
+fn main() {
+    #[cfg(target_os = "windows")]
+    windows::configure_environment();
+    browser::configure_platform();
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| argument == "--version" || argument == "-v")
+    {
+        println!("xd {}", desktop_version());
+        return;
+    }
+    Application::new()
+        .with_assets(EmbeddedIcons)
+        .run(|cx: &mut App| {
+            install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+            cx.bind_keys([
+                KeyBinding::new("ctrl-c", CopyRenderedSelection, Some("XdDesktop")),
+                KeyBinding::new("cmd-c", CopyRenderedSelection, Some("XdDesktop")),
+                KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
+                // No context: the shortcut also works before anything has focus. The
+                // terminal's own ctrl-u is bound deeper, so it still wins there.
+                KeyBinding::new("ctrl-u", ToggleUsage, None),
+                KeyBinding::new("cmd-u", ToggleUsage, None),
+                KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
+                KeyBinding::new("delete", Delete, Some("ComposerInput")),
+                KeyBinding::new("ctrl-backspace", DeleteWord, Some("ComposerInput")),
+                KeyBinding::new("alt-backspace", DeleteWord, Some("ComposerInput")),
+                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("ComposerInput")),
+                KeyBinding::new("alt-delete", DeleteWordForward, Some("ComposerInput")),
+                KeyBinding::new("left", Left, Some("ComposerInput")),
+                KeyBinding::new("right", Right, Some("ComposerInput")),
+                KeyBinding::new("ctrl-left", WordLeft, Some("ComposerInput")),
+                KeyBinding::new("alt-left", WordLeft, Some("ComposerInput")),
+                KeyBinding::new("ctrl-right", WordRight, Some("ComposerInput")),
+                KeyBinding::new("alt-right", WordRight, Some("ComposerInput")),
+                KeyBinding::new("shift-left", SelectLeft, Some("ComposerInput")),
+                KeyBinding::new("shift-right", SelectRight, Some("ComposerInput")),
+                KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some("ComposerInput")),
+                KeyBinding::new("alt-shift-left", SelectWordLeft, Some("ComposerInput")),
+                KeyBinding::new("ctrl-shift-right", SelectWordRight, Some("ComposerInput")),
+                KeyBinding::new("alt-shift-right", SelectWordRight, Some("ComposerInput")),
+                KeyBinding::new("home", Home, Some("ComposerInput")),
+                KeyBinding::new("end", End, Some("ComposerInput")),
+                KeyBinding::new("ctrl-a", SelectAll, Some("ComposerInput")),
+                KeyBinding::new("ctrl-c", Copy, Some("ComposerInput")),
+                KeyBinding::new("ctrl-x", Cut, Some("ComposerInput")),
+                KeyBinding::new("ctrl-v", Paste, Some("ComposerInput")),
+                KeyBinding::new("cmd-a", SelectAll, Some("ComposerInput")),
+                KeyBinding::new("cmd-c", Copy, Some("ComposerInput")),
+                KeyBinding::new("cmd-x", Cut, Some("ComposerInput")),
+                KeyBinding::new("cmd-v", Paste, Some("ComposerInput")),
+                KeyBinding::new("enter", Submit, Some("ComposerInput")),
+                KeyBinding::new(
+                    "ctrl-cmd-space",
+                    ShowCharacterPalette,
+                    Some("ComposerInput"),
+                ),
+                KeyBinding::new("backspace", EditorBackspace, Some("FileEditor")),
+                KeyBinding::new("delete", EditorDelete, Some("FileEditor")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("FileEditor")),
+                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("FileEditor")),
+                KeyBinding::new("ctrl-delete", EditorDeleteWordForward, Some("FileEditor")),
+                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("FileEditor")),
+                KeyBinding::new("left", EditorLeft, Some("FileEditor")),
+                KeyBinding::new("right", EditorRight, Some("FileEditor")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("FileEditor")),
+                KeyBinding::new("alt-left", EditorWordLeft, Some("FileEditor")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("FileEditor")),
+                KeyBinding::new("alt-right", EditorWordRight, Some("FileEditor")),
+                KeyBinding::new("up", EditorUp, Some("FileEditor")),
+                KeyBinding::new("down", EditorDown, Some("FileEditor")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("FileEditor")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("FileEditor")),
+                KeyBinding::new("ctrl-shift-left", EditorSelectWordLeft, Some("FileEditor")),
+                KeyBinding::new("alt-shift-left", EditorSelectWordLeft, Some("FileEditor")),
+                KeyBinding::new(
+                    "ctrl-shift-right",
+                    EditorSelectWordRight,
+                    Some("FileEditor"),
+                ),
+                KeyBinding::new("alt-shift-right", EditorSelectWordRight, Some("FileEditor")),
+                KeyBinding::new("home", EditorHome, Some("FileEditor")),
+                KeyBinding::new("end", EditorEnd, Some("FileEditor")),
+                KeyBinding::new("ctrl-a", EditorSelectAll, Some("FileEditor")),
+                KeyBinding::new("ctrl-c", EditorCopy, Some("FileEditor")),
+                KeyBinding::new("ctrl-x", EditorCut, Some("FileEditor")),
+                KeyBinding::new("ctrl-v", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("cmd-a", EditorSelectAll, Some("FileEditor")),
+                KeyBinding::new("cmd-c", EditorCopy, Some("FileEditor")),
+                KeyBinding::new("cmd-x", EditorCut, Some("FileEditor")),
+                KeyBinding::new("cmd-v", EditorPaste, Some("FileEditor")),
+                KeyBinding::new("enter", EditorNewline, Some("FileEditor")),
+                KeyBinding::new("tab", EditorTab, Some("FileEditor")),
+                KeyBinding::new("ctrl-s", EditorSave, Some("FileEditor")),
+                KeyBinding::new("cmd-s", EditorSave, Some("FileEditor")),
+                KeyBinding::new("backspace", EditorBackspace, Some("MessageEditor")),
+                KeyBinding::new("delete", EditorDelete, Some("MessageEditor")),
+                KeyBinding::new("ctrl-backspace", EditorDeleteWord, Some("MessageEditor")),
+                KeyBinding::new("alt-backspace", EditorDeleteWord, Some("MessageEditor")),
+                KeyBinding::new(
+                    "ctrl-delete",
+                    EditorDeleteWordForward,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new("alt-delete", EditorDeleteWordForward, Some("MessageEditor")),
+                KeyBinding::new("left", EditorLeft, Some("MessageEditor")),
+                KeyBinding::new("right", EditorRight, Some("MessageEditor")),
+                KeyBinding::new("ctrl-left", EditorWordLeft, Some("MessageEditor")),
+                KeyBinding::new("alt-left", EditorWordLeft, Some("MessageEditor")),
+                KeyBinding::new("ctrl-right", EditorWordRight, Some("MessageEditor")),
+                KeyBinding::new("alt-right", EditorWordRight, Some("MessageEditor")),
+                KeyBinding::new("up", EditorUp, Some("MessageEditor")),
+                KeyBinding::new("down", EditorDown, Some("MessageEditor")),
+                KeyBinding::new("shift-left", EditorSelectLeft, Some("MessageEditor")),
+                KeyBinding::new("shift-right", EditorSelectRight, Some("MessageEditor")),
+                KeyBinding::new(
+                    "ctrl-shift-left",
+                    EditorSelectWordLeft,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-left",
+                    EditorSelectWordLeft,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "ctrl-shift-right",
+                    EditorSelectWordRight,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new(
+                    "alt-shift-right",
+                    EditorSelectWordRight,
+                    Some("MessageEditor"),
+                ),
+                KeyBinding::new("home", EditorHome, Some("MessageEditor")),
+                KeyBinding::new("end", EditorEnd, Some("MessageEditor")),
+                KeyBinding::new("ctrl-a", EditorSelectAll, Some("MessageEditor")),
+                KeyBinding::new("ctrl-c", EditorCopy, Some("MessageEditor")),
+                KeyBinding::new("ctrl-x", EditorCut, Some("MessageEditor")),
+                KeyBinding::new("ctrl-v", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("cmd-a", EditorSelectAll, Some("MessageEditor")),
+                KeyBinding::new("cmd-c", EditorCopy, Some("MessageEditor")),
+                KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
+                KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
+                KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
+                KeyBinding::new("ctrl-enter", EditorSubmitNow, Some("MessageEditor")),
+                KeyBinding::new("cmd-enter", EditorSubmitNow, Some("MessageEditor")),
+                KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
+                KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
+                KeyBinding::new("backspace", Backspace, Some("TerminalInput")),
+                KeyBinding::new("delete", Delete, Some("TerminalInput")),
+                KeyBinding::new("ctrl-backspace", DeleteWord, Some("TerminalInput")),
+                KeyBinding::new("alt-backspace", DeleteWord, Some("TerminalInput")),
+                KeyBinding::new("ctrl-delete", DeleteWordForward, Some("TerminalInput")),
+                KeyBinding::new("alt-delete", DeleteWordForward, Some("TerminalInput")),
+                KeyBinding::new("left", Left, Some("TerminalInput")),
+                KeyBinding::new("right", Right, Some("TerminalInput")),
+                KeyBinding::new("ctrl-left", WordLeft, Some("TerminalInput")),
+                KeyBinding::new("alt-left", WordLeft, Some("TerminalInput")),
+                KeyBinding::new("ctrl-right", WordRight, Some("TerminalInput")),
+                KeyBinding::new("alt-right", WordRight, Some("TerminalInput")),
+                KeyBinding::new("up", Up, Some("TerminalInput")),
+                KeyBinding::new("down", Down, Some("TerminalInput")),
+                KeyBinding::new("pageup", TerminalPageUp, Some("TerminalInput")),
+                KeyBinding::new("pagedown", TerminalPageDown, Some("TerminalInput")),
+                KeyBinding::new("home", Home, Some("TerminalInput")),
+                KeyBinding::new("end", End, Some("TerminalInput")),
+                KeyBinding::new("shift-enter", TerminalControlJ, Some("TerminalInput")),
+                KeyBinding::new("enter", Submit, Some("TerminalInput")),
+                KeyBinding::new("tab", Tab, Some("TerminalInput")),
+                KeyBinding::new("shift-tab", TerminalShiftTab, Some("TerminalInput")),
+                KeyBinding::new("escape", Escape, Some("TerminalInput")),
+                KeyBinding::new("ctrl-c", Interrupt, Some("TerminalInput")),
+                KeyBinding::new("ctrl-a", TerminalControlA, Some("TerminalInput")),
+                KeyBinding::new("ctrl-b", TerminalControlB, Some("TerminalInput")),
+                KeyBinding::new("ctrl-d", TerminalEndOfFile, Some("TerminalInput")),
+                KeyBinding::new("ctrl-e", TerminalControlE, Some("TerminalInput")),
+                KeyBinding::new("ctrl-f", TerminalControlF, Some("TerminalInput")),
+                KeyBinding::new("ctrl-g", TerminalControlG, Some("TerminalInput")),
+                KeyBinding::new("ctrl-h", TerminalControlH, Some("TerminalInput")),
+                KeyBinding::new("ctrl-i", TerminalControlI, Some("TerminalInput")),
+                KeyBinding::new("ctrl-j", TerminalControlJ, Some("TerminalInput")),
+                KeyBinding::new("ctrl-k", TerminalControlK, Some("TerminalInput")),
+                KeyBinding::new("ctrl-l", TerminalClearScreen, Some("TerminalInput")),
+                KeyBinding::new("ctrl-m", TerminalControlM, Some("TerminalInput")),
+                KeyBinding::new("ctrl-n", TerminalControlN, Some("TerminalInput")),
+                KeyBinding::new("ctrl-o", TerminalControlO, Some("TerminalInput")),
+                KeyBinding::new("ctrl-p", TerminalControlP, Some("TerminalInput")),
+                KeyBinding::new("ctrl-q", TerminalControlQ, Some("TerminalInput")),
+                KeyBinding::new("ctrl-r", TerminalReverseSearch, Some("TerminalInput")),
+                KeyBinding::new("ctrl-s", TerminalControlS, Some("TerminalInput")),
+                KeyBinding::new("ctrl-t", TerminalControlT, Some("TerminalInput")),
+                KeyBinding::new("ctrl-u", TerminalControlU, Some("TerminalInput")),
+                KeyBinding::new("ctrl-w", TerminalControlW, Some("TerminalInput")),
+                KeyBinding::new("ctrl-x", TerminalControlX, Some("TerminalInput")),
+                KeyBinding::new("ctrl-y", TerminalControlY, Some("TerminalInput")),
+                KeyBinding::new("ctrl-z", TerminalSuspend, Some("TerminalInput")),
+                KeyBinding::new("ctrl-shift-c", Copy, Some("TerminalInput")),
+                KeyBinding::new("ctrl-shift-v", Paste, Some("TerminalInput")),
+                KeyBinding::new("cmd-v", Paste, Some("TerminalInput")),
+            ]);
+            let settings = AppSettings::load();
+            let bounds = Bounds::centered(
+                None,
+                size(
+                    px(f32::from(settings.window_width.max(760))),
+                    px(f32::from(settings.window_height.max(560))),
+                ),
+                cx,
+            );
+            let window_bounds = if settings.window_maximized {
+                WindowBounds::Maximized(bounds)
+            } else {
+                WindowBounds::Windowed(bounds)
+            };
+            let desktop_window = cx
+                .open_window(
+                    WindowOptions {
+                        focus: true,
+                        window_bounds: Some(window_bounds),
+                        is_resizable: true,
+                        window_min_size: Some(size(px(760.0), px(560.0))),
+                        window_background: WindowBackgroundAppearance::Opaque,
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("xd".into()),
+                            appears_transparent: true,
+                            traffic_light_position: cfg!(target_os = "macos")
+                                .then(|| point(px(12.0), px(10.0))),
+                        }),
+                        window_decorations: Some(WindowDecorations::Client),
+                        app_id: Some(xd_desktop::channel::app_id()),
+                        ..Default::default()
+                    },
+                    |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
+                )
+                .expect("open xd GPUI window");
+            cx.on_action(move |_: &ToggleUsage, cx| {
+                // The key is being dispatched inside this window's own update.
+                cx.defer(move |cx| {
+                    let _ = desktop_window
+                        .update(cx, |desktop, window, cx| desktop.toggle_usage(window, cx));
+                });
+            });
+            cx.activate(true);
+        });
+}
+
+fn desktop_version() -> String {
+    option_env!("XD_COMMIT")
+        .filter(|commit| !commit.is_empty() && *commit != "development")
+        .map(|commit| {
+            format!(
+                "{} ({})",
+                env!("CARGO_PKG_VERSION"),
+                &commit[..7.min(commit.len())]
+            )
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
 }
