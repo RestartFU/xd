@@ -1001,8 +1001,12 @@ class ChatViewModel(
         val read = ++pullRequestReads
         viewModelScope.launch {
             try {
+                // The lookup asks about whatever is checked out when it runs, so
+                // keep it only if the branch held still around it.
+                val before = session.gitStatus().branch
                 val url = session.pullRequestUrl()
-                if (read == pullRequestReads) _pullRequest.value = url
+                val after = session.gitStatus().branch
+                if (read == pullRequestReads) _pullRequest.value = url.takeIf { before == after }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {

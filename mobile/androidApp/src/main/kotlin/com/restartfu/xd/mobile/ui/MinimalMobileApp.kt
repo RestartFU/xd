@@ -1402,7 +1402,7 @@ private fun NewSessionDialog(
             try {
                 val found = places()
                 loaded = found
-                if (worktree == null) worktree = found.default
+                worktree = found.reconcile(worktree)
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -1478,6 +1478,21 @@ internal data class NewSessionPlaces(
     val pullRequests: List<PullRequestSourceReply>,
     val pullRequestError: String?,
 ) {
+    /**
+     * A choice restored from before a rotation, matched against what the host
+     * lists now: a branch or pull request keeps its identity with its current
+     * commit, and anything no longer offered falls back to the default.
+     */
+    fun reconcile(choice: Ops.NewSessionWorktree?): Ops.NewSessionWorktree? = when (choice) {
+        null -> default
+        Ops.NewSessionWorktree.New -> if (canCreateWorktree) choice else default
+        is Ops.NewSessionWorktree.Existing -> if (worktrees.any { it.path == choice.path }) choice else default
+        is Ops.NewSessionWorktree.Branch -> branches.firstOrNull { it.reference == choice.reference }
+            ?.let { Ops.NewSessionWorktree.Branch(it.reference, it.oid) } ?: default
+        is Ops.NewSessionWorktree.PullRequest -> pullRequests.firstOrNull { it.number == choice.number }
+            ?.let { Ops.NewSessionWorktree.PullRequest(it.number, it.oid) } ?: default
+    }
+
     /** The checkout in use, else the project's own, as the desktop picks. */
     val default: Ops.NewSessionWorktree?
         get() = (worktrees.firstOrNull { it.current } ?: worktrees.firstOrNull { it.main } ?: worktrees.firstOrNull())
@@ -1558,9 +1573,14 @@ private fun WorkspacePicker(
                         modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                     )
                     val query = filter.trim()
+                    // The chosen one always shows, whatever the filter and limit hide.
                     places.pullRequests
                         .filter { query.isEmpty() || it.title.contains(query, true) || "#${it.number}".contains(query) }
                         .take(PLACE_LIMIT)
+                        .let { shown ->
+                            val chosen = (selected as? Ops.NewSessionWorktree.PullRequest)?.number
+                            shown + places.pullRequests.filter { it.number == chosen && it !in shown }
+                        }
                         .forEach { pull ->
                             PlaceRow(
                                 label = "#${pull.number} ${pull.title}",
@@ -1572,6 +1592,10 @@ private fun WorkspacePicker(
                     places.branches
                         .filter { query.isEmpty() || it.name.contains(query, true) }
                         .take(PLACE_LIMIT)
+                        .let { shown ->
+                            val chosen = (selected as? Ops.NewSessionWorktree.Branch)?.reference
+                            shown + places.branches.filter { it.reference == chosen && it !in shown }
+                        }
                         .forEach { branch ->
                             PlaceRow(
                                 label = branch.name,
