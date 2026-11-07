@@ -900,6 +900,7 @@ class ChatViewModel(
 
     fun editQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
         if (!sameQueue(state.value.queue, opened)) return
+        if (!identifiable(opened, oldText)) return
         launchGuarded(_droppingQueued) {
             session.editQueued(index, oldText, text, opened.revision)
         }
@@ -921,6 +922,7 @@ class ChatViewModel(
     fun steerQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
         val before = state.value
         if (!sameQueue(before.queue, opened)) return
+        if (!identifiable(opened, oldText)) return
         launchGuarded(_steering) {
             // Each step names the queue it expects, so a message another device
             // moved or dropped meanwhile is never mistaken for an equal one.
@@ -976,8 +978,8 @@ class ChatViewModel(
     fun dropQueued(index: Int, text: String, opened: OpenedQueue) {
         val before = state.value.queue
         if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
-        // A host without queue revisions cannot tell equal messages apart.
-        if (opened.revision == null && before.count { it == text } != 1) return
+        // A host without queue revisions does not check what it drops.
+        if (opened.revision == null) return
         launchGuarded(_droppingQueued) {
             session.dropQueued(index, text, opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
@@ -1001,6 +1003,10 @@ class ChatViewModel(
         _queueNotice.value = QUEUE_CHANGED
         return false
     }
+
+    /** Whether the host can tell [text] apart: by revision, or by being unique. */
+    private fun identifiable(opened: OpenedQueue, text: String): Boolean =
+        opened.revision != null || opened.messages.count { it == text } == 1
 
     /** The queue changed while a message was open, so its dialog closed. */
     fun queueChanged() {
