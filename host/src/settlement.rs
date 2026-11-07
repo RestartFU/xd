@@ -965,6 +965,18 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_checkout_there_and_back_during_the_lookup_discards_the_answer() {
+        with_fake_gh(
+            "git checkout -q -b other; git checkout -q feature; \
+             echo https://github.com/o/r/pull/11",
+            |fixture, _| {
+                assert_eq!(fixture.store.chat_pull_request(&fixture.chat), None);
+            },
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_merged_pull_request_settles_a_session_right_away() {
         let merged_at = now_seconds() + 60;
         with_fake_gh(

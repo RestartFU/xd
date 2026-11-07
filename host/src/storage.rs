@@ -2837,8 +2837,8 @@ impl StateStore {
     /// The pull request of the branch checked out for a chat, as `branch` and
     /// `url`, whatever state the working tree is in. An empty `url` means there
     /// is none; a missing `url` means GitHub could not say, which is not the
-    /// same as no. `None` outside a repository, on a detached HEAD, and when the
-    /// branch changed during the lookup.
+    /// same as no. `None` outside a repository, on a detached HEAD, and when HEAD
+    /// moved during the lookup.
     pub(crate) fn chat_pull_request(&self, chat_id: &str) -> Option<Value> {
         let workdir = {
             let database = self.database.lock().ok()?;
@@ -2846,6 +2846,10 @@ impl StateStore {
         };
         let workdir = Path::new(&workdir);
         let branch = self.checked_out_branch(workdir)?;
+        let head_moves = head_move_count(workdir);
+        // gh answers for whatever is checked out when it runs. Naming the branch
+        // would pin that down, but gh then matches the name alone and misses a
+        // pull request whose head is called something else locally.
         let url = match run_gh(workdir, &["pr", "view", "--json", "url", "--jq", ".url"]) {
             Ok((status, stdout, _)) if status.success() => extract_web_url(&stdout),
             Ok((_, _, stderr))
@@ -2855,9 +2859,9 @@ impl StateStore {
             }
             _ => None,
         };
-        // gh answers for whatever is checked out when it runs, so after a
-        // checkout its answer may belong to another branch.
-        if self.checked_out_branch(workdir).as_deref() != Some(branch.as_str()) {
+        if self.checked_out_branch(workdir).as_deref() != Some(branch.as_str())
+            || head_move_count(workdir) != head_moves
+        {
             return None;
         }
         Some(match url {
@@ -6111,6 +6115,17 @@ fn command_failure(stdout: &[u8], stderr: &[u8], fallback: &str) -> StorageError
         .find(|line| !line.is_empty())
         .unwrap_or(fallback);
     StorageError::InvalidRequest(detail.chars().take(240).collect())
+}
+
+/// How many times HEAD has moved, by its reflog. Unlike the branch name this
+/// also changes after a checkout there and back.
+fn head_move_count(workdir: &Path) -> Option<u64> {
+    let (status, stdout, _) =
+        run_git(workdir, &["rev-list", "--walk-reflogs", "--count", "HEAD"]).ok()?;
+    status
+        .success()
+        .then(|| String::from_utf8_lossy(&stdout).trim().parse().ok())
+        .flatten()
 }
 
 fn extract_web_url(output: &[u8]) -> Option<String> {
