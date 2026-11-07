@@ -37,6 +37,9 @@ for line in sys.stdin:
         log.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv, 'home': os.environ.get('CODEX_HOME'), 'frame': frame}) + '\n')
     method = frame.get('method')
     if method == 'initialize': print(json.dumps({'id':1,'result':{}}), flush=True)
+    elif method == 'model/list':
+        time.sleep(0.3)
+        print(json.dumps({'id':2,'result':{'data':[{'model':'cli-default','isDefault':True,'defaultReasoningEffort':'low'},{'model':'gpt-5.5','defaultReasoningEffort':'medium'}]}}), flush=True)
     elif method in ('thread/start','thread/resume'): print(json.dumps({'id':2,'result':{'thread':{'id':'thread-test'}}}), flush=True)
     elif method == 'turn/start':
         print(json.dumps({'id':3,'result':{'turn':{'id':'turn-test'}}}), flush=True)
@@ -308,11 +311,27 @@ fn installed_cli_reuses_sessions_and_resumes_after_process_loss() {
             reply["working"] == false
         });
     };
+    // Only processes that opened a thread ran turns: the host also starts short
+    // ones to ask the assistant for its models.
     let requests = || -> Vec<Value> {
-        fs::read_to_string(daemon.root.join("codex.requests"))
+        let frames: Vec<Value> = fs::read_to_string(daemon.root.join("codex.requests"))
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let turn_processes: Vec<Value> = frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    frame["frame"]["method"].as_str(),
+                    Some("thread/start" | "thread/resume")
+                )
+            })
+            .map(|frame| frame["pid"].clone())
+            .collect();
+        frames
+            .into_iter()
+            .filter(|frame| turn_processes.contains(&frame["pid"]))
             .collect()
     };
     send(&mut client);
@@ -371,6 +390,90 @@ fn installed_cli_reuses_sessions_and_resumes_after_process_loss() {
             .iter()
             .any(|arg| arg == "service_tier=\"priority\"")
     );
+}
+
+#[test]
+fn a_first_turn_waits_for_the_default_the_assistant_reports() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    // Nothing has been discovered yet, and the send races the probe this starts.
+    let chat = daemon.chat(&mut client);
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"hello"}))["ok"],
+        true
+    );
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let requests = fs::read_to_string(daemon.root.join("codex.requests")).unwrap();
+    let thread = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|frame| frame["frame"]["method"] == "thread/start")
+        .unwrap();
+    assert_eq!(thread["frame"]["params"]["model"], "cli-default");
+}
+
+#[test]
+fn a_first_turn_leaves_a_remembered_model_the_assistant_has_retired() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let earlier = daemon.chat(&mut client);
+    // Built in, so it is accepted, but the assistant does not offer it.
+    assert_eq!(
+        client.call(json!({"op":"set-option", "chat":earlier, "option":"model",
+            "value":"gpt-5.3-codex-spark"}))["ok"],
+        true
+    );
+    assert_eq!(
+        client.call(json!({"op":"set-option", "chat":earlier, "option":"effort",
+            "value":"high"}))["ok"],
+        true
+    );
+    // The earlier chat's probe has not answered yet, so the pick is not checked.
+    let chat = daemon.chat(&mut client);
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"hello"}))["ok"],
+        true
+    );
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let requests = fs::read_to_string(daemon.root.join("codex.requests")).unwrap();
+    let thread = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|frame| frame["frame"]["method"] == "thread/start")
+        .unwrap();
+    assert_eq!(thread["frame"]["params"]["model"], "cli-default");
+}
+
+#[test]
+fn a_first_turn_waits_for_the_default_effort_of_a_model_already_chosen() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let folder = client.call(json!({"op":"new-folder", "name":"Project"}));
+    // A built-in model is accepted and pinned without anything being discovered.
+    let settings = client.call(json!({"op":"set-folder-settings", "folder":folder["id"],
+        "backend":null, "model":"gpt-5.5", "workdir":null, "repo":null}));
+    assert_eq!(settings["ok"], true, "{settings}");
+    let chat = client.call(json!({"op":"new-chat", "folder":folder["id"]}));
+    assert_eq!(chat["ok"], true, "{chat}");
+    let chat = chat["id"].as_str().unwrap();
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"hello"}))["ok"],
+        true
+    );
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let requests = fs::read_to_string(daemon.root.join("codex.requests")).unwrap();
+    let turn = requests
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|frame| frame["frame"]["method"] == "turn/start")
+        .unwrap();
+    assert_eq!(turn["frame"]["params"]["effort"], "medium");
 }
 
 #[test]

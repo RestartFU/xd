@@ -340,7 +340,13 @@ acting at once are therefore ordered by the host rather than racing.
 Without `session`, `folder` is required and the operation creates a new session
 containing the new chat. `title` defaults to `New Chat` and also supplies the
 initial session title. Optional `backend` selects the chat's assistant;
-otherwise the folder and host defaults apply. `worktree` may select `new`, an
+otherwise the folder and host defaults apply. Without `backend`, the chat starts
+on the folder's model if it has one; otherwise it takes the model last chosen
+with `set-option` for that assistant, else the assistant's own default. Its effort is
+the one last chosen for that assistant, else the default the assistant reports
+for the chat's model, else `high`. A chat's first `send` waits for model discovery if
+either value is unset, and moves a chat on a model the assistant no longer
+offers to its default. `worktree` may select `new`, an
 `existing` path, a full local or remote-tracking branch ref plus its listed
 commit, or a pull request number plus its listed head commit. Branch and pull
 request selections create an isolated managed `xd/*` worktree and are
@@ -578,6 +584,9 @@ Selecting a model atomically requires sending `backend` alongside `value`;
 without `backend` only the model string is stored. The atomic form validates
 both, clears an unsupported effort, and appends a visible `Switched to …`
 transcript event.
+
+Each `model` or `effort` selection is also remembered for that chat's assistant,
+separately from every other assistant, and new chats on it start from there.
 
 `host-update` updates the host's own installation, so a paired device can
 bring a machine forward without a shell on it. `install` replaces the files,
