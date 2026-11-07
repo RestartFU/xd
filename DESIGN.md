@@ -150,7 +150,7 @@ Keep the conversation readable at its actual window size. Titles truncate where 
 
 Desktop has a project sidebar, 256px by default and resizable by dragging its edge, a session header, a separate 43px chat-tab row, and a central conversation. The regular composer and chat measure cap at 736px; an empty conversation centers a 660px composer beneath its context, heading and description. A short transcript starts at the top; longer transcripts retain scrolling and the existing latest-output behavior.
 
-Changes, Files, Browser and Terminal belong to the session workspace. Chat tabs control independent conversations. Desktop settings use a bounded panel up to 900×760px, with section navigation that changes to a horizontal strip in compact windows. The application minimum is 760×560px.
+Changes, Files, Browser and Terminal belong to the session workspace. The desktop side pane runs the workspace's full height beside the session column: its tabs sit level with the session header, its address bar or tool controls level with the chat tabs, and one rule closes both columns. Chat tabs control independent conversations. Desktop settings use a bounded panel up to 900×760px, with section navigation that changes to a horizontal strip in compact windows. The application minimum is 760×560px.
 
 Android uses bottom navigation outside an open chat on compact screens and a navigation rail from 600dp. Phone chats use the header back action to return to projects. Chat tabs scroll horizontally and reveal the selected chat. Changes, Files and Terminal remain separate workspace tabs below them. Touch controls preserve 48dp targets; dialogs and reading areas respect system insets and enlarged text.
 
@@ -166,7 +166,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 ## Components
 
-**Project navigation.** Each project reveals its sessions. One sidebar row represents a session even when it contains several chats. The row restores that session's last active chat and aggregates working, waiting and unread activity. On desktop, drag a project's row to reorder it among its siblings; a line shows where it will land, and the order is saved on the host.
+**Project navigation.** Each project reveals its sessions. One sidebar row represents a session even when it contains several chats. The row restores that session's last active chat and aggregates working, waiting and unread activity. On desktop, drag a project's row to reorder it among its siblings; a line shows where it will land, and the order is saved on the host. Settled sessions collapse into a shelf pinned just above the sidebar footer, whose Terminal, Settings and Usage icons sit at its left edge; opened, the shelf grows upward to half the sidebar and scrolls past that.
 
 **Chat tabs.** Each tab has an agent mark and title. Add creates another chat sharing the workspace. Close hides a tab without deleting history; Reopen on desktop and All chats on Android restore it. Phone tabs omit inline close buttons; All chats contains Close chat. Explicit rename and confirmed delete remain separate actions. Desktop keeps the final visible chat open. Android can hide all tabs and shows a saved-chats state with reopen and create actions.
 
