@@ -1099,9 +1099,10 @@ fn kind_order(kind: &str) -> u8 {
     }
 }
 
-/// Codex ids name slots, so pool by kind; Claude ids identify distinct allowances.
+/// Codex's `primary` and `secondary` name slots, so they pool by kind. Other ids,
+/// such as its credit limit and Claude's allowances, are distinct allowances.
 fn pool_key(provider: &str, window: &LimitWindow) -> String {
-    if provider == "codex" {
+    if provider == "codex" && matches!(window.id.as_str(), "primary" | "secondary") {
         window.kind.clone()
     } else {
         format!("{}:{}", window.kind, window.id)
@@ -1685,6 +1686,40 @@ mod tests {
             pools[0].accounts[0].key, "a",
             "the soonest reset comes first"
         );
+    }
+
+    #[test]
+    fn a_codex_credit_limit_never_pools_with_a_monthly_allowance() {
+        let accounts = [
+            account(
+                "codex",
+                "a",
+                vec![
+                    window("primary", "monthly", 80.0, None, None),
+                    window("individual", "monthly", 10.0, None, None),
+                ],
+            ),
+            account(
+                "codex",
+                "b",
+                vec![window("individual", "monthly", 30.0, None, None)],
+            ),
+        ];
+        let pools = collect_pools(&accounts, 0);
+        let windows = &pools[0].windows;
+        assert_eq!(windows.len(), 2);
+        let primary = windows
+            .iter()
+            .find(|pool| pool.members[0].window.id == "primary")
+            .unwrap();
+        assert_eq!(primary.members.len(), 1);
+        assert_eq!(primary.remaining_percent, 20);
+        let credit = windows
+            .iter()
+            .find(|pool| pool.members[0].window.id == "individual")
+            .unwrap();
+        assert_eq!(credit.members.len(), 2);
+        assert_eq!(credit.remaining_percent, 80);
     }
 
     #[test]

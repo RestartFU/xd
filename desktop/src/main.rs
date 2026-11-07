@@ -2957,6 +2957,7 @@ impl XdDesktop {
         if self.active_endpoint == ChatEndpoint::Remote {
             self.refresh_selected_chat_after_connect(cx);
         }
+        self.usage_host_connected(ChatEndpoint::Remote);
     }
 
     fn listen_for_remote(
@@ -3110,6 +3111,7 @@ impl XdDesktop {
 
     fn remote_connection_failed(&mut self, error: RemoteError, cx: &mut Context<Self>) {
         let message = error.to_string();
+        self.usage_forget_host(ChatEndpoint::Remote, cx);
         self.remote_host = None;
         self.remote_bridge = None;
         self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
@@ -3194,6 +3196,7 @@ impl XdDesktop {
         }
         self.remote_generation = self.remote_generation.saturating_add(1);
         self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
+        self.usage_forget_host(ChatEndpoint::Remote, cx);
         self.remote_host = None;
         self.remote_bridge = None;
         // A host that refused this device still needs a new pairing, and the
@@ -6542,6 +6545,7 @@ impl XdDesktop {
         };
         self.remote_generation = self.remote_generation.saturating_add(1);
         let generation = self.remote_generation;
+        self.usage_forget_host(ChatEndpoint::Remote, cx);
         self.remote_host = None;
         self.remote_bridge = None;
         self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;

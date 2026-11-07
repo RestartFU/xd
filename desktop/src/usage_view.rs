@@ -752,37 +752,11 @@ impl XdDesktop {
         let index = endpoint_index(endpoint);
         let handled = match update {
             HostUpdate::Disconnected { .. } => {
-                let environment = &mut self.usage.environments[index];
-                environment.summary_loading = false;
-                environment.limits_loading = false;
-                // That slot may reconnect to another host or login, so what it
-                // reported can no longer be acted on.
-                environment.accounts = None;
-                if let Some(dialog) = &mut self.usage.price
-                    && dialog.saving.contains(&index)
-                {
-                    dialog.saving.retain(|host| *host != index);
-                    dialog.error = Some(format!(
-                        "{} disconnected before saving finished.",
-                        environment_label(index)
-                    ));
-                }
-                if self
-                    .usage
-                    .confirm_reset
-                    .as_ref()
-                    .is_some_and(|confirm| confirm.environment == index)
-                {
-                    self.usage.confirm_reset = None;
-                }
-                if self.usage.reset_busy == Some(index) {
-                    self.usage.reset_busy = None;
-                    self.usage.reset_status = Some(
-                        "The connection dropped before the reset answered. Check your limits before trying again."
-                            .into(),
-                    );
-                }
-                cx.notify();
+                self.usage_forget_host(endpoint, cx);
+                false
+            }
+            HostUpdate::Connected { .. } if endpoint == ChatEndpoint::Local => {
+                self.usage_host_connected(endpoint);
                 false
             }
             HostUpdate::Reply { kind, body, .. } => self.usage_reply(index, kind, body, cx),
@@ -793,6 +767,52 @@ impl XdDesktop {
             cx.notify();
         }
         handled
+    }
+
+    /// That slot may come back as another host or login, so nothing it reported
+    /// can be shown or acted on, and nothing it still owes can be waited for.
+    pub(super) fn usage_forget_host(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) {
+        let index = endpoint_index(endpoint);
+        self.usage.environments[index] = UsageEnvironment::default();
+        if let Some(dialog) = &mut self.usage.price
+            && dialog.saving.contains(&index)
+        {
+            dialog.saving.retain(|host| *host != index);
+            dialog.error = Some(format!(
+                "{} disconnected before saving finished.",
+                environment_label(index)
+            ));
+        }
+        if self
+            .usage
+            .confirm_reset
+            .as_ref()
+            .is_some_and(|confirm| confirm.environment == index)
+        {
+            self.usage.confirm_reset = None;
+        }
+        if self.usage.reset_busy == Some(index) {
+            self.usage.reset_busy = None;
+            self.usage.reset_status = Some(
+                "The connection dropped before the reset answered. Check your limits before trying again."
+                    .into(),
+            );
+        }
+        cx.notify();
+    }
+
+    /// Reads again for a host that has just (re)connected. Every selected host
+    /// is asked together, so rolling hours keep one shared window.
+    pub(super) fn usage_host_connected(&mut self, endpoint: ChatEndpoint) {
+        if !self.usage_open {
+            return;
+        }
+        self.usage_read_current(false);
+        if let Some(dialog) = &self.usage.price
+            && let Some(host) = self.endpoint_host(endpoint)
+        {
+            let _ = host.usage_prices(dialog.id);
+        }
     }
 
     fn usage_reply(
@@ -875,7 +895,7 @@ impl XdDesktop {
         let environment = &mut self.usage.environments[index];
         match name {
             "usage-summary" => {
-                if generation == environment.summary_generation {
+                if generation != 0 && generation == environment.summary_generation {
                     environment.summary_loading = false;
                     let summary = body.get("summary").and_then(Summary::parse);
                     if summary.is_none() {
@@ -890,7 +910,7 @@ impl XdDesktop {
                 true
             }
             "usage-limits" => {
-                if generation == environment.limits_generation {
+                if generation != 0 && generation == environment.limits_generation {
                     environment.limits_loading = false;
                     environment.limits_error = None;
                     environment.accounts = Some(parse_limit_accounts(
@@ -1142,13 +1162,13 @@ impl XdDesktop {
         let Some(dialog) = &self.usage.price else {
             return;
         };
-        if !dialog.rows.is_empty()
-            || selected
-                .iter()
-                .any(|index| self.usage.environments[*index].prices.is_none())
+        if selected
+            .iter()
+            .any(|index| self.usage.environments[*index].prices.is_none())
         {
             return;
         }
+        let held: Vec<String> = dialog.rows.iter().map(|row| row.model.clone()).collect();
         let colors = self.settings.theme.colors();
         let mut rows: BTreeMap<String, (String, [String; 4])> = BTreeMap::new();
         for index in selected {
@@ -1182,8 +1202,11 @@ impl XdDesktop {
                 }
             }
         }
+        // Repeatable: a host that answers late only adds the models it alone holds.
         for (model, (alias, values)) in rows {
-            self.usage_add_price_row(&model, false, &alias, values, colors, cx);
+            if !held.contains(&model) {
+                self.usage_add_price_row(&model, false, &alias, values, colors, cx);
+            }
         }
         let pending = self
             .usage
@@ -1202,10 +1225,28 @@ impl XdDesktop {
         }
     }
 
+    /// A selected host whose saved prices have not been read. A save replaces a
+    /// host's whole list, so sending one without that baseline would erase it.
+    fn usage_unread_prices(&self, selected: &[usize]) -> Option<usize> {
+        selected
+            .iter()
+            .copied()
+            .find(|index| self.usage.environments[*index].prices.is_none())
+    }
+
     fn save_usage_prices(&mut self, cx: &mut Context<Self>) {
+        let unread = self.usage_unread_prices(&self.usage_selected());
         let Some(dialog) = &mut self.usage.price else {
             return;
         };
+        if let Some(index) = unread {
+            dialog.error = Some(format!(
+                "Still reading saved prices from {}.",
+                environment_label(index)
+            ));
+            cx.notify();
+            return;
+        }
         if let Some(message) = dialog
             .rows
             .iter()
@@ -2979,6 +3020,8 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        // The set of hosts being waited for can shrink without any of them answering.
+        self.usage_fill_price_dialog(cx);
         let dialog = self.usage.price.as_ref()?;
         let selected = self.usage_selected();
         let loaded = selected
@@ -4236,6 +4279,72 @@ mod tests {
                 desktop.usage.reset_attempt.is_none(),
                 "an outcome settles the attempt"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn a_dropped_host_leaves_nothing_behind(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            let environment = &mut desktop.usage.environments[1];
+            environment.summary_generation = 3;
+            environment.requested_window = Some((30, 1));
+            environment.prices = Some(json!({"prices": {}}));
+            assert!(desktop.usage_event(1, "usage-summary", &summary_event(3)));
+            assert!(desktop.usage.environments[1].summary.is_some());
+
+            let gone = HostUpdate::Disconnected {
+                message: "gone".into(),
+            };
+            desktop.usage_host_update(ChatEndpoint::Remote, &gone, cx);
+            let environment = &desktop.usage.environments[1];
+            assert!(
+                environment.summary.is_none(),
+                "it may return as another host"
+            );
+            assert!(environment.summary_window.is_none());
+            assert!(environment.prices.is_none());
+
+            // An answer without a generation matches nothing now that none is owed.
+            let mut unnumbered = summary_event(0);
+            unnumbered.remove("generation");
+            assert!(desktop.usage_event(1, "usage-summary", &unnumbered));
+            assert!(desktop.usage.environments[1].summary.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn price_rows_fill_repeatably_and_never_save_from_an_unread_host(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.usage.price = Some(PriceDialog {
+                rows: Vec::new(),
+                pending_model: None,
+                id: 1,
+                saving: Vec::new(),
+                error: None,
+            });
+            let price = json!({"input": 1.0, "output": 2.0});
+            desktop.usage.environments[0].prices = Some(json!({"prices": {"a": price}}));
+            // Waiting on the other host: nothing to show yet, and nothing may be saved.
+            desktop.usage_fill_price_rows(&[0, 1], cx);
+            assert!(desktop.usage.price.as_ref().unwrap().rows.is_empty());
+            assert_eq!(desktop.usage_unread_prices(&[0, 1]), Some(1));
+            // That host dropped: the survivor's prices appear without a new answer.
+            desktop.usage_fill_price_rows(&[0], cx);
+            desktop.usage_fill_price_rows(&[0], cx);
+            let rows = &desktop.usage.price.as_ref().unwrap().rows;
+            assert_eq!(rows.len(), 1, "filling twice adds nothing");
+            assert_eq!(desktop.usage_unread_prices(&[0]), None);
+            // It came back: only what it alone holds is added.
+            desktop.usage.environments[1].prices =
+                Some(json!({"prices": {"a": price, "b": price}}));
+            desktop.usage_fill_price_rows(&[0, 1], cx);
+            let rows = &desktop.usage.price.as_ref().unwrap().rows;
+            let names: Vec<&str> = rows.iter().map(|row| row.model.as_str()).collect();
+            assert_eq!(names, ["a", "b"]);
         });
     }
 
