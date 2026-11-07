@@ -50,6 +50,77 @@ public data class TreeReply(
     val settlement: Boolean = false,
 )
 
+/** A chat checkout's Git state, as `git-status` and `git-commit` answer. */
+@Serializable
+public data class GitStatusReply(
+    val ok: Boolean = true,
+    val branch: String = "",
+    val base: String = "",
+    val upstream: String = "",
+    val ahead: Int = 0,
+    val behind: Int = 0,
+    val staged: Int = 0,
+    val unstaged: Int = 0,
+    val untracked: Int = 0,
+    val conflicted: Int = 0,
+    val clean: Boolean = true,
+) {
+    /** Uncommitted files, of any kind. */
+    val changed: Int get() = staged + unstaged + untracked + conflicted
+
+    /** Everything can be committed in one go: something changed and nothing is in conflict. */
+    val canCommit: Boolean get() = !clean && conflicted == 0
+
+    /**
+     * The branch is pushed, clean, and not the base, so it may have a pull
+     * request worth asking GitHub about; the desktop asks under the same terms.
+     */
+    val mayHavePullRequest: Boolean
+        get() = clean && conflicted == 0 && branch.isNotEmpty() &&
+            branch != "(detached)" && branch != "(initial)" &&
+            base.isNotEmpty() && branch != base && upstream.isNotEmpty() && ahead == 0
+}
+
+/** The pull request of a chat's checked-out branch; an empty [url] means there is none. */
+@Serializable
+public data class PullRequestStatusReply(
+    val ok: Boolean = true,
+    val url: String = "",
+)
+
+@Serializable
+public data class BranchSourceReply(
+    val name: String,
+    val reference: String,
+    val oid: String,
+)
+
+@Serializable
+public data class PullRequestSourceReply(
+    val number: Long,
+    val title: String,
+    val oid: String,
+)
+
+/** What a project's new session can start from besides its checkouts. */
+@Serializable
+public data class NewChatSourcesReply(
+    val ok: Boolean = true,
+    val branches: List<BranchSourceReply> = emptyList(),
+    @SerialName("pull_requests") val pullRequests: List<PullRequestSourceReply> = emptyList(),
+    /** Why pull requests could not be listed, such as GitHub's CLI being missing. */
+    @SerialName("pull_request_error") val pullRequestError: String? = null,
+)
+
+/** A project's checkouts, for choosing where a new session works. */
+@Serializable
+public data class FolderSettingsReply(
+    val ok: Boolean = true,
+    val worktrees: List<WorktreeReply> = emptyList(),
+    @SerialName("can_create_worktree") val canCreateWorktree: Boolean = false,
+    @SerialName("effective_workdir") val effectiveWorkdir: String? = null,
+)
+
 /** The host's rules for settling sessions by itself. */
 @Serializable
 public data class AutoSettleSettingsReply(

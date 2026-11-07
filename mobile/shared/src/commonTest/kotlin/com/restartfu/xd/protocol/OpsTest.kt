@@ -9,9 +9,42 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
 class OpsTest {
+    @Test
+    fun newSessionsCanStartFromEachKindOfWorkspace() {
+        fun worktree(choice: Ops.NewSessionWorktree) =
+            Ops.newChat("f", backend = "codex", worktree = choice)["worktree"]!!.jsonObject
+        assertEquals("new", worktree(Ops.NewSessionWorktree.New)["kind"]!!.jsonPrimitive.content)
+        val existing = worktree(Ops.NewSessionWorktree.Existing("/repo-feature"))
+        assertEquals("existing", existing["kind"]!!.jsonPrimitive.content)
+        assertEquals("/repo-feature", existing["path"]!!.jsonPrimitive.content)
+        val branch = worktree(Ops.NewSessionWorktree.Branch("refs/heads/feature", "abc"))
+        assertEquals("branch", branch["kind"]!!.jsonPrimitive.content)
+        assertEquals("refs/heads/feature", branch["ref"]!!.jsonPrimitive.content)
+        assertEquals("abc", branch["oid"]!!.jsonPrimitive.content)
+        val pull = worktree(Ops.NewSessionWorktree.PullRequest(42, "def"))
+        assertEquals("pull-request", pull["kind"]!!.jsonPrimitive.content)
+        assertEquals(42, pull["number"]!!.jsonPrimitive.int)
+        assertFalse("worktree" in Ops.newChat("f"))
+        // A chat joining a session shares its checkout.
+        assertFailsWith<IllegalArgumentException> {
+            Ops.newChat("f", sessionId = "s", worktree = Ops.NewSessionWorktree.New)
+        }
+    }
+
+    @Test
+    fun commitsTrimTheMessageAndRefuseOnesTheHostWould() {
+        assertEquals("Fix login", Ops.gitCommit("c", "  Fix login \n")["message"]!!.jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.gitCommit("c", "   ") }
+        assertFailsWith<IllegalArgumentException> { Ops.gitCommit("c", "x".repeat(4097)) }
+        assertEquals("git-pr-status", Ops.gitPullRequestStatus("c")["op"]!!.jsonPrimitive.content)
+        assertEquals("folder-settings", Ops.folderSettings("f")["op"]!!.jsonPrimitive.content)
+        assertEquals("new-chat-sources", Ops.newChatSources("f")["op"]!!.jsonPrimitive.content)
+    }
+
     @Test
     fun sessionOperationsNameTheSession() {
         assertEquals("settle-session", Ops.settleSession("s")["op"]!!.jsonPrimitive.content)

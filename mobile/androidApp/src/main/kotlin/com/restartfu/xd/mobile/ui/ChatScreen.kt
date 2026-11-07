@@ -1,5 +1,8 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -178,6 +181,12 @@ internal fun ChatScreen(
             onDismiss = { choosingModel = false },
         )
     }
+    val pullRequest by model.pullRequest.collectAsStateWithLifecycle()
+    val uriHandler = LocalUriHandler.current
+    // A finished turn may have pushed a branch or opened its pull request.
+    LaunchedEffect(state.chatId, state.working) {
+        if (!state.working) model.refreshPullRequest()
+    }
     val listState = rememberLazyListState()
     val items = state.visibleItems
 
@@ -235,13 +244,26 @@ internal fun ChatScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
-                                if (projectName.isNotBlank()) Text(
-                                    projectName,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (projectName.isNotBlank()) Text(
+                                        projectName,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    // The branch's pull request, as the desktop's session header shows it.
+                                    pullRequest?.let { url ->
+                                        Text(
+                                            pullRequestLabel(url),
+                                            modifier = Modifier.clickable(role = Role.Button) { uriHandler.openUri(url) },
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = LocalXdSignals.current.link,
+                                            textDecoration = TextDecoration.Underline,
+                                        )
+                                    }
+                                }
                             }
                         }
                     },

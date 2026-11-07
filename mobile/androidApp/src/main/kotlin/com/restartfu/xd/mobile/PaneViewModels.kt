@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile
 
+import com.restartfu.xd.protocol.GitStatusReply
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -19,6 +20,14 @@ public data class DiffPane(
     val collapsedFiles: Set<String> = emptySet(),
     val loading: Boolean = false,
     val error: String? = null,
+    /** The checkout's branch and uncommitted changes; null outside a repository. */
+    val git: GitStatusReply? = null,
+    /** The branch's pull request, when it has one. */
+    val pullRequestUrl: String? = null,
+    val committing: Boolean = false,
+    val commitError: String? = null,
+    /** Bumped by each successful commit, so the message field can clear. */
+    val commits: Int = 0,
 )
 
 /**
@@ -50,9 +59,63 @@ class DiffViewModel(
         )
     }
 
+    /**
+     * Commits every change with [message], as the desktop's Changes pane does,
+     * then reads the patch again.
+     */
+    fun commit(message: String) {
+        val current = _state.value
+        if (current.committing || current.git?.canCommit != true || message.isBlank()) return
+        _state.value = current.copy(committing = true, commitError = null)
+        viewModelScope.launch {
+            try {
+                val git = session().commitAll(message)
+                _state.value = _state.value.copy(git = git, committing = false, commits = _state.value.commits + 1)
+                refresh()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.value = _state.value.copy(
+                    committing = false,
+                    commitError = error.message ?: "Could not commit",
+                )
+            }
+        }
+    }
+
+    /** Branch, changes, and pull request; a checkout outside Git just shows none of them. */
+    private var gitReads = 0L
+
+    private fun refreshGit() {
+        val read = ++gitReads
+        viewModelScope.launch {
+            val git = try {
+                session().gitStatus()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                null
+            }
+            val pullRequest = if (git?.mayHavePullRequest == true) {
+                try {
+                    session().pullRequestUrl()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+            // An older read finishing late must not replace a newer answer.
+            if (read == gitReads) _state.value = _state.value.copy(git = git, pullRequestUrl = pullRequest)
+        }
+    }
+
     fun refresh() {
         val branch = _state.value.branch
         _state.value = _state.value.copy(loading = true, error = null)
+        refreshGit()
         viewModelScope.launch {
             try {
                 val patch = if (branch) {

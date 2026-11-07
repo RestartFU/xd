@@ -292,6 +292,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         title: String,
         agent: DirectAgent,
         sessionId: String? = null,
+        worktree: Ops.NewSessionWorktree? = null,
     ) {
         if (_creatingChat.value) return
         _creatingChat.value = true
@@ -303,6 +304,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     title = title.takeIf(String::isNotBlank),
                     backend = agent.wire,
                     sessionId = sessionId,
+                    worktree = worktree,
                 )
                 _createdDirectSession.value = CreatedDirectSession(
                     folderId,
@@ -972,6 +974,30 @@ class ChatViewModel(
             session.reorderQueued(index, text, anchor, queue[anchor], after = !up, revision = opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != queue }
+            }
+        }
+    }
+
+    private val _pullRequest = MutableStateFlow<String?>(null)
+    private var pullRequestReads = 0L
+
+    /** The pull request of the branch this chat works on, for the session header. */
+    val pullRequest: StateFlow<String?> = _pullRequest.asStateFlow()
+
+    /**
+     * Asks GitHub, through the host, whether the checked-out branch has a pull
+     * request. A failure leaves the last answer: the header is a convenience.
+     */
+    fun refreshPullRequest() {
+        val read = ++pullRequestReads
+        viewModelScope.launch {
+            try {
+                val url = session.pullRequestUrl()
+                if (read == pullRequestReads) _pullRequest.value = url
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // Leave whatever was shown.
             }
         }
     }

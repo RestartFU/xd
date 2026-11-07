@@ -11,6 +11,8 @@ import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
+import com.restartfu.xd.protocol.FolderSettingsReply
+import com.restartfu.xd.protocol.NewChatSourcesReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.RemoteProtocolException
 import com.restartfu.xd.protocol.ShortcutsReply
@@ -512,13 +514,26 @@ public class XdClient(
         requestTreeRefresh()
     }
 
+    /** Branches and open pull requests a new session in [folderId] can start from. */
+    public suspend fun newChatSources(folderId: String): NewChatSourcesReply {
+        val value = actor.call(Ops.newChatSources(folderId))
+        return actor.decodeReply(value) { it.decodeReply<NewChatSourcesReply>() }
+    }
+
+    /** A project's checkouts, and whether it can make another worktree. */
+    public suspend fun folderSettings(folderId: String): FolderSettingsReply {
+        val value = actor.call(Ops.folderSettings(folderId))
+        return actor.decodeReply(value) { it.decodeReply<FolderSettingsReply>() }
+    }
+
     public suspend fun createChat(
         folderId: String,
         title: String?,
         backend: String? = null,
         sessionId: String? = null,
+        worktree: Ops.NewSessionWorktree? = null,
     ): String {
-        val value = actor.call(Ops.newChat(folderId, title, backend, sessionId))
+        val value = actor.call(Ops.newChat(folderId, title, backend, sessionId, worktree))
         val id = actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
             reply.id?.takeIf(String::isNotBlank)

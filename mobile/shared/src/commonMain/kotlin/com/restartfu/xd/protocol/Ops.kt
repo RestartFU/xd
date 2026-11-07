@@ -341,17 +341,79 @@ public object Ops {
         title: String? = null,
         backend: String? = null,
         sessionId: String? = null,
+        worktree: NewSessionWorktree? = null,
     ): JsonObject = buildJsonObject {
         put("op", "new-chat")
         require(folderId.isNotBlank()) { "Folder id must not be blank" }
         put("folder", folderId)
         if (sessionId != null) {
             require(sessionId.isNotBlank()) { "Session id must not be blank" }
+            // A chat joining a session shares its checkout; the host refuses a worktree.
+            require(worktree == null) { "A chat joining a session cannot choose a worktree" }
             put("session", sessionId)
         }
         if (!title.isNullOrBlank()) put("title", title)
         if (!backend.isNullOrBlank()) put("backend", backend)
+        if (worktree != null) put("worktree", worktree.wire())
     }
+
+    /**
+     * Where a new session works: a fresh worktree, one of the project's
+     * checkouts, or a managed worktree for a branch or pull request. A branch
+     * or pull request names the commit the host listed, which it checks again
+     * before checking out.
+     */
+    public sealed interface NewSessionWorktree {
+        public data object New : NewSessionWorktree
+        public data class Existing(val path: String) : NewSessionWorktree
+        public data class Branch(val reference: String, val oid: String) : NewSessionWorktree
+        public data class PullRequest(val number: Long, val oid: String) : NewSessionWorktree
+
+        public fun wire(): JsonObject = buildJsonObject {
+            when (val worktree = this@NewSessionWorktree) {
+                New -> put("kind", "new")
+                is Existing -> {
+                    put("kind", "existing")
+                    put("path", worktree.path)
+                }
+                is Branch -> {
+                    put("kind", "branch")
+                    put("ref", worktree.reference)
+                    put("oid", worktree.oid)
+                }
+                is PullRequest -> {
+                    put("kind", "pull-request")
+                    put("number", worktree.number)
+                    put("oid", worktree.oid)
+                }
+            }
+        }
+    }
+
+    public fun newChatSources(folderId: String): JsonObject = buildJsonObject {
+        put("op", "new-chat-sources")
+        put("folder", requireId(folderId, "Folder"))
+    }
+
+    public fun folderSettings(folderId: String): JsonObject = buildJsonObject {
+        put("op", "folder-settings")
+        put("folder", requireId(folderId, "Folder"))
+    }
+
+    public fun gitStatus(chatId: String): JsonObject = withChat("git-status", chatId)
+
+    /** Commits every change in the chat's checkout with [message], as the desktop's Commit does. */
+    public fun gitCommit(chatId: String, message: String): JsonObject = buildJsonObject {
+        val trimmed = message.trim()
+        require(trimmed.isNotEmpty() && trimmed.encodeToByteArray().size <= 4096 && '\u0000' !in trimmed) {
+            "Commit messages must contain 1 to 4096 bytes"
+        }
+        put("op", "git-commit")
+        put("chat", chatId)
+        put("message", trimmed)
+    }
+
+    public fun gitPullRequestStatus(chatId: String): JsonObject = withChat("git-pr-status", chatId)
 
     public fun newFolder(
         name: String,

@@ -108,6 +108,12 @@ import com.restartfu.xd.model.SettledSession
 import com.restartfu.xd.model.activeSessions
 import com.restartfu.xd.model.settledSessions
 import com.restartfu.xd.protocol.Ops
+import androidx.compose.material3.RadioButton
+import com.restartfu.xd.protocol.BranchSourceReply
+import com.restartfu.xd.protocol.PullRequestSourceReply
+import com.restartfu.xd.protocol.WorktreeReply
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 private enum class MobileDestination {
@@ -460,7 +466,7 @@ internal fun MinimalMobileApp(
             projectName = session.title,
             chatTab = true,
             onDismiss = { createChatIn = null },
-            onCreate = { title, agent ->
+            onCreate = { title, agent, _ ->
                 createChatIn = null
                 activeProject?.let { project -> model.createDirectSession(project.id, title, agent, session.id) }
             },
@@ -619,10 +625,11 @@ private fun MinimalProjectsHome(
     if (createSession && selected != null) {
         NewSessionDialog(
             projectName = selected.name,
+            places = { NewSessionPlaces.load(model.client, selected.id) },
             onDismiss = { createSession = false },
-            onCreate = { title, agent ->
+            onCreate = { title, agent, worktree ->
                 createSession = false
-                model.createDirectSession(selected.id, title, agent)
+                model.createDirectSession(selected.id, title, agent, worktree = worktree)
             },
         )
     }
@@ -1372,11 +1379,30 @@ private fun EmptyCard(text: String) {
 private fun NewSessionDialog(
     projectName: String,
     chatTab: Boolean = false,
+    /** Where a new session can work; null for a chat joining an existing session. */
+    places: (suspend () -> NewSessionPlaces)? = null,
     onDismiss: () -> Unit,
-    onCreate: (String, DirectAgent) -> Unit,
+    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?) -> Unit,
 ) {
     var title by rememberSaveable { mutableStateOf("") }
     var agent by rememberSaveable { mutableStateOf(DirectAgent.CODEX) }
+    var loaded by remember { mutableStateOf<NewSessionPlaces?>(null) }
+    var placesError by remember { mutableStateOf<String?>(null) }
+    var worktree by remember { mutableStateOf<Ops.NewSessionWorktree?>(null) }
+    if (places != null) {
+        LaunchedEffect(Unit) {
+            try {
+                val found = places()
+                loaded = found
+                worktree = found.default
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // The host still picks the project's own checkout.
+                placesError = error.message ?: "Could not list where a session can work"
+            }
+        }
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (chatTab) "New chat" else "New session") },
@@ -1406,15 +1432,183 @@ private fun NewSessionDialog(
                         )
                     }
                 }
+                if (places != null) {
+                    WorkspacePicker(
+                        places = loaded,
+                        error = placesError,
+                        selected = worktree,
+                        onSelect = { worktree = it },
+                    )
+                }
             }
         },
         confirmButton = {
-            Button(onClick = { onCreate(title.trim(), agent) }) {
+            Button(
+                onClick = { onCreate(title.trim(), agent, worktree) },
+                // Wait for the choices, as the desktop does; if they cannot be
+                // read, the host's own default checkout still works.
+                enabled = places == null || placesError != null || worktree != null,
+            ) {
                 Text(if (chatTab) "Create chat" else "Create session")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** Where a new session in a project can work, as the desktop's new session dialog offers. */
+internal data class NewSessionPlaces(
+    val worktrees: List<WorktreeReply>,
+    val canCreateWorktree: Boolean,
+    val branches: List<BranchSourceReply>,
+    val pullRequests: List<PullRequestSourceReply>,
+    val pullRequestError: String?,
+) {
+    /** The checkout in use, else the project's own, as the desktop picks. */
+    val default: Ops.NewSessionWorktree?
+        get() = (worktrees.firstOrNull { it.current } ?: worktrees.firstOrNull { it.main } ?: worktrees.firstOrNull())
+            ?.let { Ops.NewSessionWorktree.Existing(it.path) }
+
+    companion object {
+        suspend fun load(client: com.restartfu.xd.XdClient, folderId: String): NewSessionPlaces = coroutineScope {
+            val settings = async { client.folderSettings(folderId) }
+            // Branches and pull requests are extras: a project without Git, or a
+            // host without them, still offers its checkouts.
+            val sources = async { runCatching { client.newChatSources(folderId) }.getOrNull() }
+            val folder = settings.await()
+            val found = sources.await()
+            val worktrees = folder.worktrees.ifEmpty {
+                listOfNotNull(folder.effectiveWorkdir?.takeIf(String::isNotBlank)?.let {
+                    WorktreeReply(path = it, detached = false, main = true, current = true)
+                })
+            }
+            NewSessionPlaces(
+                worktrees = worktrees,
+                canCreateWorktree = folder.canCreateWorktree,
+                branches = found?.branches.orEmpty(),
+                pullRequests = found?.pullRequests.orEmpty(),
+                pullRequestError = found?.pullRequestError,
+            )
+        }
+    }
+}
+
+/**
+ * A checkout, a new worktree, a branch, or an open pull request. Branches and
+ * pull requests get their own managed worktree on the host.
+ */
+@Composable
+private fun WorkspacePicker(
+    places: NewSessionPlaces?,
+    error: String?,
+    selected: Ops.NewSessionWorktree?,
+    onSelect: (Ops.NewSessionWorktree) -> Unit,
+) {
+    var filter by rememberSaveable { mutableStateOf("") }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text("Workspace", style = MaterialTheme.typography.titleSmall)
+        when {
+            error != null -> Text(
+                "$error The project's own checkout will be used.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            places == null -> Text(
+                "Reading the project's checkouts…",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            else -> {
+                places.worktrees.forEach { checkout ->
+                    PlaceRow(
+                        label = checkout.branch ?: checkout.path.substringAfterLast('/'),
+                        detail = if (checkout.main) "Project directory" else checkout.path,
+                        chosen = selected == Ops.NewSessionWorktree.Existing(checkout.path),
+                        onClick = { onSelect(Ops.NewSessionWorktree.Existing(checkout.path)) },
+                    )
+                }
+                if (places.canCreateWorktree) {
+                    PlaceRow(
+                        label = "New worktree",
+                        detail = "A fresh branch in its own checkout",
+                        chosen = selected == Ops.NewSessionWorktree.New,
+                        onClick = { onSelect(Ops.NewSessionWorktree.New) },
+                    )
+                }
+                if (places.branches.isNotEmpty() || places.pullRequests.isNotEmpty()) {
+                    OutlinedTextField(
+                        value = filter,
+                        onValueChange = { filter = it },
+                        label = { Text("Find a branch or pull request") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    )
+                    val query = filter.trim()
+                    places.pullRequests
+                        .filter { query.isEmpty() || it.title.contains(query, true) || "#${it.number}".contains(query) }
+                        .take(PLACE_LIMIT)
+                        .forEach { pull ->
+                            PlaceRow(
+                                label = "#${pull.number} ${pull.title}",
+                                detail = "Pull request",
+                                chosen = selected == Ops.NewSessionWorktree.PullRequest(pull.number, pull.oid),
+                                onClick = { onSelect(Ops.NewSessionWorktree.PullRequest(pull.number, pull.oid)) },
+                            )
+                        }
+                    places.branches
+                        .filter { query.isEmpty() || it.name.contains(query, true) }
+                        .take(PLACE_LIMIT)
+                        .forEach { branch ->
+                            PlaceRow(
+                                label = branch.name,
+                                detail = "Branch",
+                                chosen = selected == Ops.NewSessionWorktree.Branch(branch.reference, branch.oid),
+                                onClick = { onSelect(Ops.NewSessionWorktree.Branch(branch.reference, branch.oid)) },
+                                mono = true,
+                            )
+                        }
+                }
+                places.pullRequestError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+    }
+}
+
+/** Branches and pull requests shown at once; the filter finds the rest. */
+private const val PLACE_LIMIT = 12
+
+@Composable
+private fun PlaceRow(label: String, detail: String, chosen: Boolean, onClick: () -> Unit, mono: Boolean = false) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        RadioButton(selected = chosen, onClick = null)
+        Column(Modifier.weight(1f)) {
+            Text(
+                label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontFamily = if (mono) XdMonoFamily else null,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                detail,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = LocalXdSignals.current.faint,
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
 }
 
 @Composable

@@ -17,6 +17,8 @@ import com.restartfu.xd.protocol.WireJson
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.DiffReply
 import com.restartfu.xd.protocol.FileEntryReply
+import com.restartfu.xd.protocol.GitStatusReply
+import com.restartfu.xd.protocol.PullRequestStatusReply
 import com.restartfu.xd.protocol.ImageReply
 import com.restartfu.xd.protocol.Limits
 import kotlin.io.encoding.Base64
@@ -116,6 +118,19 @@ public class ChatSession internal constructor(
         after: Boolean,
         revision: Long? = null,
     ): Unit = core.call(Ops.reorderQueue(core.chatId, source, sourceText, anchor, anchorText, after, revision))
+
+    /** The checkout's branch and uncommitted changes. */
+    public suspend fun gitStatus(): GitStatusReply =
+        core.read(Ops.gitStatus(core.chatId)) { it.decodeReply<GitStatusReply>() }
+
+    /** Commits every change with [message] and answers with the new state. */
+    public suspend fun commitAll(message: String): GitStatusReply =
+        core.read(Ops.gitCommit(core.chatId, message)) { it.decodeReply<GitStatusReply>() }
+
+    /** The checked-out branch's pull request, or null when it has none. */
+    public suspend fun pullRequestUrl(): String? =
+        core.read(Ops.gitPullRequestStatus(core.chatId)) { it.decodeReply<PullRequestStatusReply>() }
+            .url.takeIf(String::isNotBlank)
 
     /** Continues the chat's cut-short turn; see [Ops.resumeTurn]. */
     public suspend fun resumeTurn(): Unit = core.call(Ops.resumeTurn(core.chatId))
