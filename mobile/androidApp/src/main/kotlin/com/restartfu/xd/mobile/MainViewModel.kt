@@ -958,6 +958,7 @@ class ChatViewModel(
         // Swapping two equal messages changes nothing, and the queue would never
         // look changed for the wait below to end.
         if (queue[anchor] == text) return
+        if (opened.revision == null && queue.count { it == text } != 1) return
         launchGuarded(_droppingQueued) {
             session.reorderQueued(index, text, anchor, queue[anchor], after = !up, revision = opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
@@ -975,6 +976,8 @@ class ChatViewModel(
     fun dropQueued(index: Int, text: String, opened: OpenedQueue) {
         val before = state.value.queue
         if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
+        // A host without queue revisions cannot tell equal messages apart.
+        if (opened.revision == null && before.count { it == text } != 1) return
         launchGuarded(_droppingQueued) {
             session.dropQueued(index, text, opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {

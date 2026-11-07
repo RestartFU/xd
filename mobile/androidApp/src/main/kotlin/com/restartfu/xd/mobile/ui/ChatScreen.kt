@@ -489,14 +489,18 @@ private fun Composer(
     // Another queue action still out would make these do nothing, so they wait.
     val queueBusy by model.queueBusy.collectAsStateWithLifecycle()
     editing?.let { (index, original, opened) ->
+        // Without the host's queue revision, a message is only told apart by
+        // its text, so Drop and Move wait for one that is unique.
+        val identifiable = opened.revision != null || opened.messages.count { it == original } == 1
         QueuedMessageDialog(
             draft = openDraft ?: original,
             onDraft = model::editQueuedDraft,
             original = original,
             busy = queueBusy || steering,
             working = state.working,
-            canMoveUp = index > 0,
-            canMoveDown = index < state.queue.lastIndex,
+            canMoveUp = index > 0 && identifiable,
+            canMoveDown = index < state.queue.lastIndex && identifiable,
+            canDrop = identifiable,
             onMove = { up ->
                 model.closeQueuedMessage()
                 model.moveQueued(index, original, up, opened)
@@ -806,6 +810,7 @@ private fun QueuedMessageDialog(
     working: Boolean,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
+    canDrop: Boolean,
     onMove: (up: Boolean) -> Unit,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit,
@@ -865,7 +870,7 @@ private fun QueuedMessageDialog(
         },
         dismissButton = {
             Row {
-                TextButton(onClick = onDrop, enabled = !busy) { Text("Drop") }
+                TextButton(onClick = onDrop, enabled = !busy && canDrop) { Text("Drop") }
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
         },

@@ -36,6 +36,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -81,6 +83,8 @@ public class XdClient(
     /** The newest request that failed, and the newest whose answer was shown. */
     private var autoSettleFailedCall = 0L
     private var autoSettleAppliedCall = 0L
+    /** Guards the checks above together with the updates they allow. */
+    private val autoSettleLock = Mutex()
     private val _autoSettleError = MutableStateFlow<String?>(null)
 
     /**
@@ -211,7 +215,7 @@ public class XdClient(
                 val eventName =
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
                 if (eventName == "auto-settle-settings") {
-                    autoSettleBroadcasts.update { it + 1 }
+                    autoSettleLock.withLock { autoSettleBroadcasts.update { it + 1 } }
                     rereadAutoSettle()
                 }
                 if (eventName == "tree") {
@@ -267,12 +271,14 @@ public class XdClient(
         terminalBusy.value = emptySet()
         visibleChat.value = null
         _sessionGeneration.update { it + 1 }
-        _autoSettleSettings.value = null
-        autoSettleWanted.value = false
-        _autoSettleStale.value = false
-        autoSettleFailedCall = 0
-        autoSettleAppliedCall = 0
-        _autoSettleError.value = null
+        autoSettleLock.withLock {
+            _autoSettleSettings.value = null
+            autoSettleWanted.value = false
+            _autoSettleStale.value = false
+            autoSettleFailedCall = 0
+            autoSettleAppliedCall = 0
+            _autoSettleError.value = null
+        }
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -434,12 +440,14 @@ public class XdClient(
                 // possibly old until a newer request's answer is shown.
                 // Only the newest failure counts: an older one finishing last
                 // must not replace its error.
-                if (generation == _sessionGeneration.value && call > autoSettleFailedCall) {
-                    autoSettleFailedCall = call
-                    if (call > autoSettleAppliedCall) {
-                        _autoSettleStale.value = true
-                        // A background read's failure is told by the stale mark alone.
-                        if (!background) _autoSettleError.value = error.message ?: "The host did not answer"
+                autoSettleLock.withLock {
+                    if (generation == _sessionGeneration.value && call > autoSettleFailedCall) {
+                        autoSettleFailedCall = call
+                        if (call > autoSettleAppliedCall) {
+                            _autoSettleStale.value = true
+                            // A background read's failure is told by the stale mark alone.
+                            if (!background) _autoSettleError.value = error.message ?: "The host did not answer"
+                        }
                     }
                 }
                 if (!background) throw error
@@ -448,14 +456,16 @@ public class XdClient(
             // Otherwise the read that broadcast started decides the value.
             // Only an answer to a newer request than the one shown: an older
             // reply arriving last must not bring back older rules.
-            if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value &&
-                call > autoSettleAppliedCall
-            ) {
-                _autoSettleSettings.value = rules
-                autoSettleAppliedCall = maxOf(autoSettleAppliedCall, call)
-                if (call > autoSettleFailedCall) {
-                    _autoSettleStale.value = false
-                    _autoSettleError.value = null
+            autoSettleLock.withLock {
+                if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value &&
+                    call > autoSettleAppliedCall
+                ) {
+                    _autoSettleSettings.value = rules
+                    autoSettleAppliedCall = call
+                    if (call > autoSettleFailedCall) {
+                        _autoSettleStale.value = false
+                        _autoSettleError.value = null
+                    }
                 }
             }
         } finally {
