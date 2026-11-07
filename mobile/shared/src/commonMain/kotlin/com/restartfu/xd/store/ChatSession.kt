@@ -100,11 +100,12 @@ public class ChatSession internal constructor(
         index: Int,
         oldText: String,
         text: String,
-    ): Unit = core.call(Ops.editQueue(core.chatId, index, oldText, text))
+        seen: List<String>? = null,
+    ): Unit = core.call(Ops.editQueue(core.chatId, index, oldText, text, seen))
 
     /** Redirects the running turn to a queued message; see [Ops.steerQueue]. */
-    public suspend fun steerQueued(index: Int, text: String): Unit =
-        core.call(Ops.steerQueue(core.chatId, index, text))
+    public suspend fun steerQueued(index: Int, text: String, seen: List<String>? = null): Unit =
+        core.call(Ops.steerQueue(core.chatId, index, text, seen))
 
     /** Moves queued message [source] next to [anchor]; see [Ops.reorderQueue]. */
     public suspend fun reorderQueued(

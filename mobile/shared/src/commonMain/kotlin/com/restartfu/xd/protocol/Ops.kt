@@ -172,9 +172,11 @@ public object Ops {
         index: Int,
         oldText: String,
         text: String,
+        seen: List<String>? = null,
     ): JsonObject = buildJsonObject {
         require(index >= 0) { "Queue index must not be negative" }
         require(text.isNotEmpty()) { "Edited text must not be empty" }
+        if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
         put("op", "edit-queue")
         put("chat", chatId)
         put("index", index)
@@ -195,8 +197,10 @@ public object Ops {
         chatId: String,
         index: Int,
         text: String,
+        seen: List<String>? = null,
     ): JsonObject = buildJsonObject {
         require(index >= 0) { "Queue index must not be negative" }
+        if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
         put("op", "steer-queue")
         put("chat", chatId)
         put("index", index)

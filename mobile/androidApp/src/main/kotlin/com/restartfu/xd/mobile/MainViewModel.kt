@@ -868,9 +868,10 @@ class ChatViewModel(
         _catalogError.value = null
     }
 
-    fun editQueued(index: Int, oldText: String, text: String) {
+    fun editQueued(index: Int, oldText: String, text: String, opened: List<String>) {
+        if (!sameQueue(state.value.queue, opened)) return
         launchGuarded(_droppingQueued) {
-            session.editQueued(index, oldText, text)
+            session.editQueued(index, oldText, text, opened)
         }
     }
 
@@ -887,11 +888,15 @@ class ChatViewModel(
      * the turn to change or the queue to shrink rather than reporting success
      * while the old one is still winding down.
      */
-    fun steerQueued(index: Int, oldText: String, text: String) {
+    fun steerQueued(index: Int, oldText: String, text: String, opened: List<String>) {
         val before = state.value
+        if (!sameQueue(before.queue, opened)) return
         launchGuarded(_steering) {
-            if (text != oldText) session.editQueued(index, oldText, text)
-            session.steerQueued(index, text)
+            // Each step names the queue it expects, so a message another device
+            // moved or dropped meanwhile is never mistaken for an equal one.
+            if (text != oldText) session.editQueued(index, oldText, text, opened)
+            val edited = opened.toMutableList().also { it[index] = text }
+            session.steerQueued(index, text, edited)
             withTimeoutOrNull(CANCEL_EVENT_TIMEOUT_MILLIS) {
                 state.first {
                     !it.working ||
@@ -914,6 +919,9 @@ class ChatViewModel(
         if (!sameQueue(queue, opened)) return
         val anchor = if (up) index - 1 else index + 1
         if (queue.getOrNull(index) != text || anchor !in queue.indices) return
+        // Swapping two equal messages changes nothing, and the queue would never
+        // look changed for the wait below to end.
+        if (queue[anchor] == text) return
         launchGuarded(_droppingQueued) {
             session.reorderQueued(index, text, anchor, queue[anchor], after = !up, seen = opened)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {

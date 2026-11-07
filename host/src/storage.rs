@@ -4593,8 +4593,11 @@ impl StateStore {
             .filter(|index| *index >= 0)
             .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
             as usize;
+        let seen = seen_queue(request)?;
         self.mutate_queue(chat_id, move |queue| {
-            if queue.get(index) != Some(&old_text) {
+            if seen.as_ref().is_some_and(|seen| seen != queue)
+                || queue.get(index) != Some(&old_text)
+            {
                 return Err(StorageError::InvalidRequest(
                     "That queued message changed; try again.".into(),
                 ));
@@ -4651,8 +4654,9 @@ impl StateStore {
             .filter(|index| *index >= 0)
             .ok_or_else(|| StorageError::InvalidRequest(message.into()))?
             as usize;
+        let seen = seen_queue(request)?;
         self.mutate_queue(chat_id, move |queue| {
-            if queue.get(index) != Some(&text) {
+            if seen.as_ref().is_some_and(|seen| seen != queue) || queue.get(index) != Some(&text) {
                 return Err(StorageError::InvalidRequest(
                     "That queued message changed; try again.".into(),
                 ));

@@ -604,9 +604,9 @@ with the same composer.
 
 `queue` requires non-empty `text`. `drop-queue` without `index` clears the whole
 queue. With `index`, an optional `text` names the message the client saw there;
-the host refuses the drop if a different message now holds that place. `drop-queue` and `reorder-queue` also take an
-optional `queue`, the whole queue the client saw; the host refuses either if its queue
-differs. Messages have no identity but their place and texts can repeat, so this is
+the host refuses the drop if a different message now holds that place. `drop-queue`, `edit-queue`, `steer-queue`, and
+`reorder-queue` also take an optional `queue`, the whole queue the client saw; the host refuses any of them if its
+queue differs. Messages have no identity but their place and texts can repeat, so this is
 what keeps one of two equal messages from standing in for the other. All four broadcast a `queued` event carrying the new queue, so every
 attached device sees what is waiting and either can steer it.
 

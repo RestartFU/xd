@@ -494,11 +494,11 @@ private fun Composer(
             onDismiss = { editing = null },
             onSave = { text ->
                 editing = null
-                if (text != original) model.editQueued(index, original, text)
+                if (text != original) model.editQueued(index, original, text, opened)
             },
             onSteer = { text ->
                 editing = null
-                model.steerQueued(index, original, text)
+                model.steerQueued(index, original, text, opened)
             },
             onDrop = {
                 editing = null

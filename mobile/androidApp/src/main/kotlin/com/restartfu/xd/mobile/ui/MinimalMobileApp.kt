@@ -369,6 +369,7 @@ internal fun MinimalMobileApp(
     renamingSession?.let { session ->
         NameDialog(
             title = "Rename session",
+            target = "session:${session.id}",
             initial = session.title,
             onDismiss = { renamingSession = null },
             onConfirm = { name ->
@@ -396,6 +397,7 @@ internal fun MinimalMobileApp(
     renamingProject?.let { project ->
         NameDialog(
             title = "Rename project",
+            target = "project:${project.id}",
             initial = project.name,
             validate = ::projectNameError,
             onDismiss = { renamingProject = null },
@@ -1704,12 +1706,16 @@ private fun SettingAction(
 @Composable
 private fun NameDialog(
     title: String,
+    /** What is being renamed; a draft saved for anything else is not restored. */
+    target: String,
     initial: String,
     validate: (String) -> String? = { null },
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
-    var name by rememberSaveable(initial) { mutableStateOf(initial) }
+    // Saved with its target: a restored draft is only used for the same one.
+    var saved by rememberSaveable(stateSaver = NameDraftSaver) { mutableStateOf(target to initial) }
+    val name = if (saved.first == target) saved.second else initial
     val cleaned = name.trim()
     val error = validate(cleaned)
     AlertDialog(
@@ -1718,7 +1724,7 @@ private fun NameDialog(
         text = {
             OutlinedTextField(
                 value = name,
-                onValueChange = { name = it },
+                onValueChange = { saved = target to it },
                 singleLine = true,
                 isError = error != null,
                 supportingText = error?.let { { Text(it) } },
@@ -1733,6 +1739,11 @@ private fun NameDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+private val NameDraftSaver = listSaver<Pair<String, String>, String>(
+    save = { listOf(it.first, it.second) },
+    restore = { Pair(it[0], it[1]) },
+)
 
 /** A permanent removal, with the action named on its button rather than a bare Yes. */
 @Composable
