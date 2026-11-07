@@ -425,17 +425,18 @@ internal fun MinimalMobileApp(
         )
     }
     renameChat?.let { chat ->
-        var title by rememberSaveable(chat.id) { mutableStateOf(chat.title) }
-        AlertDialog(
-            onDismissRequest = { renameChat = null },
-            title = { Text("Rename chat") },
-            text = {
-                OutlinedTextField(title, onValueChange = { title = it }, label = { Text("Chat title") }, singleLine = true)
+        // The same dialog as sessions and projects: its draft is saved with the
+        // chat it renames, and it waits while an earlier rename is still out.
+        NameDialog(
+            title = "Rename chat",
+            target = "chat:${chat.id}",
+            initial = chat.title,
+            busy = renamingChats,
+            onDismiss = { renameChat = null },
+            onConfirm = { title ->
+                renameChat = null
+                if (title != chat.title) model.renameChat(chat.id, title)
             },
-            confirmButton = {
-                TextButton(onClick = { model.renameChat(chat.id, title.trim()); renameChat = null }, enabled = title.isNotBlank()) { Text("Rename") }
-            },
-            dismissButton = { TextButton(onClick = { renameChat = null }) { Text("Cancel") } },
         )
     }
     deleteChat?.let { chat ->

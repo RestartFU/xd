@@ -101,6 +101,7 @@ class OpsTest {
         assertFalse("text" in Ops.dropQueue("chat", null, "ignored"))
         assertEquals(7, Ops.dropQueue("chat", 0, "repeat", 7)["queue_revision"]!!.jsonPrimitive.int)
         assertFalse("queue_revision" in Ops.dropQueue("chat", 0, "repeat"))
+        assertEquals(3, Ops.dropQueue("chat", null, revision = 3)["queue_revision"]!!.jsonPrimitive.int)
     }
 
     @Test

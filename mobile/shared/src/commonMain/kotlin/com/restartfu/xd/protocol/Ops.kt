@@ -156,9 +156,10 @@ public object Ops {
             require(index >= 0) { "Queue index must not be negative" }
             put("index", index)
             if (text != null) put("text", text)
-            // The queue revision as seen: equal texts are only told apart by it.
-            if (revision != null) put("queue_revision", revision)
         }
+        // The queue revision as seen, clearing the whole queue included: equal
+        // texts, and messages added since, are only told apart by it.
+        if (revision != null) put("queue_revision", revision)
     }
 
     /**
