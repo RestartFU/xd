@@ -166,6 +166,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var chatTitleWriteSucceeded = 0L
     private var chatTitleWriteFailed = 0L
     private var accountActions = 0L
+    private val _signInDrafts = MutableStateFlow<Map<String, SignInDraft>>(emptyMap())
+    /**
+     * Each assistant's sign-in code being typed and whether it is out, kept
+     * here so recreating the activity neither loses a code nor sends it twice.
+     */
+    val signInDrafts: StateFlow<Map<String, SignInDraft>> = _signInDrafts.asStateFlow()
     private var accountActionSucceeded = 0L
     private var accountActionFailed = 0L
     /** Each assistant's models, for choosing a title model. */
@@ -203,6 +209,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             client.sessionGeneration.collect {
                 _accountsError.value = null
+                _signInDrafts.value = emptyMap()
                 _chatTitles.value = null
                 _chatTitlesError.value = null
                 _chatTitlesWriteError.value = null
@@ -276,9 +283,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun signIn(provider: String) =
         accountsAction("Could not start signing in") { client.agentAuthAction(Ops.AuthAction.START, provider) }
 
-    /** [done] hears whether the host took it, so a failed code can be kept and sent again. */
-    fun sendSignInInput(provider: String, input: String, done: (Boolean) -> Unit) =
-        accountsAction("Could not send that", done) { client.agentAuthAction(Ops.AuthAction.INPUT, provider, input) }
+    fun editSignInInput(provider: String, text: String) {
+        _signInDrafts.update { drafts ->
+            val draft = drafts[provider] ?: SignInDraft()
+            if (draft.sending) drafts else drafts + (provider to draft.copy(text = text))
+        }
+    }
+
+    /** A code belongs to one sign-in; once that ends, the next starts with none. */
+    fun endSignInInput(provider: String) {
+        _signInDrafts.update { drafts ->
+            val draft = drafts[provider] ?: return@update drafts
+            if (draft.sending) drafts + (provider to draft.copy(text = "")) else drafts - provider
+        }
+    }
+
+    /** Sends the typed code, keeping it until the host takes it, so a failure can be sent again. */
+    fun sendSignInInput(provider: String) {
+        val draft = _signInDrafts.value[provider] ?: return
+        val sent = draft.text.trim()
+        if (draft.sending || sent.isEmpty()) return
+        _signInDrafts.update { it + (provider to draft.copy(sending = true)) }
+        val generation = client.sessionGeneration.value
+        accountsAction(
+            "Could not send that",
+            done = { taken ->
+                // Forgotten with its host meanwhile: the drafts now are another host's.
+                if (generation == client.sessionGeneration.value) _signInDrafts.update { drafts ->
+                    val current = drafts[provider] ?: return@update drafts
+                    drafts + (provider to if (taken) SignInDraft() else current.copy(sending = false))
+                }
+            },
+        ) { client.agentAuthAction(Ops.AuthAction.INPUT, provider, sent) }
+    }
 
     fun cancelSignIn(provider: String) =
         accountsAction("Could not cancel signing in") { client.agentAuthAction(Ops.AuthAction.CANCEL, provider) }
@@ -1369,3 +1406,6 @@ class ChatViewModel(
 }
 
 private const val QUEUE_CHANGED = "The queue changed on another device. Open the message again."
+
+/** A sign-in code being typed, and whether it has been sent and not yet answered. */
+data class SignInDraft(val text: String = "", val sending: Boolean = false)

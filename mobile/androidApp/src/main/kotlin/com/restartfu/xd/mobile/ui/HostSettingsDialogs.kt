@@ -40,6 +40,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.MainViewModel
+import com.restartfu.xd.mobile.SignInDraft
 import com.restartfu.xd.protocol.AgentAuthProviderReply
 import com.restartfu.xd.protocol.AgentCliProviderReply
 import com.restartfu.xd.protocol.Ops
@@ -113,10 +114,11 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
 private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
     val openLink = rememberLinkOpener()
     val signingIn = provider.state == "signing-in"
-    var input by rememberSaveable(provider.provider) { mutableStateOf("") }
-    var sending by remember { mutableStateOf(false) }
+    val drafts by model.signInDrafts.collectAsStateWithLifecycle()
+    val draft = drafts[provider.provider] ?: SignInDraft()
+    val sending = draft.sending
     // A code belongs to one sign-in; another attempt starts with none.
-    LaunchedEffect(signingIn) { if (!signingIn) input = "" }
+    LaunchedEffect(signingIn) { if (!signingIn) model.endSignInInput(provider.provider) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 8.dp)) {
@@ -145,24 +147,17 @@ private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
             if (provider.needsInput) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
-                        value = input,
-                        onValueChange = { input = it },
+                        value = draft.text,
+                        onValueChange = { model.editSignInInput(provider.provider, it) },
                         modifier = Modifier.weight(1f),
                         placeholder = { Text("Code from the sign-in page") },
                         singleLine = true,
                         enabled = !sending,
                     )
                     TextButton(
-                        onClick = {
-                            val sent = input.trim()
-                            sending = true
-                            // Kept until the host takes it, so a failure can be sent again.
-                            model.sendSignInInput(provider.provider, sent) { taken ->
-                                sending = false
-                                if (taken && input.trim() == sent) input = ""
-                            }
-                        },
-                        enabled = input.isNotBlank() && !sending,
+                        // Kept until the host takes it, so a failure can be sent again.
+                        onClick = { model.sendSignInInput(provider.provider) },
+                        enabled = draft.text.isNotBlank() && !sending,
                     ) { Text(if (sending) "Sending…" else "Send") }
                 }
             }
