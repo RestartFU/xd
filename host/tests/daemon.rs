@@ -25,6 +25,19 @@ struct Daemon {
     child: Child,
 }
 /// Where a daemon's stderr goes, so a failing test can show why it died.
+fn ask_for_an_answer(socket: &Path) -> bool {
+    let Ok(mut socket) = UnixStream::connect(socket) else {
+        return false;
+    };
+    let mut line = String::new();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .is_ok()
+        && writeln!(socket, "{}", json!({"op":"ping"})).is_ok()
+        && BufReader::new(&socket)
+            .read_line(&mut line)
+            .is_ok_and(|read| read > 0)
+}
 fn daemon_log(root: &Path) -> Stdio {
     fs::OpenOptions::new()
         .create(true)
@@ -131,13 +144,7 @@ for line in sys.stdin:
             socket,
             child,
         };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        // The socket file appears a moment before it accepts connections, so
-        // only a connection shows that the daemon is ready for a client.
-        while UnixStream::connect(&daemon.socket).is_err() {
-            assert!(Instant::now() < deadline, "daemon startup timed out");
-            thread::sleep(Duration::from_millis(10));
-        }
+        daemon.wait_until_serving();
         daemon
     }
     /// Starts a new daemon on the same data after this one was stopped.
@@ -154,11 +161,27 @@ for line in sys.stdin:
             .stderr(daemon_log(&self.root))
             .spawn()
             .unwrap();
+        self.wait_until_serving();
+    }
+    /// Only an answer proves this daemon is up. The socket file appears before
+    /// it can be connected to, and a socket that accepts may still belong to the
+    /// previous daemon, through a child of it that is yet to reach `exec`.
+    #[track_caller]
+    fn wait_until_serving(&self) {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while UnixStream::connect(&self.socket).is_err() {
-            assert!(Instant::now() < deadline, "daemon restart timed out");
+        while !self.answers() {
+            assert!(Instant::now() < deadline, "daemon did not start serving");
             thread::sleep(Duration::from_millis(10));
         }
+    }
+    fn answers(&self) -> bool {
+        // Connecting can block, which must not outlast the caller's deadline.
+        let socket = self.socket.clone();
+        let (answered, answer) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = answered.send(ask_for_an_answer(&socket));
+        });
+        answer.recv_timeout(Duration::from_secs(1)).unwrap_or(false)
     }
     fn client(&self) -> Client<UnixStream, UnixStream> {
         let socket = UnixStream::connect(&self.socket).unwrap();
