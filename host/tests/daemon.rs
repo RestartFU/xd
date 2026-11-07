@@ -75,6 +75,7 @@ for line in sys.stdin:
 "#).unwrap();
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_xd-host"));
+        command.env("XD_DISABLE_AUTO_UPDATE", "1");
         command
             .args(["daemon", "--data"])
             .arg(&root)
@@ -583,6 +584,7 @@ fn bridges_autostart_one_daemon_and_preserve_pairing_after_restart() {
             let root = root.clone();
             thread::spawn(move || {
                 let mut child = Command::new(env!("CARGO_BIN_EXE_xd-host"))
+                    .env("XD_DISABLE_AUTO_UPDATE", "1")
                     .args(["stdio", "--data"])
                     .arg(&root)
                     .env("XD_CODEX_EXECUTABLE", root.join("codex"))

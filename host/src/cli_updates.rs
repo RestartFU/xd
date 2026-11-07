@@ -400,11 +400,19 @@ fn release_parts(word: &str) -> Option<[u64; 3]> {
     parts.try_into().ok()
 }
 
+/// A prerelease comes before the release it leads to, but two prereleases of
+/// one release are not compared: a CLI's prerelease tags have no shared order.
 fn is_newer(latest: &str, current: &str) -> bool {
-    matches!(
-        (release_parts(latest), release_parts(current)),
-        (Some(latest), Some(current)) if latest > current
-    )
+    let (Some(latest_parts), Some(current_parts)) = (release_parts(latest), release_parts(current))
+    else {
+        return false;
+    };
+    latest_parts > current_parts
+        || (latest_parts == current_parts && is_prerelease(current) && !is_prerelease(latest))
+}
+
+fn is_prerelease(version: &str) -> bool {
+    version.split('+').next().unwrap_or_default().contains('-')
 }
 
 fn latest_package_version(package: &str) -> Result<String, String> {
@@ -607,6 +615,11 @@ mod tests {
         assert!(!is_newer("2.1.319", "2.1.319"));
         assert!(!is_newer("2.1.318", "2.1.319"));
         assert!(!is_newer("garbage", "2.1.319"));
+        assert!(is_newer("1.2.3", "1.2.3-beta.1"));
+        assert!(is_newer("1.2.4-beta.1", "1.2.3"));
+        assert!(!is_newer("1.2.3-beta.1", "1.2.3"));
+        assert!(!is_newer("1.2.3-beta.2", "1.2.3-beta.1"));
+        assert!(!is_newer("1.2.3+build.2", "1.2.3+build.1"));
     }
 
     #[test]

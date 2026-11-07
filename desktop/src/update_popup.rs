@@ -188,12 +188,13 @@ impl XdDesktop {
     /// Starts everything the popup listed. Each action is refused by the host
     /// if it is already running, so a repeated confirm cannot run one twice.
     fn confirm_updates(&mut self, cx: &mut Context<Self>) {
-        let Some(panel) = self.self_update_panel.as_ref() else {
+        let Some(panel) = self.self_update_panel.as_mut() else {
             return;
         };
         if panel.busy {
             return;
         }
+        panel.error = None;
         let install_app = panel.app_pending();
         let providers = panel
             .pending_clis()

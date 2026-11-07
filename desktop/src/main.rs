@@ -18808,6 +18808,8 @@ mod tests {
         assert!(XdDesktop::local_admin_event("host-update"));
         assert!(XdDesktop::local_admin_event("agent-cli-update"));
         assert!(!XdDesktop::local_admin_event("agent-cli-changed"));
+        assert!(!XdDesktop::remote_read_event("agent-cli-update"));
+        assert!(!XdDesktop::remote_read_event("host-update"));
         assert!(XdDesktop::local_admin_reply(&RequestKind::AgentCliUpdates));
         assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
