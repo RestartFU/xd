@@ -724,6 +724,11 @@ impl Engine {
             return;
         };
         for folder in folders {
+            // A folder of projects has no repository; an organization's folder
+            // already names its account.
+            if folder.get("group").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
             let Some(directory) = folder
                 .get("id")
                 .and_then(Value::as_str)

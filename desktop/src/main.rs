@@ -32,21 +32,21 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
-    App, Application, AssetSource, Bounds, ClipboardItem, Context, CursorStyle, Decorations,
-    Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, Image, KeyBinding, ListAlignment,
-    ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render, ResizeEdge,
-    ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer, TitlebarOptions,
-    WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*, px, relative, rgb,
-    rgba, size, svg,
+    App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
+    Decorations, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, Image, KeyBinding,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render,
+    ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
+    TitlebarOptions, WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*,
+    px, relative, rgb, rgba, size, svg,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
     activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
     host::{
-        HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RESUME_TEXT, RequestKind,
-        StartedHost,
+        HostHandle, HostUpdate, MessageCursor, NewFolder, NewSessionWorktree, RESUME_TEXT,
+        RequestKind, StartedHost,
     },
     markdown,
     model::{
@@ -106,8 +106,9 @@ use input::{
     Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight, terminal_paste_bytes,
 };
 use minimal::{
-    AgentCli, MinimalRoute, SessionCard, SettledCard, age_label, next_active_session,
-    project_cards, project_sessions, reconcile_route, resumable_session, settled_cards,
+    AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
+    next_active_session, project_cards, project_sessions, reconcile_route, resumable_session,
+    settled_cards,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -142,6 +143,7 @@ const SEND_ICON: &str = "icons/send.svg";
 const STOP_ICON: &str = "icons/stop.svg";
 const PLAY_ICON: &str = "icons/play.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
+const FOLDERS_ICON: &str = "icons/folders.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
 const GIT_PULL_REQUEST_ICON: &str = "icons/git-pull-request.svg";
@@ -186,6 +188,8 @@ const CATALOG_UPDATE_LABEL_MIN_WIDTH: f32 = 256.0;
 const CATALOG_SESSION_MIN_WIDTH: f32 = 384.0;
 /// Every session row shares one height and baseline.
 const CARD_HEIGHT: f32 = 30.0;
+/// How far the sidebar indents a project or folder for each folder it is in.
+const CATALOG_INDENT: f32 = 12.0;
 /// How long the sidebar offers to undo a settle.
 const SETTLE_UNDO_LIFETIME: Duration = Duration::from_secs(5);
 /// Rows of the Settled shelf shown at first, and how many Show more adds.
@@ -1717,6 +1721,26 @@ struct SettleUndo {
     generation: u64,
 }
 
+/// What the sidebar's New dialog creates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum WorkspaceCreateKind {
+    #[default]
+    Project,
+    /// A folder that holds projects and other folders.
+    Folder,
+    /// A folder named after a GitHub organization, whose avatar it shows. Its
+    /// repositories are left for the user to add as projects.
+    Organization,
+}
+
+/// The menu a "+" opens to add to the sidebar, at the top level or inside a
+/// folder.
+#[derive(Clone)]
+struct ProjectAddMenu {
+    parent: Option<String>,
+    position: Point<Pixels>,
+}
+
 #[derive(Clone)]
 struct SidebarContextMenu {
     target: SidebarTarget,
@@ -2045,6 +2069,10 @@ struct XdDesktop {
     catalog_find_input: Entity<ComposerInput>,
     catalog_query: String,
     creating_workspace: bool,
+    workspace_create_kind: WorkspaceCreateKind,
+    /// The folder the dialog creates inside, if not the top level.
+    workspace_create_parent: Option<String>,
+    project_add_menu: Option<ProjectAddMenu>,
     workspace_create_name: String,
     workspace_create_repo: String,
     workspace_create_clone: String,
@@ -2637,6 +2665,9 @@ impl XdDesktop {
             catalog_find_input,
             catalog_query: String::new(),
             creating_workspace: false,
+            workspace_create_kind: WorkspaceCreateKind::Project,
+            workspace_create_parent: None,
+            project_add_menu: None,
             workspace_create_name: String::new(),
             workspace_create_repo: String::new(),
             workspace_create_clone: String::new(),
@@ -3054,6 +3085,7 @@ impl XdDesktop {
         self.pending_sidebar_delete = None;
         self.sidebar_move = None;
         self.creating_workspace = false;
+        self.project_add_menu = None;
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
         self.workspace_context_folder = None;
@@ -5382,6 +5414,9 @@ impl XdDesktop {
             name,
             repo,
             repo_url,
+            parent,
+            group,
+            ..
         } = kind
         else {
             return false;
@@ -5389,6 +5424,8 @@ impl XdDesktop {
         let form_matches = endpoint == self.active_endpoint
             && self.creating_workspace
             && self.workspace_create_name.trim() == name
+            && self.workspace_create_parent == *parent
+            && (self.workspace_create_kind != WorkspaceCreateKind::Project) == *group
             && optional_trimmed(&self.workspace_create_repo) == repo.as_deref()
             && optional_trimmed(&self.workspace_create_clone) == repo_url.as_deref();
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -6184,6 +6221,7 @@ impl XdDesktop {
             || self.devices_panel.is_some()
             || self.remote_panel.is_some()
             || self.creating_workspace
+            || self.project_add_menu.is_some()
             || self.sidebar_edit.is_some()
             || self.sidebar_context_menu.is_some()
             || self.pending_sidebar_delete.is_some()
@@ -6236,19 +6274,69 @@ impl XdDesktop {
     }
 
     fn begin_workspace_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_workspace_create_in(WorkspaceCreateKind::Project, None, window, cx);
+    }
+
+    /// Opens the New dialog for `kind`, creating inside `parent` when given.
+    fn begin_workspace_create_in(
+        &mut self,
+        kind: WorkspaceCreateKind,
+        parent: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_add_menu = None;
         self.creating_workspace = true;
+        self.workspace_create_kind = kind;
+        self.workspace_create_parent = parent;
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
         self.workspace_create_repo.clear();
         self.workspace_create_clone.clear();
-        self.workspace_create_input
-            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.workspace_create_input.update(cx, |input, cx| {
+            input.set_placeholder(
+                match kind {
+                    WorkspaceCreateKind::Project => "Project name…",
+                    WorkspaceCreateKind::Folder => "Folder name…",
+                    WorkspaceCreateKind::Organization => {
+                        "Organization, e.g. acme or github.com/acme…"
+                    }
+                },
+                cx,
+            );
+            input.set_text(String::new(), cx)
+        });
         self.workspace_repo_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.workspace_clone_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         let focus = self.workspace_create_input.read(cx).focus_handle(cx);
         self.focus_minimal_popup(focus, window, cx);
+        cx.notify();
+    }
+
+    fn open_project_add_menu(
+        &mut self,
+        parent: Option<String>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = window.bounds().size;
+        let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 216.0).max(8.0));
+        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 140.0).max(8.0));
+        self.sidebar_context_menu = None;
+        self.project_add_menu = Some(ProjectAddMenu {
+            parent,
+            position: point(px(x), px(y)),
+        });
+        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        cx.notify();
+    }
+
+    fn close_project_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project_add_menu = None;
+        self.restore_minimal_popup_focus(window);
         cx.notify();
     }
 
@@ -6319,24 +6407,56 @@ impl XdDesktop {
         if !self.creating_workspace || self.workspace_create_submitting {
             return;
         }
-        let name = self.workspace_create_name.trim();
+        let kind = self.workspace_create_kind;
+        let typed = self.workspace_create_name.trim();
+        let (name, owner) = match kind {
+            WorkspaceCreateKind::Organization => match organization_login(typed) {
+                Some(login) => (login.clone(), Some(login)),
+                None => {
+                    self.model.connection_error = Some(
+                        "Enter a GitHub organization name, such as acme or github.com/acme.".into(),
+                    );
+                    cx.notify();
+                    return;
+                }
+            },
+            _ => (typed.to_owned(), None),
+        };
         if name.is_empty() {
-            self.model.connection_error = Some("A workspace name cannot be empty.".into());
+            self.model.connection_error = Some(match kind {
+                WorkspaceCreateKind::Project => "A project name cannot be empty.".into(),
+                _ => "A folder name cannot be empty.".into(),
+            });
             cx.notify();
             return;
         }
-        let repo = optional_trimmed(&self.workspace_create_repo).map(str::to_owned);
-        let repo_url = optional_trimmed(&self.workspace_create_clone).map(str::to_owned);
+        let project = kind == WorkspaceCreateKind::Project;
+        let repo = optional_trimmed(&self.workspace_create_repo)
+            .filter(|_| project)
+            .map(str::to_owned);
+        let repo_url = optional_trimmed(&self.workspace_create_clone)
+            .filter(|_| project)
+            .map(str::to_owned);
         if repo.is_some() && repo_url.is_some() {
             self.model.connection_error =
                 Some("Choose either an existing repository path or a clone URL.".into());
             cx.notify();
             return;
         }
+        let parent = self.workspace_create_parent.clone();
         let result = self
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
-            .and_then(|host| host.new_folder(name, repo.as_deref(), repo_url.as_deref()));
+            .and_then(|host| {
+                host.new_folder(NewFolder {
+                    name: &name,
+                    parent: parent.as_deref(),
+                    repo: repo.as_deref(),
+                    repo_url: repo_url.as_deref(),
+                    group: !project,
+                    owner: owner.as_deref(),
+                })
+            });
         match result {
             Ok(()) => {
                 if let Some(repo_url) = &repo_url {
@@ -6345,7 +6465,19 @@ impl XdDesktop {
                 } else {
                     self.pending_clone_requests.remove(&self.active_endpoint);
                 }
-                self.workspace_create_name = name.to_owned();
+                // Open the folders it lands in, so the new row is in view.
+                let mut opening = parent;
+                while let Some(folder_id) = opening {
+                    self.collapsed_folders.remove(&folder_id);
+                    opening = self
+                        .model
+                        .folders
+                        .iter()
+                        .find(|folder| folder.id == folder_id)
+                        .and_then(|folder| folder.parent.clone());
+                }
+                self.persist_collapsed_folders();
+                self.workspace_create_name = name;
                 self.workspace_create_repo = repo.unwrap_or_default();
                 self.workspace_create_clone = repo_url.unwrap_or_default();
                 self.workspace_create_submitting = true;
@@ -6357,6 +6489,8 @@ impl XdDesktop {
 
     fn cancel_workspace_create(&mut self, cx: &mut Context<Self>) {
         self.creating_workspace = false;
+        self.workspace_create_kind = WorkspaceCreateKind::Project;
+        self.workspace_create_parent = None;
         self.workspace_create_submitting = false;
         self.workspace_create_name.clear();
         self.workspace_create_repo.clear();
@@ -7310,9 +7444,20 @@ impl XdDesktop {
             MinimalRoute::Terminal => return None,
         };
         requested
-            .filter(|id| self.model.folders.iter().any(|folder| folder.id == *id))
+            .filter(|id| {
+                self.model
+                    .folders
+                    .iter()
+                    .any(|folder| folder.id == *id && !folder.group)
+            })
             .map(str::to_owned)
-            .or_else(|| self.model.folders.first().map(|folder| folder.id.clone()))
+            .or_else(|| {
+                self.model
+                    .folders
+                    .iter()
+                    .find(|folder| !folder.group)
+                    .map(|folder| folder.id.clone())
+            })
     }
 
     fn browser_scope_key(&self) -> String {
@@ -11841,6 +11986,189 @@ impl XdDesktop {
         )
     }
 
+    /// A folder of projects in the catalog: a header that opens and closes
+    /// what it holds, which the rows after it list one level deeper.
+    #[allow(clippy::too_many_arguments)]
+    fn render_folder_group(
+        &mut self,
+        colors: ThemeColors,
+        folder: &ProjectCard,
+        index: usize,
+        indent: Pixels,
+        open: bool,
+        held: usize,
+        folders: Rc<[Folder]>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let toggle_folder = folder.id.clone();
+        let context_folder = folder.id.clone();
+        let context_name = folder.name.clone();
+        let add_parent = folder.id.clone();
+        let drag_payload = ProjectDragPayload {
+            project_id: folder.id.clone(),
+            title: folder.name.clone(),
+        };
+        let (can_drop_folders, line_folders, drop_folders) =
+            (folders.clone(), folders.clone(), folders);
+        let (can_drop_target, line_target, drop_target) =
+            (folder.id.clone(), folder.id.clone(), folder.id.clone());
+        let mark = match self.owner_avatar(folder.owner.as_deref()) {
+            Some(avatar) => workspace_icon(Some(avatar), 13.0, colors.faint),
+            None => icon(FOLDERS_ICON, 13.0, colors.faint),
+        };
+        let header = div()
+            .id(("catalog-folder-header", index))
+            .h(px(30.0))
+            .w_full()
+            .pl(px(4.0))
+            .pr(px(2.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(7.0))
+            .group("catalog-folder")
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(colors.surface_high)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_folder_collapsed(toggle_folder.clone(), cx);
+            }))
+            .when(self.model.folder_reorder_supported, |header| {
+                header.on_drag(drag_payload, move |drag, position, _, cx| {
+                    cx.new(|_| ProjectDragPreview {
+                        title: drag.title.clone(),
+                        position,
+                        colors,
+                    })
+                })
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_sidebar_context_menu(
+                        SidebarTarget::Folder(context_folder.clone()),
+                        context_name.clone(),
+                        event.position,
+                        window,
+                        cx,
+                    );
+                }),
+            )
+            .child(
+                div()
+                    .size(px(20.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(
+                        if open {
+                            CHEVRON_DOWN_ICON
+                        } else {
+                            CHEVRON_RIGHT_ICON
+                        },
+                        12.0,
+                        colors.faint,
+                    )),
+            )
+            .child(mark)
+            .child(
+                truncating_label(folder.name.clone())
+                    .flex_shrink()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.muted)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(rgb(colors.faint))
+                    .child(held.to_string()),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id(("catalog-folder-add", index))
+                    .invisible()
+                    .group_hover("catalog-folder", |style| style.visible())
+                    .size(px(22.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.border)))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_project_add_menu(
+                            Some(add_parent.clone()),
+                            event.position(),
+                            window,
+                            cx,
+                        );
+                    }))
+                    .child(plus_icon(colors.faint)),
+            );
+        div()
+            .id(("catalog-folder", index))
+            .relative()
+            .w_full()
+            .pl(indent)
+            .flex()
+            .flex_col()
+            .child(header)
+            .when(open && held == 0, |group| {
+                group.child(
+                    div().pl(px(CATALOG_INDENT)).child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.muted))
+                            .child("No projects yet."),
+                    ),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .can_drop(move |value, _, _| {
+                        value
+                            .downcast_ref::<ProjectDragPayload>()
+                            .is_some_and(|drag| {
+                                project_reorder_for_drop(
+                                    &can_drop_folders,
+                                    &drag.project_id,
+                                    &can_drop_target,
+                                )
+                                .is_some()
+                            })
+                    })
+                    .drag_over::<ProjectDragPayload>(move |style, drag, _, _| {
+                        let after =
+                            project_reorder_for_drop(&line_folders, &drag.project_id, &line_target)
+                                .is_some_and(|reorder| reorder.after);
+                        let style = if after {
+                            style.border_b_2()
+                        } else {
+                            style.border_t_2()
+                        };
+                        style.border_color(rgb(colors.accent))
+                    })
+                    .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
+                        if let Some(reorder) =
+                            project_reorder_for_drop(&drop_folders, &drag.project_id, &drop_target)
+                        {
+                            this.reorder_project_from_drop(reorder, cx);
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
     /// The catalog: one drawer per project, each holding its session cards.
     /// The current project's drawer lifts out; the rest stay one line tall and
     /// show only their sessions' signal tabs until opened.
@@ -11867,13 +12195,80 @@ impl XdDesktop {
         let folders: Rc<[Folder]> = self.model.folders.clone().into();
 
         let query = self.catalog_query.clone();
+        let finding = !query.is_empty();
+        let tree = folder_tree(&folders);
+        let parent_index = folders
+            .iter()
+            .map(|folder| {
+                let parent = folder.parent.as_deref()?;
+                folders.iter().position(|candidate| candidate.id == parent)
+            })
+            .collect::<Vec<_>>();
+        // While finding, a folder whose name matches shows everything in it,
+        // and a folder is shown when anything inside it is.
+        let mut named = vec![false; folders.len()];
+        let mut shown = vec![false; folders.len()];
+        if finding {
+            for row in &tree {
+                let folder = &folders[row.index];
+                named[row.index] = folder.name.to_lowercase().contains(&query)
+                    || parent_index[row.index].is_some_and(|parent| named[parent]);
+                shown[row.index] = named[row.index]
+                    || (!folder.group
+                        && project_sessions(&folder.id, &active_chats)
+                            .iter()
+                            .any(|session| {
+                                session.title.to_lowercase().contains(&query)
+                                    || session.branch.to_lowercase().contains(&query)
+                            }));
+            }
+            for row in tree.iter().rev() {
+                if shown[row.index]
+                    && let Some(parent) = parent_index[row.index]
+                {
+                    shown[parent] = true;
+                }
+            }
+        }
         let mut matches = 0usize;
-        for (project_index, project) in projects.iter().enumerate() {
+        let mut hidden_below = None;
+        for row in &tree {
+            let project_index = row.index;
+            let project = &projects[project_index];
+            let indent = px(row.depth as f32 * CATALOG_INDENT);
+            if hidden_below.is_some_and(|depth| row.depth > depth) {
+                session_instance += project.sessions;
+                continue;
+            }
+            hidden_below = None;
+            if folders[project_index].group {
+                if finding && !shown[project_index] {
+                    continue;
+                }
+                let open = finding || !self.collapsed_folders.contains(&project.id);
+                if !open {
+                    hidden_below = Some(row.depth);
+                }
+                let held = parent_index
+                    .iter()
+                    .filter(|parent| **parent == Some(project_index))
+                    .count();
+                drawers.push(self.render_folder_group(
+                    colors,
+                    project,
+                    project_index,
+                    indent,
+                    open,
+                    held,
+                    folders.clone(),
+                    cx,
+                ));
+                continue;
+            }
             let current = current_project.as_deref() == Some(project.id.as_str())
                 && !matches!(self.minimal_route, MinimalRoute::Terminal);
             let mut sessions = project_sessions(&project.id, &active_chats);
-            let finding = !query.is_empty();
-            if finding && !project.name.to_lowercase().contains(&query) {
+            if finding && !named[project_index] {
                 sessions.retain(|session| {
                     session.title.to_lowercase().contains(&query)
                         || session.branch.to_lowercase().contains(&query)
@@ -12035,6 +12430,7 @@ impl XdDesktop {
                     .id(("minimal-session-group", project_index))
                     .relative()
                     .w_full()
+                    .pl(indent)
                     .flex()
                     .flex_col()
                     .child(header)
@@ -12107,7 +12503,8 @@ impl XdDesktop {
                                     this.reorder_project_from_drop(reorder, cx);
                                 }
                             })),
-                    ),
+                    )
+                    .into_any_element(),
             );
         }
 
@@ -12176,8 +12573,8 @@ impl XdDesktop {
                             .rounded(px(5.0))
                             .cursor_pointer()
                             .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.begin_workspace_create(window, cx)
+                            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                                this.open_project_add_menu(None, event.position(), window, cx)
                             }))
                             .child(plus_icon(colors.muted)),
                     ),
@@ -15730,6 +16127,16 @@ impl XdDesktop {
             let delete_target = menu.target.clone();
             let project = matches!(menu.target, SidebarTarget::Folder(_));
             let chat = matches!(menu.target, SidebarTarget::Chat(_));
+            let group = match &menu.target {
+                SidebarTarget::Folder(folder_id) => self
+                    .model
+                    .folders
+                    .iter()
+                    .find(|folder| &folder.id == folder_id && folder.group)
+                    .map(|folder| folder.id.clone()),
+                _ => None,
+            };
+            let folder_group = group.is_some();
             let settlement = match &menu.target {
                 SidebarTarget::Session(session_id) => self
                     .session_settlement(session_id)
@@ -15764,6 +16171,44 @@ impl XdDesktop {
                         .shadow_lg()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .when_some(group, |card, folder_id| {
+                            let row =
+                                |id: &'static str,
+                                 label: &'static str,
+                                 kind: WorkspaceCreateKind| {
+                                    let parent = folder_id.clone();
+                                    div()
+                                        .id(id)
+                                        .w_full()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .text_sm()
+                                        .text_color(rgb(colors.text))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.sidebar_context_menu = None;
+                                            this.begin_workspace_create_in(
+                                                kind,
+                                                Some(parent.clone()),
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                        .child(label)
+                                };
+                            card.child(row(
+                                "catalog-folder-new-project",
+                                "New project here",
+                                WorkspaceCreateKind::Project,
+                            ))
+                            .child(row(
+                                "catalog-folder-new-folder",
+                                "New folder here",
+                                WorkspaceCreateKind::Folder,
+                            ))
+                        })
                         .child(
                             div()
                                 .id(if project {
@@ -15787,7 +16232,9 @@ impl XdDesktop {
                                         cx,
                                     );
                                 }))
-                                .child(if project {
+                                .child(if folder_group {
+                                    "Rename folder"
+                                } else if project {
                                     "Rename project"
                                 } else if chat {
                                     "Rename chat"
@@ -15872,7 +16319,9 @@ impl XdDesktop {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.begin_sidebar_delete(delete_target.clone(), window, cx);
                                 }))
-                                .child(if project {
+                                .child(if folder_group {
+                                    "Delete folder"
+                                } else if project {
                                     "Delete project"
                                 } else if chat {
                                     "Delete chat"
@@ -15880,6 +16329,102 @@ impl XdDesktop {
                                     "Delete session"
                                 }),
                         ),
+                )
+                .into_any_element()
+        });
+        let project_add_overlay = self.project_add_menu.clone().map(|menu| {
+            let inside = menu.parent.as_deref().and_then(|parent| {
+                self.model
+                    .folders
+                    .iter()
+                    .find(|folder| folder.id == parent)
+                    .map(|folder| folder.name.clone())
+            });
+            let row = |id: &'static str,
+                       label: &'static str,
+                       detail: &'static str,
+                       kind: WorkspaceCreateKind| {
+                let parent = menu.parent.clone();
+                div()
+                    .id(id)
+                    .w_full()
+                    .px_3()
+                    .py(px(7.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.begin_workspace_create_in(kind, parent.clone(), window, cx);
+                    }))
+                    .child(div().text_sm().text_color(rgb(colors.text)).child(label))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgb(colors.muted))
+                            .child(detail),
+                    )
+            };
+            div()
+                .occlude()
+                .absolute()
+                .inset_0()
+                .track_focus(&minimal_popup_focus)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_project_add_menu(window, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, window, cx| this.close_project_add_menu(window, cx)),
+                )
+                .child(
+                    div()
+                        .id("catalog-add-menu")
+                        .occlude()
+                        .absolute()
+                        .left(menu.position.x)
+                        .top(menu.position.y)
+                        .w(px(208.0))
+                        .p_1()
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(rgb(colors.border))
+                        .bg(rgb(colors.surface))
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .when_some(inside, |card, name| {
+                            card.child(
+                                div()
+                                    .px_3()
+                                    .pt(px(5.0))
+                                    .pb(px(3.0))
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(colors.faint))
+                                    .child(truncating_label(format!("Add to {name}"))),
+                            )
+                        })
+                        .child(row(
+                            "catalog-add-project",
+                            "New project",
+                            "A repository to work in",
+                            WorkspaceCreateKind::Project,
+                        ))
+                        .child(row(
+                            "catalog-add-folder",
+                            "New folder",
+                            "Holds projects and folders",
+                            WorkspaceCreateKind::Folder,
+                        ))
+                        .child(row(
+                            "catalog-add-organization",
+                            "GitHub organization",
+                            "A folder with its avatar",
+                            WorkspaceCreateKind::Organization,
+                        )),
                 )
                 .into_any_element()
         });
@@ -16468,6 +17013,20 @@ impl XdDesktop {
         let workspace_overlay = self.creating_workspace.then(|| {
             let can_save =
                 !self.workspace_create_submitting && !self.workspace_create_name.trim().is_empty();
+            let kind = self.workspace_create_kind;
+            let project = kind == WorkspaceCreateKind::Project;
+            let inside = self.workspace_create_parent.as_deref().and_then(|parent| {
+                self.model
+                    .folders
+                    .iter()
+                    .find(|folder| folder.id == parent)
+                    .map(|folder| folder.name.clone())
+            });
+            let (heading, action) = match kind {
+                WorkspaceCreateKind::Project => ("New project", "Create project"),
+                WorkspaceCreateKind::Folder => ("New folder", "Create folder"),
+                WorkspaceCreateKind::Organization => ("Add GitHub organization", "Add organization"),
+            };
             div()
                 .occlude()
                 .absolute()
@@ -16491,10 +17050,23 @@ impl XdDesktop {
                         .shadow_lg()
                         .child(
                             div()
-                                .text_size(px(16.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(colors.text))
-                                .child("New project"),
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(px(16.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(colors.text))
+                                        .child(heading),
+                                )
+                                .when_some(inside, |title, name| {
+                                    title.child(
+                                        truncating_label(format!("In {name}"))
+                                            .text_sm()
+                                            .text_color(rgb(colors.muted)),
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -16508,37 +17080,49 @@ impl XdDesktop {
                                 .bg(rgb(colors.background))
                                 .child(self.workspace_create_input.clone()),
                         )
-                        .child(
-                            div()
-                                .h(px(36.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .bg(rgb(colors.background))
-                                .child(self.workspace_repo_input.clone()),
-                        )
-                        .child(
-                            div()
-                                .h(px(36.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .bg(rgb(colors.background))
-                                .child(self.workspace_clone_input.clone()),
-                        )
+                        .when(project, |card| {
+                            card.child(
+                                div()
+                                    .h(px(36.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.background))
+                                    .child(self.workspace_repo_input.clone()),
+                            )
+                            .child(
+                                div()
+                                    .h(px(36.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.background))
+                                    .child(self.workspace_clone_input.clone()),
+                            )
+                        })
                         .child(div().text_xs().text_color(rgb(colors.muted)).child(
-                            if cfg!(target_os = "windows")
-                                && self.active_endpoint == ChatEndpoint::Local
-                            {
-                                "Use a WSL path (/home/… or /mnt/c/…) or a clone URL."
-                            } else {
-                                "Use either an existing repository path or a clone URL."
+                            match kind {
+                                WorkspaceCreateKind::Project
+                                    if cfg!(target_os = "windows")
+                                        && self.active_endpoint == ChatEndpoint::Local =>
+                                {
+                                    "Use a WSL path (/home/… or /mnt/c/…) or a clone URL."
+                                }
+                                WorkspaceCreateKind::Project => {
+                                    "Use either an existing repository path or a clone URL."
+                                }
+                                WorkspaceCreateKind::Folder => {
+                                    "Folders hold projects and other folders. Add them with the folder's + button."
+                                }
+                                WorkspaceCreateKind::Organization => {
+                                    "Shows the organization's avatar. Add its repositories as projects inside it when you want them."
+                                }
                             },
                         ))
                         .child(
@@ -16597,7 +17181,7 @@ impl XdDesktop {
                                         .child(if self.workspace_create_submitting {
                                             "Creating…"
                                         } else {
-                                            "Create project"
+                                            action
                                         }),
                                 ),
                         ),
@@ -16607,6 +17191,19 @@ impl XdDesktop {
         #[allow(clippy::bind_instead_of_map)]
         let sidebar_rename_overlay = self.sidebar_edit.clone().and_then(|edit| {
             let (heading, cancel_id, save_id) = match &edit.target {
+                SidebarTarget::Folder(folder_id)
+                    if self
+                        .model
+                        .folders
+                        .iter()
+                        .any(|folder| &folder.id == folder_id && folder.group) =>
+                {
+                    (
+                        "Rename folder",
+                        "minimal-cancel-project-rename",
+                        "minimal-save-project-rename",
+                    )
+                }
                 SidebarTarget::Folder(_) => (
                     "Rename project",
                     "minimal-cancel-project-rename",
@@ -16734,12 +17331,12 @@ impl XdDesktop {
             let SidebarTarget::Folder(folder_id) = target else {
                 return None;
             };
-            let project_name = self
+            let (project_name, group) = self
                 .model
                 .folders
                 .iter()
                 .find(|folder| folder.id == folder_id)
-                .map(|folder| folder.name.clone())?;
+                .map(|folder| (folder.name.clone(), folder.group))?;
             let submitting = self.sidebar_delete_submitting;
             Some(
                 div()
@@ -16768,15 +17365,25 @@ impl XdDesktop {
                                     .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
-                                    .child("Delete project?"),
+                                    .child(if group {
+                                        "Delete folder?"
+                                    } else {
+                                        "Delete project?"
+                                    }),
                             )
                             .child(
                                 div()
                                     .text_sm()
                                     .text_color(rgb(colors.muted))
-                                    .child(format!(
-                                        "This removes {project_name} and all its sessions from xd. Its files will be moved to the workspace trash."
-                                    )),
+                                    .child(if group {
+                                        format!(
+                                            "This removes {project_name}, every project and folder in it, and all their sessions from xd. Its files will be moved to the workspace trash."
+                                        )
+                                    } else {
+                                        format!(
+                                            "This removes {project_name} and all its sessions from xd. Its files will be moved to the workspace trash."
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
@@ -16835,7 +17442,7 @@ impl XdDesktop {
                                             .child(if submitting {
                                                 "Deleting…"
                                             } else {
-                                                "Delete project"
+                                                if group { "Delete folder" } else { "Delete project" }
                                             }),
                                     ),
                             ),
@@ -17574,6 +18181,8 @@ impl XdDesktop {
                     this.close_remote(cx);
                 } else if this.sidebar_context_menu.is_some() {
                     this.close_sidebar_context_menu(window, cx);
+                } else if this.project_add_menu.is_some() {
+                    this.close_project_add_menu(window, cx);
                 } else if this.pending_sidebar_delete.is_some() {
                     this.cancel_sidebar_delete(cx);
                 } else if this.sidebar_edit.is_some() {
@@ -17679,6 +18288,7 @@ impl XdDesktop {
                     .when_some(catalog_resize, |row, handle| row.child(handle)),
             )
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
+            .when_some(project_add_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
             .when_some(update_overlay, |root, overlay| root.child(overlay))
             .when_some(usage_overlay, |root, overlay| root.child(overlay))
@@ -17982,6 +18592,9 @@ impl AssetSource for EmbeddedIcons {
             FOLDER_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/folder.svg").as_slice(),
             )),
+            FOLDERS_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/folders.svg").as_slice(),
+            )),
             FILE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/file.svg").as_slice(),
             )),
@@ -18093,6 +18706,7 @@ impl AssetSource for EmbeddedIcons {
             STOP_ICON.into(),
             PLAY_ICON.into(),
             FOLDER_ICON.into(),
+            FOLDERS_ICON.into(),
             FILE_ICON.into(),
             GIT_BRANCH_ICON.into(),
             GIT_PULL_REQUEST_ICON.into(),
@@ -18222,6 +18836,36 @@ fn notify_turn_finished(_: &str) {}
 fn optional_trimmed(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
+}
+
+/// The GitHub login in what was typed for an organization: its name, `@name`,
+/// or its page address. Anything that is not a valid login is refused, since
+/// the host fetches that account's avatar.
+fn organization_login(typed: &str) -> Option<String> {
+    let typed = typed.trim().trim_end_matches('/');
+    let path = typed
+        .split_once("://")
+        .map_or(typed, |(_, rest)| rest)
+        .trim_start_matches("www.");
+    let login = match path.split_once('/') {
+        Some((host, rest)) if host.eq_ignore_ascii_case("github.com") => {
+            let (login, rest) = rest.split_once('/').unwrap_or((rest, ""));
+            if !rest.is_empty() {
+                return None;
+            }
+            login
+        }
+        Some(_) => return None,
+        None => path.strip_prefix('@').unwrap_or(path),
+    };
+    let valid = !login.is_empty()
+        && login.len() <= 39
+        && !login.starts_with('-')
+        && !login.ends_with('-')
+        && login
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-');
+    valid.then(|| login.to_owned())
 }
 
 /// The title to create a chat under, given whatever is in the field.
@@ -20365,6 +21009,7 @@ Binary files /dev/null and b/image.png differ\n";
                 "fn open_sidebar_context_menu(",
                 "fn close_sidebar_context_menu(",
             ),
+            ("fn open_project_add_menu(", "fn close_project_add_menu("),
             ("fn open_remote(", "fn close_remote("),
         ] {
             let opener = production
@@ -20539,6 +21184,7 @@ Binary files /dev/null and b/image.png differ\n";
                 name: "Pull requests".into(),
                 parent: None,
                 owner: None,
+                group: false,
             }];
             desktop.model.chats = vec![
                 serde_json::from_value(serde_json::json!({
@@ -20600,6 +21246,7 @@ Binary files /dev/null and b/image.png differ\n";
                 name: "Links".into(),
                 parent: None,
                 owner: None,
+                group: false,
             }];
             desktop.minimal_route = MinimalRoute::Cli {
                 project_id: "link-project".into(),
@@ -20965,6 +21612,7 @@ Binary files /dev/null and b/image.png differ\n";
                 name: "project".into(),
                 parent: None,
                 owner: None,
+                group: false,
             }];
             desktop.model.chats = (0..60)
                 .map(|index| ChatSummary {
@@ -21188,12 +21836,14 @@ Binary files /dev/null and b/image.png differ\n";
                     name: "A".into(),
                     parent: None,
                     owner: None,
+                    group: false,
                 },
                 Folder {
                     id: "b".into(),
                     name: "B".into(),
                     parent: None,
                     owner: None,
+                    group: false,
                 },
             ];
             desktop.minimal_route = MinimalRoute::Cli {
@@ -22490,6 +23140,25 @@ Binary files /dev/null and b/image.png differ\n";
             name: id.into(),
             parent: parent.map(str::to_owned),
             owner: None,
+            group: false,
+        }
+    }
+
+    #[test]
+    fn organization_names_come_from_a_login_or_its_github_page() {
+        for (typed, login) in [
+            ("acme", Some("acme")),
+            ("  @acme-inc ", Some("acme-inc")),
+            ("github.com/acme", Some("acme")),
+            ("https://www.github.com/Acme/", Some("Acme")),
+            ("https://github.com/acme/web", None),
+            ("https://gitlab.com/acme", None),
+            ("acme corp", None),
+            ("-acme", None),
+            ("", None),
+            ("../acme", None),
+        ] {
+            assert_eq!(organization_login(typed).as_deref(), login, "{typed:?}");
         }
     }
 
@@ -22941,6 +23610,7 @@ Binary files /dev/null and b/image.png differ\n";
                 name: "Renamed workspace".into(),
                 parent: None,
                 owner: None,
+                group: false,
             }],
             chats: vec![xd_desktop::model::ChatSummary {
                 id: "chat-1".into(),
@@ -23719,7 +24389,8 @@ Binary files /dev/null and b/image.png differ\n";
             .1;
         for behavior in [
             "let workspace_delete_overlay =",
-            ".child(\"Delete project?\")",
+            "\"Delete project?\"",
+            "\"Delete folder?\"",
             "minimal-cancel-project-delete",
             "minimal-confirm-project-delete",
             "this.confirm_sidebar_delete(cx)",
@@ -24074,6 +24745,7 @@ Binary files /dev/null and b/image.png differ\n";
                 parent: None,
                 name: "Remote".into(),
                 owner: None,
+                group: false,
             }];
             desktop.collapsed_folders.retain(|folder_id| {
                 desktop

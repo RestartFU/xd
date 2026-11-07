@@ -521,17 +521,31 @@ impl StateStore {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let root = self.workspace_root.to_string_lossy();
         let mut statement = database.prepare(
-            "SELECT id, relative_path FROM workspace_folders \
+            "SELECT id, relative_path, is_group, owner FROM workspace_folders \
              WHERE root_path = ? ORDER BY sort_order, LENGTH(relative_path), relative_path",
         )?;
+        let mut groups = HashMap::<String, Option<String>>::new();
         let stored = statement
             .query_map([root.as_ref()], |row| {
-                Ok(WorkspaceRow {
-                    id: row.get(0)?,
-                    relative_path: row.get(1)?,
-                })
+                Ok((
+                    WorkspaceRow {
+                        id: row.get(0)?,
+                        relative_path: row.get(1)?,
+                    },
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
             })?
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|(row, group, owner)| {
+                if group {
+                    groups.insert(row.id.clone(), owner);
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        drop(statement);
         let by_path = stored
             .iter()
             .map(|row| (row.relative_path.clone(), row.clone()))
@@ -588,6 +602,12 @@ impl StateStore {
                     && visible_ids.contains(parent.id.as_str())
                 {
                     folder["parent"] = Value::String(parent.id.clone());
+                }
+                if let Some(owner) = groups.get(&row.id) {
+                    folder["group"] = Value::Bool(true);
+                    if let Some(owner) = owner {
+                        folder["owner"] = Value::String(owner.clone());
+                    }
                 }
                 folder
             })
@@ -3174,6 +3194,25 @@ impl StateStore {
                 "The repository path must be an existing directory on the host.".into(),
             ));
         }
+        let owner = optional_string(request, "owner")?;
+        if owner.is_some_and(|owner| !crate::owner_icon::valid_login(owner)) {
+            return Err(StorageError::InvalidRequest(
+                "That is not a GitHub organization or user name.".into(),
+            ));
+        }
+        // An organization is a folder of projects named after its account.
+        let group = owner.is_some()
+            || match request.get("group") {
+                None | Some(Value::Null) => false,
+                Some(value) => value.as_bool().ok_or_else(|| {
+                    StorageError::InvalidRequest("group must be true or false".into())
+                })?,
+            };
+        if group && (repo.is_some() || repo_url.is_some()) {
+            return Err(StorageError::InvalidRequest(
+                "A folder holds projects; add the repository as a project inside it.".into(),
+            ));
+        }
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let root = self.workspace_root.to_string_lossy();
         let parent_relative = match parent_id {
@@ -3194,14 +3233,21 @@ impl StateStore {
         } else {
             format!("{parent_relative}/{name}")
         };
-        if let Some(id) = database
+        if let Some((id, existing_group)) = database
             .query_row(
-                "SELECT id FROM workspace_folders WHERE root_path = ? AND relative_path = ?",
+                "SELECT id, is_group FROM workspace_folders WHERE root_path = ? AND relative_path = ?",
                 params![root.as_ref(), &relative],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
             )
             .optional()?
         {
+            if existing_group != group {
+                return Err(StorageError::InvalidRequest(if existing_group {
+                    "There is already a folder of that name there.".into()
+                } else {
+                    "There is already a project of that name there.".into()
+                }));
+            }
             let mut reply = json!({"ok": true, "id": id});
             if let Some(repo_url) = repo_url {
                 reply["cloning"] = Value::String(repo_url);
@@ -3209,6 +3255,11 @@ impl StateStore {
             return Ok(reply);
         }
         let path = self.workspace_root.join(&relative);
+        if group && path.join(".git").exists() {
+            return Err(StorageError::InvalidRequest(
+                "That directory is a repository; add it as a project instead.".into(),
+            ));
+        }
         let created = match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_dir() => false,
             Ok(_) => {
@@ -3240,9 +3291,19 @@ impl StateStore {
         let inserted = database.execute(
             "INSERT INTO workspace_folders \
              (id, root_path, relative_path, backend, model, workdir, repo, instructions, \
-              shortcuts, sort_order, created_at, updated_at) \
-              VALUES (?, ?, ?, NULL, NULL, NULL, ?, NULL, '[]', ?, ?, ?)",
-            params![id, root.as_ref(), relative, repo, sort_order, now, now],
+              shortcuts, sort_order, created_at, updated_at, is_group, owner) \
+              VALUES (?, ?, ?, NULL, NULL, NULL, ?, NULL, '[]', ?, ?, ?, ?, ?)",
+            params![
+                id,
+                root.as_ref(),
+                relative,
+                repo,
+                sort_order,
+                now,
+                now,
+                group,
+                owner
+            ],
         );
         if let Err(error) = inserted {
             if created {
@@ -3543,15 +3604,25 @@ impl StateStore {
             ));
         }
         let root = self.workspace_root.to_string_lossy();
-        let folder_exists: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM workspace_folders WHERE root_path = ? AND id = ?)",
-            params![root.as_ref(), folder_id],
-            |row| row.get(0),
-        )?;
-        if !folder_exists {
-            return Err(StorageError::InvalidRequest(
-                "No such folder on the host.".into(),
-            ));
+        let group: Option<bool> = transaction
+            .query_row(
+                "SELECT is_group FROM workspace_folders WHERE root_path = ? AND id = ?",
+                params![root.as_ref(), folder_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match group {
+            None => {
+                return Err(StorageError::InvalidRequest(
+                    "No such folder on the host.".into(),
+                ));
+            }
+            Some(true) => {
+                return Err(StorageError::InvalidRequest(
+                    "A folder holds projects; start the session in one of its projects.".into(),
+                ));
+            }
+            Some(false) => {}
         }
         let defaults = transaction
             .query_row(
@@ -4828,6 +4899,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             ensure_chat_session_context_columns(database)?;
             ensure_chat_partial_reply_columns(database)?;
             ensure_workspace_sort_order(database)?;
+            ensure_workspace_group_columns(database)?;
             ensure_chat_sort_order(database)?;
             ensure_shared_events_table(database)?;
             disable_claude_mode(database)?;
@@ -4922,6 +4994,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     ensure_chat_session_context_columns(database)?;
     ensure_chat_partial_reply_columns(database)?;
     ensure_workspace_sort_order(database)?;
+    ensure_workspace_group_columns(database)?;
     ensure_chat_sort_order(database)?;
     ensure_shared_events_table(database)?;
     disable_claude_mode(database)?;
@@ -5108,6 +5181,35 @@ fn ensure_workspace_sort_order(database: &Connection) -> Result<(), StorageError
             "ALTER TABLE workspace_folders ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// Folders the user made to hold projects, such as one per organization, are
+/// marked as groups; an organization's folder also remembers the GitHub
+/// account whose avatar stands for it, since it has no remote to read one from.
+fn ensure_workspace_group_columns(database: &Connection) -> Result<(), StorageError> {
+    let has_folders: bool = database.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_folders')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_folders {
+        return Ok(());
+    }
+    let mut statement = database.prepare("PRAGMA table_info(workspace_folders)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    drop(statement);
+    if !columns.contains("is_group") {
+        database.execute(
+            "ALTER TABLE workspace_folders ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.contains("owner") {
+        database.execute("ALTER TABLE workspace_folders ADD COLUMN owner TEXT", [])?;
     }
     Ok(())
 }
@@ -9492,6 +9594,99 @@ mod tests {
                 .unwrap()["parent"],
             existing
         );
+    }
+
+    #[test]
+    fn folders_hold_projects_and_an_organization_names_its_account() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let id = |reply: Value| reply["id"].as_str().unwrap().to_owned();
+
+        let organization = id(store
+            .new_folder(&json!({"name": "acme-inc", "owner": "acme-inc"}))
+            .unwrap());
+        let clients = id(store
+            .new_folder(&json!({"name": "Clients", "group": true, "parent": organization}))
+            .unwrap());
+        let project = id(store
+            .new_folder(&json!({"name": "web", "parent": clients}))
+            .unwrap());
+        assert!(fixture.workspaces.join("acme-inc/Clients/web").is_dir());
+        assert_eq!(
+            id(store
+                .new_folder(&json!({"name": "acme-inc", "owner": "acme-inc"}))
+                .unwrap()),
+            organization,
+            "asking again answers with the same folder"
+        );
+
+        let tree = store.tree().unwrap();
+        let folder = |wanted: &str| {
+            tree["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|folder| folder["id"] == wanted)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(folder(&organization)["group"], true);
+        assert_eq!(folder(&organization)["owner"], "acme-inc");
+        assert_eq!(folder(&clients)["group"], true);
+        assert_eq!(folder(&clients)["parent"], organization.as_str());
+        assert!(folder(&clients).get("owner").is_none());
+        assert!(folder(&project).get("group").is_none());
+        assert_eq!(folder(&project)["parent"], clients.as_str());
+
+        let error = store
+            .new_chat(&json!({"folder": organization}))
+            .unwrap_err();
+        assert!(error.to_string().contains("one of its projects"));
+        store.new_chat(&json!({"folder": project})).unwrap();
+    }
+
+    #[test]
+    fn folders_refuse_repositories_bad_owners_and_project_names() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store.new_folder(&json!({"name": "Website"})).unwrap();
+        fs::create_dir_all(fixture.workspaces.join("checkout/.git")).unwrap();
+
+        for (request, message) in [
+            (
+                json!({"name": "Website", "group": true}),
+                "already a project of that name",
+            ),
+            (
+                json!({"name": "checkout", "group": true}),
+                "is a repository",
+            ),
+            (
+                json!({"name": "acme", "owner": "acme/../../x"}),
+                "not a GitHub organization",
+            ),
+            (
+                json!({"name": "acme", "owner": "acme", "repo_url": "https://github.com/acme/web"}),
+                "add the repository as a project",
+            ),
+            (json!({"name": "acme", "group": "yes"}), "true or false"),
+        ] {
+            let error = store.new_folder(&request).unwrap_err().to_string();
+            assert!(error.contains(message), "{request}: {error}");
+        }
+        assert!(!fixture.workspaces.join("acme").exists());
+
+        store
+            .new_folder(&json!({"name": "Clients", "group": true}))
+            .unwrap();
+        let error = store
+            .new_folder(&json!({"name": "Clients"}))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("already a folder of that name"), "{error}");
     }
 
     #[test]

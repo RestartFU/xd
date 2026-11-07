@@ -40,6 +40,19 @@ pub enum NewSessionWorktree {
     PullRequest { number: u64, oid: String },
 }
 
+/// What to create with `new-folder`: a project, optionally backed by a
+/// repository, or a folder of projects (`group`), which an organization's
+/// `owner` names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NewFolder<'a> {
+    pub name: &'a str,
+    pub parent: Option<&'a str>,
+    pub repo: Option<&'a str>,
+    pub repo_url: Option<&'a str>,
+    pub group: bool,
+    pub owner: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestKind {
     Tree,
@@ -211,6 +224,9 @@ pub enum RequestKind {
         name: String,
         repo: Option<String>,
         repo_url: Option<String>,
+        parent: Option<String>,
+        group: bool,
+        owner: Option<String>,
     },
     NewChat {
         folder_id: String,
@@ -819,24 +835,31 @@ impl HostHandle {
         )
     }
 
-    pub fn new_folder(
-        &self,
-        name: &str,
-        repo: Option<&str>,
-        repo_url: Option<&str>,
-    ) -> Result<(), String> {
-        let mut body = json!({"op": "new-folder", "name": name});
-        if let Some(repo) = repo {
+    pub fn new_folder(&self, folder: NewFolder<'_>) -> Result<(), String> {
+        let mut body = json!({"op": "new-folder", "name": folder.name});
+        if let Some(parent) = folder.parent {
+            body["parent"] = Value::String(parent.to_owned());
+        }
+        if let Some(repo) = folder.repo {
             body["repo"] = Value::String(repo.to_owned());
         }
-        if let Some(repo_url) = repo_url {
+        if let Some(repo_url) = folder.repo_url {
             body["repo_url"] = Value::String(repo_url.to_owned());
+        }
+        if folder.group {
+            body["group"] = Value::Bool(true);
+        }
+        if let Some(owner) = folder.owner {
+            body["owner"] = Value::String(owner.to_owned());
         }
         self.send(
             RequestKind::NewFolder {
-                name: name.to_owned(),
-                repo: repo.map(str::to_owned),
-                repo_url: repo_url.map(str::to_owned),
+                name: folder.name.to_owned(),
+                repo: folder.repo.map(str::to_owned),
+                repo_url: folder.repo_url.map(str::to_owned),
+                parent: folder.parent.map(str::to_owned),
+                group: folder.group,
+                owner: folder.owner.map(str::to_owned),
             },
             body,
         )

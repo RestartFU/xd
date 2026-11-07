@@ -186,6 +186,53 @@ pub(crate) fn project_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<Pr
         .collect()
 }
 
+/// One row of the sidebar's project tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TreeRow {
+    /// The folder's place in the host's list.
+    pub(crate) index: usize,
+    /// How many folders it sits inside.
+    pub(crate) depth: usize,
+}
+
+/// The folders in sidebar order: each one followed by what it holds, siblings
+/// in the host's order. A folder whose parent is not listed sits at the top.
+pub(crate) fn folder_tree(folders: &[Folder]) -> Vec<TreeRow> {
+    let listed = |id: &str| folders.iter().any(|folder| folder.id == id);
+    let mut children = std::collections::HashMap::<&str, Vec<usize>>::new();
+    let mut roots = Vec::new();
+    for (index, folder) in folders.iter().enumerate() {
+        match folder.parent.as_deref() {
+            Some(parent) if parent != folder.id && listed(parent) => {
+                children.entry(parent).or_default().push(index)
+            }
+            _ => roots.push(index),
+        }
+    }
+    let mut rows = Vec::with_capacity(folders.len());
+    let mut placed = vec![false; folders.len()];
+    let visit = |start: usize, rows: &mut Vec<TreeRow>, placed: &mut [bool]| {
+        let mut stack = vec![(start, 0)];
+        while let Some((index, depth)) = stack.pop() {
+            if std::mem::replace(&mut placed[index], true) {
+                continue;
+            }
+            rows.push(TreeRow { index, depth });
+            if let Some(held) = children.get(folders[index].id.as_str()) {
+                stack.extend(held.iter().rev().map(|&child| (child, depth + 1)));
+            }
+        }
+    };
+    for root in roots {
+        visit(root, &mut rows, &mut placed);
+    }
+    // A parent loop is not reachable from the top; list it rather than lose it.
+    for index in 0..folders.len() {
+        visit(index, &mut rows, &mut placed);
+    }
+    rows
+}
+
 pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<SessionCard> {
     chats
         .iter()
@@ -299,6 +346,7 @@ mod tests {
             name: name.into(),
             parent: None,
             owner: None,
+            group: false,
         }
     }
 
@@ -308,7 +356,54 @@ mod tests {
             name: format!("{id}-name"),
             parent: None,
             owner: None,
+            group: false,
         }
+    }
+
+    fn child(id: &str, parent: &str) -> Folder {
+        Folder {
+            parent: Some(parent.into()),
+            ..folder(id, id)
+        }
+    }
+
+    #[test]
+    fn the_folder_tree_lists_what_each_folder_holds_beneath_it() {
+        let folders = vec![
+            folder("acme", "acme"),
+            folder("solo", "solo"),
+            child("web", "acme"),
+            child("clients", "acme"),
+            child("portal", "clients"),
+            child("lost", "gone"),
+        ];
+
+        let rows = folder_tree(&folders)
+            .into_iter()
+            .map(|row| (folders[row.index].id.as_str(), row.depth))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("acme", 0),
+                ("web", 1),
+                ("clients", 1),
+                ("portal", 2),
+                ("solo", 0),
+                ("lost", 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_folder_tree_keeps_folders_caught_in_a_parent_loop() {
+        let folders = vec![child("a", "b"), child("b", "a"), child("self", "self")];
+
+        let rows = folder_tree(&folders);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], TreeRow { index: 2, depth: 0 });
     }
 
     #[test]
