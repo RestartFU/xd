@@ -10436,6 +10436,8 @@ impl XdDesktop {
                 16.0
             }))
             .bg(rgb(colors.chrome))
+            .border_b_1()
+            .border_color(rgb(colors.border))
             .when(titlebar, |bar| {
                 bar.on_mouse_down(MouseButton::Left, |event, window, _| {
                     if event.click_count >= 2 {
