@@ -15,7 +15,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,9 +30,13 @@ internal fun ShortcutEditorDialog(
     onSave: (List<String>) -> Unit,
     onRetry: () -> Unit,
 ) {
-    var prompts by remember(state.opening, state.prompts) {
+    // Saved, so recreating the activity keeps unsaved edits; keyed on the
+    // opening and the loaded list, so a fresh load starts from the host's.
+    var prompts by rememberSaveable(state.opening, state.prompts, stateSaver = PromptsSaver) {
         mutableStateOf(state.prompts)
     }
+    // Locked while saving: the request carries the list as Save found it.
+    val editable = !state.saving
 
     AlertDialog(
         onDismissRequest = { if (!state.saving) onDismiss() },
@@ -73,17 +78,19 @@ internal fun ShortcutEditorDialog(
                                 label = { Text("Prompt") },
                                 minLines = 1,
                                 maxLines = 4,
+                                enabled = editable,
                             )
                             TextButton(
                                 onClick = {
                                     prompts = prompts.filterIndexed { at, _ -> at != index }
                                 },
+                                enabled = editable,
                             ) { Text("Remove") }
                         }
                     }
                     TextButton(
                         onClick = { prompts = prompts + "" },
-                        enabled = prompts.size < 24,
+                        enabled = editable && prompts.size < 24,
                     ) { Text("Add prompt") }
                 }
             }
@@ -101,3 +108,5 @@ internal fun ShortcutEditorDialog(
         },
     )
 }
+
+private val PromptsSaver = listSaver<List<String>, String>(save = { it }, restore = { it })
