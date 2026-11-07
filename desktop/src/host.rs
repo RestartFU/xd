@@ -1773,24 +1773,6 @@ impl HostHandle {
         )
     }
 
-    /// Clears the draft's text after a send and asks what the send left in its
-    /// attachments, such as a file another device added meanwhile, without
-    /// replacing them.
-    pub fn clear_sent_draft(
-        &self,
-        chat_id: &str,
-        attachment_generation: u64,
-    ) -> Result<(), String> {
-        self.send(
-            RequestKind::SetDraft {
-                chat_id: chat_id.to_owned(),
-                text: String::new(),
-                attachment_generation: Some(attachment_generation),
-            },
-            json!({"op": "set-draft", "chat": chat_id, "text": "", "return_attachments": true}),
-        )
-    }
-
     pub fn set_new_worktree(&self, chat_id: &str, enabled: bool) -> Result<(), String> {
         self.send(
             RequestKind::SetOption {
@@ -2273,15 +2255,15 @@ mod tests {
             .unwrap();
         host.send_message("chat-1", "a shortcut", &[], None, None, false)
             .unwrap();
-        // The clear after a send asks what is left instead of replacing it.
-        host.clear_sent_draft("chat-1", 7).unwrap();
+        // The clear after a send claims the whole list, files included.
+        host.set_draft("chat-1", "", Some(&[]), Some(7)).unwrap();
 
         let seen = server.join().unwrap();
         assert_eq!(seen[0]["attachments"][0]["mime"], "application/pdf");
         assert!(seen[1].get("attachments").is_none());
         assert_eq!(seen[2]["op"], "set-draft");
-        assert_eq!(seen[2]["return_attachments"], true);
-        assert!(seen[2].get("attachments").is_none());
+        assert_eq!(seen[2]["files"], true);
+        assert_eq!(seen[2]["attachments"], serde_json::json!([]));
         let _ = fs::remove_dir_all(directory);
     }
 

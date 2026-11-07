@@ -607,11 +607,8 @@ The host persists one composer draft per chat and broadcasts a `draft` event
 after every update. `text` is required but may be empty and is limited to 1
 MiB. Optional `attachments` replaces the synchronized attachment list, in the
 same form and limits as `send`; omit it for ordinary text edits so large payloads
-are not resent on every keystroke. An empty array clears them. With
-`"return_attachments":true` and no `attachments`, the reply and the event carry
-`draft_attachments` and `draft_files` as they stand. A client sends it once after
-a message, so it and every other client learn what the message left in the
-draft. Without
+are not resent on every keystroke. An empty array clears them. A draft is shared
+last-writer-wins: each list a client sends replaces the one before it. Without
 `"files":true`, which a client that shows files as well as images sends, the
 list replaces only the draft's images: the files the client cannot see are kept
 after them. The client's own list keeps to

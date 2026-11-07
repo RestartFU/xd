@@ -1487,7 +1487,7 @@ mod tests {
             assert_eq!(names, ["sent.pdf", "first.png", "since.txt", "second.png"]);
             assert!(desktop.attachments_dirty);
 
-            // Nothing joins the draft while a send is out, or its clear is.
+            // Nothing joins the draft while a send is out.
             desktop.sending = true;
             let extra = || Attachment::from_file("extra.txt", vec![1]);
             assert!(
@@ -1497,14 +1497,6 @@ mod tests {
                     .contains("Wait")
             );
             desktop.sending = false;
-            desktop.awaiting_sent_clear = Some(5);
-            assert!(
-                desktop
-                    .add_attachment(extra())
-                    .unwrap_err()
-                    .contains("Wait")
-            );
-            desktop.awaiting_sent_clear = None;
 
             // A restored draft keeps to the host's limits.
             let big =
@@ -1556,78 +1548,17 @@ mod tests {
     }
 
     #[gpui::test]
-    fn after_a_send_the_empty_list_is_neither_uploaded_nor_refilled(cx: &mut gpui::TestAppContext) {
+    fn a_draft_older_than_the_one_shown_keeps_its_attachments_out(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = composer_with_images(cx, &[]);
         desktop.update(cx, |desktop, cx| {
-            // As a send leaves it: the clear is out and nothing to upload.
-            desktop.awaiting_sent_clear = Some(5);
-            desktop.attachments_dirty = false;
-            desktop.attachment_generation = 5;
-            let sent = Attachment::from_file("sent.pdf", b"%PDF".to_vec());
-            let added = Attachment::from_file("added.txt", b"from elsewhere".to_vec());
-
-            // An echo of an earlier draft does not bring the sent file back,
-            // though its text still applies.
+            let shown = Attachment::from_file("shown.txt", b"now".to_vec());
             desktop.handle_event(
                 "draft",
-                serde_json::json!({"chat": "implementation", "draft": "echo", "draft_revision": 90}),
-                Some(vec![sent]),
+                serde_json::json!({"chat": "implementation", "draft": "", "draft_revision": 60}),
+                Some(vec![shown]),
                 cx,
             );
-            assert_eq!(desktop.model.draft_revision, 90);
-            assert!(desktop.model.draft_attachments.is_empty());
-
-            // The clear's reply shows what the send left, and ends the wait.
-            let mut reply = serde_json::Map::new();
-            reply.insert("ok".into(), true.into());
-            reply.insert("draft".into(), "".into());
-            reply.insert("draft_revision".into(), 91.into());
-            desktop.handle_reply(
-                RequestKind::SetDraft {
-                    chat_id: "implementation".into(),
-                    text: String::new(),
-                    attachment_generation: Some(5),
-                },
-                reply,
-                Some(vec![added]),
-                cx,
-            );
-            let names = desktop
-                .model
-                .draft_attachments
-                .iter()
-                .map(|attachment| attachment.name.as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(names, ["added.txt"]);
-            assert!(desktop.awaiting_sent_clear.is_none() && !desktop.attachments_dirty);
-
-            // A failed send gives its attachments back and moves the list on;
-            // the clear's late reply still ends the wait, applying nothing.
-            desktop.awaiting_sent_clear = Some(6);
-            desktop.attachment_generation = 7;
-            desktop.attachments_dirty = true;
-            let mut reply = serde_json::Map::new();
-            reply.insert("ok".into(), true.into());
-            reply.insert("draft".into(), "".into());
-            reply.insert("draft_revision".into(), 92.into());
-            desktop.handle_reply(
-                RequestKind::SetDraft {
-                    chat_id: "implementation".into(),
-                    text: String::new(),
-                    attachment_generation: Some(6),
-                },
-                reply,
-                Some(Vec::new()),
-                cx,
-            );
-            assert!(desktop.awaiting_sent_clear.is_none());
             assert_eq!(desktop.model.draft_attachments.len(), 1);
-            let extra = Attachment::from_file("extra.txt", vec![1]);
-            desktop.add_attachment(extra).unwrap();
-
-            // A draft older than the one shown does not bring back its list.
-            desktop.attachments_dirty = false;
-            let shown = desktop.model.draft_attachments.clone();
             let stale = Attachment::from_file("stale.txt", b"old".to_vec());
             desktop.handle_event(
                 "draft",
@@ -1635,114 +1566,7 @@ mod tests {
                 Some(vec![stale]),
                 cx,
             );
-            assert_eq!(desktop.model.draft_attachments, shown);
-
-            // A clear that fails reloads the draft, and nothing can be
-            // attached until the host's list is back.
-            desktop.awaiting_sent_clear = Some(9);
-            let mut failed = serde_json::Map::new();
-            failed.insert("ok".into(), false.into());
-            failed.insert("error".into(), "no".into());
-            desktop.handle_reply(
-                RequestKind::SetDraft {
-                    chat_id: "implementation".into(),
-                    text: String::new(),
-                    attachment_generation: Some(9),
-                },
-                failed,
-                None,
-                cx,
-            );
-            assert!(desktop.awaiting_sent_clear.is_none() && desktop.draft_reload_pending);
-            let blocked = Attachment::from_file("blocked.txt", vec![1]);
-            assert!(desktop.add_attachment(blocked).unwrap_err().contains("Wait"));
-
-            // The reload keeps a list a failed send gave back and adds the
-            // host's files to it, then attaching opens again.
-            let restored = Attachment::from_file("restored.txt", b"mine".to_vec());
-            let elsewhere = Attachment::from_file("elsewhere.txt", b"theirs".to_vec());
-            desktop.model.draft_attachments = vec![restored.clone()];
-            desktop.attachments_dirty = true;
-            let mut chat = serde_json::Map::new();
-            chat.insert("ok".into(), true.into());
-            desktop.handle_reply(
-                RequestKind::Chat {
-                    chat_id: "implementation".into(),
-                },
-                chat,
-                Some(vec![restored, elsewhere]),
-                cx,
-            );
-            let names = desktop
-                .model
-                .draft_attachments
-                .iter()
-                .map(|attachment| attachment.name.as_str())
-                .collect::<Vec<_>>();
-            assert_eq!(names, ["restored.txt", "elsewhere.txt"]);
-            assert!(!desktop.draft_reload_pending && desktop.attachments_dirty);
-        });
-    }
-
-    #[gpui::test]
-    fn the_awaited_clear_fills_in_a_revision_an_event_already_showed(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (desktop, cx) = composer_with_images(cx, &[]);
-        desktop.update(cx, |desktop, cx| {
-            desktop.awaiting_sent_clear = Some(3);
-            desktop.attachment_generation = 3;
-            let left = Attachment::from_file("left.txt", b"from elsewhere".to_vec());
-            desktop.handle_event(
-                "draft",
-                serde_json::json!({"chat": "implementation", "draft": "", "draft_revision": 70}),
-                Some(vec![left.clone()]),
-                cx,
-            );
-            assert!(desktop.model.draft_attachments.is_empty());
-            let mut reply = serde_json::Map::new();
-            reply.insert("ok".into(), true.into());
-            reply.insert("draft".into(), "".into());
-            reply.insert("draft_revision".into(), 70.into());
-            desktop.handle_reply(
-                RequestKind::SetDraft {
-                    chat_id: "implementation".into(),
-                    text: String::new(),
-                    attachment_generation: Some(3),
-                },
-                reply,
-                Some(vec![left]),
-                cx,
-            );
-            assert_eq!(desktop.model.draft_attachments.len(), 1);
-            assert!(desktop.awaiting_sent_clear.is_none());
-
-            // A clear overtaken by a newer draft does not apply its older
-            // list; the newer one is fetched instead.
-            desktop.model.draft_attachments.clear();
-            desktop.awaiting_sent_clear = Some(3);
-            desktop.handle_event(
-                "draft",
-                serde_json::json!({"chat": "implementation", "draft": "", "draft_revision": 72}),
-                Some(vec![Attachment::from_file("newer.txt", b"n".to_vec())]),
-                cx,
-            );
-            let mut reply = serde_json::Map::new();
-            reply.insert("ok".into(), true.into());
-            reply.insert("draft".into(), "".into());
-            reply.insert("draft_revision".into(), 71.into());
-            desktop.handle_reply(
-                RequestKind::SetDraft {
-                    chat_id: "implementation".into(),
-                    text: String::new(),
-                    attachment_generation: Some(3),
-                },
-                reply,
-                Some(vec![Attachment::from_file("older.txt", b"o".to_vec())]),
-                cx,
-            );
-            assert!(desktop.model.draft_attachments.is_empty());
-            assert!(desktop.awaiting_sent_clear.is_none() && desktop.draft_reload_pending);
+            assert_eq!(desktop.model.draft_attachments[0].name, "shown.txt");
         });
     }
 

@@ -3263,13 +3263,6 @@ impl StateStore {
                 body["draft_attachments"] = draft_images(&stored);
                 body["draft_files"] = Value::Array(kept_draft_files(&stored));
             }
-        } else if request.get("return_attachments").and_then(Value::as_bool) == Some(true) {
-            // What a send left in the draft: the sender learns what others
-            // added, and every other client that the sent ones are gone.
-            for body in [&mut reply, &mut event] {
-                body["draft_attachments"] = draft_images(&stored);
-                body["draft_files"] = Value::Array(kept_draft_files(&stored));
-            }
         }
         Ok((reply, event))
     }
@@ -13040,12 +13033,6 @@ mod tests {
         store
             .prepare_send(&json!({"chat": "chat-1", "text": "shortcut"}))
             .unwrap();
-        // The sender's clear can ask what is left without replacing it.
-        let (reply, event) = store
-            .set_draft(&json!({"chat": "chat-1", "text": "", "return_attachments": true}))
-            .unwrap();
-        assert_eq!(names(&reply["draft_files"]), ["Report.pdf"]);
-        assert_eq!(event["draft_files"], reply["draft_files"]);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
 
         // Files it cannot see never refuse its images, even past a message's
