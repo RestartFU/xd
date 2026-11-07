@@ -9819,7 +9819,7 @@ impl XdDesktop {
     }
 
     fn resume_turn(&mut self, cx: &mut Context<Self>) {
-        if self.sending {
+        if self.sending || self.attachments_reading > 0 {
             return;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
@@ -10146,13 +10146,23 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// The host connection now in use. Files chosen while it was another one
+    /// are not sent to this one, even to a chat of the same name.
+    fn attachment_connection(&self) -> (ChatEndpoint, u64) {
+        let generation = match self.active_endpoint {
+            ChatEndpoint::Local => self.connection_generation,
+            ChatEndpoint::Remote => self.remote_generation,
+        };
+        (self.active_endpoint, generation)
+    }
+
     /// Opens the system file picker and attaches what the user chooses.
     fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // What is chosen belongs to this chat, wherever the user goes meanwhile.
         let Some(chat) = self.model.selected_chat.clone() else {
             return;
         };
-        let endpoint = self.active_endpoint;
+        let connection = self.attachment_connection();
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -10176,7 +10186,7 @@ impl XdDesktop {
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.active_endpoint == endpoint
+                if this.attachment_connection() == connection
                     && this.model.selected_chat.as_deref() == Some(chat.as_str())
                 {
                     window.focus(&composer);
@@ -10206,7 +10216,7 @@ impl XdDesktop {
             bytes: MAX_TOTAL_ATTACHMENT_BYTES
                 .saturating_sub(draft.iter().map(|attachment| attachment.bytes).sum()),
         };
-        let endpoint = self.active_endpoint;
+        let connection = self.attachment_connection();
         let read = cx.background_spawn(async move { read_attachments(paths, room) });
         self.attachments_reading += 1;
         cx.notify();
@@ -10217,7 +10227,7 @@ impl XdDesktop {
                 cx.notify();
                 // The files belong to the draft they were chosen for, on the
                 // host it was chosen on.
-                if this.active_endpoint != endpoint
+                if this.attachment_connection() != connection
                     || this.model.selected_chat.as_deref() != Some(chat.as_str())
                 {
                     return;
@@ -15301,7 +15311,11 @@ impl XdDesktop {
             && self.attachments_reading == 0;
         let working = self.model.working;
         let shows_resume = self.shows_resume();
-        let can_resume = shows_resume && self.model.connected && metadata_ready && !self.sending;
+        let can_resume = shows_resume
+            && self.model.connected
+            && metadata_ready
+            && !self.sending
+            && self.attachments_reading == 0;
         let can_submit = can_send || can_resume;
         let agent = AgentCli::from_backend(&self.model.backend);
 

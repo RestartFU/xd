@@ -1366,7 +1366,9 @@ mod tests {
             desktop.model.connection_error = None;
             desktop.send_composer(cx);
             desktop.queue_composer(cx);
-            // With no host, a send or queue that went ahead would have said so.
+            desktop.resume_turn(cx);
+            // With no host, a send, queue, or resume that went ahead would
+            // have said so.
             assert_eq!(desktop.model.connection_error, None);
             // The user moves on before the read finishes.
             desktop.model.selected_chat = Some("elsewhere".into());

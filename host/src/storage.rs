@@ -8649,11 +8649,12 @@ fn attachment_file_name(supplied: &str) -> &str {
         .next()
         .unwrap_or_default()
         .trim();
-    let usable = !name.is_empty()
-        && name != "."
-        && name != ".."
-        && name.len() <= 255
-        && !name.chars().any(char::is_control);
+    // One plain component on this host: nothing a join could take as a root,
+    // a drive, or a parent.
+    let mut components = Path::new(name).components();
+    let single =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    let usable = single && name.len() <= 255 && !name.chars().any(char::is_control);
     if usable { name } else { "" }
 }
 
@@ -12875,6 +12876,19 @@ mod tests {
             .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": [png("d.png")]}))
             .unwrap_err();
         assert!(refused.to_string().contains("10 attachments"));
+    }
+
+    #[test]
+    fn attached_file_names_are_one_plain_component() {
+        assert_eq!(attachment_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(attachment_file_name("C:\\Users\\me\\a.txt"), "a.txt");
+        assert_eq!(
+            attachment_file_name(" Meeting 10:30.txt "),
+            "Meeting 10:30.txt"
+        );
+        for unusable in ["", ".", "..", "dir/", "a\nb", &"x".repeat(256)] {
+            assert_eq!(attachment_file_name(unusable), "", "{unusable:?}");
+        }
     }
 
     #[test]
