@@ -21962,7 +21962,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn dropping_a_project_without_a_host_keeps_the_order_and_says_why(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.model.folders =
                 vec![project("a", None), project("b", None), project("c", None)];
