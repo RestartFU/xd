@@ -23,10 +23,12 @@ xd-terminal = { path = "../terminal-core" }
 xd-transport = { path = "../transport-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+futures-util = { version = "0.3", default-features = false }
 gio = "0.18"
 # The Dockerfile pins the matching CEF distribution; keep the two in step.
 cef = "=156.3.0"
 x11rb = "0.13"
+zbus = { version = "5", default-features = false, features = ["async-io"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 raw-window-handle = "0.6.2"
