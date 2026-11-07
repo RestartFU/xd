@@ -2191,8 +2191,15 @@ impl StateStore {
     /// it what happened. Resuming cannot: the request is not in its session.
     /// Stopping several in a row keeps them all, newest last.
     pub fn mark_cut_off_turn(&self, chat_id: &str, request: &str) -> Result<(), StorageError> {
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        append_cut_off_request(&database, chat_id, request)?;
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        append_cut_off_request(&transaction, chat_id, request)?;
+        // Moved, not copied: recovery must not add the same request again.
+        transaction.execute(
+            "UPDATE chats SET unrecorded_request = NULL WHERE id = ?",
+            [chat_id],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -11583,6 +11590,15 @@ mod tests {
         let next = start("chat-1", "still there?");
         assert!(next.prompt.contains("/code-review 1193"), "{}", next.prompt);
         assert!(next.prompt.contains("are you ok?"), "{}", next.prompt);
+        store.clear_cut_off_turn("chat-1").unwrap();
+
+        // A host that dies right after a stop saved the request adds it once.
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        start("chat-1", "stopped");
+        store.mark_cut_off_turn("chat-1", "stopped").unwrap();
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["chat-1"]);
+        let next = start("chat-1", "after the stop");
+        assert_eq!(next.prompt.matches("stopped").count(), 1, "{}", next.prompt);
         store.clear_cut_off_turn("chat-1").unwrap();
 
         // Once Claude reports the session it has the request, so nothing is lost.
