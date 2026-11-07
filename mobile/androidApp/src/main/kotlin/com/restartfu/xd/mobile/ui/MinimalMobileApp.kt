@@ -323,7 +323,9 @@ internal fun MinimalMobileApp(
             onDismiss = model::closeShortcutEditor,
             onSave = model::saveShortcuts,
             onRetry = { model.openShortcutEditor(editor.folderId, editor.title) },
-            onEdit = { model.editShortcutDraft(editor.opening, it) },
+            onText = { id, text -> model.setShortcutText(editor.opening, id, text) },
+            onAdd = { model.addShortcut(editor.opening) },
+            onRemove = { id -> model.removeShortcut(editor.opening, id) },
         )
     }
     renameChat?.let { chat ->

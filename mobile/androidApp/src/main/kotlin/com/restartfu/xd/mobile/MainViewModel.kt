@@ -60,6 +60,9 @@ data class ShortcutEditorState(
  */
 data class DraftPrompt(val id: Long, val text: String)
 
+/** The most prompt buttons one editor offers. */
+const val MAX_SHORTCUTS = 24
+
 data class CreatedDirectSession(
     val projectId: String,
     val chatId: String,
@@ -347,20 +350,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Replaces the open editor's draft; ignored while saving, which sends the draft as it was. */
-    fun editShortcutDraft(opening: Long, draft: List<DraftPrompt>) {
+    /**
+     * One change to the open editor's draft, applied to the draft as it is
+     * now rather than to the copy a callback last saw, so quick edits never
+     * undo each other. Ignored while saving, which sends the draft as it was.
+     */
+    private fun changeShortcutDraft(opening: Long, change: (List<DraftPrompt>) -> List<DraftPrompt>) {
         _shortcutEditor.update { current ->
-            if (current?.opening == opening && !current.saving) current.copy(draft = draft) else current
+            if (current?.opening == opening && !current.saving) current.copy(draft = change(current.draft)) else current
         }
     }
+
+    fun setShortcutText(opening: Long, id: Long, text: String) =
+        changeShortcutDraft(opening) { draft -> draft.map { if (it.id == id) it.copy(text = text) else it } }
+
+    fun addShortcut(opening: Long) = changeShortcutDraft(opening) { draft ->
+        if (draft.size >= MAX_SHORTCUTS) draft else draft + DraftPrompt((draft.maxOfOrNull { it.id } ?: -1) + 1, "")
+    }
+
+    fun removeShortcut(opening: Long, id: Long) =
+        changeShortcutDraft(opening) { draft -> draft.filterNot { it.id == id } }
 
     fun closeShortcutEditor() {
         _shortcutEditor.value = null
     }
 
-    fun saveShortcuts(prompts: List<String>) {
+    /** Saves the open editor's current draft. */
+    fun saveShortcuts() {
         val editor = _shortcutEditor.value ?: return
         if (editor.saving || !editor.loaded) return
+        val prompts = editor.draft.map { it.text.trim() }.filter { it.isNotEmpty() }
         val saving = editor.copy(saving = true, error = null)
         _shortcutEditor.value = saving
         viewModelScope.launch {
