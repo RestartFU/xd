@@ -32,6 +32,15 @@ class ProviderStatesTest {
     }
 
     @Test
+    fun aReplyFromBeforeClearingIsRefused() = runTest {
+        val states = ProviderStates<Item> { it.name }
+        val mark = states.mark()
+        states.clear()
+        states.reply(listOf(Item("codex", "signed-in")), mark)
+        assertNull(states.items.value)
+    }
+
+    @Test
     fun aLaterReplyAppliesOnceNoEventIsPending() = runTest {
         val states = ProviderStates<Item> { it.name }
         states.event(Item("codex", "signing-in"))

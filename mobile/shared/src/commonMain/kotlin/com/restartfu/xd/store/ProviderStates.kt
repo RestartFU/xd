@@ -26,6 +26,8 @@ public class ProviderStates<T>(private val key: (T) -> String) {
         /** The newest request whose reply set each assistant's state. */
         val applied: Map<String, Long> = emptyMap(),
         val requests: Long = 0,
+        /** Advanced by [clear], so a reply for a forgotten host is refused. */
+        val epoch: Long = 0,
     )
 
     private val lock = Mutex()
@@ -36,12 +38,16 @@ public class ProviderStates<T>(private val key: (T) -> String) {
     public val items: StateFlow<Map<String, T>?> = _items.asStateFlow()
 
     /** Taken before a request, and handed back with its reply. */
-    public class Mark internal constructor(internal val events: Map<String, Long>, internal val request: Long)
+    public class Mark internal constructor(
+        internal val events: Map<String, Long>,
+        internal val request: Long,
+        internal val epoch: Long,
+    )
 
     public suspend fun mark(): Mark = lock.withLock {
         val request = state.requests + 1
         state = state.copy(requests = request)
-        Mark(state.events, request)
+        Mark(state.events, request, state.epoch)
     }
 
     public suspend fun event(item: T): Unit = lock.withLock {
@@ -54,6 +60,7 @@ public class ProviderStates<T>(private val key: (T) -> String) {
     }
 
     public suspend fun reply(items: List<T>, mark: Mark): Unit = lock.withLock {
+        if (mark.epoch != state.epoch) return@withLock
         val fresh = items.filter {
             state.events[key(it)] == mark.events[key(it)] &&
                 mark.request > (state.applied[key(it)] ?: 0)
@@ -66,7 +73,7 @@ public class ProviderStates<T>(private val key: (T) -> String) {
     }
 
     public suspend fun clear(): Unit = lock.withLock {
-        state = State(null, emptyMap(), requests = state.requests)
+        state = State(null, emptyMap(), requests = state.requests, epoch = state.epoch + 1)
         _items.value = null
     }
 }

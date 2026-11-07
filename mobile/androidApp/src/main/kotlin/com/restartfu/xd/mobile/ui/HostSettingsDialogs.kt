@@ -36,6 +36,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.protocol.AgentAuthProviderReply
@@ -183,33 +184,38 @@ internal fun AgentSecretsDialog(
     title: String,
     onDismiss: () -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
-    // The draft outlives recreating the activity in a view model, not saved
-    // state: secret values never go into a bundle. Each opening has its own.
+    // The draft and its save outlive recreating the activity in a view model,
+    // not saved state: secret values never go into a bundle. Each opening has
+    // its own.
     val opening = rememberSaveable { java.util.UUID.randomUUID().toString() }
-    val drafts: SecretDrafts = viewModel()
-    val draft = remember(opening) { drafts.open(opening) }
+    val editors: HostEditors = viewModel()
+    val draft = remember(opening) { editors.secretDraft(opening) }
+    val save = remember(opening) { editors.save(opening) }
     val close = {
-        drafts.close(opening)
+        editors.close(opening)
         onDismiss()
     }
     var names by draft.names
     var removed by draft.removed
     var replaced by draft.replaced
     var added by draft.added
-    var error by remember { mutableStateOf<String?>(null) }
-    var saving by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    val saving by save.saving
+    val error = loadError ?: save.error.value
     var attempt by remember { mutableStateOf(0) }
+    LaunchedEffect(save.saved.value) {
+        if (save.saved.value) close()
+    }
     LaunchedEffect(attempt) {
         // A draft restored after recreation already has its names.
         if (names != null) return@LaunchedEffect
-        error = null
+        loadError = null
         try {
             names = model.client.agentSecrets(folderId)
         } catch (failure: CancellationException) {
             throw failure
         } catch (failure: Throwable) {
-            error = failure.message ?: "Could not read the secrets"
+            loadError = failure.message ?: "Could not read the secrets"
         }
     }
     val newNames = added.map { it.first.trim() }
@@ -287,20 +293,7 @@ internal fun AgentSecretsDialog(
                         Ops.SecretEntry(name, replaced[name]?.takeIf(String::isNotEmpty))
                     }
                     val entries = kept + added.map { (name, value) -> Ops.SecretEntry(name.trim(), value) }
-                    saving = true
-                    error = null
-                    scope.launch {
-                        try {
-                            model.client.setAgentSecrets(folderId, entries)
-                            close()
-                        } catch (failure: CancellationException) {
-                            throw failure
-                        } catch (failure: Throwable) {
-                            error = failure.message ?: "Could not save the secrets"
-                        } finally {
-                            saving = false
-                        }
-                    }
+                    editors.run(opening, "Could not save the secrets") { model.client.setAgentSecrets(folderId, entries) }
                 },
                 enabled = names != null && valid && !saving,
             ) { Text(if (saving) "Saving…" else "Save") }
@@ -319,12 +312,49 @@ internal class SecretDraft {
     val added = mutableStateOf(emptyList<Pair<String, String>>())
 }
 
-/** Secrets drafts by opening, surviving activity recreation but not the process. */
-internal class SecretDrafts : androidx.lifecycle.ViewModel() {
-    private val drafts = mutableMapOf<String, SecretDraft>()
-    fun open(opening: String): SecretDraft = drafts.getOrPut(opening) { SecretDraft() }
+/** One editor's save: whether it is out, how it failed, and whether it landed. */
+internal class EditorSave {
+    val saving = mutableStateOf(false)
+    val error = mutableStateOf<String?>(null)
+    val saved = mutableStateOf(false)
+}
+
+/**
+ * Host-setting editors' drafts and saves by opening. They survive recreating
+ * the activity, so a save in flight keeps its outcome and its editor stays
+ * locked until it settles, but not the process.
+ */
+internal class HostEditors : androidx.lifecycle.ViewModel() {
+    private val secretDrafts = mutableMapOf<String, SecretDraft>()
+    private val saves = mutableMapOf<String, EditorSave>()
+
+    fun secretDraft(opening: String): SecretDraft = secretDrafts.getOrPut(opening) { SecretDraft() }
+
+    fun save(opening: String): EditorSave = saves.getOrPut(opening) { EditorSave() }
+
+    /** Runs [block] as [opening]'s save, in this view model's scope rather than the dialog's. */
+    fun run(opening: String, failure: String, block: suspend () -> Unit) {
+        val save = save(opening)
+        if (save.saving.value) return
+        save.saving.value = true
+        save.error.value = null
+        viewModelScope.launch {
+            try {
+                block()
+                save.saved.value = true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                save.error.value = error.message ?: failure
+            } finally {
+                save.saving.value = false
+            }
+        }
+    }
+
     fun close(opening: String) {
-        drafts.remove(opening)
+        secretDrafts.remove(opening)
+        saves.remove(opening)
     }
 }
 
@@ -339,24 +369,35 @@ internal fun ProjectContextDialog(
     projectName: String,
     onDismiss: () -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
     var text by rememberSaveable(folderId) { mutableStateOf<String?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var saving by remember { mutableStateOf(false) }
+    // The save runs in a view model, so rotating keeps its outcome and lock.
+    val opening = rememberSaveable { java.util.UUID.randomUUID().toString() }
+    val editors: HostEditors = viewModel()
+    val save = remember(opening) { editors.save(opening) }
+    val close = {
+        editors.close(opening)
+        onDismiss()
+    }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    val saving by save.saving
+    val error = loadError ?: save.error.value
+    LaunchedEffect(save.saved.value) {
+        if (save.saved.value) close()
+    }
     var attempt by remember { mutableStateOf(0) }
     LaunchedEffect(folderId, attempt) {
         if (text != null) return@LaunchedEffect
-        error = null
+        loadError = null
         try {
             text = model.client.folderContext(folderId).orEmpty()
         } catch (failure: CancellationException) {
             throw failure
         } catch (failure: Throwable) {
-            error = failure.message ?: "Could not read the project context"
+            loadError = failure.message ?: "Could not read the project context"
         }
     }
     AlertDialog(
-        onDismissRequest = { if (!saving) onDismiss() },
+        onDismissRequest = { if (!saving) close() },
         title = { Text("$projectName context") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -383,25 +424,13 @@ internal fun ProjectContextDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    saving = true
-                    error = null
-                    scope.launch {
-                        try {
-                            model.client.setFolderContext(folderId, text)
-                            onDismiss()
-                        } catch (failure: CancellationException) {
-                            throw failure
-                        } catch (failure: Throwable) {
-                            error = failure.message ?: "Could not save the project context"
-                        } finally {
-                            saving = false
-                        }
-                    }
+                    val saved = text
+                    editors.run(opening, "Could not save the project context") { model.client.setFolderContext(folderId, saved) }
                 },
                 enabled = text != null && !saving,
             ) { Text(if (saving) "Saving…" else "Save") }
         },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = close, enabled = !saving) { Text("Cancel") } },
     )
 }
 
