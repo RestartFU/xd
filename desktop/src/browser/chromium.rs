@@ -125,7 +125,9 @@ wrap_app! {
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 /// Set once CEF has been shut down, after which no browser can be created.
 static SHUT_DOWN: AtomicBool = AtomicBool::new(false);
-/// Browsers CEF has created and not yet finished closing.
+/// Browsers CEF has accepted, whether or not created yet, and not finished
+/// closing. One that is never created keeps CEF from shutting down, which is
+/// the safe way round.
 static LIVE_BROWSERS: AtomicUsize = AtomicUsize::new(0);
 
 /// CEF allows one initialization per process, so the first browser's scale
@@ -393,7 +395,6 @@ wrap_life_span_handler! {
             let Some(browser) = browser else {
                 return;
             };
-            LIVE_BROWSERS.fetch_add(1, Ordering::SeqCst);
             let mut shared = lock(&self.shared);
             if shared.closed.is_some() {
                 let host = browser.host();
@@ -734,6 +735,9 @@ impl ChromiumView {
             },
         );
         let mut client = ViewClient::new(shared.clone(), events);
+        // Counted before asking, so a shutdown can never fall between CEF
+        // accepting the browser and creating it.
+        LIVE_BROWSERS.fetch_add(1, Ordering::SeqCst);
         let created = browser_host_create_browser(
             Some(&info),
             Some(&mut client),
@@ -743,6 +747,7 @@ impl ChromiumView {
             None,
         );
         if created != 1 {
+            LIVE_BROWSERS.fetch_sub(1, Ordering::SeqCst);
             release_windows(&mut lock(&shared));
             return Err("Could not create the browser.".into());
         }
