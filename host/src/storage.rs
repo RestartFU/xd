@@ -3301,6 +3301,12 @@ impl StateStore {
         let requested_parent_id = optional_string(request, "parent")?;
         let before_id = optional_string(request, "before")?;
         let after_id = optional_string(request, "after")?;
+        let keep_parent = match request.get("keep_parent") {
+            None | Some(Value::Null) => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                StorageError::InvalidRequest("keep_parent must be true or false".into())
+            })?,
+        };
         if before_id.is_some() && after_id.is_some() {
             return Err(StorageError::InvalidRequest(
                 "Choose either a workspace before or after which to move.".into(),
@@ -3359,7 +3365,7 @@ impl StateStore {
         let source = self.workspace_root.join(&relative);
         let parent = self.workspace_root.join(&parent_relative);
         if source.parent() != Some(parent.as_path()) {
-            if request.get("keep_parent").and_then(Value::as_bool) == Some(true) {
+            if keep_parent {
                 return Err(StorageError::InvalidRequest(
                     "Reordering would move this folder to another directory.".into(),
                 ));
@@ -8941,9 +8947,11 @@ mod tests {
             .unwrap()
             .to_owned();
 
-        store
-            .move_folder(&json!({"folder": top, "before": child, "keep_parent": true}))
-            .unwrap_err();
+        for keep_parent in [json!(true), json!("true"), json!(1)] {
+            store
+                .move_folder(&json!({"folder": top, "before": child, "keep_parent": keep_parent}))
+                .unwrap_err();
+        }
         assert!(fixture.workspaces.join("Top").is_dir());
         assert!(!fixture.workspaces.join("Parent/Top").exists());
         let ids = || {

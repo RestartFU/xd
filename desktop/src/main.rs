@@ -2878,8 +2878,10 @@ impl XdDesktop {
                         this.host = Some(host);
                         this._started_host = Some(started_host);
                         this.reconnect_attempt = 0;
-                        this.endpoint_model_mut(ChatEndpoint::Local)
-                            .connection_error = None;
+                        let local_model = this.endpoint_model_mut(ChatEndpoint::Local);
+                        local_model.connection_error = None;
+                        // Until its tree says otherwise, this host may be older.
+                        local_model.folder_reorder_supported = false;
                         this.listen_for_host(updates, generation, cx);
                     }
                     Err(error) => {
@@ -2996,6 +2998,8 @@ impl XdDesktop {
         let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
         remote_model.connected = true;
         remote_model.connection_error = None;
+        // Until its tree says otherwise, this host may be older.
+        remote_model.folder_reorder_supported = false;
         if let Some(panel) = &mut self.remote_panel {
             panel.submitting = false;
             panel.error = None;
