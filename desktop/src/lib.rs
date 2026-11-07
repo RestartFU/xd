@@ -12,5 +12,6 @@ pub mod remote;
 pub mod session_host;
 pub mod session_runtime;
 pub mod theme;
+pub mod usage;
 #[cfg(any(windows, test))]
 pub mod wsl;

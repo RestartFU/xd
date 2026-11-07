@@ -330,6 +330,9 @@ boundary, not an event cursor.
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, `pending: true` while the host fetches, `retry: true` when the last fetch failed, or none of these when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
+| `usage-summary` | `days` of `1`, `7`, `30`, or `90`, optional IANA `time_zone`, optional `now_ms`, optional `refresh: boolean`, optional `generation` | `pending: true`; the asking connection then receives a `usage-summary` event with `generation` and `summary:{resolution,window_label,periods,buckets,sessions,sources,pricing}`, read from the host's Claude Code and Codex transcripts and priced from a daily LiteLLM price list |
+| `usage-limits` | optional IANA `time_zone`, optional `generation` | `pending: true`; the asking connection then receives a `usage-limits` event with `generation` and `accounts:[{provider,account_key,plan,windows,reset_credits,unavailable}]`, asked of each installed assistant; `account_key` is a hash, so no address crosses the wire |
+| `usage-prices` | none | saved `prices:{model:{input,output,cache_read,cache_write}}` in USD per million tokens, and `aliases:{model:target}` |
 | `image-read` | absolute host `path`, optional `preview: boolean` | `mime` of `image/png`, `image/jpeg`, `image/gif`, or `image/webp`, and base64 `data`; only images the host stored itself: remote pastes and [images in replies](#images-in-replies) |
 | `search` | `query` | matching stored messages |
 | `diff-read` | `chat` plus one `read` of `base`, `working-status`, `branch-status` (with `base`), `working-all`, `branch-all` (with `base`), `working-file`/`untracked-file` (with a safe relative `path`), or `branch-file` (with `base` and `path`) | `output: string`, limited to 8 MiB |
@@ -672,6 +675,21 @@ an update runs.
 desktop reads its own compiled-in catalog because it ships with the host; a
 separately released client must ask, since `set-option` validates the model id
 and a hard-coded list would be refused as soon as one is added or retired.
+
+### `set-usage-prices`
+
+Replaces the host's custom model prices and aliases. Takes `prices` and `aliases`
+in the shape `usage-prices` returns; `input` and `output` are required, and a blank
+cache rate uses the input rate. Answers with the saved values.
+
+### `usage-consume-reset-credit`
+
+Spends one banked reset credit on the host's signed-in account. Takes `provider`
+(`codex`), an `idempotency_key` naming the attempt, which is reused when retrying
+it, and the `account_key` from `usage-limits`; the host refuses if that is missing
+or no longer the signed-in account. Answers `pending: true`, then sends the asking connection a `usage-reset-credit`
+event with `outcome` of `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed`,
+or `error`. This cannot be undone, so clients must confirm first.
 
 ### `workflow-status`
 

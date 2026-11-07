@@ -63,6 +63,7 @@ mod source_build;
 mod speech;
 mod terminal;
 mod update_popup;
+mod usage_view;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 mod workspace_settings;
@@ -102,6 +103,10 @@ use settings::{AppSettings, BrowserState, ThemePreset};
 use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
+use usage_view::{
+    ALERT_ICON, GAUGE_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON,
+    TICKET_ICON, TRENDING_DOWN_ICON, TRENDING_UP_ICON, USAGE_ICON, UsagePage,
+};
 
 pub(crate) const UI_FONT: &str = "Inter";
 /// Static instances: GPUI renders only the default instance of a variable
@@ -595,7 +600,7 @@ fn agent_icon(agent: AgentCli) -> &'static str {
     }
 }
 
-gpui::actions!(xd, [CloseSearch, CopyRenderedSelection]);
+gpui::actions!(xd, [CloseSearch, CopyRenderedSelection, ToggleUsage]);
 
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = xd, no_json)]
@@ -1676,6 +1681,8 @@ struct XdDesktop {
     minimal_theme_open: bool,
     update_popup_open: bool,
     minimal_popup_focus: FocusHandle,
+    usage_open: bool,
+    usage: UsagePage,
     minimal_popup_previous_focus: Option<WeakFocusHandle>,
     minimal_popup_focus_captured: bool,
     minimal_new_session_agent: AgentCli,
@@ -2246,6 +2253,8 @@ impl XdDesktop {
             minimal_theme_open: false,
             update_popup_open: false,
             minimal_popup_focus,
+            usage_open: false,
+            usage: UsagePage::new(cx.focus_handle()),
             minimal_popup_previous_focus: None,
             minimal_popup_focus_captured: false,
             minimal_new_session_agent: AgentCli::Codex,
@@ -2979,6 +2988,9 @@ impl XdDesktop {
         generation: u64,
         cx: &mut Context<Self>,
     ) {
+        if self.usage_host_update(ChatEndpoint::Remote, &update, cx) {
+            return;
+        }
         match update {
             HostUpdate::Connected { .. } => {}
             HostUpdate::Disconnected { message } => {
@@ -3211,6 +3223,9 @@ impl XdDesktop {
 
     fn handle_host_update(&mut self, update: HostUpdate, generation: u64, cx: &mut Context<Self>) {
         if generation != self.connection_generation {
+            return;
+        }
+        if self.usage_host_update(ChatEndpoint::Local, &update, cx) {
             return;
         }
         if self.active_endpoint == ChatEndpoint::Remote {
@@ -5829,6 +5844,7 @@ impl XdDesktop {
     fn browser_occluded_by_popup(&self) -> bool {
         self.auth_open
             || self.update_popup_open
+            || self.usage_open
             || self.native_option_open.is_some()
             || self.share_panel.is_some()
             || self.devices_panel.is_some()
@@ -11680,6 +11696,18 @@ impl XdDesktop {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.toggle_minimal_theme_popup(window, cx)
                             })),
+                    )
+                    .child(
+                        pane_icon_button(
+                            "minimal-usage",
+                            "Usage",
+                            USAGE_ICON,
+                            self.usage_open,
+                            colors,
+                        )
+                        .w(px(30.0))
+                        .h(px(30.0))
+                        .on_click(cx.listener(|this, _, window, cx| this.toggle_usage(window, cx))),
                     ),
             )
             .into_any_element()
@@ -15081,6 +15109,9 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
+        let usage_overlay = self
+            .usage_open
+            .then(|| self.render_usage(colors, window, cx));
         let theme_overlay = self
             .minimal_theme_open
             .then(|| self.render_workspace_settings(colors, window, cx));
@@ -16701,6 +16732,9 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if this.dismiss_usage_layer(window, cx) {
+                    return;
+                }
                 if let Some(pane) = this.browser_panes.get(&this.browser_scope_key()).cloned()
                     && pane.update(cx, |pane, cx| pane.dismiss_add_menu(cx))
                 {
@@ -16851,6 +16885,7 @@ impl XdDesktop {
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
             .when_some(update_overlay, |root, overlay| root.child(overlay))
+            .when_some(usage_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(share_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
@@ -17166,6 +17201,39 @@ impl AssetSource for EmbeddedIcons {
             )),
             CHEVRON_DOWN_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/chevron-down.svg").as_slice(),
+            )),
+            USAGE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/chart-no-axes-column.svg").as_slice(),
+            )),
+            GAUGE_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/gauge.svg").as_slice(),
+            )),
+            TRENDING_UP_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/trending-up.svg").as_slice(),
+            )),
+            TRENDING_DOWN_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/trending-down.svg").as_slice(),
+            )),
+            REFRESH_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/refresh.svg").as_slice(),
+            )),
+            INFO_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/info.svg").as_slice(),
+            )),
+            SLIDERS_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/sliders-horizontal.svg").as_slice(),
+            )),
+            ROTATE_CCW_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/rotate-ccw.svg").as_slice(),
+            )),
+            PLUS_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/plus.svg").as_slice(),
+            )),
+            TICKET_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/ticket.svg").as_slice(),
+            )),
+            ALERT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/circle-alert.svg").as_slice(),
             )),
             CLOSE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/close.svg").as_slice(),
@@ -18338,11 +18406,11 @@ mod tests {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.run_until_parked();
 
-        // The catalog footer holds Terminal and Settings.
+        // The catalog footer holds Terminal, Settings, and Usage.
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
         let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
         cx.simulate_click(
-            point(px(catalog_width - 50.0), footer_y),
+            point(px(catalog_width - 88.0), footer_y),
             gpui::Modifiers::default(),
         );
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
@@ -18351,6 +18419,26 @@ mod tests {
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
         cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).minimal_theme_open));
+    }
+
+    #[gpui::test]
+    fn the_sidebar_usage_icon_opens_the_page(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.run_until_parked();
+
+        let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
+        let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
+        cx.simulate_click(
+            point(px(catalog_width - 23.0), footer_y),
+            gpui::Modifiers::default(),
+        );
+        cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
+        // A press on the page stays on it; one on the backdrop dismisses it.
+        cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
+        cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(!desktop.read(cx).usage_open));
     }
 
     #[gpui::test]
@@ -22079,6 +22167,10 @@ fn main() {
                 KeyBinding::new("ctrl-c", CopyRenderedSelection, Some("XdDesktop")),
                 KeyBinding::new("cmd-c", CopyRenderedSelection, Some("XdDesktop")),
                 KeyBinding::new("escape", CloseSearch, Some("XdDesktop")),
+                // No context: the shortcut also works before anything has focus. The
+                // terminal's own ctrl-u is bound deeper, so it still wins there.
+                KeyBinding::new("ctrl-u", ToggleUsage, None),
+                KeyBinding::new("cmd-u", ToggleUsage, None),
                 KeyBinding::new("backspace", Backspace, Some("ComposerInput")),
                 KeyBinding::new("delete", Delete, Some("ComposerInput")),
                 KeyBinding::new("ctrl-backspace", DeleteWord, Some("ComposerInput")),
@@ -22270,26 +22362,34 @@ fn main() {
             } else {
                 WindowBounds::Windowed(bounds)
             };
-            cx.open_window(
-                WindowOptions {
-                    focus: true,
-                    window_bounds: Some(window_bounds),
-                    is_resizable: true,
-                    window_min_size: Some(size(px(760.0), px(560.0))),
-                    window_background: WindowBackgroundAppearance::Opaque,
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("xd".into()),
-                        appears_transparent: true,
-                        traffic_light_position: cfg!(target_os = "macos")
-                            .then(|| point(px(12.0), px(10.0))),
-                    }),
-                    window_decorations: Some(WindowDecorations::Client),
-                    app_id: Some(xd_desktop::channel::app_id().into()),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
-            )
-            .expect("open xd GPUI window");
+            let desktop_window = cx
+                .open_window(
+                    WindowOptions {
+                        focus: true,
+                        window_bounds: Some(window_bounds),
+                        is_resizable: true,
+                        window_min_size: Some(size(px(760.0), px(560.0))),
+                        window_background: WindowBackgroundAppearance::Opaque,
+                        titlebar: Some(TitlebarOptions {
+                            title: Some("xd".into()),
+                            appears_transparent: true,
+                            traffic_light_position: cfg!(target_os = "macos")
+                                .then(|| point(px(12.0), px(10.0))),
+                        }),
+                        window_decorations: Some(WindowDecorations::Client),
+                        app_id: Some(xd_desktop::channel::app_id().into()),
+                        ..Default::default()
+                    },
+                    |window, cx| cx.new(|cx| XdDesktop::new(window, cx)),
+                )
+                .expect("open xd GPUI window");
+            cx.on_action(move |_: &ToggleUsage, cx| {
+                // The key is being dispatched inside this window's own update.
+                cx.defer(move |cx| {
+                    let _ = desktop_window
+                        .update(cx, |desktop, window, cx| desktop.toggle_usage(window, cx));
+                });
+            });
             cx.activate(true);
         });
 }

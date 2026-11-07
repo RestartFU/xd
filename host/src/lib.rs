@@ -47,6 +47,7 @@ mod terminal_activity;
 mod terminal_query;
 mod terminal_replay;
 mod tool_diff;
+mod usage;
 mod user_environment;
 mod workflow;
 mod worktree_name;
@@ -70,6 +71,7 @@ use storage::SendDisposition;
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
 use terminal::TerminalManager;
+use usage::UsageService;
 use workflow::WorkflowStatuses;
 
 pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
@@ -85,6 +87,7 @@ pub struct Engine {
     cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
+    usage: UsageService,
     owner_icons: Arc<OwnerIcons>,
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -148,6 +151,7 @@ impl Engine {
             cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
+            usage: UsageService::new(events.clone(), None),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
@@ -199,6 +203,7 @@ impl Engine {
             cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
+            usage: UsageService::new(events.clone(), data_directory.clone()),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
@@ -437,6 +442,20 @@ impl Engine {
             Some("reorder-queue") => self.event_mutation(|store| store.reorder_queue(&request)),
             Some("steer-queue") => self.steer_queue(&request),
             Some("workflow-status") => self.workflow_status(owner, &request),
+            Some("usage-summary") => self
+                .usage
+                .summary(owner, &request)
+                .unwrap_or_else(error_reply),
+            Some("usage-limits") => self
+                .usage
+                .limits(owner, &request)
+                .unwrap_or_else(error_reply),
+            Some("usage-consume-reset-credit") => self
+                .usage
+                .consume_reset_credit(owner, &request)
+                .unwrap_or_else(error_reply),
+            Some("usage-prices") => self.usage.prices().unwrap_or_else(error_reply),
+            Some("set-usage-prices") => self.usage.set_prices(&request).unwrap_or_else(error_reply),
             Some("owner-icon") => self
                 .owner_icons
                 .icon(owner, &request)
@@ -2564,6 +2583,22 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 8);
         assert_eq!(reply["error"], "Invalid workflow run marker.");
+    }
+
+    #[test]
+    fn usage_is_dispatched_and_validates_before_scanning() {
+        let reply = dispatch(json!({"op": "usage-summary", "days": 3, "_xd_request": 10}));
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["_xd_request"], 10);
+        assert_eq!(reply["error"], "Usage windows are 1, 7, 30, or 90 days.");
+        let reply = dispatch(json!({"op": "usage-consume-reset-credit", "provider": "claude"}));
+        assert_eq!(reply["error"], "Only Codex has reset credits.");
+        // Without a data directory there is nothing saved and nowhere to save.
+        assert_eq!(dispatch(json!({"op": "usage-prices"}))["prices"], json!({}));
+        assert_eq!(
+            dispatch(json!({"op": "set-usage-prices", "prices": {}}))["ok"],
+            false
+        );
     }
 
     #[test]
