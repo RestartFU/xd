@@ -96,7 +96,9 @@ first. Stored conversations can resume afterward. Turn on **Settings → General
 Resume chats after a restart** to have xd continue any turn that a crash, reboot, or
 daemon stop cut off, the next time the app connects to the local daemon. It posts a
 visible message in the chat and the agent continues with no prompt from you, so it
-is off by default. A resumed turn that is cut off again waits for you. Updates always target the local
+is off by default. A resumed turn that is cut off again waits for you. After a turn is
+stopped, cut off, or ended by a usage limit, the composer's send button becomes a play
+button while the composer is empty; pressing it continues the chat. Updates always target the local
 machine, including while you are viewing a remote workspace. Source builds and
 Windows installations require a manual app update. Set `XD_DISABLE_AUTO_UPDATE=1`
 to disable background checks.

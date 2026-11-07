@@ -40,6 +40,8 @@ For an optional concise spoken response, wrap only the words that should be read
 Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all."#;
 const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
 /// Sent as a normal message, so the transcript shows why the agent carried on.
+/// What the composer's resume button says on the user's behalf.
+pub(crate) const CONTINUE_PROMPT: &str = "Continue where you left off.";
 pub(crate) const RESUME_PROMPT: &str =
     "Continue where you left off. xd restarted before your last turn finished.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
@@ -750,7 +752,7 @@ impl StateStore {
             .query_row(
                 "SELECT folder_id, title, backend, workdir, model, effort, access, plan, fast, \
                  queued, new_worktree, host_working, draft, draft_attachments, \
-                 draft_revision, original_workdir FROM chats WHERE id = ?",
+                 draft_revision, original_workdir, turn_resumable FROM chats WHERE id = ?",
                 [chat_id],
                 |row| {
                     Ok((
@@ -770,6 +772,7 @@ impl StateStore {
                         row.get::<_, String>(13)?,
                         row.get::<_, i64>(14)?,
                         row.get::<_, Option<String>>(15)?,
+                        row.get::<_, bool>(16)?,
                     ))
                 },
             )
@@ -835,6 +838,7 @@ impl StateStore {
             "draft_revision": row.14,
             "shortcuts": shortcuts,
             "working": row.11,
+            "resumable": row.16,
             "effort": row.5.unwrap_or_else(|| default_effort(&row.2, row.4.as_deref())),
             "new_worktree": row.10,
             "has_messages": has_messages,
@@ -2129,6 +2133,39 @@ impl StateStore {
         Ok(())
     }
 
+    /// Notes that the turn ending now was cut short rather than finished, so
+    /// the composer offers to continue it. Starting any turn clears this.
+    pub fn mark_turn_resumable(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chats SET turn_resumable = 1 WHERE id = ?",
+            [chat_id],
+        )?;
+        Ok(())
+    }
+
+    /// The user message a cut-short turn was answering, for sending the message
+    /// that continues it. `None` when the chat's latest turn is not resumable.
+    pub fn resumable_turn(&self, chat_id: &str) -> Result<Option<i64>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let resumable = database
+            .query_row(
+                "SELECT turn_resumable FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        if !resumable {
+            return Ok(None);
+        }
+        Ok(Some(database.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
+            [chat_id],
+            |row| row.get(0),
+        )?))
+    }
+
     /// The chats a restart cut off, once each. They stay in the database until
     /// the desktop decides, so another restart first does not lose them. A chat
     /// cut off while answering the resume prompt is left alone, so a turn that
@@ -2203,7 +2240,8 @@ impl StateStore {
     pub fn begin_background_turn(&self, chat_id: &str) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let changed = database.execute(
-            "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ? AND host_working = 0",
+            "UPDATE chats SET host_working = 1, turn_resumable = 0, updated_at = ? \
+             WHERE id = ? AND host_working = 0",
             params![now_seconds(), chat_id],
         )?;
         Ok(changed > 0)
@@ -4295,7 +4333,8 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            plan INTEGER NOT NULL DEFAULT 0, fast INTEGER NOT NULL DEFAULT 0, \
            claude_mode INTEGER NOT NULL DEFAULT 0, queued TEXT, new_worktree INTEGER NOT NULL DEFAULT 0, \
            terminal_open INTEGER NOT NULL DEFAULT 0, diff_open INTEGER NOT NULL DEFAULT 0, \
-           resume_after_restart INTEGER NOT NULL DEFAULT 0, original_workdir TEXT, \
+           resume_after_restart INTEGER NOT NULL DEFAULT 0, turn_resumable INTEGER NOT NULL DEFAULT 0, \
+           original_workdir TEXT, \
            session_mode TEXT NOT NULL DEFAULT 'chat', \
            host_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
@@ -4641,6 +4680,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     }
     if !columns.contains("partial_reply_label") {
         database.execute("ALTER TABLE chats ADD COLUMN partial_reply_label TEXT", [])?;
+    }
+    if !columns.contains("turn_resumable") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN turn_resumable INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -6686,6 +6731,10 @@ fn prepare_turn(
     text: &str,
     worktree_name: Option<&str>,
 ) -> Result<TurnSpec, StorageError> {
+    transaction.execute(
+        "UPDATE chats SET turn_resumable = 0 WHERE id = ?",
+        [chat_id],
+    )?;
     let chat = transaction
         .query_row(
             "SELECT folder_id, backend, workdir, model, effort, access, plan, fast, new_worktree, \
@@ -6856,8 +6905,8 @@ fn end_interrupted_turn(
         params![chat_id, INTERRUPTED_TURN, now_seconds()],
     )?;
     transaction.execute(
-        "UPDATE chats SET host_working = 0, partial_reply = '', partial_reply_label = NULL, \
-         updated_at = ? WHERE id = ?",
+        "UPDATE chats SET host_working = 0, turn_resumable = 1, partial_reply = '', \
+         partial_reply_label = NULL, updated_at = ? WHERE id = ?",
         params![now_seconds(), chat_id],
     )?;
     Ok(())
@@ -9797,6 +9846,47 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn stopping_a_turn_with_queued_work_moves_on_instead_of_offering_resume() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let resumable = || store.chat("chat").unwrap()["resumable"] == true;
+        let send = |text: &str| {
+            store
+                .prepare_send(&json!({"chat": "chat", "text": text}))
+                .unwrap()
+        };
+
+        send("first");
+        send("queued");
+        store.mark_turn_resumable("chat").unwrap();
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_some());
+        assert!(!resumable());
+        assert_eq!(store.resumable_turn("chat").unwrap(), None);
+
+        store.mark_turn_resumable("chat").unwrap();
+        let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
+        assert!(finish.next.is_none());
+        assert!(resumable());
+        let latest: i64 = store.messages(&json!({"chat": "chat"})).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter_map(|message| message["id"].as_i64())
+            .max()
+            .unwrap();
+        assert_eq!(store.resumable_turn("chat").unwrap(), Some(latest));
+        assert!(store.begin_background_turn("chat").unwrap());
+        assert!(!resumable());
     }
 
     #[test]

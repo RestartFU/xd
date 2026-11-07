@@ -206,8 +206,10 @@ ignore these members keep listing settled sessions with the active ones.
 ```
 
 Success always includes `ok`, `title`, `backend`, `session_mode`, `auth_state`, `commands`,
-`plan`, `queue` (oldest first), `working`, `effort`, `new_worktree`, and
-`has_messages`. It also includes `session`, `session_title`, and
+`plan`, `queue` (oldest first), `working`, `resumable`, `effort`, `new_worktree`, and
+`has_messages`. `resumable` is true when the chat's last turn was cut short: stopped,
+interrupted by the host going down, or ended by a usage limit. It clears when any
+turn starts. It also includes `session`, `session_title`, and
 `terminal_chat` for its shared workspace session. The chat's `title` belongs to
 that conversation; the session title is managed independently.
 
@@ -568,6 +570,17 @@ attached device sees what is waiting and either can steer it.
 
 Stops the running turn. A control operation: answered even while a serialized
 command is slow.
+
+### `resume-turn`
+
+```json
+{"op":"resume-turn","chat":"chat-1"}
+{"ok":true,"queued":false}
+```
+
+Continues a cut-short turn by sending `Continue where you left off.` as a visible
+user message. Fails when the chat is not `resumable` or has moved on since, so
+clients pressing it together start one turn. Anything queued runs after that turn.
 
 ### `respond`
 

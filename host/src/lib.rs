@@ -364,6 +364,7 @@ impl Engine {
             Some("set-shortcuts") => self.event_mutation(|store| store.set_shortcuts(&request)),
             Some("set-option") => self.event_mutation(|store| store.set_option(&request)),
             Some("send") => self.send_message(&request),
+            Some("resume-turn") => self.resume_turn(&request),
             Some("respond") => {
                 match (
                     request.get("chat").and_then(Value::as_str),
@@ -1316,6 +1317,27 @@ impl Engine {
 
     fn send_message(&self, request: &Value) -> Value {
         self.send_message_inner(request, None)
+    }
+
+    /// Continues a turn that was cut short. Unlike a plain send it refuses once
+    /// the chat has moved on, so two clients pressing resume cannot queue a
+    /// second "continue" behind the first.
+    fn resume_turn(&self, request: &Value) -> Value {
+        let chat_id = match required_string(request, "chat", "resume-turn needs a chat id") {
+            Ok(chat_id) => chat_id,
+            Err(error) => return error_reply(error),
+        };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.resumable_turn(chat_id) {
+            Ok(Some(last_message)) => self.send_message_inner(
+                &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
+                Some(last_message),
+            ),
+            Ok(None) => error_reply("This chat can no longer be resumed."),
+            Err(error) => error_reply(error),
+        }
     }
 
     fn send_message_inner(&self, request: &Value, continues: Option<i64>) -> Value {
