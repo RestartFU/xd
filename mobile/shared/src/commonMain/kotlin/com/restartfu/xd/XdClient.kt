@@ -432,8 +432,10 @@ public class XdClient(
             } catch (error: Throwable) {
                 // Any failure, in the foreground or not, leaves the rules shown
                 // possibly old until a newer request's answer is shown.
-                if (generation == _sessionGeneration.value) {
-                    autoSettleFailedCall = maxOf(autoSettleFailedCall, call)
+                // Only the newest failure counts: an older one finishing last
+                // must not replace its error.
+                if (generation == _sessionGeneration.value && call > autoSettleFailedCall) {
+                    autoSettleFailedCall = call
                     if (call > autoSettleAppliedCall) {
                         _autoSettleStale.value = true
                         // A background read's failure is told by the stale mark alone.

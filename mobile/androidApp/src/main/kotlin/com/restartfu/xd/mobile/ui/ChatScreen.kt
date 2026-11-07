@@ -475,6 +475,7 @@ private fun Composer(
     // In the view model, so an open queued message survives rotating the phone.
     val opened by model.openQueued.collectAsStateWithLifecycle()
     val editing = opened?.let { Triple(it.index, it.text, it.queue) }
+    val openDraft = opened?.draft
     val queueNotice by model.queueNotice.collectAsStateWithLifecycle()
     LaunchedEffect(state.queue, state.queueRevision) {
         val opened = editing ?: return@LaunchedEffect
@@ -489,9 +490,8 @@ private fun Composer(
     val queueBusy by model.queueBusy.collectAsStateWithLifecycle()
     editing?.let { (index, original, opened) ->
         QueuedMessageDialog(
-            // The texts too, so a host without revisions cannot restore a draft
-            // onto a different message that took the same place.
-            identity = "${state.chatId}|${opened.revision}|$index|${opened.messages.hashCode()}|$original",
+            draft = openDraft ?: original,
+            onDraft = model::editQueuedDraft,
             original = original,
             busy = queueBusy || steering,
             working = state.working,
@@ -797,9 +797,10 @@ private fun Composer(
  */
 @Composable
 private fun QueuedMessageDialog(
-    /** Which message this is: its chat, queue revision, and place. */
-    identity: String,
     original: String,
+    /** The edit in progress, held by the view model with the open message. */
+    draft: String,
+    onDraft: (String) -> Unit,
     /** A queue action is still out; actions wait for it rather than being dropped. */
     busy: Boolean,
     working: Boolean,
@@ -811,10 +812,7 @@ private fun QueuedMessageDialog(
     onSteer: (String) -> Unit,
     onDrop: () -> Unit,
 ) {
-    // Saved with the message it edits: a draft restored after rotation is used
-    // only for the same message in the same queue, never for another one.
-    var saved by rememberSaveable(stateSaver = QueueDraftSaver) { mutableStateOf(identity to original) }
-    val text = if (saved.first == identity) saved.second else original
+    val text = draft
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -823,7 +821,7 @@ private fun QueuedMessageDialog(
             Column {
                 OutlinedTextField(
                     value = text,
-                    onValueChange = { saved = identity to it },
+                    onValueChange = onDraft,
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Message") },
                     minLines = 2,
@@ -1252,8 +1250,3 @@ private fun InteractionCard(request: com.restartfu.xd.model.PendingInteraction, 
         }
     }
 }
-
-private val QueueDraftSaver = androidx.compose.runtime.saveable.listSaver<Pair<String, String>, String>(
-    save = { listOf(it.first, it.second) },
-    restore = { Pair(it[0], it[1]) },
-)

@@ -80,7 +80,13 @@ data class SettledNotice(
 data class OpenedQueue(val messages: List<String>, val revision: Long?)
 
 /** A queued message open for editing: its place, its text, and the queue around it. */
-data class OpenedMessage(val index: Int, val text: String, val queue: OpenedQueue)
+data class OpenedMessage(
+    val index: Int,
+    val text: String,
+    val queue: OpenedQueue,
+    /** The edit in progress, kept here so no message text goes into saved state. */
+    val draft: String = text,
+)
 
 data class CreatedDirectSession(
     val projectId: String,
@@ -633,6 +639,10 @@ class ChatViewModel(
 
     fun closeQueuedMessage() {
         _openQueued.value = null
+    }
+
+    fun editQueuedDraft(draft: String) {
+        _openQueued.update { it?.copy(draft = draft) }
     }
 
     /** Why a queued-message action was not done, shown beside the queue. */
