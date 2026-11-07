@@ -42,6 +42,10 @@ class DiffViewModel(
     private val _state = MutableStateFlow(DiffPane())
     val state: StateFlow<DiffPane> = _state.asStateFlow()
 
+    // Declared before init: it reads them, and properties initialise in order.
+    private var gitReads = 0L
+    private var patchReads = 0L
+
     init {
         refresh()
     }
@@ -94,8 +98,6 @@ class DiffViewModel(
     }
 
     /** Branch, changes, and pull request; a checkout outside Git just shows none of them. */
-    private var gitReads = 0L
-
     private fun refreshGit() {
         val read = ++gitReads
         viewModelScope.launch {
@@ -123,8 +125,6 @@ class DiffViewModel(
             if (read == gitReads) _state.value = _state.value.copy(git = git, pullRequestUrl = pullRequest)
         }
     }
-
-    private var patchReads = 0L
 
     fun refresh() {
         val branch = _state.value.branch

@@ -980,15 +980,21 @@ class ChatViewModel(
 
     private val _pullRequest = MutableStateFlow<String?>(null)
     private var pullRequestReads = 0L
+    private var pullRequestBranch: String? = null
 
     /** The pull request of the branch this chat works on, for the session header. */
     val pullRequest: StateFlow<String?> = _pullRequest.asStateFlow()
 
     /**
      * Asks GitHub, through the host, whether the checked-out branch has a pull
-     * request. A failure leaves the last answer: the header is a convenience.
+     * request. A failure on the same branch leaves the last answer.
      */
-    fun refreshPullRequest() {
+    fun refreshPullRequest(branch: String?) {
+        // Another branch's pull request is never right, even if this lookup fails.
+        if (branch != pullRequestBranch) {
+            pullRequestBranch = branch
+            _pullRequest.value = null
+        }
         val read = ++pullRequestReads
         viewModelScope.launch {
             try {

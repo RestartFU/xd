@@ -188,7 +188,7 @@ internal fun ChatScreen(
     // A finished turn may have pushed a branch or opened its pull request.
     // So does a branch switched under an idle session.
     LaunchedEffect(state.chatId, state.working, branch) {
-        if (!state.working) model.refreshPullRequest()
+        if (!state.working) model.refreshPullRequest(branch)
     }
     val listState = rememberLazyListState()
     val items = state.visibleItems
