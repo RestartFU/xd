@@ -5,7 +5,7 @@
 //! also ties a notification naming its `desktop-entry` to the life of the
 //! sender, and would take it away as soon as such a helper exited.
 
-use std::{collections::HashMap, num::NonZeroU32, pin::pin};
+use std::{collections::HashMap, future::ready, num::NonZeroU32, pin::pin};
 
 use async_channel::{Receiver, Sender};
 use futures_util::{StreamExt as _, stream};
@@ -84,6 +84,7 @@ impl<T: Send + 'static> Notifier<T> {
 enum Input<T> {
     Request(Request<T>),
     Bus(zbus::Result<Message>),
+    BusClosed,
 }
 
 async fn run<T>(
@@ -112,10 +113,12 @@ async fn serve<T>(
         .await?;
     let desktop_entry = xd_desktop::channel::app_id();
     let mut tracker = Tracker::default();
-    let mut inputs = pin!(stream::select(
-        requests.map(Input::Request),
-        messages.map(Input::Bus),
-    ));
+    // The requests alone must not keep this going: `Notifier::show` can only
+    // tell that the connection is gone once they have stopped being received.
+    let messages = messages
+        .map(Input::Bus)
+        .chain(stream::once(ready(Input::BusClosed)));
+    let mut inputs = pin!(stream::select(requests.map(Input::Request), messages));
     while let Some(input) = inputs.next().await {
         match input {
             Input::Request(Request { body, target }) => {
@@ -129,7 +132,8 @@ async fn serve<T>(
                     let _ = activations.send(activation).await;
                 }
             }
-            Input::Bus(Err(_)) => {}
+            Input::Bus(Err(error)) => return Err(error),
+            Input::BusClosed => return Ok(()),
         }
     }
     Ok(())
@@ -577,6 +581,37 @@ mod tests {
                 token: Some("token".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn losing_the_bus_ends_the_worker_so_the_next_notification_reconnects() {
+        let Some(bus) = PrivateBus::start() else {
+            eprintln!("skipped: dbus-daemon is not available");
+            return;
+        };
+        let address = bus.address.clone();
+        let (requests, received) = async_channel::unbounded::<Request<()>>();
+        let (activations, _clicked) = async_channel::unbounded();
+        let (ended, worker_ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = zbus::block_on(async move {
+                let connection = zbus::connection::Builder::address(address.as_str())?
+                    .build()
+                    .await?;
+                serve(connection, received, activations).await
+            });
+            let _ = ended.send(());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(worker_ended.try_recv().is_err(), "the bus is still up");
+
+        drop(bus);
+
+        worker_ended
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker outlived the bus");
+        // This failing is what sends `Notifier::show` to a new connection.
+        assert!(requests.is_closed());
     }
 
     #[test]
