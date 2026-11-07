@@ -158,7 +158,7 @@ mod tests {
             match self.store.plan_auto_delete(candidate, settings).unwrap() {
                 Ok(plan) => self
                     .store
-                    .finish_auto_delete(candidate, settings, plan)
+                    .finish_auto_delete(candidate, settings, plan, &|| true)
                     .unwrap(),
                 Err(outcome) => outcome,
             }
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .finish_auto_delete(&candidate, &longer, plan)
+                .finish_auto_delete(&candidate, &longer, plan, &|| true)
                 .unwrap(),
             AutoDeletion::Changed
         );
@@ -595,7 +595,7 @@ mod tests {
         std::fs::write(worktree.join("late.txt"), "written after the check").unwrap();
         let finished = fixture
             .store
-            .finish_auto_delete(&candidate, &settings, plan)
+            .finish_auto_delete(&candidate, &settings, plan, &|| true)
             .unwrap();
         assert!(matches!(finished, AutoDeletion::Kept(_)), "{finished:?}");
         assert!(worktree.join("late.txt").exists());
@@ -659,7 +659,7 @@ mod tests {
         fixture.git(&worktree, &["checkout", "-q", "-b", "mine-now"]);
         let finished = fixture
             .store
-            .finish_auto_delete(&candidate, &settings, plan)
+            .finish_auto_delete(&candidate, &settings, plan, &|| true)
             .unwrap();
         assert!(
             matches!(&finished, AutoDeletion::Deleted { worktrees, .. } if worktrees.is_empty()),
@@ -687,5 +687,34 @@ mod tests {
             [AutoDeletion::Deleted { worktrees, .. }] if worktrees.is_empty()
         ));
         assert!(worktree.exists(), "the user made this one");
+    }
+
+    #[test]
+    fn activity_reported_at_the_last_moment_keeps_the_session() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        fixture.enable(1);
+        fixture.age(3);
+        let settings = fixture.store.auto_delete_settings().unwrap();
+        let candidate = fixture
+            .store
+            .deletion_candidates(now_seconds(), &settings)
+            .unwrap()
+            .remove(0);
+        let plan = fixture
+            .store
+            .plan_auto_delete(&candidate, &settings)
+            .unwrap()
+            .ok()
+            .unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .finish_auto_delete(&candidate, &settings, plan, &|| false)
+                .unwrap(),
+            AutoDeletion::Changed
+        );
+        assert_eq!(fixture.chats(), 1);
+        assert!(worktree.exists());
     }
 }

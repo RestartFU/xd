@@ -449,24 +449,22 @@ impl TerminalManager {
     /// whether they are closed.
     pub(crate) fn close_unused(&self, owners: &HashSet<String>, idle_since: i64) -> bool {
         let sessions = self.owned_by(owners);
-        let mut writers = Vec::with_capacity(sessions.len());
+        // `output_use` before `writer`, the order closing a terminal takes them.
         let mut marking = Vec::with_capacity(sessions.len());
         for session in &sessions {
-            let Ok(writer) = session.writer.try_lock() else {
-                return false;
-            };
-            writers.push(writer);
             let Ok(output) = session.output_use.lock() else {
                 return false;
             };
             marking.push(output);
         }
-        let closed_recently = self.activity.closed_usage.lock().map_or(true, |closed| {
-            owners
-                .iter()
-                .any(|owner| closed.get(owner).is_some_and(|used| *used > idle_since))
-        });
-        if closed_recently
+        let mut writers = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            let Ok(writer) = session.writer.try_lock() else {
+                return false;
+            };
+            writers.push(writer);
+        }
+        if self.closed_since(owners, idle_since)
             || sessions
                 .iter()
                 .any(|session| session.last_used.load(Ordering::Acquire) > idle_since)
@@ -507,6 +505,16 @@ impl TerminalManager {
             );
         }
         usage
+    }
+
+    /// Whether a terminal of these owners that has closed, and whose use the
+    /// store does not have yet, was used after `idle_since`.
+    pub(crate) fn closed_since(&self, owners: &HashSet<String>, idle_since: i64) -> bool {
+        self.activity.closed_usage.lock().map_or(true, |closed| {
+            owners
+                .iter()
+                .any(|owner| closed.get(owner).is_some_and(|used| *used > idle_since))
+        })
     }
 
     /// Drops closed terminals' use once it is kept elsewhere, unless a

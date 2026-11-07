@@ -1331,7 +1331,8 @@ impl Engine {
             if !self.terminals.close_unused(&owners, idle_since) {
                 continue;
             }
-            match store.finish_auto_delete(&candidate, &settings, plan) {
+            let still_idle = || !self.terminals.closed_since(&owners, idle_since);
+            match store.finish_auto_delete(&candidate, &settings, plan, &still_idle) {
                 Ok(deletion::AutoDeletion::Deleted {
                     chats,
                     worktrees,

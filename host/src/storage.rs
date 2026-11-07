@@ -4178,11 +4178,16 @@ impl StateStore {
     /// The session is deleted before Git runs, so a worktree Git refuses at
     /// the last moment stays on disk with everything in it, and no chat is
     /// left pointing at a folder that is gone.
+    ///
+    /// `still_idle` is asked last, just before the session is deleted, for
+    /// activity the store cannot see, such as a closing terminal's output. It
+    /// must not use the store.
     pub(crate) fn finish_auto_delete(
         &self,
         candidate: &SettlementCandidate,
         decided_under: &AutoDeleteSettings,
         plan: AutoDeletePlan,
+        still_idle: &dyn Fn() -> bool,
     ) -> Result<AutoDeletion, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         if read_auto_delete_settings(&database)? != *decided_under {
@@ -4202,6 +4207,9 @@ impl StateStore {
                 return Ok(AutoDeletion::Kept(reason));
             }
             worktrees.push(worktree);
+        }
+        if !still_idle() {
+            return Ok(AutoDeletion::Changed);
         }
         transaction.execute(
             "DELETE FROM chats WHERE workspace_session_id = ?",
