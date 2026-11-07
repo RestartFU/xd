@@ -642,13 +642,22 @@ fn patch_view_lines(patch: &str) -> impl Iterator<Item = (PatchLine, &str)> {
     })
 }
 
-/// The newer path in `a/old b/new`. Other prefixes, and quoted paths git could
-/// not write plainly, are shown as git wrote them.
+/// The newer path in `a/old b/new`. An unrenamed file repeats one path, which
+/// splits exactly even if the path contains ` b/`; a rename's own lines stay in
+/// the patch, naming it in full. Other prefixes, and quoted paths git could not
+/// write plainly, are shown as git wrote them.
 fn patch_file_path(paths: &str) -> &str {
-    paths
-        .strip_prefix("a/")
-        .and_then(|_| paths.rsplit_once(" b/"))
-        .map_or(paths, |(_, new)| new)
+    let unrenamed = paths.len().checked_sub(5).and_then(|names| {
+        let name = paths.strip_prefix("a/")?.get(..names / 2)?;
+        (paths.len() % 2 == 1 && paths[2 + name.len()..].strip_prefix(" b/")? == name)
+            .then_some(name)
+    });
+    unrenamed.unwrap_or_else(|| {
+        paths
+            .strip_prefix("a/")
+            .and_then(|_| paths.rsplit_once(" b/"))
+            .map_or(paths, |(_, new)| new)
+    })
 }
 
 fn agent_icon(agent: AgentCli) -> &'static str {
@@ -15057,6 +15066,16 @@ impl XdDesktop {
                                     .px(px(10.0))
                                     .flex()
                                     .items_center()
+                                    .cursor_text()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.git_commit_input
+                                                .read(cx)
+                                                .focus_handle(cx)
+                                                .focus(window);
+                                        }),
+                                    )
                                     .rounded(px(8.0))
                                     .border_1()
                                     .border_color(rgb(if commit_focused {
@@ -18057,6 +18076,13 @@ Binary files /dev/null and b/image.png differ\n";
     #[test]
     fn a_patch_header_shows_the_new_name_of_a_rename_and_odd_paths_verbatim() {
         assert_eq!(super::patch_file_path("a/old.rs b/new.rs"), "new.rs");
+        assert_eq!(
+            super::patch_file_path("a/src/ b/example.rs b/src/ b/example.rs"),
+            "src/ b/example.rs"
+        );
+        assert_eq!(super::patch_file_path("a/café.rs b/café.rs"), "café.rs");
+        assert_eq!(super::patch_file_path("a/é b/é"), "é");
+        assert_eq!(super::patch_file_path("short"), "short");
         assert_eq!(
             super::patch_file_path("\"a/caf\\303\\251\" \"b/caf\\303\\251\""),
             "\"a/caf\\303\\251\" \"b/caf\\303\\251\""
