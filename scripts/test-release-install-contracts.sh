@@ -60,9 +60,6 @@ chmod +x "$fixture/bin/xd"
 cat > "$fixture/etc/fonts.conf.in" <<'EOF'
 <fontconfig><dir>@BUNDLE@/share/fonts</dir></fontconfig>
 EOF
-for cache in pixbuf-loaders gtk-immodules; do
-  printf '"@BUNDLE@/lib/module.so"\n' > "$fixture/etc/$cache.cache.in"
-done
 cat > "$fixture/share/applications/com.restartfu.Xd.Nightly.desktop" <<'EOF'
 [Desktop Entry]
 Name=xd
@@ -87,18 +84,13 @@ fonts="$runtime/xd-$(id -u)/xd-nightly/fonts.conf"
 escaped_home=${home//&/&amp;}
 grep -Fq -- "<dir>$escaped_home/.local/opt/xd-nightly/share/fonts</dir>" "$fonts" \
   || fail "fontconfig bundle path was corrupted"
-for cache in pixbuf-loaders gtk-immodules; do
-  grep -Fqx -- "\"$home/.local/opt/xd-nightly/lib/module.so\"" \
-    "$runtime/xd-$(id -u)/xd-nightly/$cache.cache" \
-    || fail "GTK module cache bundle path was corrupted"
-done
 
 # A restart enters the launcher with bundle values still in its environment.
 # Keep the original snapshots, including empty values representing unset keys.
 cat > "$home/.local/opt/xd-nightly/bin/xd" <<'EOF'
 #!/bin/sh
 if [ "${XD_TEST_RESTART:-}" = 1 ]; then
-  printf '%s|%s|%s' "$XD_HOST_PATH" "$XD_HOST_GIO_MODULE_DIR" "$XD_HOST_GSETTINGS_SCHEMA_DIR"
+  printf '%s|%s|%s' "$XD_HOST_PATH" "$XD_HOST_GIO_MODULE_DIR" "$XD_HOST_LOCPATH"
 else
   printf '%s\n' 'xd 0.0.0'
 fi
@@ -106,7 +98,7 @@ EOF
 snapshots=$(HOME="$home" XDG_RUNTIME_DIR="$runtime" XD_TEST_RESTART=1 \
   PATH="/bundle/bin:/usr/bin:/bin" XD_HOST_PATH="/usr/bin:/bin" \
   GIO_MODULE_DIR="/bundle/gio" XD_HOST_GIO_MODULE_DIR="/host/gio" \
-  GSETTINGS_SCHEMA_DIR="/bundle/schemas" XD_HOST_GSETTINGS_SCHEMA_DIR= \
+  LOCPATH="/bundle/locale" XD_HOST_LOCPATH= \
   "$home/.local/bin/xd-nightly")
 [ "$snapshots" = '/usr/bin:/bin|/host/gio|' ] \
   || fail "restarting Linux launcher overwrote the original environment"

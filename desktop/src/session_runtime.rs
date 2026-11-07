@@ -862,22 +862,9 @@ fn restore_host_environment(command: &mut CommandBuilder) {
     }
 }
 
-const BROWSER_ENVIRONMENT: &[&str] = &[
-    "WAYLAND_DISPLAY",
-    "GDK_BACKEND",
-    "XD_BROWSER_BUNDLE_ROOT",
-    "XD_BROWSER_RUNTIME_ROOT",
-    "WEBKIT_INJECTED_BUNDLE_PATH",
-    "GIO_MODULE_DIR",
-    "GSETTINGS_SCHEMA_DIR",
-    "GDK_PIXBUF_MODULE_FILE",
-    "GTK_IM_MODULE_FILE",
-    "GST_PLUGIN_SYSTEM_PATH_1_0",
-    "GST_PLUGIN_SCANNER_1_0",
-    "GST_REGISTRY_1_0",
-];
+const BROWSER_ENVIRONMENT: &[&str] = &["WAYLAND_DISPLAY", "GIO_MODULE_DIR"];
 
-/// Browser dependencies belong to the desktop and its WebKit children. Host
+/// Browser dependencies belong to the desktop and its Chromium children. Host
 /// services, SSH, terminals, and agent CLIs retain the user's toolkit settings.
 pub(crate) fn restore_browser_environment(command: &mut Command) {
     for name in BROWSER_ENVIRONMENT {

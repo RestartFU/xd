@@ -1,14 +1,16 @@
-//! A system WebKit view occupying an ordinary GPUI layout slot.
+//! A native browser view occupying an ordinary GPUI layout slot: Chromium on
+//! Linux, and the system web view on macOS and Windows.
 //!
 //! The native child is above GPUI's drawing surface. Owners must hide it when
 //! changing workspaces or removing the pane from the tree, and cover it while a
 //! popup is open: a covered page is replaced by a still picture of itself, so
 //! the popup can draw over it.
 //!
-//! On Linux, GTK and WebKit's UI side run on their own thread (see
-//! [`gtk_thread`]) so GPUI frames cannot delay page painting or scrolling, and
-//! page work cannot delay GPUI. Every native call goes through
-//! [`NativeBrowser::with_view`], and results return as [`NativeEvent`]s.
+//! On Linux, calls into Chromium are queued on their own thread (see
+//! [`browser_thread`]) and Chromium runs its UI on another, so GPUI frames cannot
+//! delay page painting or scrolling, and page work cannot delay GPUI. Every
+//! native call goes through [`NativeBrowser::with_view`], and results return as
+//! [`NativeEvent`]s.
 
 use std::{
     cell::{Cell, RefCell},
@@ -25,12 +27,10 @@ use gpui::{
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, Pixels, Render,
     RenderImage, ScrollHandle, Style, Timer, Window, div, prelude::*, px, relative, rgb, rgba,
 };
-#[cfg(target_os = "linux")]
-use raw_window_handle::XlibWindowHandle;
+#[cfg(not(target_os = "linux"))]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle, WindowHandle};
 use url::Url;
-#[cfg(target_os = "linux")]
-use wry::WebViewExtUnix;
+#[cfg(not(target_os = "linux"))]
 use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 use xd_desktop::theme::ThemeColors;
 
@@ -43,6 +43,11 @@ pub const SESSION_HEADER_HEIGHT: f32 = 48.0;
 pub const TAB_BAR_HEIGHT: f32 = 43.0;
 /// Page tabs keep one width so a loading title does not move its neighbours.
 const BROWSER_TAB_WIDTH: f32 = 148.0;
+
+#[cfg(target_os = "linux")]
+mod chromium;
+#[cfg(target_os = "linux")]
+pub use chromium::{run_smoke_test_if_requested, run_subprocess_if_requested};
 
 #[derive(Clone, Debug)]
 pub enum BrowserEvent {
@@ -116,6 +121,9 @@ enum NativeEvent {
         can_back: bool,
         can_forward: bool,
     },
+    /// A page asked for a file: Chromium has no dialog of its own on Linux.
+    #[cfg(target_os = "linux")]
+    FileDialog(chromium::FileDialog),
 }
 
 #[derive(Default)]
@@ -175,51 +183,46 @@ impl NativeEvents {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 thread_local! {
     static SHARED_BROWSER_CONTEXT: RefCell<Option<Rc<RefCell<WebContext>>>> = const { RefCell::new(None) };
 }
 
 #[cfg(target_os = "linux")]
 thread_local! {
-    static SHARED_GTK_CONTEXT: RefCell<Option<webkit2gtk::WebContext>> = const { RefCell::new(None) };
-    static GTK_VIEWS: RefCell<std::collections::HashMap<u64, NativeEntry>> = RefCell::default();
+    static BROWSER_VIEWS: RefCell<std::collections::HashMap<u64, NativeEntry>> = RefCell::default();
 }
 
-type NativeEntry = (WebView, Rc<RefCell<WebContext>>);
-
-/// The one thread that touches GTK, GDK, and WebKit's UI side on Linux.
-///
-/// WebKit's frames and input wait on this thread, so sharing GPUI's would make
-/// a page stutter whenever the window redraws, such as during a streaming
-/// reply. GDK opens its own X11 connection, independent of GPUI's, and nothing
-/// else in the process uses GLib's default main context.
+#[cfg(not(target_os = "linux"))]
+type NativeView = WebView;
 #[cfg(target_os = "linux")]
-mod gtk_thread {
+type NativeView = chromium::ChromiumView;
+
+#[cfg(not(target_os = "linux"))]
+type NativeEntry = (WebView, Rc<RefCell<WebContext>>);
+#[cfg(target_os = "linux")]
+type NativeEntry = (NativeView, ());
+
+/// Runs native browser calls in order on Linux, some of which wait on the X
+/// server or on Chromium, so that they cannot delay a GPUI frame.
+///
+/// Chromium's UI thread pumps GLib's default main context, including its X11
+/// events, so this queue must never touch that context.
+#[cfg(target_os = "linux")]
+mod browser_thread {
     use std::{sync::OnceLock, thread};
 
     use async_channel::Sender;
-    use gtk::glib::MainContext;
 
     type Job = Box<dyn FnOnce() + Send>;
 
     fn start() -> Option<Sender<Job>> {
         let (sender, receiver) = async_channel::unbounded::<Job>();
         thread::Builder::new()
-            .name("xd-gtk".into())
+            .name("xd-browser".into())
             .spawn(move || {
-                let context = MainContext::default();
-                // Own the context for the thread's lifetime: GLib only wakes a
-                // blocked iteration for other threads' sources if it has an owner.
-                let Ok(_owner) = context.acquire() else {
-                    return;
-                };
-                context.spawn_local(async move {
-                    while let Ok(job) = receiver.recv().await {
-                        job();
-                    }
-                });
-                loop {
-                    context.iteration(true);
+                while let Ok(job) = receiver.recv_blocking() {
+                    job();
                 }
             })
             .ok()?;
@@ -236,24 +239,21 @@ mod gtk_thread {
     }
 }
 
-/// Configure both native toolkits before any threads or windows are created.
-/// Wry's child-webview embedding uses X11 on Linux; XWayland supplies it on a
-/// Wayland desktop. Saved values are restored in host/terminal subprocesses.
+/// Configure the window system before any threads or windows are created.
+/// Chromium embeds as an X11 child on Linux; XWayland supplies it on a Wayland
+/// desktop. Saved values are restored in host/terminal subprocesses.
 pub fn configure_platform() {
     #[cfg(target_os = "linux")]
     if env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
         // SAFETY: called at the very beginning of main, before thread creation.
         unsafe {
-            for (name, saved) in [
-                ("WAYLAND_DISPLAY", "XD_HOST_WAYLAND_DISPLAY"),
-                ("GDK_BACKEND", "XD_HOST_GDK_BACKEND"),
-            ] {
-                if env::var_os(saved).is_none() {
-                    env::set_var(saved, env::var_os(name).unwrap_or_default());
-                }
+            if env::var_os("XD_HOST_WAYLAND_DISPLAY").is_none() {
+                env::set_var(
+                    "XD_HOST_WAYLAND_DISPLAY",
+                    env::var_os("WAYLAND_DISPLAY").unwrap_or_default(),
+                );
             }
             env::remove_var("WAYLAND_DISPLAY");
-            env::set_var("GDK_BACKEND", "x11");
         }
     }
 }
@@ -582,8 +582,6 @@ impl BrowserPane {
             && let Some(native) = &tab.display.native
         {
             native.with_view(|view| {
-                #[cfg(target_os = "linux")]
-                focus_gtk_webview(&view.webview());
                 let _ = view.focus();
             });
         }
@@ -856,25 +854,6 @@ impl BrowserTab {
             _ => {}
         })
         .detach();
-        #[cfg(target_os = "linux")]
-        cx.observe_window_activation(window, |tab, window, _| {
-            if !window.is_window_active()
-                && tab.display.native_visible.get()
-                && let Some(native) = &tab.display.native
-            {
-                native.with_view(|view| {
-                    // GPUI treats FocusOut(Inferior) as deactivation too.
-                    // Keep page focus when X moved into this native child.
-                    let webview = view.webview();
-                    if !gtk_browser_has_keyboard_focus(&webview)
-                        && let Some(window) = gtk_browser_toplevel(&webview)
-                    {
-                        set_gtk_window_focus(&window, false);
-                    }
-                });
-            }
-        })
-        .detach();
         cx.spawn(async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
                 if this
@@ -887,7 +866,7 @@ impl BrowserTab {
         })
         .detach();
         // Includes same-document navigation (e.g. an SPA's pushState), for
-        // which WebKit does not necessarily emit a page-load event.
+        // which the engine does not necessarily emit a page-load event.
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(250)).await;
@@ -1045,6 +1024,11 @@ impl BrowserTab {
                 self.loading = false;
                 self.load_timed_out = false;
                 self.error = Some(error);
+            }
+            #[cfg(target_os = "linux")]
+            NativeEvent::FileDialog(dialog) => {
+                dialog.show(cx);
+                return;
             }
             // This arrives several times a second, so it must only redraw when
             // something changed; it returns before the unconditional notify.
@@ -1537,10 +1521,9 @@ impl TabDisplay {
 /// Hides a page awaiting its picture even if no frame comes to draw it.
 const PICTURE_FALLBACK_DELAY: Duration = Duration::from_millis(250);
 
-fn set_native_visible(view: &WebView, visible: bool, events: &NativeEvents) {
-    #[cfg(target_os = "linux")]
+fn set_native_visible(view: &NativeView, visible: bool, events: &NativeEvents) {
     if !visible {
-        blur_gtk_webview(&view.webview());
+        blur_native_view(view);
     }
     if let Err(error) = view.set_visible(visible) {
         events.send(NativeEvent::Error(error.to_string()));
@@ -1549,9 +1532,9 @@ fn set_native_visible(view: &WebView, visible: bool, events: &NativeEvents) {
 
 /// The view's current pixels in GPUI's BGRA order, where the platform can
 /// read them back. Elsewhere a covered page leaves its slot blank.
-fn capture_view(view: &WebView) -> Option<image::RgbaImage> {
+fn capture_view(view: &NativeView) -> Option<image::RgbaImage> {
     #[cfg(target_os = "linux")]
-    return capture_gtk_webview(&view.webview());
+    return view.capture();
     #[cfg(not(target_os = "linux"))]
     {
         let _ = view;
@@ -1560,7 +1543,7 @@ fn capture_view(view: &WebView) -> Option<image::RgbaImage> {
 }
 
 /// A handle to a native view living on the thread its toolkit requires: GPUI's
-/// on macOS and Windows, [`gtk_thread`] on Linux.
+/// on macOS and Windows, [`browser_thread`] on Linux.
 struct NativeBrowser {
     #[cfg(target_os = "linux")]
     id: u64,
@@ -1579,15 +1562,15 @@ impl NativeBrowser {
     /// Apply a call to the view, in submission order. On Linux this returns
     /// before the call runs, so outcomes must be reported as a [`NativeEvent`].
     /// `Send` holds on every platform so that shared callers stay portable.
-    fn with_view(&self, apply: impl FnOnce(&WebView) + Send + 'static) {
+    fn with_view(&self, apply: impl FnOnce(&NativeView) + Send + 'static) {
         if self.is_disposed() {
             return;
         }
         #[cfg(target_os = "linux")]
         {
             let id = self.id;
-            gtk_thread::post(move || {
-                GTK_VIEWS.with(|views| {
+            browser_thread::post(move || {
+                BROWSER_VIEWS.with(|views| {
                     if let Some((view, _)) = views.borrow().get(&id) {
                         apply(view);
                     }
@@ -1605,12 +1588,15 @@ impl NativeBrowser {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let scale = window.scale_factor();
         let _ = window;
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let (reply, created) = std::sync::mpsc::channel();
-        gtk_thread::post(move || {
-            let result = create_linux_native(events).map(|entry| {
-                GTK_VIEWS.with(|views| views.borrow_mut().insert(id, entry));
+        browser_thread::post(move || {
+            let created_entry =
+                chromium::ChromiumView::create(events, scale).map(|view| (view, ()));
+            let result = created_entry.map(|entry| {
+                BROWSER_VIEWS.with(|views| views.borrow_mut().insert(id, entry));
             });
             let _ = reply.send(result);
         });
@@ -1646,16 +1632,11 @@ impl NativeBrowser {
         {
             let id = self.id;
             let (reply, disposed) = std::sync::mpsc::channel();
-            gtk_thread::post(move || {
-                let entry = GTK_VIEWS.with(|views| views.borrow_mut().remove(&id));
-                if let Some((view, context)) = entry {
-                    use gtk::prelude::*;
-                    if let Some(window) = register_gtk_browser_window(&view) {
-                        // Release GTK's resources before Wry destroys its X11 child.
-                        window.unrealize();
-                    }
-                    drop(view);
-                    drop(context);
+            browser_thread::post(move || {
+                let entry = BROWSER_VIEWS.with(|views| views.borrow_mut().remove(&id));
+                #[cfg(target_os = "linux")]
+                if let Some((view, ())) = entry {
+                    view.close(NATIVE_REPLY_TIMEOUT);
                 }
                 let _ = reply.send(());
             });
@@ -1666,8 +1647,8 @@ impl NativeBrowser {
     }
 }
 
-/// How long GPUI waits for the two calls it cannot leave pending. The GTK
-/// thread never waits on GPUI, so reaching this means WebKit itself is stuck.
+/// How long GPUI waits for the two calls it cannot leave pending. The browser
+/// thread never waits on GPUI, so reaching this means Chromium itself is stuck.
 #[cfg(target_os = "linux")]
 const NATIVE_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1731,6 +1712,15 @@ impl gpui::Element for NativeSurface {
                 .bounds
                 .get()
                 .is_none_or(|previous| previous.0 != bounds || previous.1 != allocation.1);
+            #[cfg(target_os = "linux")]
+            let rect = chromium::PhysicalBounds::new(
+                f64::from(bounds.origin.x),
+                f64::from(bounds.origin.y),
+                f64::from(bounds.size.width.max(px(1.))),
+                f64::from(bounds.size.height.max(px(1.))),
+                f64::from(allocation.1),
+            );
+            #[cfg(not(target_os = "linux"))]
             let rect = Rect {
                 position: wry::dpi::LogicalPosition::new(
                     f64::from(bounds.origin.x),
@@ -1779,7 +1769,7 @@ impl gpui::Element for NativeSurface {
             if phase == DispatchPhase::Capture && !bounds.contains(&event.position) {
                 #[cfg(target_os = "linux")]
                 {
-                    native.with_view(|view| blur_gtk_webview(&view.webview()));
+                    native.with_view(blur_native_view);
                     _window.activate_window();
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -1791,9 +1781,11 @@ impl gpui::Element for NativeSurface {
     }
 }
 
-/// A borrowed OS parent handle; Wry obtains the X11 connection from GTK.
+/// A borrowed OS parent handle.
+#[cfg(not(target_os = "linux"))]
 struct NativeParent(RawWindowHandle);
 
+#[cfg(not(target_os = "linux"))]
 impl HasWindowHandle for NativeParent {
     fn window_handle(&self) -> Result<WindowHandle<'_>, raw_window_handle::HandleError> {
         // SAFETY: the GPUI window owns this handle and outlives its child view.
@@ -1801,29 +1793,12 @@ impl HasWindowHandle for NativeParent {
     }
 }
 
-/// Runs on [`gtk_thread`], which is therefore the thread GTK treats as its main.
-#[cfg(target_os = "linux")]
-fn create_linux_native(events: NativeEvents) -> Result<NativeEntry, String> {
-    if env::var_os("DISPLAY").is_none_or(|display| display.is_empty()) {
-        return Err(
-            "The integrated browser needs X11 or XWayland. Enable XWayland and restart xd.".into(),
-        );
-    }
-    gtk::init().map_err(|error| format!("Could not initialize the browser: {error}"))?;
-    let parent = NativeParent(RawWindowHandle::Xlib(XlibWindowHandle::new(
-        find_x11_parent()? as _,
-    )));
-    create_native(parent, events)
-}
-
+#[cfg(not(target_os = "linux"))]
 fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEntry, String> {
     let context = SHARED_BROWSER_CONTEXT.with(|shared| {
         shared
             .borrow_mut()
             .get_or_insert_with(|| {
-                #[cfg(target_os = "linux")]
-                let context = WebContext::new(None);
-                #[cfg(not(target_os = "linux"))]
                 let context = WebContext::new(Some(browser_data_directory()));
                 Rc::new(RefCell::new(context))
             })
@@ -1834,14 +1809,6 @@ fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEnt
     let title_events = events.clone();
     let popup_events = events.clone();
     let builder = WebViewBuilder::new_with_web_context(&mut context_ref);
-    #[cfg(target_os = "linux")]
-    let builder = {
-        use wry::WebViewBuilderExtUnix;
-        // Wry 0.57 does not expose its WebContext's native GTK context. Its
-        // public related-view API lets us supply a context configured before
-        // view creation, which can start WebKit subprocesses immediately.
-        builder.with_related_view(linux_related_view()?)
-    };
     let native = builder
         .with_visible(false)
         .with_focused(false)
@@ -1870,245 +1837,21 @@ fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEnt
         })
         .build_as_child(&parent)
         .map_err(|error| format!("Could not create the browser: {error}"))?;
-    // Wry's X11 builder shows the GTK wrapper before attaching its X11 data,
-    // so its initial with_visible(false) only hides the inner WebKit widget.
-    // Hide the fully constructed child before trusting our visibility cache;
-    // otherwise a blank/background tab leaves a mapped 200px surface at (0, 0).
+    // Hide the fully constructed child before trusting our visibility cache.
     native
         .set_visible(false)
         .map_err(|error| format!("Could not hide the browser: {error}"))?;
-    #[cfg(target_os = "linux")]
-    {
-        register_gtk_browser_window(&native);
-        use gtk::prelude::WidgetExt;
-        use webkit2gtk::WebViewExt;
-        use wry::WebViewExtUnix;
-        let webview = native.webview();
-        webview.connect_button_press_event(|webview, _| {
-            focus_gtk_webview(webview);
-            gtk::glib::Propagation::Proceed
-        });
-        webview.connect_load_failed(move |_, _, url, error| {
-            if !error.matches(webkit2gtk::NetworkError::Cancelled) {
-                events.send(NativeEvent::Error(format!("Could not load {url}: {error}")));
-            }
-            false
-        });
-    }
     drop(context_ref);
     Ok((native, context))
 }
 
-/// The page's current pixels, read back from its X11 window, in the BGRA
-/// order GPUI's renderer takes.
 #[cfg(target_os = "linux")]
-fn capture_gtk_webview(webview: &webkit2gtk::WebView) -> Option<image::RgbaImage> {
-    use gtk::prelude::*;
-
-    let window = gtk_browser_toplevel(webview)?.window()?;
-    if !window.is_viewable() {
-        return None;
-    }
-    let pixbuf = window.pixbuf(0, 0, window.width(), window.height())?;
-    let (width, height) = (pixbuf.width() as usize, pixbuf.height() as usize);
-    let stride = pixbuf.rowstride() as usize;
-    let channels = pixbuf.n_channels() as usize;
-    if width == 0 || height == 0 || channels < 3 {
-        return None;
-    }
-    let pixels = pixbuf.read_pixel_bytes();
-    let mut frame = Vec::with_capacity(width * height * 4);
-    for row in pixels.chunks(stride).take(height) {
-        for pixel in row[..width * channels].chunks_exact(channels) {
-            frame.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 0xff]);
-        }
-    }
-    image::RgbaImage::from_raw(width as u32, height as u32, frame)
+fn blur_native_view(view: &NativeView) {
+    view.blur();
 }
 
-#[cfg(target_os = "linux")]
-fn register_gtk_browser_window(view: &WebView) -> Option<gtk::Window> {
-    use gtk::prelude::*;
-    use wry::WebViewExtUnix;
-
-    let window = view.webview().toplevel()?.downcast::<gtk::Window>().ok()?;
-    if let Some(gdk_window) = window.window() {
-        let mut owner = std::ptr::null_mut();
-        // SAFETY: inspect the live GDK window's opaque owner on GTK's thread;
-        // the pointer is never dereferenced.
-        unsafe {
-            gtk::gdk::ffi::gdk_window_get_user_data(gdk_window.as_ptr(), &mut owner);
-        }
-        if owner.is_null() {
-            // Wry replaces GtkWindow's registered GDK window with a foreign
-            // child. GTK needs its owner to route focus events to the toplevel,
-            // which lets WebKit display the caret in a focused page input.
-            window.register_window(&gdk_window);
-        }
-        gdk_window.set_events(
-            gdk_window.events()
-                | gtk::gdk::EventMask::FOCUS_CHANGE_MASK
-                | gtk::gdk::EventMask::KEY_PRESS_MASK
-                | gtk::gdk::EventMask::KEY_RELEASE_MASK,
-        );
-    }
-    Some(window)
-}
-
-#[cfg(target_os = "linux")]
-unsafe extern "C" {
-    fn gdk_x11_window_get_xid(window: *mut gtk::gdk::ffi::GdkWindow) -> std::ffi::c_ulong;
-}
-
-#[cfg(target_os = "linux")]
-fn gtk_browser_toplevel(webview: &webkit2gtk::WebView) -> Option<gtk::Window> {
-    use gtk::prelude::*;
-    webview.toplevel()?.downcast::<gtk::Window>().ok()
-}
-
-#[cfg(target_os = "linux")]
-fn set_gtk_window_focus(window: &gtk::Window, focused: bool) {
-    use gtk::prelude::*;
-    if window.has_toplevel_focus() == focused && window.is_active() == focused {
-        return;
-    }
-    let Some(gdk_window) = window.window() else {
-        return;
-    };
-    // GDK does not translate foreign-window focus into GtkWindow state.
-    // Deliver the standard GTK focus event on interaction, rather than
-    // leaving WebKit's document/caret unfocused while keyboard input works.
-    // SAFETY: this event is allocated and freed here on GTK's thread.
-    // It owns one reference to the live GDK window; GTK handles it synchronously.
-    unsafe {
-        let event = gtk::gdk::ffi::gdk_event_new(gtk::gdk::ffi::GDK_FOCUS_CHANGE);
-        let focus = event.cast::<gtk::gdk::ffi::GdkEventFocus>();
-        (*focus).window = gtk::glib::gobject_ffi::g_object_ref(gdk_window.as_ptr().cast()).cast();
-        (*focus).send_event = 1;
-        (*focus).in_ = i16::from(focused);
-        gtk::ffi::gtk_widget_event(window.as_ptr().cast(), event);
-        gtk::gdk::ffi::gdk_event_free(event);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn focus_gtk_webview(webview: &webkit2gtk::WebView) {
-    use gtk::prelude::*;
-    use x11rb::protocol::xproto::{ConnectionExt, InputFocus};
-    if let Some(window) = gtk_browser_toplevel(webview) {
-        // Complete GTK's pending map before focusing its foreign X11 child.
-        // GdkWindow::focus routes through the WM on EWMH desktops, where an
-        // unmanaged child may be ignored. Set the keyboard target directly.
-        window.display().sync();
-        let Some((connection, child, focused)) = gtk_browser_keyboard_focus(webview) else {
-            return;
-        };
-        if !focused {
-            let Ok(request) = connection.set_input_focus(InputFocus::PARENT, child, 0u32) else {
-                return;
-            };
-            if request.check().is_err() {
-                return;
-            }
-        }
-        set_gtk_window_focus(&window, true);
-        webview.grab_focus();
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn gtk_browser_keyboard_focus(
-    webview: &webkit2gtk::WebView,
-) -> Option<(x11rb::rust_connection::RustConnection, u32, bool)> {
-    use gtk::prelude::*;
-    use x11rb::protocol::xproto::ConnectionExt;
-    let window = gtk_browser_toplevel(webview)?.window()?;
-    // SAFETY: borrow the live X11 GDK window on its owning thread.
-    let child = u32::try_from(unsafe { gdk_x11_window_get_xid(window.as_ptr()) }).ok()?;
-    let (connection, _) = x11rb::connect(None).ok()?;
-    let mut focus = connection.get_input_focus().ok()?.reply().ok()?.focus;
-    for _ in 0..8 {
-        if focus == child {
-            return Some((connection, child, true));
-        }
-        if focus <= 1 {
-            break;
-        }
-        focus = connection.query_tree(focus).ok()?.reply().ok()?.parent;
-    }
-    Some((connection, child, false))
-}
-
-#[cfg(target_os = "linux")]
-fn gtk_browser_has_keyboard_focus(webview: &webkit2gtk::WebView) -> bool {
-    gtk_browser_keyboard_focus(webview).is_some_and(|(_, _, focused)| focused)
-}
-
-#[cfg(target_os = "linux")]
-fn blur_gtk_webview(webview: &webkit2gtk::WebView) {
-    use x11rb::{
-        connection::Connection,
-        protocol::xproto::{ConnectionExt, InputFocus},
-    };
-    if let Some(window) = gtk_browser_toplevel(webview) {
-        set_gtk_window_focus(&window, false);
-    }
-    // Restore GPUI's keyboard target only while this page owns it. Hiding an
-    // inactive page must not take focus from another application.
-    if let Some((connection, child, true)) = gtk_browser_keyboard_focus(webview)
-        && let Ok(reply) = connection.query_tree(child)
-        && let Ok(tree) = reply.reply()
-    {
-        let _ = connection.set_input_focus(InputFocus::PARENT, tree.parent, 0u32);
-        let _ = connection.flush();
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_related_view() -> Result<webkit2gtk::WebView, String> {
-    let context = SHARED_GTK_CONTEXT.with(|shared| {
-        if let Some(context) = shared.borrow().as_ref() {
-            return Ok(context.clone());
-        }
-        let context = create_linux_browser_context()?;
-        *shared.borrow_mut() = Some(context.clone());
-        Ok::<_, String>(context)
-    })?;
-    // A related view inherits its seed's web process. Use a fresh seed per tab
-    // while sharing the context/data manager, so a busy page cannot stall
-    // every chat's browser through one common renderer.
-    Ok(webkit2gtk::WebView::with_context(&context))
-}
-
-#[cfg(target_os = "linux")]
-fn create_linux_browser_context() -> Result<webkit2gtk::WebContext, String> {
-    use webkit2gtk::{CookieManagerExt, WebContextExt, WebsiteDataManagerExt};
-
-    let directory = browser_data_directory();
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("Could not create browser data directory: {error}"))?;
-    let data = webkit2gtk::WebsiteDataManager::builder()
-        .base_cache_directory(directory.to_string_lossy())
-        .base_data_directory(directory.to_string_lossy())
-        .build();
-    let context = webkit2gtk::WebContext::builder()
-        .website_data_manager(&data)
-        .build();
-    // Must precede even constructing the first WebView: WebKit rejects
-    // sandbox changes once either a network or a web process has spawned.
-    for name in ["XD_BROWSER_BUNDLE_ROOT", "XD_BROWSER_RUNTIME_ROOT"] {
-        if let Some(path) = env::var_os(name) {
-            context.add_path_to_sandbox(PathBuf::from(path), true);
-        }
-    }
-    if let Some(cookies) = data.cookie_manager() {
-        cookies.set_persistent_storage(
-            &directory.join("cookies").to_string_lossy(),
-            webkit2gtk::CookiePersistentStorage::Text,
-        );
-    }
-    Ok(context)
-}
+#[cfg(not(target_os = "linux"))]
+fn blur_native_view(_: &NativeView) {}
 
 fn browser_data_directory() -> PathBuf {
     env::var_os("XDG_DATA_HOME")
@@ -2686,27 +2429,27 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn gtk_jobs_run_in_order_on_one_dedicated_thread() {
+    fn browser_jobs_run_in_order_on_one_dedicated_thread() {
         let (reply, results) = std::sync::mpsc::channel();
         for index in 0..1_000 {
             let reply = reply.clone();
-            gtk_thread::post(move || {
+            browser_thread::post(move || {
                 let _ = reply.send((index, std::thread::current().id()));
             });
         }
         let received = (0..1_000)
             .map(|_| results.recv_timeout(Duration::from_secs(10)).unwrap())
             .collect::<Vec<_>>();
-        let gtk = received[0].1;
-        assert_ne!(gtk, std::thread::current().id());
+        let browser = received[0].1;
+        assert_ne!(browser, std::thread::current().id());
         for (expected, (index, thread)) in received.into_iter().enumerate() {
             assert_eq!(index, expected);
-            assert_eq!(thread, gtk);
+            assert_eq!(thread, browser);
         }
     }
 
     #[test]
-    fn native_events_can_cross_to_the_gtk_thread() {
+    fn native_events_can_cross_to_the_browser_thread() {
         fn assert_send<T: Send>() {}
         assert_send::<NativeEvents>();
     }

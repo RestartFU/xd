@@ -37,7 +37,6 @@ for pattern in \
   whisper.cpp \
   XD_WHISPER_SERVER \
   voice-build \
-  libasound \
   pipewire \
   libadwaita \
   libvte \

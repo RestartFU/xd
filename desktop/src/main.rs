@@ -24776,9 +24776,13 @@ fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> 
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    browser::run_subprocess_if_requested();
     #[cfg(target_os = "windows")]
     windows::configure_environment();
     browser::configure_platform();
+    #[cfg(target_os = "linux")]
+    browser::run_smoke_test_if_requested();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if arguments
         .iter()

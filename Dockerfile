@@ -13,29 +13,67 @@ ENV PATH="/usr/local/cargo/bin:${PATH}"
 RUN rustup component add rustfmt clippy \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
+      bzip2 \
       ca-certificates \
       clang \
       cmake \
+      curl \
       g++ \
       gcc \
       git \
+      libasound2t64 \
+      libatk-bridge2.0-0t64 \
+      libatk1.0-0t64 \
+      libatspi2.0-0t64 \
+      libcairo2 \
+      libcups2t64 \
+      libdbus-1-3 \
+      libexpat1 \
       libfontconfig-dev \
-      libglib2.0-dev \
-      libgtk-3-dev \
+      libgbm1 \
+      libglib2.0-0t64 \
+      libnspr4 \
+      libnss3 \
+      libpango-1.0-0 \
       libssl-dev \
+      libudev1 \
       libva-dev \
       libvulkan1 \
       libwayland-dev \
-      libwebkit2gtk-4.1-dev \
       libx11-xcb-dev \
+      libxcomposite1 \
+      libxdamage1 \
+      libxext6 \
+      libxfixes3 \
       libxkbcommon-x11-dev \
+      libxrandr2 \
       libzstd-dev \
       lld \
       make \
+      ninja-build \
       pkg-config \
       python3 \
       tmux \
  && rm -rf /var/lib/apt/lists/*
+
+# Chromium for the Linux browser, through CEF. Its version must match the `cef`
+# crate in desktop/Cargo.toml. The crate expects Release and Resources flattened
+# and recognizes a distribution by archive.json; otherwise it downloads its own,
+# which nothing here would have verified.
+ARG CEF_ARCHIVE=cef_binary_156.0.15+gcf671c0+chromium-156.0.8078.80_linux64_minimal.tar.bz2
+ARG CEF_SHA256=6873f975bb047316680ea1839980ed5bd4c33c8cd4ce45761c94211856605388
+ARG CEF_SHA1=09235427222e026a4f34399742df27c5d98a4f8a
+ENV CEF_PATH=/opt/cef
+RUN curl -fsSL --retry 3 -o /tmp/cef.tar.bz2 \
+      "https://cef-builds.spotifycdn.com/$(printf '%s' "$CEF_ARCHIVE" | sed 's/+/%2B/g')" \
+ && echo "$CEF_SHA256  /tmp/cef.tar.bz2" | sha256sum -c - \
+ && mkdir -p "$CEF_PATH" \
+ && tar -xjf /tmp/cef.tar.bz2 --strip-components=1 -C "$CEF_PATH" \
+ && rm /tmp/cef.tar.bz2 \
+ && mv "$CEF_PATH"/Release/* "$CEF_PATH"/Resources/* "$CEF_PATH"/ \
+ && rmdir "$CEF_PATH/Release" "$CEF_PATH/Resources" \
+ && printf '{"type":"minimal","name":"%s","sha1":"%s"}\n' \
+      "$CEF_ARCHIVE" "$CEF_SHA1" > "$CEF_PATH/archive.json"
 
 ARG BUILD_JOBS=1
 ENV CARGO_BUILD_JOBS=$BUILD_JOBS
@@ -109,20 +147,6 @@ ENV XD_COMMIT=$XD_COMMIT
 RUN cargo build --locked --release \
  && test -x target/release/xd-desktop
 
-# Production WebKitGTK disables WEBKIT_EXEC_PATH. Use its public GLib launch
-# API to relocate only WebKit's three auxiliary executables, retaining the
-# engine's own bubblewrap sandbox policy.
-FROM gpui-toolchain AS browser-runtime-paths
-
-COPY scripts/webkit-paths.c /src/webkit-paths.c
-COPY scripts/test-browser-tls.c /src/test-browser-tls.c
-RUN gcc -O2 -Wall -Wextra -Werror -shared -fPIC \
-      $(pkg-config --cflags gio-2.0) /src/webkit-paths.c \
-      -o /xd-webkit-paths.so -ldl $(pkg-config --libs gio-2.0) \
- && gcc -O2 -Wall -Wextra -Werror $(pkg-config --cflags gio-2.0) \
-      /src/test-browser-tls.c -o /test-browser-tls \
-      -Wl,--no-as-needed -L/ -l:xd-webkit-paths.so $(pkg-config --libs gio-2.0)
-
 FROM gpui-toolchain AS rust-host-source
 
 WORKDIR /src/host
@@ -178,6 +202,7 @@ ARG GIT_VERSION=2.47.3
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       adwaita-icon-theme \
+      binutils \
       ca-certificates \
       curl \
       desktop-file-utils \
@@ -187,20 +212,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       fonts-jetbrains-mono \
       fonts-noto-color-emoji \
       git \
-      glib-networking \
+      libasound2t64 \
+      libatk-bridge2.0-0t64 \
+      libatk1.0-0t64 \
+      libatspi2.0-0t64 \
+      libcairo2 \
+      libcups2t64 \
+      libdbus-1-3 \
+      libexpat1 \
       libfontconfig1 \
+      libgbm1 \
+      libglib2.0-0t64 \
+      libnspr4 \
+      libnss3 \
+      libpango-1.0-0 \
       libsqlite3-dev \
       libssl-dev \
+      libudev1 \
       libvulkan1 \
       libwayland-client0 \
-      libwebkit2gtk-4.1-0 \
       libx11-data \
       libx11-xcb1 \
+      libxcomposite1 \
+      libxdamage1 \
+      libxext6 \
+      libxfixes3 \
       libxkbcommon-x11-0 \
+      libxrandr2 \
       openssl \
       patchelf \
+      python3 \
       tmux \
       xkb-data \
+      xvfb \
     && git --version | grep -F "git version $GIT_VERSION" \
     && rm -rf /var/lib/apt/lists/*
 
@@ -225,7 +269,7 @@ WORKDIR /src
 COPY data ./data
 COPY scripts/bundle.sh /usr/local/bin/bundle.sh
 COPY scripts/smoke-bundle.sh /usr/local/bin/smoke-bundle.sh
-COPY scripts/test-browser-tls.sh /usr/local/bin/test-browser-tls.sh
+COPY scripts/test-browser-chromium.sh /usr/local/bin/test-browser-chromium.sh
 COPY scripts/xd.sh /usr/local/share/xd-launcher.sh
 COPY scripts/install.sh /stage/usr/libexec/install.sh
 COPY scripts/curl.sh /stage/usr/libexec/curl
@@ -235,8 +279,7 @@ RUN install -m0755 /usr/bin/tmux /stage/usr/libexec/tmux \
  && install -Dm0644 /usr/share/doc/tmux/copyright /stage/usr/share/licenses/tmux-LICENSE
 COPY --from=gpui-desktop-release /src/desktop/target/release/xd-desktop /stage/usr/bin/xd
 COPY --from=rust-host-release /src/host/target/release/xd-host /stage/usr/libexec/xd-host
-COPY --from=browser-runtime-paths /xd-webkit-paths.so /stage/usr/lib/xd-webkit-paths.so
-COPY --from=browser-runtime-paths /test-browser-tls /tmp/test-browser-tls
+COPY --from=gpui-toolchain /opt/cef/ /tmp/cef/
 
 RUN set -eux; \
     test "$PROFILE" = default || test "$PROFILE" = nightly; \
@@ -250,8 +293,22 @@ RUN set -eux; \
     install -d \
       /stage/usr/share/applications \
       /stage/usr/share/fonts/xd \
+      /stage/usr/lib \
       /stage/usr/share/licenses/xd \
       /stage/usr/share/icons/hicolor/scalable/apps; \
+    cp -a \
+      /tmp/cef/libcef.so \
+      /tmp/cef/libvk_swiftshader.so \
+      /tmp/cef/vk_swiftshader_icd.json \
+      /tmp/cef/v8_context_snapshot.bin \
+      /tmp/cef/icudtl.dat \
+      /tmp/cef/chrome_100_percent.pak \
+      /tmp/cef/chrome_200_percent.pak \
+      /tmp/cef/resources.pak \
+      /tmp/cef/locales \
+      /stage/usr/lib/; \
+    install -m0644 /tmp/cef/LICENSE.txt /stage/usr/share/licenses/xd/cef-LICENSE.txt; \
+    install -m0644 /tmp/cef/CREDITS.html /stage/usr/share/licenses/xd/chromium-CREDITS.html; \
     install -m0644 data/fonts/Inter-*.ttf /stage/usr/share/fonts/xd/; \
     install -m0644 \
       data/licenses/alacritty-terminal-LICENSE-APACHE \
@@ -281,8 +338,7 @@ RUN set -eux; \
     bash /usr/local/bin/bundle.sh \
       /stage /out /usr/local/share/xd-launcher.sh; \
     sh /usr/local/bin/smoke-bundle.sh /out; \
-    patchelf --set-rpath /out/lib /tmp/test-browser-tls; \
-    sh /usr/local/bin/test-browser-tls.sh /out /tmp/test-browser-tls
+    sh /usr/local/bin/test-browser-chromium.sh /out no-sandbox
 
 # --- export ----------------------------------------------------------------
 FROM scratch AS bundle
