@@ -774,6 +774,11 @@ impl TerminalPanel {
         true
     }
 
+    /// Whether closing this tab would leave the panel with nothing to show.
+    fn is_only_tab(&self, terminal_id: &str) -> bool {
+        !self.opening && matches!(self.sessions.as_slice(), [session] if session.id == terminal_id)
+    }
+
     fn selected(&self) -> Option<&TerminalTab> {
         let selected = self.selected.as_deref()?;
         self.sessions.iter().find(|session| session.id == selected)
@@ -7110,20 +7115,54 @@ impl XdDesktop {
         });
     }
 
-    fn kill_terminal_id(&mut self, terminal_id: String, cx: &mut Context<Self>) {
-        if let Err(error) = self
+    fn kill_terminal_id(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> bool {
+        let result = self
             .active_host()
             .ok_or_else(|| "Host disconnected.".to_owned())
-            .and_then(|host| host.terminal_kill(&terminal_id))
-            && let Some(panel) = &mut self.terminal_panel
-        {
-            panel.error = Some(error);
-        }
+            .and_then(|host| host.terminal_kill(terminal_id));
         cx.notify();
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                if let Some(panel) = &mut self.terminal_panel {
+                    panel.error = Some(error);
+                }
+                false
+            }
+        }
     }
 
-    fn close_terminal_tab(&mut self, tab_id: String, cx: &mut Context<Self>) {
-        self.kill_terminal_id(tab_id, cx);
+    fn close_terminal_tab(&mut self, tab_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let closes_panel = self.closing_tab_empties_bottom_terminal(&tab_id);
+        if self.kill_terminal_id(&tab_id, cx) && closes_panel {
+            self.collapse_bottom_terminal_without(&tab_id, window, cx);
+        }
+    }
+
+    fn closing_tab_empties_bottom_terminal(&self, tab_id: &str) -> bool {
+        self.native_session()
+            && self.bottom_terminal_open
+            && self
+                .terminal_panel
+                .as_ref()
+                .is_some_and(|panel| panel.is_only_tab(tab_id))
+    }
+
+    /// The tab goes now rather than on terminal-closed: reopening the panel
+    /// before that event arrives must start a new shell, not show a dying one.
+    fn collapse_bottom_terminal_without(
+        &mut self,
+        tab_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = &mut self.terminal_panel {
+            panel.remove(tab_id);
+        }
+        self.sync_terminal_input_mode(cx);
+        self.bottom_terminal_open = false;
+        self.composer_input.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
     }
 
     fn start_terminal_session(&mut self, reuse: bool, cx: &mut Context<Self>) {
@@ -9460,9 +9499,9 @@ impl XdDesktop {
                                     .bg(rgb(colors.surface_high))
                                     .text_color(rgb(colors.text))
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.close_terminal_tab(close_id.clone(), cx);
+                                this.close_terminal_tab(close_id.clone(), window, cx);
                             }))
                             .child(icon(CLOSE_ICON, 12.0, colors.faint)),
                     )
@@ -17440,6 +17479,61 @@ mod tests {
                 Some("retained-shell")
             );
             assert!(desktop.native_pane == NativePane::Files);
+        });
+    }
+
+    #[gpui::test]
+    fn closing_the_last_bottom_terminal_tab_collapses_the_panel(cx: &mut gpui::TestAppContext) {
+        let shell = |id: &str| {
+            XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": id})).unwrap()
+        };
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model.selected_chat = Some("dock-chat".into());
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.sessions = vec![shell("first"), shell("second")];
+            panel.selected = Some("first".into());
+            assert!(!desktop.closing_tab_empties_bottom_terminal("first"));
+
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.remove("second");
+            panel.opening = true;
+            assert!(
+                !desktop.closing_tab_empties_bottom_terminal("first"),
+                "a tab that is still opening keeps the panel in use"
+            );
+            desktop.terminal_panel.as_mut().unwrap().opening = false;
+            assert!(!desktop.closing_tab_empties_bottom_terminal("other"));
+            assert!(desktop.closing_tab_empties_bottom_terminal("first"));
+
+            desktop.close_terminal_tab("first".into(), window, cx);
+            assert!(
+                desktop.bottom_terminal_open,
+                "a failed close must stay visible with its error"
+            );
+            let panel = desktop.terminal_panel.as_ref().unwrap();
+            assert_eq!(panel.sessions.len(), 1);
+            assert!(panel.error.is_some());
+
+            desktop.collapse_bottom_terminal_without("first", window, cx);
+            assert!(!desktop.bottom_terminal_open);
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            assert!(panel.sessions.is_empty());
+            assert_eq!(panel.selected, None);
+            panel.auto_open = false;
+
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            assert!(desktop.bottom_terminal_open);
+            assert!(desktop.terminal_panel.as_ref().unwrap().auto_open);
+
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.sessions = vec![shell("first")];
+            desktop.model.selected_chat = None;
+            assert!(
+                !desktop.closing_tab_empties_bottom_terminal("first"),
+                "the global terminal is the page itself, not a collapsible panel"
+            );
         });
     }
 
