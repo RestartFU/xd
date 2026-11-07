@@ -1600,9 +1600,18 @@ impl NativeBrowser {
             });
             let _ = reply.send(result);
         });
-        created
-            .recv_timeout(NATIVE_REPLY_TIMEOUT)
-            .map_err(|_| "The browser did not start. Restart xd to try again.".to_string())??;
+        let Ok(result) = created.recv_timeout(NATIVE_REPLY_TIMEOUT) else {
+            // Jobs run in order, so this runs once the slow creation is done.
+            // A view it made anyway has no owner left to close it.
+            browser_thread::post(move || {
+                let entry = BROWSER_VIEWS.with(|views| views.borrow_mut().remove(&id));
+                if let Some((view, ())) = entry {
+                    view.close(CEF_CLOSE_TIMEOUT);
+                }
+            });
+            return Err("The browser did not start. Restart xd to try again.".into());
+        };
+        result?;
         Ok(Self {
             id,
             disposed: Cell::new(false),
