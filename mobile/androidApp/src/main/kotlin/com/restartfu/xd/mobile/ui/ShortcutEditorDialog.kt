@@ -13,9 +13,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.restartfu.xd.mobile.DraftPrompt
 import com.restartfu.xd.mobile.ShortcutEditorState
 
 @Composable
@@ -24,7 +26,7 @@ internal fun ShortcutEditorDialog(
     onDismiss: () -> Unit,
     onSave: (List<String>) -> Unit,
     onRetry: () -> Unit,
-    onEdit: (List<String>) -> Unit,
+    onEdit: (List<DraftPrompt>) -> Unit,
 ) {
     // The draft lives in the editor state, so recreating the activity keeps it
     // and another opening never sees it.
@@ -61,12 +63,14 @@ internal fun ShortcutEditorDialog(
                         TextButton(onClick = onRetry) { Text("Try again") }
                         return@Column
                     }
-                    prompts.forEachIndexed { index, prompt ->
+                    // Keyed by each prompt's identity, so removing one never moves
+                    // another row's text field, focus included, onto a neighbour.
+                    prompts.forEachIndexed { index, prompt -> key(prompt.id) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             OutlinedTextField(
-                                value = prompt,
+                                value = prompt.text,
                                 onValueChange = { value ->
-                                    onEdit(prompts.toMutableList().also { it[index] = value })
+                                    onEdit(prompts.toMutableList().also { it[index] = prompt.copy(text = value) })
                                 },
                                 modifier = Modifier.weight(1f),
                                 label = { Text("Prompt") },
@@ -81,9 +85,9 @@ internal fun ShortcutEditorDialog(
                                 enabled = editable,
                             ) { Text("Remove") }
                         }
-                    }
+                    } }
                     TextButton(
-                        onClick = { onEdit(prompts + "") },
+                        onClick = { onEdit(prompts + DraftPrompt((prompts.maxOfOrNull { it.id } ?: -1) + 1, "")) },
                         enabled = editable && prompts.size < 24,
                     ) { Text("Add prompt") }
                 }
@@ -92,7 +96,7 @@ internal fun ShortcutEditorDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    onSave(prompts.map { it.trim() }.filter { it.isNotEmpty() })
+                    onSave(prompts.map { it.text.trim() }.filter { it.isNotEmpty() })
                 },
                 enabled = state.loaded && !state.saving,
             ) { Text(if (state.saving) "Saving…" else "Save") }

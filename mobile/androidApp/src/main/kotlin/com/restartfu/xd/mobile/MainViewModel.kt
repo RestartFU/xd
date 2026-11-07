@@ -51,8 +51,14 @@ data class ShortcutEditorState(
      * The list being edited. Kept here rather than in the dialog, so it
      * outlives recreating the activity and belongs to this opening alone.
      */
-    val draft: List<String> = emptyList(),
+    val draft: List<DraftPrompt> = emptyList(),
 )
+
+/**
+ * One prompt in the shortcut editor. The [id] keeps a row's identity while
+ * others are added or removed, so a focused field stays on its own prompt.
+ */
+data class DraftPrompt(val id: Long, val text: String)
 
 data class CreatedDirectSession(
     val projectId: String,
@@ -328,7 +334,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val prompts = if (folderId == null) reply.global else reply.workspace
                 opened.copy(
                     prompts = prompts,
-                    draft = prompts,
+                    draft = prompts.mapIndexed { index, text -> DraftPrompt(index.toLong(), text) },
                     loading = false,
                     loaded = true,
                 )
@@ -342,7 +348,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Replaces the open editor's draft; ignored while saving, which sends the draft as it was. */
-    fun editShortcutDraft(opening: Long, draft: List<String>) {
+    fun editShortcutDraft(opening: Long, draft: List<DraftPrompt>) {
         _shortcutEditor.update { current ->
             if (current?.opening == opening && !current.saving) current.copy(draft = draft) else current
         }
