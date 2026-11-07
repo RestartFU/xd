@@ -47,9 +47,11 @@ sessions after three days without activity and when their pull request merges or
 closes; change this in **Settings → General → Auto-settle**. Those rules belong to
 the host, so they keep running while the app is closed, and each host keeps its
 own. To keep one session out of them, choose **Disable auto-settle** from its
-right-click menu. Settling only changes where a session is listed: its agent and
-terminals keep running. The Android app still lists settled sessions with the
-active ones.
+right-click menu. Settling only changes where a session is listed: its terminals
+and anything its agent is still doing keep running. The host stops an agent's
+process once it has nothing left to do, within two minutes of settling or after 30
+idle minutes otherwise, and the next message resumes the conversation. The Android
+app still lists settled sessions with the active ones.
 
 ## Install
 

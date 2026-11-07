@@ -77,6 +77,16 @@ const STEER_SETTLE_LIMIT: Duration = Duration::from_millis(300);
 /// know the marker shows a small tool row rather than the agent's own words.
 const STEER_ROW_PREFIX: &str = "steer\n";
 
+/// How long a kept process waits for its next turn before it is stopped. The
+/// next message resumes the conversation in a new process.
+const IDLE_AGENT_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// The same for a settled chat, which nobody is expected to come back to soon.
+/// A moment's quiet still counts, so a process is not stopped mid-sentence.
+const SETTLED_AGENT_LIMIT: Duration = Duration::from_secs(60);
+/// Tools that have a kept process act later on nothing but its own timers, with
+/// no child process or running task to show for it.
+const WAKEUP_TOOLS: [&str; 2] = ["ScheduleWakeup", "CronCreate"];
+
 #[derive(Default)]
 struct ChatRecords {
     entries: HashMap<String, RecordEntry>,
@@ -131,6 +141,27 @@ struct Router {
     /// The latest turn this process answered. A turn the agent starts by
     /// itself is modelled on it.
     template: TurnSpec,
+    /// When the process last said anything or finished a turn.
+    quiet_since: Instant,
+    /// It has timers of its own that only keep running while it does.
+    wakes_itself: bool,
+    /// A background task has finished, and the agent has not yet begun the turn
+    /// in which it may report on it.
+    report_due: bool,
+    /// It was stopped for being idle, so what it said last has nowhere to go.
+    released: bool,
+}
+
+impl Router {
+    /// Whether the process has had nothing to do for at least `limit`.
+    fn at_rest_for(&self, limit: Duration) -> bool {
+        self.sink.is_none()
+            && !self.wakes_itself
+            // Lines left over from Claude are waiting for a turn about to start.
+            // Codex always leaves its idle output for the next turn.
+            && (self.backend != "claude" || self.backlog.is_empty())
+            && self.quiet_since.elapsed() >= limit
+    }
 }
 
 /// Where a turn reads its agent's output from.
@@ -252,6 +283,44 @@ fn claude_idle_line(line: &str) -> IdleLine {
     }
 }
 
+/// Whether the agent owes a report on a finished task after this line of output,
+/// given whether it did before. A task finishing sets that and only the start of
+/// a turn clears it, so a process that never starts one just waits longer.
+fn report_due_after(line: &str, due: bool) -> bool {
+    if !line.contains("task_notification") && !line.contains("init") {
+        return due;
+    }
+    let Ok(root) = serde_json::from_str::<Value>(line) else {
+        return due;
+    };
+    match (root["type"].as_str(), root["subtype"].as_str()) {
+        (Some("system"), Some("task_notification")) => true,
+        (Some("system"), Some("init")) => false,
+        _ => due,
+    }
+}
+
+/// Whether a line of agent output shows the agent setting a timer.
+fn schedules_a_wakeup(line: &str) -> bool {
+    if !WAKEUP_TOOLS.iter().any(|tool| line.contains(tool)) {
+        return false;
+    }
+    let Ok(root) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    let is_wakeup = |block: &Value| {
+        block["type"] == "tool_use"
+            && block["name"]
+                .as_str()
+                .is_some_and(|name| WAKEUP_TOOLS.contains(&name))
+    };
+    root.pointer("/event/content_block").is_some_and(is_wakeup)
+        || root
+            .pointer("/message/content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| blocks.iter().any(is_wakeup))
+}
+
 #[derive(Default)]
 struct PendingInteractions {
     revision: u64,
@@ -280,7 +349,8 @@ struct PendingInteraction {
 /// with it: a background shell, a watch, a build. The next message then meets a
 /// process that never heard of any of it. With `--input-format stream-json` the
 /// turns arrive on stdin instead and the process stays up, so what it started
-/// is still running when the next one arrives.
+/// is still running when the next one arrives. It stays up for as long as it
+/// has something running; see [`TurnRuntime::release_idle_agents`].
 struct AgentSession {
     child: Arc<Mutex<Child>>,
     stdin: ChildStdin,
@@ -921,6 +991,10 @@ impl TurnRuntime {
 
     /// Hands lines that arrived between turns to whoever should have them.
     fn pump(&self, chat_id: &str, router: &mut Router) {
+        if router.released {
+            router.backlog.clear();
+            return;
+        }
         while let Some(line) = router.backlog.pop_front() {
             if let Some(sink) = &router.sink {
                 if sink.send(Feed::Line(line.clone())).is_ok() {
@@ -981,6 +1055,9 @@ impl TurnRuntime {
                     let Ok(mut router) = router.lock() else {
                         return;
                     };
+                    router.quiet_since = Instant::now();
+                    router.wakes_itself |= schedules_a_wakeup(&text);
+                    router.report_due = report_due_after(&text, router.report_due);
                     router.backlog.push_back(text);
                     runtime.pump(&chat_id, &mut router);
                 }
@@ -1031,6 +1108,7 @@ impl TurnRuntime {
             return Vec::new();
         };
         router.sink = None;
+        router.quiet_since = Instant::now();
         let mut unread = Vec::new();
         let mut steers = Vec::new();
         while let Ok(feed) = lines.try_recv() {
@@ -1237,6 +1315,10 @@ impl TurnRuntime {
             child: child.clone(),
             complaint: complaint.clone(),
             template: turn.clone(),
+            quiet_since: Instant::now(),
+            wakes_itself: false,
+            report_due: false,
+            released: false,
         }));
         Self::spawn_reader(
             Arc::downgrade(&self.inner),
@@ -1281,6 +1363,120 @@ impl TurnRuntime {
             let _ = child.wait();
         }
         self.settle_orphaned_agents(chat_id);
+    }
+
+    /// Stops the kept processes nobody is using, so an idle chat costs no memory.
+    ///
+    /// The next message starts a new process that resumes the conversation, but
+    /// nothing brings back what a process was running, so anything still at work
+    /// keeps it up: a turn, an open question, a background agent or shell, a
+    /// child process or another process in its group, a timer. That includes a
+    /// tool server that lasts as long as the process does, since it cannot be told
+    /// apart from a long build.
+    pub(crate) fn release_idle_agents(&self) {
+        self.release_quiet_agents(IDLE_AGENT_LIMIT, SETTLED_AGENT_LIMIT);
+    }
+
+    fn release_quiet_agents(&self, idle: Duration, settled: Duration) -> usize {
+        let settled_chats = match self.inner.store.settled_chats() {
+            Ok(chats) => chats,
+            Err(error) => {
+                eprintln!("xd: cannot look for idle agents: {error}");
+                return 0;
+            }
+        };
+        // No other lock is held while the rest of the chat's state is read: the
+        // process's output is checked again below, and a turn or an agent that
+        // begins after this point changes it.
+        let mut due = Vec::new();
+        if let Ok(sessions) = self.inner.sessions.lock() {
+            for (chat_id, session) in sessions.iter() {
+                let Ok(router) = session.router.lock() else {
+                    continue;
+                };
+                // An agent can take its time to report on a finished task, and
+                // that report is lost if it is stopped first.
+                let limit = if settled_chats.contains(chat_id) && !router.report_due {
+                    settled
+                } else {
+                    idle
+                };
+                if router.at_rest_for(limit) {
+                    due.push((chat_id.clone(), router.quiet_since));
+                }
+            }
+        }
+        due.retain(|(chat_id, _)| !self.has_work_in_progress(chat_id));
+        if due.is_empty() {
+            return 0;
+        }
+        let Some(accompanied) = crate::process_tree::with_company() else {
+            return 0;
+        };
+        due.iter()
+            .filter(|(chat_id, quiet_since)| {
+                self.release_agent(chat_id, *quiet_since, &accompanied)
+            })
+            .count()
+    }
+
+    fn has_work_in_progress(&self, chat_id: &str) -> bool {
+        let turn = self
+            .inner
+            .active
+            .lock()
+            .map_or(true, |active| active.contains_key(chat_id));
+        let agent = self.inner.records.lock().map_or(true, |records| {
+            records.get(chat_id).is_some_and(|book| {
+                book.entries
+                    .values()
+                    .filter_map(|entry| entry.run.as_ref())
+                    .any(|run| run.status == SubagentStatus::Running)
+            })
+        });
+        turn || agent || self.has_interactions(chat_id)
+    }
+
+    /// Stops the chat's kept process if it has stayed as it was found.
+    ///
+    /// Taking the sessions and then the router is what a new turn does, so the
+    /// turn either finds the process gone and starts another, or gets here first
+    /// and is seen.
+    fn release_agent(
+        &self,
+        chat_id: &str,
+        quiet_since: Instant,
+        accompanied: &HashSet<u32>,
+    ) -> bool {
+        let Ok(mut sessions) = self.inner.sessions.lock() else {
+            return false;
+        };
+        let Some(session) = sessions.get(chat_id) else {
+            return false;
+        };
+        let Ok(child) = session.child.lock() else {
+            return false;
+        };
+        if accompanied.contains(&child.id()) {
+            return false;
+        }
+        drop(child);
+        {
+            let Ok(mut router) = session.router.lock() else {
+                return false;
+            };
+            if router.sink.is_some() || router.quiet_since != quiet_since {
+                return false;
+            }
+            router.released = true;
+        }
+        if let Some(session) = sessions.remove(chat_id)
+            && let Ok(mut child) = session.child.lock()
+        {
+            let _ = terminate_agent(&mut child);
+            let _ = child.wait();
+        }
+        true
     }
 
     /// Stops the card of every agent still marked running, once the process
@@ -3302,6 +3498,392 @@ read release
                 },
             );
         assert!(!fixture.runtime.steer(&fixture.chat, "Do this instead"));
+    }
+
+    /// A chat with a fake Claude behind it, cleaned up when the test ends.
+    #[cfg(unix)]
+    struct KeptAgent {
+        root: std::path::PathBuf,
+        store: Arc<StateStore>,
+        runtime: TurnRuntime,
+        chat: String,
+        session: String,
+        _environment: std::sync::MutexGuard<'static, ()>,
+    }
+
+    #[cfg(unix)]
+    impl KeptAgent {
+        const LONG: Duration = Duration::from_secs(60 * 60);
+        const INIT: &str = r#"echo '{"type":"system","subtype":"init","session_id":"s1"}'"#;
+        const ANSWER: &str = r#"echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Answer."}]}}'
+echo '{"type":"result","subtype":"success","result":"Answer."}'"#;
+
+        /// `script` receives `$ROOT`, a directory the test can read.
+        fn new(script: &str) -> Self {
+            use std::{env, fs, os::unix::fs::PermissionsExt};
+
+            let environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+            let root = env::temp_dir().join(format!("xd-runtime-idle-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(root.join("Workspaces")).unwrap();
+            let agent = root.join("claude");
+            fs::write(
+                &agent,
+                format!("#!/bin/sh\nROOT='{}'\n{script}\n", root.display()),
+            )
+            .unwrap();
+            fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+            // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+            unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+            let store =
+                Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+            let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let chat = store
+                .new_chat(&json!({"folder": folder, "backend": "claude"}))
+                .unwrap();
+            let runtime = TurnRuntime::new(
+                store.clone(),
+                Arc::new(EventBus::default()),
+                Arc::new(SecretsStore::new(None)),
+            );
+            Self {
+                root,
+                store,
+                runtime,
+                chat: chat["id"].as_str().unwrap().to_owned(),
+                session: chat["session"].as_str().unwrap().to_owned(),
+                _environment: environment,
+            }
+        }
+
+        fn send(&self, text: &str) {
+            match self
+                .store
+                .prepare_send(&json!({"chat": self.chat, "text": text}))
+                .unwrap()
+            {
+                crate::storage::SendDisposition::Start { turn, .. } => {
+                    self.runtime.start(turn).unwrap();
+                }
+                crate::storage::SendDisposition::Queued { .. } => panic!("{text} was queued"),
+            }
+        }
+
+        fn send_and_finish(&self, text: &str) {
+            self.send(text);
+            self.wait_for_turn_end();
+        }
+
+        fn wait_for_turn_end(&self) {
+            wait_for("the turn to end", || {
+                self.runtime.live_turn(&self.chat).is_none()
+                    && self.store.chat(&self.chat).unwrap()["working"] == false
+            });
+        }
+
+        fn child(&self) -> Arc<Mutex<Child>> {
+            self.runtime
+                .inner
+                .sessions
+                .lock()
+                .unwrap()
+                .get(&self.chat)
+                .expect("a kept process")
+                .child
+                .clone()
+        }
+
+        /// Writes a line to the kept process, for a script that is waiting to
+        /// go on but must not be mistaken for answering a turn.
+        fn poke(&self) {
+            let mut sessions = self.runtime.inner.sessions.lock().unwrap();
+            let session = sessions.get_mut(&self.chat).expect("a kept process");
+            writeln!(session.stdin, "go").unwrap();
+            session.stdin.flush().unwrap();
+        }
+
+        fn release_any_quiet(&self) -> usize {
+            self.runtime
+                .release_quiet_agents(Duration::ZERO, Duration::ZERO)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for KeptAgent {
+        fn drop(&mut self) {
+            self.runtime.shutdown();
+            // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+            unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_idle_agent_is_stopped_and_the_next_message_resumes_its_conversation() {
+        let agent = KeptAgent::new(&format!(
+            "echo \"$1 $2\" >> \"$ROOT/started\"\nwhile read turn; do\n{}\n{}\ndone",
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        let runtime = &agent.runtime;
+
+        assert_eq!(
+            runtime.release_quiet_agents(KeptAgent::LONG, KeptAgent::LONG),
+            0,
+            "an agent that has only just gone quiet stays up"
+        );
+        let child = agent.child();
+        assert_eq!(
+            runtime.release_quiet_agents(Duration::ZERO, KeptAgent::LONG),
+            1
+        );
+        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
+        assert!(
+            !runtime
+                .inner
+                .sessions
+                .lock()
+                .unwrap()
+                .contains_key(&agent.chat)
+        );
+        assert_eq!(agent.store.chat(&agent.chat).unwrap()["working"], false);
+
+        agent.send_and_finish("second");
+        let started = std::fs::read_to_string(agent.root.join("started")).unwrap();
+        let started = started.lines().collect::<Vec<_>>();
+        assert_eq!(started.len(), 2, "{started:?}");
+        assert!(!started[0].contains("--resume"), "{started:?}");
+        assert!(started[1].contains("--resume s1"), "{started:?}");
+        let answers = contents(&agent.store, &agent.chat)
+            .into_iter()
+            .filter(|(role, _)| role == "assistant")
+            .map(|(_, content)| content)
+            .collect::<Vec<_>>();
+        assert_eq!(answers, ["Answer.", "Answer."]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settled_chat_is_stopped_sooner_than_an_active_one() {
+        let agent = KeptAgent::new(&format!(
+            "read turn\n{}\n{}\nread next",
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        let runtime = &agent.runtime;
+        assert_eq!(
+            runtime.release_quiet_agents(KeptAgent::LONG, Duration::ZERO),
+            0
+        );
+        agent
+            .store
+            .settle_session(&json!({"session": agent.session}))
+            .unwrap();
+        assert_eq!(
+            runtime.release_quiet_agents(KeptAgent::LONG, Duration::ZERO),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_kept_through_its_turn() {
+        let agent = KeptAgent::new(&format!("read turn\n{}\nread never", KeptAgent::INIT));
+        agent.send("first");
+        wait_for("the turn to start", || {
+            agent.runtime.live_turn(&agent.chat).is_some()
+        });
+        assert_eq!(agent.release_any_quiet(), 0);
+        assert!(agent.runtime.cancel(&agent.chat));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_kept_while_a_child_process_runs() {
+        let agent = KeptAgent::new(&format!(
+            "read turn\nsleep 300 >/dev/null 2>&1 &\necho $! > \"$ROOT/shell\"\n{}\n{}\nread next",
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        assert_eq!(agent.release_any_quiet(), 0);
+
+        let shell = std::fs::read_to_string(agent.root.join("shell")).unwrap();
+        let shell: libc::pid_t = shell.trim().parse().unwrap();
+        // SAFETY: the pid names a child of the fake agent, still unreaped.
+        assert_eq!(unsafe { libc::kill(shell, libc::SIGKILL) }, 0);
+        wait_for("the idle agent to be stopped", || {
+            agent.release_any_quiet() == 1
+        });
+    }
+
+    /// The shell that started it has gone, so it is nobody's child, but stopping
+    /// the agent would kill the whole group.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_kept_while_something_it_left_runs_in_its_group() {
+        let agent = KeptAgent::new(&format!(
+            "read turn\nsh -c 'sleep 300 >/dev/null 2>&1 & echo $! > \"$0\"' \"$ROOT/left\"\n{}\n{}\nread next",
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        assert_eq!(agent.release_any_quiet(), 0);
+
+        let left = std::fs::read_to_string(agent.root.join("left")).unwrap();
+        let left: libc::pid_t = left.trim().parse().unwrap();
+        // SAFETY: the pid names a process the fake agent's shell left running.
+        assert_eq!(unsafe { libc::kill(left, libc::SIGKILL) }, 0);
+        wait_for("the idle agent to be stopped", || {
+            agent.release_any_quiet() == 1
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_kept_while_a_background_task_runs() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+{}
+read poke
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        assert_eq!(agent.release_any_quiet(), 0);
+
+        agent.poke();
+        wait_for("the idle agent to be stopped", || {
+            agent.release_any_quiet() == 1
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settled_chat_waits_longer_for_the_report_on_a_finished_task() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+{}
+read poke
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        agent
+            .store
+            .settle_session(&json!({"session": agent.session}))
+            .unwrap();
+        agent.poke();
+        wait_for("the task to finish", || {
+            contents(&agent.store, &agent.chat)
+                .iter()
+                .filter_map(|(_, content)| crate::subagent::decode(content))
+                .any(|record| record["status"] == "completed")
+        });
+
+        let runtime = &agent.runtime;
+        assert_eq!(
+            runtime.release_quiet_agents(KeptAgent::LONG, Duration::ZERO),
+            0
+        );
+        assert_eq!(
+            runtime.release_quiet_agents(Duration::ZERO, KeptAgent::LONG),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_task_finishing_as_a_turn_ends_still_waits_for_its_report() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+{}
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        agent
+            .store
+            .settle_session(&json!({"session": agent.session}))
+            .unwrap();
+        wait_for("the task to finish", || {
+            contents(&agent.store, &agent.chat)
+                .iter()
+                .filter_map(|(_, content)| crate::subagent::decode(content))
+                .any(|record| record["status"] == "completed")
+        });
+        assert_eq!(
+            agent
+                .runtime
+                .release_quiet_agents(KeptAgent::LONG, Duration::ZERO),
+            0
+        );
+    }
+
+    #[test]
+    fn a_report_is_due_from_a_task_finishing_until_a_turn_begins() {
+        let finished = r#"{"type":"system","subtype":"task_notification","task_id":"t1"}"#;
+        let begun = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let text = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"init"}]}}"#;
+        assert!(report_due_after(finished, false));
+        assert!(
+            report_due_after(text, true),
+            "only a turn's start clears it"
+        );
+        assert!(report_due_after("init", true));
+        assert!(!report_due_after(begun, true));
+        assert!(!report_due_after(text, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_kept_once_it_has_set_a_timer() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"c1","name":"ScheduleWakeup","input":{{"delaySeconds":1200}}}}]}}}}'
+{}
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        assert_eq!(agent.release_any_quiet(), 0);
+    }
+
+    #[test]
+    fn only_a_call_to_a_wakeup_tool_counts_as_setting_a_timer() {
+        for line in [
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"CronCreate"}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"ScheduleWakeup"}}}"#,
+        ] {
+            assert!(schedules_a_wakeup(line), "{line}");
+        }
+        for line in [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ScheduleWakeup"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"grep CronCreate"}}]}}"#,
+            r#"{"type":"result","result":"Answer."}"#,
+            "ScheduleWakeup",
+        ] {
+            assert!(!schedules_a_wakeup(line), "{line}");
+        }
     }
 
     /// Claude ends a turn while a background agent still runs, then reports
