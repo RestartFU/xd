@@ -923,6 +923,15 @@ class ChatViewModel(
         val before = state.value
         if (!sameQueue(before.queue, opened)) return
         if (!identifiable(opened, oldText)) return
+        // The steer names the message by its new text, so on a host without
+        // revisions that text must stay unique too, or the steer could take
+        // another message that already has it.
+        if (opened.revision == null && text != oldText &&
+            opened.messages.filterIndexed { at, _ -> at != index }.contains(text)
+        ) {
+            _queueNotice.value = "Another queued message already says that. Edit it differently, or update the host."
+            return
+        }
         launchGuarded(_steering) {
             // Each step names the queue it expects, so a message another device
             // moved or dropped meanwhile is never mistaken for an equal one.
