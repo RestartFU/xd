@@ -1560,6 +1560,9 @@ struct XdDesktop {
     remote_state: RemoteState,
     remote_error: Option<String>,
     remote_generation: u64,
+    /// The generation of the saved-host connection attempt now running, so a
+    /// manual retry can skip a backoff sleep without racing a live attempt.
+    remote_attempt: Option<u64>,
     remote_reconnect_attempt: u32,
     transcript: ListState,
     transcript_scroll_handler_attached: bool,
@@ -2042,7 +2045,7 @@ impl XdDesktop {
             settings.active_connection.as_deref() != Some(active_connection.as_str());
         settings.active_connection = Some(active_connection);
         let settings_load_error = settings.load_error().map(str::to_owned);
-        let remote_configured = settings.remote_ssh_command.is_some();
+        let remote_configured = settings.remote_credentials.is_some();
         let minimal_popup_focus = cx.focus_handle();
         let (terminal_runtime, terminal_updates) = SessionRuntime::new();
         let mut desktop = Self {
@@ -2104,6 +2107,7 @@ impl XdDesktop {
             },
             remote_error,
             remote_generation: 0,
+            remote_attempt: None,
             remote_reconnect_attempt: 0,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_scroll_handler_attached: false,
@@ -2670,6 +2674,7 @@ impl XdDesktop {
             self.remote_state = RemoteState::Unconfigured;
             return;
         };
+        self.remote_attempt = Some(generation);
         let connection = cx
             .background_executor()
             .spawn(async move { paired::resume(credentials) });
@@ -2679,6 +2684,7 @@ impl XdDesktop {
                 if this.remote_generation != generation {
                     return;
                 }
+                this.remote_attempt = None;
                 match result {
                     Ok(session) => this.install_remote_session(session, generation, cx),
                     Err(error) => this.remote_connection_failed(error, cx),
@@ -2913,9 +2919,39 @@ impl XdDesktop {
                 let _ = host.agent_catalog();
             }
         } else {
+            // `Connecting` also covers a retry sleeping out its backoff. Only
+            // an attempt that is really running should be left to finish.
+            if self.remote_attempt != Some(self.remote_generation) {
+                self.remote_state = RemoteState::Offline;
+            }
             self.schedule_remote_connect(Duration::ZERO, cx);
         }
         cx.notify();
+    }
+
+    /// The connection status control: go to the remembered host, and ask for a
+    /// pairing code only when there is no host or it has refused this device.
+    fn reconnect_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A retry now would abandon a pairing in flight and waste its code.
+        if self.remote_panel.is_some() {
+            return;
+        }
+        if self.settings.remote_credentials.is_none()
+            || self.remote_state == RemoteState::Unconfigured
+        {
+            self.open_remote(window, cx);
+        } else {
+            self.activate_remote_runtime(cx);
+        }
+    }
+
+    /// The state of a remote that has no connection or attempt under way.
+    fn idle_remote_state(&self) -> RemoteState {
+        if self.settings.remote_credentials.is_some() {
+            RemoteState::Offline
+        } else {
+            RemoteState::Unconfigured
+        }
     }
 
     fn disconnect_remote_runtime(&mut self, cx: &mut Context<Self>) {
@@ -2927,15 +2963,22 @@ impl XdDesktop {
             return;
         }
         self.remote_generation = self.remote_generation.saturating_add(1);
+        self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
         self.remote_host = None;
         self.remote_bridge = None;
-        self.remote_state = if self.settings.remote_credentials.is_some() {
-            RemoteState::Offline
-        } else {
-            RemoteState::Unconfigured
-        };
+        // A host that refused this device still needs a new pairing, and the
+        // reason stays available for the pairing dialog. Anything else is over.
+        let refused = self.remote_state == RemoteState::Unconfigured;
+        if !refused {
+            self.remote_state = self.idle_remote_state();
+            self.remote_error = None;
+        }
         self.remote_reconnect_attempt = 0;
-        self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
+        let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
+        remote_model.connected = false;
+        if !refused {
+            remote_model.connection_error = None;
+        }
         self.schedule_connect(Duration::ZERO, cx);
         cx.notify();
     }
@@ -6131,14 +6174,12 @@ impl XdDesktop {
             .is_some_and(|panel| panel.submitting);
         if canceled_connection {
             self.remote_generation = self.remote_generation.saturating_add(1);
-            self.remote_state = if self.settings.remote_credentials.is_some() {
-                RemoteState::Offline
-            } else {
-                RemoteState::Unconfigured
-            };
+            self.remote_state = self.idle_remote_state();
         }
         self.remote_panel = None;
-        if canceled_connection && self.settings.remote_credentials.is_some() {
+        // Pairing drops the current connection, so giving up on it, whether by
+        // canceling or after a refused code, goes back to the remembered host.
+        if self.remote_state == RemoteState::Offline {
             self.schedule_remote_connect(Duration::ZERO, cx);
         }
         cx.notify();
@@ -6165,6 +6206,7 @@ impl XdDesktop {
         let generation = self.remote_generation;
         self.remote_host = None;
         self.remote_bridge = None;
+        self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
         self.remote_state = RemoteState::Connecting;
         self.remote_error = None;
         if let Some(panel) = &mut self.remote_panel {
@@ -6187,11 +6229,7 @@ impl XdDesktop {
                         this.remote_panel = None;
                     }
                     Err(error) => {
-                        this.remote_state = if this.settings.remote_ssh_command.is_some() {
-                            RemoteState::Offline
-                        } else {
-                            RemoteState::Unconfigured
-                        };
+                        this.remote_state = this.idle_remote_state();
                         this.remote_error = Some(error.to_string());
                         if let Some(panel) = &mut this.remote_panel {
                             panel.submitting = false;
@@ -9777,13 +9815,7 @@ impl XdDesktop {
                             .text_color(rgb(colors.text))
                     })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if remote_active {
-                            this.disconnect_remote_runtime(cx);
-                        } else {
-                            this.open_remote(window, cx);
-                        }
-                    }))
+                    .on_click(cx.listener(|this, _, window, cx| this.reconnect_remote(window, cx)))
                     .child(div().size(px(7.0)).rounded_full().bg(rgb(if connected {
                         colors.working
                     } else {
@@ -18222,6 +18254,162 @@ mod tests {
             assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
             assert!(desktop.model.connected);
             assert_eq!(desktop.connection_generation, connection_generation);
+        });
+    }
+
+    /// A refused loopback port, so a connection attempt the test does not wait
+    /// for fails at once without leaving the machine.
+    fn saved_remote_credentials() -> xd_transport::RemoteCredentials {
+        xd_transport::RemoteCredentials {
+            host: "127.0.0.1".into(),
+            port: 1,
+            fingerprint: "ab".repeat(32),
+            token: "test-token".into(),
+        }
+    }
+
+    #[gpui::test]
+    fn the_remote_status_keeps_a_live_connection(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            let generation = desktop.remote_generation;
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert_eq!(desktop.remote_state, RemoteState::Connected);
+            assert_eq!(desktop.remote_generation, generation);
+            assert!(desktop.remote_panel.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_returns_to_the_saved_host_after_disconnecting(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.remote_error = Some("Stale. Reconnecting…".into());
+            desktop.model.connected = true;
+            desktop.activate_remote_runtime(cx);
+            desktop.model.connected = true;
+            desktop.model.connection_error = Some("Stale. Reconnecting…".into());
+
+            desktop.disconnect_remote_runtime(cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert_eq!(desktop.remote_state, RemoteState::Offline);
+            assert_eq!(desktop.remote_error, None);
+            assert!(desktop.settings.remote_credentials.is_some());
+            assert!(!desktop.inactive_model.connected);
+            assert_eq!(desktop.inactive_model.connection_error, None);
+            assert!(
+                desktop
+                    .terminal_cache_refresh
+                    .contains(&ChatEndpoint::Remote)
+            );
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+            assert!(
+                desktop.remote_panel.is_none(),
+                "a remembered host must not ask for a new pairing code"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_retries_now_but_never_races_a_running_attempt(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            desktop.remote_state = RemoteState::Offline;
+            desktop.schedule_remote_connect(Duration::from_secs(60), cx);
+            let sleeping = desktop.remote_generation;
+
+            desktop.reconnect_remote(window, cx);
+
+            let retried = desktop.remote_generation;
+            assert!(retried > sleeping, "the backoff sleep must be abandoned");
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+
+            desktop.remote_attempt = Some(retried);
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.remote_generation, retried);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_asks_for_pairing_only_when_it_is_needed(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.reconnect_remote(window, cx);
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert!(desktop.remote_panel.is_some(), "no host has been paired");
+            desktop.close_remote(cx);
+
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.model.connected = true;
+            desktop.activate_remote_runtime(cx);
+            desktop.remote_connection_failed(RemoteError::Authentication("Revoked.".into()), cx);
+            assert_eq!(desktop.remote_state, RemoteState::Unconfigured);
+
+            desktop.disconnect_remote_runtime(cx);
+            assert_eq!(desktop.remote_state, RemoteState::Unconfigured);
+            assert_eq!(desktop.remote_error.as_deref(), Some("Revoked."));
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            let panel = desktop.remote_panel.as_ref().expect("a refused device");
+            assert_eq!(panel.error.as_deref(), Some("Revoked."));
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_leaves_a_pairing_in_flight_alone(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            desktop.open_remote(window, cx);
+            desktop.remote_panel.as_mut().unwrap().submitting = true;
+            desktop.remote_state = RemoteState::Connecting;
+            let pairing = desktop.remote_generation;
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.remote_generation, pairing);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+            assert!(desktop.remote_panel.as_ref().unwrap().submitting);
+        });
+    }
+
+    #[gpui::test]
+    fn closing_a_failed_pairing_returns_to_the_saved_host(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            desktop.open_remote(window, cx);
+            desktop.remote_state = desktop.idle_remote_state();
+
+            desktop.close_remote(cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
         });
     }
 
