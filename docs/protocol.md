@@ -703,8 +703,8 @@ Spends one banked reset credit on the host's signed-in account. Takes `provider`
 (`codex`), an `idempotency_key` naming the attempt, which is reused when retrying
 it, and the `account_key` from `usage-limits`; the host refuses if that is missing
 or no longer the signed-in account. Answers `pending: true`, then sends the asking connection a `usage-reset-credit`
-event with `outcome` of `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed`,
-or `error`. This cannot be undone, so clients must confirm first.
+event with `outcome` of `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed`
+and the `idempotency_key` it settles, or `error`. This cannot be undone, so clients must confirm first.
 
 ### `workflow-status`
 

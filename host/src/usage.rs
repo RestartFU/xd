@@ -2592,7 +2592,7 @@ impl UsageService {
             let command = crate::background_process::command(crate::agent::resolve_codex());
             let event = match consume_codex_reset_credit(command, &key, Some(&expected)) {
                 Ok(outcome) => {
-                    json!({"event":"usage-reset-credit", "provider":"codex", "outcome":outcome})
+                    json!({"event":"usage-reset-credit", "provider":"codex", "outcome":outcome, "idempotency_key":key})
                 }
                 Err(error) => {
                     json!({"event":"usage-reset-credit", "provider":"codex", "error":error})

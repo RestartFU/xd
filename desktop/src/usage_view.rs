@@ -227,9 +227,9 @@ pub(super) struct UsagePage {
     confirm_reset: Option<ResetConfirm>,
     /// The host a reset is waiting on.
     reset_busy: Option<usize>,
-    /// The last unanswered attempt. Retrying the same account reuses its key,
-    /// so a reset whose answer was lost cannot spend a second credit.
-    reset_attempt: Option<(String, String)>,
+    /// Unanswered attempts by account. Retrying an account reuses its key, so a
+    /// reset whose answer was lost cannot spend a second credit.
+    reset_attempts: HashMap<String, String>,
     reset_status: Option<String>,
     price: Option<PriceDialog>,
     limits_now: i64,
@@ -252,7 +252,7 @@ impl UsagePage {
             segment: None,
             confirm_reset: None,
             reset_busy: None,
-            reset_attempt: None,
+            reset_attempts: HashMap::new(),
             reset_status: None,
             price: None,
             limits_now: now_ms(),
@@ -939,9 +939,11 @@ impl XdDesktop {
                 if self.usage.reset_busy == Some(index) {
                     self.usage.reset_busy = None;
                 }
-                // An outcome settles the attempt; an error may have lost the answer.
-                if body.contains_key("outcome") {
-                    self.usage.reset_attempt = None;
+                // An outcome settles its own attempt; an error may have lost the answer.
+                if body.contains_key("outcome")
+                    && let Some(key) = body.get("idempotency_key").and_then(Value::as_str)
+                {
+                    self.usage.reset_attempts.retain(|_, held| held != key);
                 }
                 self.usage.reset_status = Some(match body.get("error").and_then(Value::as_str) {
                     Some(error) => error.to_owned(),
@@ -1335,16 +1337,18 @@ impl XdDesktop {
         self.usage.segment = None;
         self.usage.reset_status = None;
         self.usage.generation += 1;
-        let key = match &self.usage.reset_attempt {
-            Some((account, key)) if *account == confirm.account_key => key.clone(),
-            _ => format!(
-                "xd-{}-{}-{}",
-                now_ms(),
-                std::process::id(),
-                self.usage.generation
-            ),
-        };
-        self.usage.reset_attempt = Some((confirm.account_key.clone(), key.clone()));
+        let fresh = format!(
+            "xd-{}-{}-{}",
+            now_ms(),
+            std::process::id(),
+            self.usage.generation
+        );
+        let key = self
+            .usage
+            .reset_attempts
+            .entry(confirm.account_key.clone())
+            .or_insert(fresh)
+            .clone();
         let result = match self.endpoint_host(endpoint_at(confirm.environment)) {
             Some(host) => host.usage_consume_reset_credit(&key, confirm.identity.as_deref()),
             None => Err("That host is no longer connected.".to_owned()),
@@ -4295,17 +4299,33 @@ mod tests {
             // No host: the attempt fails at once and its key survives for a retry.
             desktop.usage_use_reset_credit(confirm.clone(), cx);
             assert_eq!(desktop.usage.reset_busy, None);
-            let key = desktop.usage.reset_attempt.clone().unwrap().1;
+            let key = desktop.usage.reset_attempts["account"].clone();
+            // Another account's reset neither takes nor replaces this attempt's key.
+            let other = ResetConfirm {
+                account_key: "other".into(),
+                ..confirm.clone()
+            };
+            std::thread::sleep(Duration::from_millis(2));
+            desktop.usage_use_reset_credit(other, cx);
+            let other_key = desktop.usage.reset_attempts["other"].clone();
+            assert_ne!(other_key, key);
             desktop.usage_use_reset_credit(confirm, cx);
-            assert_eq!(desktop.usage.reset_attempt.clone().unwrap().1, key);
+            assert_eq!(desktop.usage.reset_attempts["account"], key);
 
             desktop.usage.reset_busy = Some(1);
-            let answer = json!({"outcome": "reset"}).as_object().cloned().unwrap();
+            let answer = json!({"outcome": "reset", "idempotency_key": key})
+                .as_object()
+                .cloned()
+                .unwrap();
             assert!(desktop.usage_event(1, "usage-reset-credit", &answer));
             assert_eq!(desktop.usage.reset_busy, None);
             assert!(
-                desktop.usage.reset_attempt.is_none(),
-                "an outcome settles the attempt"
+                !desktop.usage.reset_attempts.contains_key("account"),
+                "settled"
+            );
+            assert!(
+                desktop.usage.reset_attempts.contains_key("other"),
+                "still unanswered"
             );
         });
     }
