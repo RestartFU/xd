@@ -8361,6 +8361,7 @@ dependencies = [
  "arboard",
  "async-channel 2.5.0",
  "base64",
+ "futures-util",
  "gpui",
  "gtk",
  "iana-time-zone",
@@ -8378,6 +8379,7 @@ dependencies = [
  "x11rb",
  "xd-terminal",
  "xd-transport",
+ "zbus",
 ]
 
 [[package]]

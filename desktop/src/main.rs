@@ -24,7 +24,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::{
     process::{Command, Stdio},
     thread,
@@ -68,6 +68,8 @@ mod files;
 mod image_preview;
 mod input;
 mod minimal;
+#[cfg(target_os = "linux")]
+mod notifications;
 mod selection;
 mod settings;
 mod source_build;
@@ -1753,6 +1755,13 @@ enum RemoteState {
     Offline,
 }
 
+/// Where clicking a "turn finished" notification should lead.
+#[cfg(target_os = "linux")]
+struct TurnNotificationTarget {
+    endpoint: ChatEndpoint,
+    chat_id: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Hash, PartialEq, Eq)]
 enum ChatEndpoint {
     #[default]
@@ -1841,6 +1850,8 @@ struct XdDesktop {
     /// says they did.
     subagent_actions: HashMap<String, &'static str>,
     pending_minimal_session: Option<(String, String)>,
+    #[cfg(target_os = "linux")]
+    turn_notifier: notifications::Notifier<TurnNotificationTarget>,
     settings: AppSettings,
     settings_open: bool,
     auth_open: bool,
@@ -2405,6 +2416,8 @@ impl XdDesktop {
         let remote_configured = settings.remote_credentials.is_some();
         let minimal_popup_focus = cx.focus_handle();
         let (terminal_runtime, terminal_updates) = SessionRuntime::new();
+        #[cfg(target_os = "linux")]
+        let (turn_notifier, clicked_notifications) = notifications::Notifier::new();
         let mut desktop = Self {
             model: AppModel {
                 draft_revision: -1,
@@ -2438,6 +2451,8 @@ impl XdDesktop {
             expanded_work_logs: HashSet::new(),
             subagent_actions: HashMap::new(),
             pending_minimal_session: None,
+            #[cfg(target_os = "linux")]
+            turn_notifier,
             settings,
             settings_open: false,
             auth_open: false,
@@ -2619,6 +2634,18 @@ impl XdDesktop {
             }
         }
         desktop.listen_for_terminal_runtime(terminal_updates, cx);
+        #[cfg(target_os = "linux")]
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(activation) = clicked_notifications.recv().await {
+                let opened = this.update_in(cx, |this, window, cx| {
+                    this.open_clicked_notification(activation, window, cx);
+                });
+                if opened.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(PULSE_INTERVAL).await;
@@ -5532,15 +5559,24 @@ impl XdDesktop {
             self.model.apply_event(name, &body);
         }
         if name == "turn-finished" && !self.event_is_active(&body) {
-            let title = body
-                .get("chat")
-                .and_then(Value::as_str)
+            let chat_id = body.get("chat").and_then(Value::as_str);
+            let title = chat_id
                 .and_then(|chat_id| self.model.chats.iter().find(|chat| chat.id == chat_id))
                 .and_then(|chat| chat.title.as_deref())
                 .unwrap_or("Background chat")
                 .to_owned();
             self.model.apply_event(name, &body);
             if self.settings.notifications {
+                #[cfg(target_os = "linux")]
+                self.turn_notifier.show(
+                    notifications::turn_finished_body(&title),
+                    TurnNotificationTarget {
+                        endpoint: self.active_endpoint,
+                        chat_id: chat_id.map(str::to_owned),
+                    },
+                    cx.background_executor(),
+                );
+                #[cfg(not(target_os = "linux"))]
                 notify_turn_finished(&title);
             }
             self.request_tree();
@@ -9990,6 +10026,51 @@ impl XdDesktop {
         let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
         cx.notify();
+    }
+
+    /// Takes the user to the window and, if it is still there, the chat that a
+    /// clicked notification was about.
+    #[cfg(target_os = "linux")]
+    fn open_clicked_notification(
+        &mut self,
+        activation: notifications::Activation<TurnNotificationTarget>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        notifications::raise_window(window, activation.token.as_deref());
+        let TurnNotificationTarget { endpoint, chat_id } = activation.target;
+        let Some(chat_id) = chat_id else {
+            return;
+        };
+        let Some((project_id, agent)) = self
+            .endpoint_model(endpoint)
+            .chats
+            .iter()
+            .find(|chat| chat.id == chat_id)
+            .and_then(|chat| {
+                let agent = AgentCli::from_backend(&chat.backend)?;
+                Some((chat.folder.clone(), agent))
+            })
+        else {
+            return;
+        };
+        match endpoint {
+            ChatEndpoint::Local => {
+                self.switch_active_endpoint(endpoint, cx);
+            }
+            ChatEndpoint::Remote => self.activate_remote_runtime(cx),
+        }
+        // An unsaved draft can refuse the switch.
+        if self.active_endpoint != endpoint {
+            return;
+        }
+        if self.usage_open {
+            self.toggle_usage(window, cx);
+        }
+        if self.minimal_theme_open {
+            self.close_minimal_theme_popup(window, cx);
+        }
+        self.open_minimal_session(project_id, chat_id, agent, window, cx);
     }
 
     fn select_minimal_session(
@@ -17896,30 +17977,6 @@ fn workflow_row_indices(model: &AppModel, marker: &str) -> Vec<usize> {
         .collect()
 }
 
-#[cfg(target_os = "linux")]
-fn notify_turn_finished(title: &str) {
-    let title = title
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(120)
-        .collect::<String>()
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    let body = format!("{title} finished");
-    if let Ok(mut child) = Command::new("notify-send")
-        .args(["--app-name=xd", "--", "xd", &body])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        thread::spawn(move || {
-            let _ = child.wait();
-        });
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn notify_turn_finished(title: &str) {
     let body = format!(
@@ -18341,6 +18398,86 @@ Binary files /dev/null and b/image.png differ\n";
             assert_eq!(rows[0].title.as_deref(), Some("Workspace switcher"));
             desktop.model.select_chat("implementation");
             assert_eq!(desktop.catalog_session_chats()[0].id, "implementation");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_a_notification_opens_its_chat(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update_in(cx, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.usage_open = true;
+            desktop.minimal_theme_open = true;
+            desktop.open_clicked_notification(
+                notifications::Activation {
+                    target: TurnNotificationTarget {
+                        endpoint: ChatEndpoint::Local,
+                        chat_id: Some("review".into()),
+                    },
+                    token: None,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+            assert!(matches!(
+                &desktop.minimal_route,
+                MinimalRoute::Cli { chat_id, .. } if chat_id == "review"
+            ));
+            assert!(!desktop.usage_open);
+            assert!(!desktop.minimal_theme_open);
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_a_notification_for_a_deleted_chat_stays_where_it_is(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update_in(cx, |desktop, window, cx| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            for chat_id in [Some("deleted".to_owned()), None] {
+                desktop.open_clicked_notification(
+                    notifications::Activation {
+                        target: TurnNotificationTarget {
+                            endpoint: ChatEndpoint::Local,
+                            chat_id,
+                        },
+                        token: None,
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(
+                    desktop.model.selected_chat.as_deref(),
+                    Some("implementation")
+                );
+            }
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_a_notification_returns_to_the_host_it_came_from(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update_in(cx, |desktop, window, cx| {
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.inactive_model = grouped_workspace_fixture();
+            desktop.open_clicked_notification(
+                notifications::Activation {
+                    target: TurnNotificationTarget {
+                        endpoint: ChatEndpoint::Local,
+                        chat_id: Some("review".into()),
+                    },
+                    token: None,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
         });
     }
 

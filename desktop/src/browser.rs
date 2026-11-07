@@ -1910,7 +1910,7 @@ fn browser_data_directory() -> PathBuf {
 /// Resolve that identity through the public X11 protocol without assuming
 /// anything about GPUI's internal Rust struct layout.
 #[cfg(target_os = "linux")]
-fn find_x11_parent() -> Result<u32, String> {
+pub(crate) fn find_x11_parent() -> Result<u32, String> {
     use x11rb::{
         connection::Connection,
         protocol::xproto::{AtomEnum, ConnectionExt},
