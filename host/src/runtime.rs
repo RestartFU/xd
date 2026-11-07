@@ -1324,8 +1324,9 @@ impl TurnRuntime {
     /// The next message starts a new process that resumes the conversation, but
     /// nothing brings back what a process was running, so anything still at work
     /// keeps it up: a turn, an open question, a background agent or shell, a
-    /// child process, a timer. That includes a tool server that lasts as long as
-    /// the process does, since it cannot be told apart from a long build.
+    /// child process or another process in its group, a timer. That includes a
+    /// tool server that lasts as long as the process does, since it cannot be told
+    /// apart from a long build.
     pub(crate) fn release_idle_agents(&self) {
         self.release_quiet_agents(IDLE_AGENT_LIMIT, SETTLED_AGENT_LIMIT);
     }
@@ -1363,11 +1364,13 @@ impl TurnRuntime {
         if due.is_empty() {
             return 0;
         }
-        let Some(parents) = crate::process_tree::parents() else {
+        let Some(accompanied) = crate::process_tree::with_company() else {
             return 0;
         };
         due.iter()
-            .filter(|(chat_id, quiet_since)| self.release_agent(chat_id, *quiet_since, &parents))
+            .filter(|(chat_id, quiet_since)| {
+                self.release_agent(chat_id, *quiet_since, &accompanied)
+            })
             .count()
     }
 
@@ -1393,7 +1396,12 @@ impl TurnRuntime {
     /// Taking the sessions and then the router is what a new turn does, so the
     /// turn either finds the process gone and starts another, or gets here first
     /// and is seen.
-    fn release_agent(&self, chat_id: &str, quiet_since: Instant, parents: &HashSet<u32>) -> bool {
+    fn release_agent(
+        &self,
+        chat_id: &str,
+        quiet_since: Instant,
+        accompanied: &HashSet<u32>,
+    ) -> bool {
         let Ok(mut sessions) = self.inner.sessions.lock() else {
             return false;
         };
@@ -1403,7 +1411,7 @@ impl TurnRuntime {
         let Ok(child) = session.child.lock() else {
             return false;
         };
-        if parents.contains(&child.id()) {
+        if accompanied.contains(&child.id()) {
             return false;
         }
         drop(child);
@@ -3363,6 +3371,28 @@ echo '{"type":"result","subtype":"success","result":"Answer."}'"#;
         let shell: libc::pid_t = shell.trim().parse().unwrap();
         // SAFETY: the pid names a child of the fake agent, still unreaped.
         assert_eq!(unsafe { libc::kill(shell, libc::SIGKILL) }, 0);
+        wait_for("the idle agent to be stopped", || {
+            agent.release_any_quiet() == 1
+        });
+    }
+
+    /// The shell that started it has gone, so it is nobody's child, but stopping
+    /// the agent would kill the whole group.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_is_kept_while_something_it_left_runs_in_its_group() {
+        let agent = KeptAgent::new(&format!(
+            "read turn\nsh -c 'sleep 300 >/dev/null 2>&1 & echo $! > \"$0\"' \"$ROOT/left\"\n{}\n{}\nread next",
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        assert_eq!(agent.release_any_quiet(), 0);
+
+        let left = std::fs::read_to_string(agent.root.join("left")).unwrap();
+        let left: libc::pid_t = left.trim().parse().unwrap();
+        // SAFETY: the pid names a process the fake agent's shell left running.
+        assert_eq!(unsafe { libc::kill(left, libc::SIGKILL) }, 0);
         wait_for("the idle agent to be stopped", || {
             agent.release_any_quiet() == 1
         });
