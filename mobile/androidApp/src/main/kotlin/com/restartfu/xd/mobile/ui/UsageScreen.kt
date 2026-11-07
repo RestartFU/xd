@@ -397,7 +397,10 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                 output = row.output.trim().toDouble(),
                 cacheRead = row.cacheRead.trim().takeIf(String::isNotEmpty)?.toDouble(),
                 cacheWrite = row.cacheWrite.trim().takeIf(String::isNotEmpty)?.toDouble(),
-            ).takeIf { it.input >= 0 && it.output >= 0 && (it.cacheRead ?: 0.0) >= 0 && (it.cacheWrite ?: 0.0) >= 0 }
+            ).takeIf { price ->
+                // The host takes only finite rates; "1e309" reads as infinity.
+                listOf(price.input, price.output, price.cacheRead ?: 0.0, price.cacheWrite ?: 0.0).all { it.isFinite() && it >= 0 }
+            }
         }.getOrNull()
     }
     val valid = parsed != null && parsed.all { (id, price) -> id.isNotEmpty() && price != null } &&
