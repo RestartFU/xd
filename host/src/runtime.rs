@@ -265,12 +265,6 @@ struct SteeredMessage {
     row: Option<i64>,
 }
 
-/// Where a returned steer goes among those already returned, which sit at the
-/// front of the queue in the order they were sent.
-fn returned_steer_index(returned: &[u64], steer: u64) -> usize {
-    returned.iter().filter(|other| **other < steer).count()
-}
-
 struct PendingInteraction {
     id: Value,
     method: String,
@@ -452,14 +446,24 @@ impl TurnRuntime {
     }
 
     /// Puts a message the agent never read back at the front of the queue.
-    /// `returned` holds the numbers of those this turn has already put back, so
+    /// `returned` holds those this turn has already put back, oldest first, so
     /// the message lands in the order it was sent, however they came back.
-    fn requeue_steer(&self, chat_id: &str, steer: u64, prompt: &str, returned: &mut Vec<u64>) {
-        let index = returned_steer_index(returned, steer);
-        match self.inner.store.requeue_at(chat_id, index, prompt) {
+    fn requeue_steer(
+        &self,
+        chat_id: &str,
+        steer: u64,
+        prompt: &str,
+        returned: &mut Vec<(u64, String)>,
+    ) {
+        let position = returned.partition_point(|(other, _)| *other < steer);
+        let earlier = returned[..position]
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>();
+        match self.inner.store.requeue_after(chat_id, &earlier, prompt) {
             Ok(event) => {
                 self.inner.events.publish(event);
-                returned.insert(index, steer);
+                returned.insert(position, (steer, prompt.to_owned()));
             }
             Err(error) => eprintln!("xd: cannot requeue a steered message: {error}"),
         }
@@ -473,7 +477,7 @@ impl TurnRuntime {
         progress: &TurnProgress,
         steered: &mut HashMap<u64, SteeredMessage>,
         steer: u64,
-        returned: &mut Vec<u64>,
+        returned: &mut Vec<(u64, String)>,
     ) {
         let Some(message) = steered.remove(&steer) else {
             return;
@@ -1364,6 +1368,9 @@ impl TurnRuntime {
         let mut steered: HashMap<u64, SteeredMessage> = HashMap::new();
         let mut next_steer = 0;
         let mut returned_steers = Vec::new();
+        // When waiting to hear what became of a steer runs out. Output from
+        // elsewhere can't put it off, so this is a limit and not a silence.
+        let mut settle_deadline: Option<Instant> = None;
 
         let mut line = String::new();
         // Stores the reply streamed so far as its own message, which a tool
@@ -1403,8 +1410,17 @@ impl TurnRuntime {
             };
         }
         loop {
-            source.set_patience(parser.settling().then_some(STEER_SETTLE_LIMIT));
-            match source.next(&mut line) {
+            let now = Instant::now();
+            settle_deadline = parser
+                .settling()
+                .then(|| settle_deadline.unwrap_or(now + STEER_SETTLE_LIMIT));
+            source.set_patience(settle_deadline.map(|deadline| deadline - now.min(deadline)));
+            let next = if settle_deadline.is_some_and(|deadline| now >= deadline) {
+                NextLine::Quiet
+            } else {
+                source.next(&mut line)
+            };
+            match next {
                 NextLine::Line => {}
                 NextLine::Steer(prompt) => {
                     close_segment!();
@@ -3000,15 +3016,79 @@ read next
         );
     }
 
+    /// However they come back, and whatever the user has since dropped from the
+    /// queue, returned steers wait in the order they were sent, ahead of the rest.
+    #[cfg(unix)]
     #[test]
     fn returned_steers_keep_the_order_they_were_sent_in() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+read release
+"#,
+        );
+        let store = &fixture.store;
+        let chat = &fixture.chat;
+        let queue = || store.chat(chat).unwrap()["queue"].clone();
+        store.requeue_front(chat, "queued").unwrap();
         let mut returned = Vec::new();
-        for (steer, index) in [(3, 0), (1, 0), (4, 2), (2, 1)] {
-            let at = returned_steer_index(&returned, steer);
-            assert_eq!(at, index, "steer {steer}");
-            returned.insert(at, steer);
+        for (steer, prompt) in [(3, "three"), (1, "one"), (4, "four"), (2, "two")] {
+            fixture
+                .runtime
+                .requeue_steer(chat, steer, prompt, &mut returned);
         }
-        assert_eq!(returned, [1, 2, 3, 4]);
+        assert_eq!(queue(), json!(["one", "two", "three", "four", "queued"]));
+
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "one"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "two"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "three"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": chat, "index": 0, "text": "four"}))
+            .unwrap();
+        fixture
+            .runtime
+            .requeue_steer(chat, 5, "five", &mut returned);
+        assert_eq!(queue(), json!(["five", "queued"]));
+    }
+
+    /// Other output, such as a background agent's progress, must not put off the
+    /// end of a turn whose replacement run never begins.
+    #[cfg(unix)]
+    #[test]
+    fn output_from_elsewhere_does_not_extend_the_wait_for_a_new_run() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+if [ -e "$HEARD" ]; then
+  while read again; do
+    echo '{"type":"system","subtype":"init","session_id":"s1"}'
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Answered again."}]}}'
+    echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Answered again."}'
+  done
+  exit 0
+fi
+: > "$HEARD"
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
+read steer
+echo '{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}'
+while :; do
+  echo '{"type":"rate_limit_event"}'
+  sleep 0.05
+done
+"#,
+        );
+        fixture.wait_for_streamed("Working on it.");
+        assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
+        fixture.wait_for_text("Answered again.");
     }
 
     /// Two steers with the same text: the first is answered and the second is
