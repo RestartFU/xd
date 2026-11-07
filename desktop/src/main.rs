@@ -331,6 +331,16 @@ fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyEle
     }
 }
 
+/// The word and dot color for the row under a running turn. A turn held up on
+/// an approval or question is not doing anything, so it stops reading as work.
+fn turn_status(waiting: bool, colors: ThemeColors) -> (&'static str, u32) {
+    if waiting {
+        ("Waiting", colors.muted)
+    } else {
+        ("Working", colors.working)
+    }
+}
+
 /// The marks a collapsed project shows for its sessions that need a look.
 fn drawer_tabs(signals: &[SessionSignal], colors: ThemeColors) -> gpui::AnyElement {
     div()
@@ -12903,6 +12913,7 @@ impl XdDesktop {
                 },
             )
             .when(working, |chat| {
+                let (status, dot) = turn_status(!self.model.interactions.is_empty(), colors);
                 chat.child(
                     div()
                         .w_full()
@@ -12918,10 +12929,10 @@ impl XdDesktop {
                             div()
                                 .size(px(7.0))
                                 .rounded_full()
-                                .bg(rgb(colors.working))
+                                .bg(rgb(dot))
                                 .opacity(pulse_opacity()),
                         )
-                        .child("Working")
+                        .child(status)
                         .child(working_dots(0, colors.muted)),
                 )
             })
@@ -17831,6 +17842,15 @@ mod tests {
         let colors = ThemePreset::Dark.colors();
         assert!(signal_tab(SessionSignal::Idle, colors).is_none());
         assert_eq!(SessionSignal::Waiting.color(colors), colors.waiting);
+    }
+
+    #[test]
+    fn a_turn_held_up_on_the_user_reads_as_waiting_in_grey() {
+        for preset in [ThemePreset::Dark, ThemePreset::Light] {
+            let colors = preset.colors();
+            assert_eq!(turn_status(false, colors), ("Working", colors.working));
+            assert_eq!(turn_status(true, colors), ("Waiting", colors.muted));
+        }
     }
 
     #[test]
