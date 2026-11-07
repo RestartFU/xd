@@ -478,7 +478,7 @@ impl TerminalManager {
         }
         drop(writers);
         for session in &sessions {
-            close_session(session, &self.sessions, &self.events);
+            close_session_marking_held(session, &self.sessions, &self.events);
         }
         // Output marked from here on belongs to a closed terminal.
         drop(marking);
@@ -710,6 +710,27 @@ impl TerminalSession {
         }))
     }
 
+    /// Notes output as use. Under `output_use`, so closing sees it: a terminal
+    /// already closing passes it on as a closed terminal's use instead.
+    fn mark_output(&self) {
+        let Ok(_marking) = self.output_use.lock() else {
+            return;
+        };
+        self.mark_used();
+        if self.is_closing() {
+            self.note_closed_use();
+        }
+    }
+
+    /// Keeps this terminal's last use after it closes, until the store has it.
+    fn note_closed_use(&self) {
+        if let Ok(mut usage) = self.activity.closed_usage.lock() {
+            let used = self.last_used.load(Ordering::Acquire);
+            let entry = usage.entry(self.owner()).or_insert(used);
+            *entry = (*entry).max(used);
+        }
+    }
+
     fn mark_used(&self) {
         self.last_used
             .store(crate::settlement::now_seconds(), Ordering::Release);
@@ -876,6 +897,21 @@ fn close_session(
     sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
     events: &EventBus,
 ) {
+    // Output marked meanwhile waits, then finds the terminal closing; see
+    // `TerminalSession::mark_output`.
+    let _marking = session
+        .output_use
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    close_session_marking_held(session, sessions, events);
+}
+
+/// [`close_session`] for a caller already holding the terminal's `output_use`.
+fn close_session_marking_held(
+    session: &TerminalSession,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    events: &EventBus,
+) {
     let closed = {
         let _activity = session
             .activity
@@ -886,11 +922,7 @@ fn close_session(
             false
         } else {
             // Before it leaves the open terminals, so its use is never in neither.
-            if let Ok(mut usage) = session.activity.closed_usage.lock() {
-                let used = session.last_used.load(Ordering::Acquire);
-                let entry = usage.entry(session.owner()).or_insert(used);
-                *entry = (*entry).max(used);
-            }
+            session.note_closed_use();
             if let Ok(mut sessions) = sessions.lock() {
                 sessions.remove(&session.id);
             }
@@ -921,9 +953,7 @@ fn start_reader(
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
-                if let Ok(_marking) = session.output_use.lock() {
-                    session.mark_used();
-                }
+                session.mark_output();
                 let data = buffer[..count].to_vec();
                 let activity_updates = activity.feed(&data);
                 let replies = queries.feed(&data);
