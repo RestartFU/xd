@@ -142,6 +142,10 @@ const CHEVRON_LEFT_ICON: &str = "icons/chevron-left.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
+const ARROW_LEFT_ICON: &str = "icons/arrow-left.svg";
+const ARROW_RIGHT_ICON: &str = "icons/arrow-right.svg";
+const ROTATE_CW_ICON: &str = "icons/rotate-cw.svg";
+const EXTERNAL_LINK_ICON: &str = "icons/external-link.svg";
 const CHECK_ICON: &str = "icons/check.svg";
 const UNDO_ICON: &str = "icons/undo.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
@@ -597,6 +601,65 @@ fn pane_icon_button(
             16.0,
             if active { colors.text } else { colors.muted },
         ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatchLine {
+    File,
+    Added,
+    Removed,
+    Context,
+    /// Hunk markers, and what git says about a file besides its lines.
+    Detail,
+}
+
+/// A unified diff as a reader wants it: each file named once by its path, with
+/// the object ids and repeated names left out. Only the headers before a file's
+/// first hunk are dropped, so a removed `-- x` line can never be mistaken for one.
+fn patch_view_lines(patch: &str) -> impl Iterator<Item = (PatchLine, &str)> {
+    let mut in_header = false;
+    patch.lines().filter_map(move |line| {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            in_header = true;
+            return Some((PatchLine::File, patch_file_path(rest)));
+        }
+        if line.starts_with("@@") {
+            in_header = false;
+            return Some((PatchLine::Detail, line));
+        }
+        if in_header {
+            let repeated = ["index ", "--- ", "+++ "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix));
+            return (!repeated).then_some((PatchLine::Detail, line));
+        }
+        Some((
+            match line.as_bytes().first() {
+                Some(b'+') => PatchLine::Added,
+                Some(b'-') => PatchLine::Removed,
+                _ => PatchLine::Context,
+            },
+            line,
+        ))
+    })
+}
+
+/// The newer path in `a/old b/new`. An unrenamed file repeats one path, which
+/// splits exactly even if the path contains ` b/`; a rename's own lines stay in
+/// the patch, naming it in full. Other prefixes, and quoted paths git could not
+/// write plainly, are shown as git wrote them.
+fn patch_file_path(paths: &str) -> &str {
+    let unrenamed = paths.len().checked_sub(5).and_then(|names| {
+        let name = paths.strip_prefix("a/")?.get(..names / 2)?;
+        (paths.len() % 2 == 1 && paths[2 + name.len()..].strip_prefix(" b/")? == name)
+            .then_some(name)
+    });
+    unrenamed.unwrap_or_else(|| {
+        paths
+            .strip_prefix("a/")
+            .and_then(|_| paths.rsplit_once(" b/"))
+            .map_or(paths, |(_, new)| new)
+    })
 }
 
 fn agent_icon(agent: AgentCli) -> &'static str {
@@ -1311,6 +1374,8 @@ type MessageImages = HashMap<String, MessageImageState>;
 const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
 /// What the image viewer leaves around an image, showing the window it is over.
 const IMAGE_VIEWER_MARGIN: f32 = 32.0;
+/// Past this a column stops narrowing and its table scrolls sideways instead.
+const TABLE_COLUMN_MIN_WIDTH: f32 = 88.0;
 
 /// How much memory images in a chat may hold. Scrolling through a long chat
 /// should not keep every image it passes.
@@ -2078,7 +2143,11 @@ impl XdDesktop {
             }
         })
         .detach();
-        let git_commit_input = cx.new(|cx| ComposerInput::new(cx, "Commit message…"));
+        let git_commit_input = cx.new(|cx| {
+            let mut input = ComposerInput::new(cx, "Commit message…");
+            input.set_compact(true);
+            input
+        });
         cx.subscribe(&git_commit_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.git_commit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.commit_changes(cx),
@@ -6377,7 +6446,7 @@ impl XdDesktop {
             .collect::<Vec<_>>();
         div()
             .id("session-chat-tab-bar")
-            .h(px(43.0))
+            .h(px(browser::TAB_BAR_HEIGHT))
             .w_full()
             .flex_none()
             .px_3()
@@ -7150,10 +7219,7 @@ impl XdDesktop {
     ) -> Option<Entity<BrowserPane>> {
         let key = self.browser_scope_key();
         let open = self.browser_is_open();
-        let visible = open
-            && !self.browser_occluded_by_popup()
-            && self.browser_drag.is_none()
-            && self.catalog_drag.is_none();
+        let visible = open && !self.browser_occluded_by_popup();
         for (scope, pane) in &self.browser_panes {
             pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
         }
@@ -10643,7 +10709,7 @@ impl XdDesktop {
 
         div()
             .id("minimal-context-toolbar")
-            .h(px(48.0))
+            .h(px(browser::SESSION_HEADER_HEIGHT))
             .w_full()
             .flex_none()
             .px(px(20.0))
@@ -12191,20 +12257,72 @@ impl XdDesktop {
                 .text_color(rgb(colors.text))
                 .child(code.code.clone())
                 .into_any_element(),
-            markdown::Block::Table(table) => div()
-                .id(("native-table", index))
-                .w_full()
-                .p_3()
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgb(colors.border))
-                .bg(rgb(colors.surface))
-                .font_family(MONO)
-                .text_size(px(12.5))
-                .line_height(px(19.0))
-                .text_color(rgb(colors.text))
-                .child(table.text.clone())
-                .into_any_element(),
+            markdown::Block::Table(table) => {
+                let weights = table.column_weights();
+                let row_count = table.rows.len();
+                let row = |row_index: usize, cells: &[markdown::InlineText]| {
+                    let scope = format!("native-table:{index}:{row_index}");
+                    div()
+                        .w_full()
+                        .flex()
+                        .when(row_index < row_count, |row| {
+                            row.border_b_1().border_color(rgb(colors.border))
+                        })
+                        .children(cells.iter().zip(&weights).enumerate().map(
+                            |(column, (cell, weight))| {
+                                // Every row divides its width by the same weights
+                                // and limits, which is what lines the columns up.
+                                let mut element = div()
+                                    .debug_selector(move || {
+                                        format!("native-table-cell-{row_index}-{column}")
+                                    })
+                                    .flex_basis(relative(0.0))
+                                    .min_w(px(TABLE_COLUMN_MIN_WIDTH))
+                                    .px_3()
+                                    .py(px(7.0))
+                                    .child(Self::render_native_inline(
+                                        cell,
+                                        colors,
+                                        scoped_element_id(&scope, column) as usize,
+                                    ));
+                                element.style().flex_grow = Some(*weight);
+                                element
+                            },
+                        ))
+                };
+                let mut table_element = div()
+                    .id(("native-table", index))
+                    .debug_selector(|| "native-table".into())
+                    .w_full()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .bg(rgb(colors.surface))
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .text_color(rgb(colors.text))
+                    .overflow_x_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w(px(TABLE_COLUMN_MIN_WIDTH * weights.len() as f32))
+                            .flex()
+                            .flex_col()
+                            .child(row(0, &table.header).font_weight(FontWeight::SEMIBOLD))
+                            .children(
+                                table
+                                    .rows
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(row_index, cells)| row(row_index + 1, cells)),
+                            ),
+                    );
+                // A vertical wheel keeps moving the transcript. Only a sideways
+                // gesture, which Shift makes of a wheel, moves a table that does
+                // not fit.
+                table_element.style().restrict_scroll_to_axis = Some(true);
+                table_element.into_any_element()
+            }
             markdown::Block::Analysis(blocks) => div()
                 .id(("native-analysis", index))
                 .w_full()
@@ -14529,44 +14647,6 @@ impl XdDesktop {
             NativePane::Files => Some({
                 let panel = self.diff_panel.clone().unwrap_or_default();
                 let mut rows = Vec::new();
-                if !panel.browse_path.is_empty() {
-                    rows.push(
-                        div()
-                            .id("native-files-up")
-                            .h(px(28.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .rounded(px(4.0))
-                            .text_size(px(12.5))
-                            .text_color(rgb(colors.muted))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let (Some(chat), Some(panel)) =
-                                    (this.model.selected_chat.clone(), &mut this.diff_panel)
-                                {
-                                    panel.browse_path = Path::new(&panel.browse_path)
-                                        .parent()
-                                        .map(|p| p.to_string_lossy().into_owned())
-                                        .unwrap_or_default();
-                                    panel.loading = true;
-                                    panel.file_preview = None;
-                                    let path = panel.browse_path.clone();
-                                    if let Some(host) = this.active_host() {
-                                        let _ = host.file_browse_list(
-                                            &chat,
-                                            &path,
-                                            this.diff_generation,
-                                        );
-                                    }
-                                }
-                                cx.notify();
-                            }))
-                            .child("← Parent directory")
-                            .into_any_element(),
-                    );
-                }
                 for (index, entry) in panel.browse_entries.iter().enumerate() {
                     let path = if panel.browse_path.is_empty() {
                         entry.name.clone()
@@ -14583,11 +14663,11 @@ impl XdDesktop {
                         div()
                             .id(("native-file", index))
                             .h(px(28.0))
-                            .px_3()
+                            .px_2()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .rounded(px(4.0))
+                            .rounded(px(6.0))
                             .font_family(MONO)
                             .text_size(px(12.0))
                             .text_color(rgb(if open { colors.text } else { colors.muted }))
@@ -14637,143 +14717,245 @@ impl XdDesktop {
                                 }
                                 cx.notify();
                             }))
-                            .child(label)
+                            .child(div().min_w_0().truncate().child(label))
                             .into_any_element(),
                     );
                 }
+                let empty = rows.is_empty() && !panel.loading && panel.error.is_none();
+                // The list takes the whole pane until there is something to
+                // show beside it, and leaves room for that at any pane width.
+                let detail_open =
+                    panel.file_preview.is_some() || panel.file_loading || panel.error.is_some();
+                let list_width = (browser_pane_width(
+                    self.settings.browser_width,
+                    f32::from(window.viewport_size().width),
+                ) * 0.42)
+                    .clamp(140.0, 220.0);
+                let at_root = panel.browse_path.is_empty();
+                let location = if at_root {
+                    "Project root".to_owned()
+                } else {
+                    panel.browse_path.clone()
+                };
+                let list = div()
+                    .id("native-file-list")
+                    .h_full()
+                    .overflow_y_scroll()
+                    .p(px(6.0))
+                    .when(panel.loading, |list| {
+                        list.child(
+                            div()
+                                .h(px(28.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .text_size(px(12.5))
+                                .text_color(rgb(colors.muted))
+                                .child("Loading…"),
+                        )
+                    })
+                    .when(empty, |list| {
+                        list.child(
+                            div()
+                                .h(px(28.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .text_size(px(12.5))
+                                .text_color(rgb(colors.muted))
+                                .child("This folder is empty."),
+                        )
+                    })
+                    .children(rows);
+                let detail = div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .when(panel.file_loading, |pane| {
+                        pane.child(
+                            div()
+                                .p_3()
+                                .text_size(px(12.5))
+                                .text_color(rgb(colors.muted))
+                                .child("Loading…"),
+                        )
+                    })
+                    .when_some(panel.error, |pane, error| {
+                        pane.child(
+                            div()
+                                .p_3()
+                                .text_size(px(12.5))
+                                .text_color(rgb(colors.danger))
+                                .child(error),
+                        )
+                    })
+                    .when_some(panel.file_preview, |pane, preview| {
+                        pane.child(
+                            div()
+                                .h(px(browser::TAB_BAR_HEIGHT))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .px_3()
+                                .border_b_1()
+                                .border_color(rgb(colors.border))
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
+                                        .font_family(MONO)
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(colors.muted))
+                                        .child(preview.path),
+                                )
+                                .child(
+                                    ui_button("native-save-file", ButtonKind::Secondary, colors)
+                                        .h(px(26.0))
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.save_browse_file(cx)),
+                                        )
+                                        .child(if preview.saving { "Saving…" } else { "Save" }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .p_2()
+                                .text_size(px(12.5))
+                                .child(self.file_editor.clone()),
+                        )
+                    });
                 div()
                     .size_full()
                     .flex()
+                    .flex_col()
                     .min_h_0()
                     .text_color(rgb(colors.text))
                     .child(
                         div()
-                            .id("native-file-list")
-                            .w(px(220.0))
+                            .h(px(browser::TAB_BAR_HEIGHT))
+                            .bg(rgb(colors.chrome))
                             .flex_none()
-                            .h_full()
-                            .overflow_y_scroll()
-                            .p(px(6.0))
-                            .border_r_1()
+                            .pl_2()
+                            .pr_3()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .border_b_1()
                             .border_color(rgb(colors.border))
-                            .children(rows),
+                            .when(!at_root, |row| {
+                                row.child(
+                                    pane_icon_button(
+                                        "native-files-up",
+                                        "Parent directory",
+                                        ARROW_LEFT_ICON,
+                                        false,
+                                        colors,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            if let (Some(chat), Some(panel)) = (
+                                                this.model.selected_chat.clone(),
+                                                &mut this.diff_panel,
+                                            ) {
+                                                panel.browse_path = Path::new(&panel.browse_path)
+                                                    .parent()
+                                                    .map(|p| p.to_string_lossy().into_owned())
+                                                    .unwrap_or_default();
+                                                panel.loading = true;
+                                                panel.file_preview = None;
+                                                let path = panel.browse_path.clone();
+                                                if let Some(host) = this.active_host() {
+                                                    let _ = host.file_browse_list(
+                                                        &chat,
+                                                        &path,
+                                                        this.diff_generation,
+                                                    );
+                                                }
+                                            }
+                                            cx.notify();
+                                        },
+                                    )),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .when(at_root, |label| label.pl_1())
+                                    .truncate()
+                                    .when(!at_root, |label| label.font_family(MONO))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(colors.muted))
+                                    .child(location),
+                            ),
                     )
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
-                            .h_full()
+                            .min_h_0()
                             .flex()
-                            .flex_col()
-                            .when(panel.loading || panel.file_loading, |pane| {
-                                pane.child(
-                                    div()
-                                        .p_3()
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(colors.muted))
-                                        .child("Loading…"),
-                                )
-                            })
-                            .when_some(panel.error, |pane, error| {
-                                pane.child(
-                                    div()
-                                        .p_3()
-                                        .text_size(px(12.5))
-                                        .text_color(rgb(colors.danger))
-                                        .child(error),
-                                )
-                            })
-                            .when_some(panel.file_preview, |pane, preview| {
-                                pane.child(
-                                    div()
-                                        .h(px(36.0))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .gap_3()
-                                        .px_3()
-                                        .border_b_1()
-                                        .border_color(rgb(colors.border))
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .flex_1()
-                                                .truncate()
-                                                .font_family(MONO)
-                                                .text_size(px(12.0))
-                                                .text_color(rgb(colors.muted))
-                                                .child(preview.path),
-                                        )
-                                        .child(
-                                            ui_button(
-                                                "native-save-file",
-                                                ButtonKind::Secondary,
-                                                colors,
-                                            )
-                                            .h(px(26.0))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.save_browse_file(cx)
-                                            }))
-                                            .child(
-                                                if preview.saving { "Saving…" } else { "Save" },
-                                            ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_h_0()
-                                        .p_2()
-                                        .text_size(px(12.5))
-                                        .child(self.file_editor.clone()),
-                                )
-                            }),
+                            .child(
+                                div()
+                                    .h_full()
+                                    .when(detail_open, |column| {
+                                        column
+                                            .w(px(list_width))
+                                            .flex_none()
+                                            .border_r_1()
+                                            .border_color(rgb(colors.border))
+                                    })
+                                    .when(!detail_open, |column| column.flex_1().min_w_0())
+                                    .child(list),
+                            )
+                            .when(detail_open, |split| split.child(detail)),
                     )
                     .into_any_element()
             }),
             NativePane::Diff => Some({
                 let panel = self.diff_panel.clone().unwrap_or_default();
-                let lines = if panel.patch.is_empty() {
-                    Vec::new()
-                } else {
-                    panel
-                        .patch
-                        .lines()
-                        .take(4_000)
-                        .enumerate()
-                        .map(|(index, line)| {
-                            let (fg, bg) = if line.starts_with("+++") || line.starts_with("---") {
-                                (colors.text, None)
-                            } else if line.starts_with('+') {
-                                (colors.text, Some(colors.diff_added))
-                            } else if line.starts_with('-') {
-                                (colors.text, Some(colors.diff_removed))
-                            } else if line.starts_with("@@") {
-                                (colors.accent_ink, None)
-                            } else if line.starts_with("diff ") {
-                                (colors.text, Some(colors.surface_high))
+                let lines = patch_view_lines(&panel.patch)
+                    .take(4_000)
+                    .enumerate()
+                    .map(|(index, (kind, line))| {
+                        let (fg, bg) = match kind {
+                            PatchLine::File => (colors.text, Some(colors.surface_high)),
+                            PatchLine::Added => (colors.text, Some(colors.diff_added)),
+                            PatchLine::Removed => (colors.text, Some(colors.diff_removed)),
+                            PatchLine::Context => (colors.muted, None),
+                            PatchLine::Detail => (colors.faint, None),
+                        };
+                        div()
+                            .id(("native-diff-line", index))
+                            .px_3()
+                            .h(px(if kind == PatchLine::File { 26.0 } else { 19.0 }))
+                            .flex()
+                            .items_center()
+                            .whitespace_nowrap()
+                            .text_color(rgb(fg))
+                            .when_some(bg, |row, bg| row.bg(rgb(bg)))
+                            .when(kind == PatchLine::File, |row| {
+                                row.when(index > 0, |row| row.mt_3())
+                                    .font_weight(FontWeight::MEDIUM)
+                            })
+                            .child(if line.is_empty() {
+                                " ".to_owned()
                             } else {
-                                (colors.muted, None)
-                            };
-                            div()
-                                .id(("native-diff-line", index))
-                                .px_3()
-                                .h(px(19.0))
-                                .whitespace_nowrap()
-                                .text_color(rgb(fg))
-                                .when_some(bg, |row, bg| row.bg(rgb(bg)))
-                                .when(line.starts_with("diff "), |row| {
-                                    row.mt_2().font_weight(FontWeight::SEMIBOLD)
-                                })
-                                .child(if line.is_empty() {
-                                    " ".to_owned()
-                                } else {
-                                    line.to_owned()
-                                })
-                                .into_any_element()
-                        })
-                        .collect::<Vec<_>>()
-                };
+                                line.to_owned()
+                            })
+                            .into_any_element()
+                    })
+                    .collect::<Vec<_>>();
+                let commit_focused = self
+                    .git_commit_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window);
                 div()
                     .size_full()
                     .flex()
@@ -14781,9 +14963,11 @@ impl XdDesktop {
                     .text_color(rgb(colors.text))
                     .child(
                         div()
-                            .h(px(36.0))
+                            .h(px(browser::TAB_BAR_HEIGHT))
+                            .bg(rgb(colors.chrome))
                             .flex_none()
-                            .px_3()
+                            .pl_3()
+                            .pr_2()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -14792,17 +14976,21 @@ impl XdDesktop {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(px(12.5))
+                                    .text_size(px(12.0))
                                     .text_color(rgb(colors.muted))
                                     .child("Working tree"),
                             )
                             .child(
-                                ui_button("native-refresh-diff", ButtonKind::Ghost, colors)
-                                    .h(px(26.0))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_native_pane(NativePane::Diff, cx)
-                                    }))
-                                    .child("Refresh"),
+                                pane_icon_button(
+                                    "native-refresh-diff",
+                                    "Refresh",
+                                    ROTATE_CW_ICON,
+                                    false,
+                                    colors,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| this.show_native_pane(NativePane::Diff, cx),
+                                )),
                             ),
                     )
                     .when(panel.loading, |pane| {
@@ -14856,13 +15044,30 @@ impl XdDesktop {
                             .child(
                                 div()
                                     .flex_1()
-                                    .h(px(32.0))
-                                    .px_2()
-                                    .rounded(px(5.0))
+                                    .min_w_0()
+                                    .h(px(30.0))
+                                    .px(px(10.0))
+                                    .flex()
+                                    .items_center()
+                                    .cursor_text()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this, _, window, cx| {
+                                            this.git_commit_input
+                                                .read(cx)
+                                                .focus_handle(cx)
+                                                .focus(window);
+                                        }),
+                                    )
+                                    .rounded(px(8.0))
                                     .border_1()
-                                    .border_color(rgb(colors.border))
-                                    .bg(rgb(colors.background))
-                                    .child(self.git_commit_input.clone()),
+                                    .border_color(rgb(if commit_focused {
+                                        colors.selected_border
+                                    } else {
+                                        colors.border
+                                    }))
+                                    .bg(rgb(colors.surface))
+                                    .child(div().w_full().child(self.git_commit_input.clone())),
                             )
                             .child(
                                 ui_button("native-commit", ButtonKind::Primary, colors)
@@ -15100,9 +15305,6 @@ impl XdDesktop {
                         cx.stop_propagation();
                         this.catalog_drag =
                             Some((f32::from(event.position.x), catalog_width as u16));
-                        for pane in this.browser_panes.values() {
-                            pane.update(cx, |pane, _| pane.set_visible(false));
-                        }
                         cx.notify();
                     }),
                 )
@@ -16825,16 +17027,6 @@ impl XdDesktop {
             .key_context("XdDesktop")
             .bg(rgb(colors.background))
             .font_family(UI_FONT)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    if let Some(pane) = this.browser_panes.get(&this.browser_scope_key()).cloned() {
-                        pane.update(cx, |pane, cx| {
-                            pane.dismiss_add_menu(cx);
-                        });
-                    }
-                }),
-            )
             .on_mouse_move(
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
                     if let Some((start_y, start_height)) = this.dock_drag {
@@ -16951,11 +17143,6 @@ impl XdDesktop {
                 if this.dismiss_usage_layer(window, cx) {
                     return;
                 }
-                if let Some(pane) = this.browser_panes.get(&this.browser_scope_key()).cloned()
-                    && pane.update(cx, |pane, cx| pane.dismiss_add_menu(cx))
-                {
-                    return;
-                }
                 if !this.catalog_query.is_empty() {
                     this.catalog_query.clear();
                     this.catalog_find_input
@@ -17021,16 +17208,13 @@ impl XdDesktop {
                             .flex_col()
                             .when_some(toolbar, |column, toolbar| column.child(toolbar))
                             .child(
-                                div()
-                                    .w_full()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .flex()
-                                    .child(
-                                        div().flex_1().min_w_0().min_h_0().h_full().child(content),
-                                    )
-                                    .when_some(browser_pane, |row, pane| {
-                                        row.child(
+                                div().w_full().flex_1().min_h_0().flex().child(
+                                    div().flex_1().min_w_0().min_h_0().h_full().child(content),
+                                ),
+                            ),
+                    )
+                    .when_some(browser_pane, |row, pane| {
+                        row.child(
                             div()
                                 .id("browser-divider")
                                 .relative()
@@ -17059,11 +17243,6 @@ impl XdDesktop {
                                                         f32::from(event.position.x),
                                                         browser_width as u16,
                                                     ));
-                                                    for pane in this.browser_panes.values() {
-                                                        pane.update(cx, |pane, _| {
-                                                            pane.set_visible(false)
-                                                        });
-                                                    }
                                                     cx.notify();
                                                 },
                                             ),
@@ -17084,7 +17263,7 @@ impl XdDesktop {
                                     div()
                                         .min_h_0()
                                         .when(side_content.is_some(), |slot| {
-                                            slot.h(px(32.0)).flex_none()
+                                            slot.h(px(browser::SESSION_HEADER_HEIGHT)).flex_none()
                                         })
                                         .when(side_content.is_none(), |slot| slot.flex_1())
                                         .child(pane),
@@ -17093,9 +17272,7 @@ impl XdDesktop {
                                     dock.child(div().flex_1().min_h_0().child(content))
                                 }),
                         )
-                                    }),
-                            ),
-                    )
+                    })
                     .when_some(catalog_resize, |row, handle| row.child(handle)),
             )
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
@@ -17419,6 +17596,18 @@ impl AssetSource for EmbeddedIcons {
             )),
             CHEVRON_LEFT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/chevron-left.svg").as_slice(),
+            )),
+            ARROW_LEFT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/arrow-left.svg").as_slice(),
+            )),
+            ARROW_RIGHT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/arrow-right.svg").as_slice(),
+            )),
+            ROTATE_CW_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/rotate-cw.svg").as_slice(),
+            )),
+            EXTERNAL_LINK_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/external-link.svg").as_slice(),
             )),
             CHEVRON_RIGHT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/chevron-right.svg").as_slice(),
@@ -17825,6 +18014,62 @@ fn strip_source_build_controls(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_patch_names_each_file_once_and_keeps_its_lines() {
+        let patch = "diff --git a/src/a b.rs b/src/a b.rs\n\
+index 1..2 100644\n\
+--- a/src/a b.rs\n\
++++ b/src/a b.rs\n\
+@@ -1,2 +1,2 @@\n\
+\x20kept\n\
+--- removed line that looks like a header\n\
++++ added line that looks like a header\n\
+index still content\n\
+diff --git a/image.png b/image.png\n\
+new file mode 100644\n\
+index 0..3\n\
+Binary files /dev/null and b/image.png differ\n";
+        assert_eq!(
+            super::patch_view_lines(patch).collect::<Vec<_>>(),
+            vec![
+                (super::PatchLine::File, "src/a b.rs"),
+                (super::PatchLine::Detail, "@@ -1,2 +1,2 @@"),
+                (super::PatchLine::Context, " kept"),
+                (
+                    super::PatchLine::Removed,
+                    "--- removed line that looks like a header"
+                ),
+                (
+                    super::PatchLine::Added,
+                    "+++ added line that looks like a header"
+                ),
+                (super::PatchLine::Context, "index still content"),
+                (super::PatchLine::File, "image.png"),
+                (super::PatchLine::Detail, "new file mode 100644"),
+                (
+                    super::PatchLine::Detail,
+                    "Binary files /dev/null and b/image.png differ"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_patch_header_shows_the_new_name_of_a_rename_and_odd_paths_verbatim() {
+        assert_eq!(super::patch_file_path("a/old.rs b/new.rs"), "new.rs");
+        assert_eq!(
+            super::patch_file_path("a/src/ b/example.rs b/src/ b/example.rs"),
+            "src/ b/example.rs"
+        );
+        assert_eq!(super::patch_file_path("a/café.rs b/café.rs"), "café.rs");
+        assert_eq!(super::patch_file_path("a/é b/é"), "é");
+        assert_eq!(super::patch_file_path("short"), "short");
+        assert_eq!(
+            super::patch_file_path("\"a/caf\\303\\251\" \"b/caf\\303\\251\""),
+            "\"a/caf\\303\\251\" \"b/caf\\303\\251\""
+        );
+    }
+
     impl XdDesktop {
         fn new_agent_terminal_panel(chat_id: String, agent: AgentCli) -> TerminalPanel {
             TerminalPanel {
@@ -18244,6 +18489,82 @@ mod tests {
             assert!(text.contains("before upgrade"));
             assert!(text.contains("after upgrade"));
         });
+    }
+
+    fn table_transcript<'a>(
+        cx: &'a mut gpui::TestAppContext,
+        width: f32,
+        table: &str,
+    ) -> &'a mut gpui::VisualTestContext {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages =
+                Arc::new(vec![Message::new(Some(1), "assistant", table, None)]);
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(width), px(800.0)));
+        cx.run_until_parked();
+        cx
+    }
+
+    #[gpui::test]
+    fn a_table_too_long_for_one_line_wraps_inside_aligned_columns(cx: &mut gpui::TestAppContext) {
+        let prose = "A cell with far more to say than one line of the column can hold. ".repeat(3);
+        let table = format!(
+            "| Check | Result | Empty |\n|---|---|---|\n| Review | Clean | |\n| {prose} | {prose} | |"
+        );
+        let cx = table_transcript(cx, 1100.0, &table);
+
+        let bounds = cx.debug_bounds("native-table").unwrap();
+        for column in 0..3 {
+            let header = cx
+                .debug_bounds(format!("native-table-cell-0-{column}").leak())
+                .unwrap();
+            for row in 1..3 {
+                let cell = cx
+                    .debug_bounds(format!("native-table-cell-{row}-{column}").leak())
+                    .unwrap();
+                assert_eq!(cell.left(), header.left());
+                assert_eq!(cell.size.width, header.size.width);
+            }
+        }
+        let last = cx.debug_bounds("native-table-cell-2-2").unwrap();
+        assert!(
+            last.right() <= bounds.right(),
+            "the table fits its reading column"
+        );
+        let short = cx.debug_bounds("native-table-cell-1-0").unwrap();
+        let wrapped = cx.debug_bounds("native-table-cell-2-0").unwrap();
+        assert!(
+            wrapped.size.height > short.size.height,
+            "a long cell wraps in place"
+        );
+    }
+
+    #[gpui::test]
+    fn a_table_with_too_many_columns_scrolls_instead_of_crushing_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let row = |cell: &str| format!("|{}", format!(" {cell} |").repeat(14));
+        let table = format!("{}\n{}\n{}", row("head"), row("---"), row("cell"));
+        let cx = table_transcript(cx, 900.0, &table);
+
+        let bounds = cx.debug_bounds("native-table").unwrap();
+        let first = cx.debug_bounds("native-table-cell-1-0").unwrap();
+        assert_eq!(first.size.width, px(TABLE_COLUMN_MIN_WIDTH));
+        assert!(first.left() + px(TABLE_COLUMN_MIN_WIDTH * 14.0) > bounds.right());
     }
 
     #[gpui::test]
@@ -19938,6 +20259,109 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dragging_the_browser_divider_resizes_it_without_hiding_the_page(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        cx.update(|_, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.settings.browser_width = 460;
+                desktop.toggle_browser(cx);
+            })
+        });
+        cx.run_until_parked();
+        let page_is_visible = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                desktop.update(cx, |desktop, cx| {
+                    desktop
+                        .sync_browser_pane(window, cx)
+                        .is_some_and(|pane| pane.read(cx).is_visible())
+                })
+            })
+        };
+        assert!(page_is_visible(cx));
+
+        let divider = 1400.0 - 460.0 - BROWSER_DIVIDER_WIDTH;
+        cx.simulate_mouse_down(
+            point(px(divider), px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(desktop.read(cx).browser_drag.is_some()));
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_move(
+            point(px(divider - 100.0), px(300.0)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(desktop.read(cx).settings.browser_width, 560));
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_up(
+            point(px(divider - 100.0), px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(desktop.read(cx).browser_drag.is_none()));
+        assert!(page_is_visible(cx));
+    }
+
+    #[gpui::test]
+    fn dragging_the_catalog_edge_does_not_hide_the_browser_page(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        cx.update(|_, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.settings.catalog_width = 256;
+                desktop.toggle_browser(cx);
+            })
+        });
+        cx.run_until_parked();
+        let page_is_visible = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                desktop.update(cx, |desktop, cx| {
+                    desktop
+                        .sync_browser_pane(window, cx)
+                        .is_some_and(|pane| pane.read(cx).is_visible())
+                })
+            })
+        };
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_down(
+            point(px(256.0), px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(desktop.read(cx).catalog_drag.is_some()));
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_move(
+            point(px(320.0), px(300.0)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(desktop.read(cx).settings.catalog_width, 320));
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_up(
+            point(px(320.0), px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(desktop.read(cx).catalog_drag.is_none()));
+        assert!(page_is_visible(cx));
+    }
+
+    #[gpui::test]
     fn browser_panes_preserve_each_chats_tabs_toggle_and_settings_visibility(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -20029,11 +20453,11 @@ mod tests {
             desktop.creating_workspace = false;
             desktop.browser_drag = Some((100.0, 460));
             desktop.sync_browser_pane(window, cx);
-            assert!(!a.read(cx).is_visible());
+            assert!(a.read(cx).is_visible());
             desktop.browser_drag = None;
             desktop.catalog_drag = Some((100.0, 256));
             desktop.sync_browser_pane(window, cx);
-            assert!(!a.read(cx).is_visible());
+            assert!(a.read(cx).is_visible());
             desktop.catalog_drag = None;
 
             desktop.settings.remote_ssh_command = Some("ssh remote.example".into());
