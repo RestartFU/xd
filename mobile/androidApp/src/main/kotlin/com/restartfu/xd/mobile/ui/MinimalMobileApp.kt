@@ -1615,6 +1615,28 @@ private fun WorkspacePicker(
                             )
                         }
                 }
+                // A choice kept through a failed listing still shows, so Create
+                // never uses something the picker does not show.
+                when (val kept = selected) {
+                    is Ops.NewSessionWorktree.PullRequest -> if (places.pullRequests.none { it.number == kept.number }) {
+                        PlaceRow(
+                            label = "#${kept.number}",
+                            detail = "Pull request, chosen before it could be listed",
+                            chosen = true,
+                            onClick = {},
+                        )
+                    }
+                    is Ops.NewSessionWorktree.Branch -> if (places.branches.none { it.reference == kept.reference }) {
+                        PlaceRow(
+                            label = kept.reference.removePrefix("refs/heads/").removePrefix("refs/remotes/"),
+                            detail = "Branch, chosen before it could be listed",
+                            chosen = true,
+                            onClick = {},
+                            mono = true,
+                        )
+                    }
+                    else -> Unit
+                }
                 places.sourcesError?.let {
                     Text(
                         "Branches and pull requests could not be listed: $it",

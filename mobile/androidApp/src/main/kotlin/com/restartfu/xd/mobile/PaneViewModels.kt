@@ -82,11 +82,16 @@ class DiffViewModel(
             try {
                 val git = session().commitAll(message)
                 // Clear only what was committed; anything typed since stays.
-                _state.value = _state.value.copy(
-                    git = git,
-                    committing = false,
-                    commitMessage = _state.value.commitMessage.takeIf { it != message }.orEmpty(),
-                )
+                // The checkout may have moved to another branch meanwhile, and
+                // its link goes in this update rather than beside that branch.
+                _state.value = _state.value.let { latest ->
+                    latest.copy(
+                        git = git,
+                        pullRequestUrl = latest.pullRequestUrl.takeIf { latest.pullRequestBranch == git.branch },
+                        committing = false,
+                        commitMessage = latest.commitMessage.takeIf { it != message }.orEmpty(),
+                    )
+                }
                 refresh()
             } catch (error: CancellationException) {
                 throw error
