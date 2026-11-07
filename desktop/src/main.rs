@@ -2886,6 +2886,10 @@ impl XdDesktop {
     /// The connection status control: go to the remembered host, and ask for a
     /// pairing code only when there is no host or it has refused this device.
     fn reconnect_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A retry now would abandon a pairing in flight and waste its code.
+        if self.remote_panel.is_some() {
+            return;
+        }
         if self.settings.remote_credentials.is_none()
             || self.remote_state == RemoteState::Unconfigured
         {
@@ -18170,6 +18174,26 @@ mod tests {
             assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
             let panel = desktop.remote_panel.as_ref().expect("a refused device");
             assert_eq!(panel.error.as_deref(), Some("Revoked."));
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_leaves_a_pairing_in_flight_alone(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            desktop.open_remote(window, cx);
+            desktop.remote_panel.as_mut().unwrap().submitting = true;
+            desktop.remote_state = RemoteState::Connecting;
+            let pairing = desktop.remote_generation;
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.remote_generation, pairing);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+            assert!(desktop.remote_panel.as_ref().unwrap().submitting);
         });
     }
 
