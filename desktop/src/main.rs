@@ -1173,12 +1173,15 @@ struct TranscriptSnapshot {
     /// Agents still running, kept with the rows so a frame need not parse
     /// every record to find them.
     running_agents: Arc<Vec<RunningAgent>>,
+    /// Each row's place in its work log, kept with the rows so measuring a long
+    /// log need not compare its text again for every row.
+    work_runs: Arc<Vec<Option<WorkRun>>>,
 }
 
 impl TranscriptSnapshot {
     fn sync_messages(&mut self, model: &AppModel) {
         self.messages = Arc::new(model.messages.clone());
-        self.sync_running_agents();
+        self.sync_derived_rows();
     }
 
     /// Rows the list draws. The list's item count must always equal this,
@@ -1200,8 +1203,13 @@ impl TranscriptSnapshot {
             Arc::make_mut(&mut self.live_items)[index] = message;
             self.messages.len() + index
         };
-        self.sync_running_agents();
+        self.sync_derived_rows();
         Some(row)
+    }
+
+    fn sync_derived_rows(&mut self) {
+        self.sync_running_agents();
+        self.sync_work_runs();
     }
 
     fn sync_running_agents(&mut self) {
@@ -1238,56 +1246,56 @@ impl TranscriptSnapshot {
 
     fn sync_live_items(&mut self, model: &AppModel) {
         self.live_items = Arc::new(model.live_items.clone());
-        self.sync_running_agents();
+        self.sync_derived_rows();
     }
 
-    fn stacks_activity(&self, index: usize) -> bool {
-        self.get(index).is_some_and(|message| {
+    fn sync_work_runs(&mut self) {
+        let rows = self
+            .messages
+            .iter()
+            .chain(self.live_items.iter())
+            .collect::<Vec<_>>();
+        let stacks = |message: &Message| {
             message.role == "tool" && activity::is_plain_activity(&message.content)
-        })
+        };
+        let mut runs = vec![None; rows.len()];
+        let mut start = 0;
+        while start < rows.len() {
+            let mut end = start;
+            while end < rows.len() && stacks(rows[end]) {
+                end += 1;
+            }
+            if end - start > 1 {
+                // The whole text must match: rows that only look alike, such as
+                // long commands sharing a truncated start, open onto different
+                // details.
+                let entry_starts = (start..end)
+                    .filter(|&row| row == start || rows[row].content != rows[row - 1].content)
+                    .collect::<Vec<_>>();
+                for (entry, &repeat_start) in entry_starts.iter().enumerate() {
+                    let repeat_end = entry_starts.get(entry + 1).copied().unwrap_or(end);
+                    let repeats = &mut runs[repeat_start..repeat_end];
+                    for (offset, run) in repeats.iter_mut().enumerate() {
+                        *run = Some(WorkRun {
+                            start,
+                            len: end - start,
+                            position: repeat_start + offset - start,
+                            entries: entry_starts.len(),
+                            entry,
+                            repeat_start,
+                            repeats: repeat_end - repeat_start,
+                        });
+                    }
+                }
+            }
+            start = end.max(start + 1);
+        }
+        self.work_runs = Arc::new(runs);
     }
 
     /// The run of plain activity a row belongs to, when there is more than one.
     fn work_run(&self, index: usize) -> Option<WorkRun> {
-        if !self.stacks_activity(index) {
-            return None;
-        }
-        let mut start = index;
-        while start > 0 && self.stacks_activity(start - 1) {
-            start -= 1;
-        }
-        let mut end = index + 1;
-        while self.stacks_activity(end) {
-            end += 1;
-        }
-        if end - start <= 1 {
-            return None;
-        }
-        // The whole text must match: rows that only look alike, such as long
-        // commands sharing a truncated start, open onto different details.
-        let repeats_previous = |row: usize| {
-            row > start
-                && self.get(row).map(|message| &message.content)
-                    == self.get(row - 1).map(|message| &message.content)
-        };
-        let starts_entry = |row: &usize| !repeats_previous(*row);
-        let mut repeat_start = index;
-        while repeats_previous(repeat_start) {
-            repeat_start -= 1;
-        }
-        let mut repeat_end = index + 1;
-        while repeat_end < end && repeats_previous(repeat_end) {
-            repeat_end += 1;
-        }
-        Some(WorkRun {
-            start,
-            len: end - start,
-            position: index - start,
-            entries: (start..end).filter(starts_entry).count(),
-            entry: (start..repeat_start).filter(starts_entry).count(),
-            repeat_start,
-            repeats: repeat_end - repeat_start,
-        })
+        self.work_runs.get(index).copied().flatten()
     }
 
     fn row_key(&self, index: usize) -> i64 {
@@ -16673,15 +16681,15 @@ mod tests {
     }
 
     fn work_log(rows: &[&str]) -> TranscriptSnapshot {
-        TranscriptSnapshot {
-            messages: Arc::new(
-                rows.iter()
-                    .enumerate()
-                    .map(|(id, text)| Message::new(Some(id as i64), "tool", *text, None))
-                    .collect(),
-            ),
-            ..TranscriptSnapshot::default()
-        }
+        let mut model = AppModel::default();
+        model.messages = rows
+            .iter()
+            .enumerate()
+            .map(|(id, text)| Message::new(Some(id as i64), "tool", *text, None))
+            .collect();
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+        snapshot
     }
 
     /// The rows a work log draws an entry for, and the count each one shows.
@@ -16712,6 +16720,38 @@ mod tests {
         assert_eq!(drawn_entries(&same, false), [(2, 3)]);
         assert_eq!(same.work_run(2).unwrap().len, 3);
         assert_eq!(same.work_run(0).unwrap().hidden_count(false), 0);
+    }
+
+    #[test]
+    fn work_log_follows_live_rows_and_breaks_at_other_rows() {
+        let mut model = AppModel::default();
+        model.messages = vec![
+            Message::new(Some(1), "tool", "Read a", None),
+            Message::new(Some(2), "tool", "Read a", None),
+            Message::new(Some(3), "assistant", "Read a", None),
+            Message::new(Some(4), "tool", "Read a", None),
+        ];
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+        assert_eq!(snapshot.work_run(1).map(|run| run.repeats), Some(2));
+        assert_eq!(snapshot.work_run(2), None);
+        // A lone row is not a log until another joins it.
+        assert_eq!(snapshot.work_run(3), None);
+
+        // A live row joins the stored run before it, across the seam.
+        model.live_items = vec![Message::new(None, "tool", "Read a", None)];
+        snapshot.sync_live_items(&model);
+        let tail = snapshot.work_run(4).unwrap();
+        assert_eq!((tail.start, tail.repeat_start, tail.repeats), (3, 3, 2));
+        assert!(!snapshot.work_run(3).unwrap().hides(false));
+        assert!(!snapshot.work_run(3).unwrap().shows_entry(false));
+        assert_eq!(snapshot.work_run(5), None);
+
+        // Clearing the live rows takes their place in the log with them.
+        model.live_items.clear();
+        snapshot.sync_live_items(&model);
+        assert_eq!(snapshot.work_run(3), None);
+        assert_eq!(snapshot.work_run(4), None);
     }
 
     #[test]
