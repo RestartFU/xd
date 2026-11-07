@@ -1613,17 +1613,18 @@ impl HostHandle {
                 })
             })
             .collect::<Vec<_>>();
-        // `files`: this client shows every attachment, so the host may clear
-        // files from the draft along with the images.
         let mut body = json!({
             "op": "send",
             "chat": chat_id,
             "text": text,
             "generate_worktree_name": true,
-            "files": true,
         });
         if !attachments.is_empty() {
             body["attachments"] = Value::Array(attachments);
+            // `files`: these are the draft's attachments, files included, so
+            // the host may clear them from the draft. A message sent without
+            // them, such as a shortcut, leaves the draft's files where they are.
+            body["files"] = Value::Bool(true);
         }
         if let Some(backend) = worktree_backend {
             body["worktree_backend"] = Value::String(backend.to_owned());
@@ -2220,6 +2221,47 @@ mod tests {
         ));
 
         server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_send_with_the_drafts_attachments_may_clear_its_files() {
+        let directory = env::temp_dir().join(format!("xd-send-files-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+                seen.push(request);
+            }
+            seen
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        let report = Attachment::from_file("Report.pdf", b"%PDF".to_vec());
+        host.send_message("chat-1", "read it", &[report], None, None, false)
+            .unwrap();
+        host.send_message("chat-1", "a shortcut", &[], None, None, false)
+            .unwrap();
+
+        let seen = server.join().unwrap();
+        assert_eq!(seen[0]["files"], true);
+        assert_eq!(seen[0]["attachments"][0]["mime"], "application/pdf");
+        assert!(seen[1].get("files").is_none() && seen[1].get("attachments").is_none());
         let _ = fs::remove_dir_all(directory);
     }
 

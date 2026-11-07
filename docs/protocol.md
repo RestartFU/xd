@@ -582,9 +582,10 @@ file: the host writes it under its sent name, the last component of `name`, in
 a private directory of its own and appends `[file: <host path>]`, which the
 agent reads from disk. An unusable name becomes `file`.
 
-A client that shows files as well as images sends `"files":true`. Without it,
-the host takes the client to show only images, as the Android app and earlier
-desktops do: a message it sends leaves the draft's files in the draft.
+A client that shows files as well as images sends `"files":true` with a message
+that carries the draft's attachments. Without it, as from the Android app, an
+earlier desktop, or a message sent apart from the draft such as a shortcut, the
+message leaves the draft's files in the draft.
 
 Desktop clients may provide `worktree_name`, `worktree_backend`, and
 `worktree_model` when the chat is configured to create a new worktree. The
