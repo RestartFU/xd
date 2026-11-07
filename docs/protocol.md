@@ -586,8 +586,8 @@ member's send; subsequent chats share it. Other agent options remain per chat.
 
 Selecting a model atomically requires sending `backend` alongside `value`;
 without `backend` only the model string is stored. The atomic form validates
-both, clears an unsupported effort, and appends a visible `Switched to …`
-transcript event.
+both and clears an unsupported effort. Changing the model adds nothing to the
+transcript.
 
 Each `model` or `effort` selection is also remembered for that chat's assistant,
 separately from every other assistant, and new chats on it start from there.
