@@ -826,6 +826,7 @@ impl BrowserTab {
                 snapshot: RefCell::new(None),
                 generation: Cell::new(0),
                 awaiting_picture: Cell::new(None),
+                picture_generation: Cell::new(None),
                 native_visible: Cell::new(false),
                 has_page: Cell::new(false),
                 healthy: Cell::new(error.is_none()),
@@ -1414,6 +1415,8 @@ struct TabDisplay {
     generation: Cell<u64>,
     /// The capture request whose view is still on screen above any popup.
     awaiting_picture: Cell<Option<u64>>,
+    /// The capture request the current picture answers.
+    picture_generation: Cell<Option<u64>>,
     native_visible: Cell<bool>,
     has_page: Cell<bool>,
     healthy: Cell<bool>,
@@ -1488,6 +1491,7 @@ impl TabDisplay {
         if self.keeps_picture() {
             *self.snapshot.borrow_mut() =
                 Some(Arc::new(RenderImage::new(vec![image::Frame::new(frame)])));
+            self.picture_generation.set(Some(generation));
         }
         let display = self.clone();
         cx.spawn(async move |_, _| {
@@ -1498,11 +1502,18 @@ impl TabDisplay {
         true
     }
 
+    /// The capture request whose own picture is ready to replace its view.
+    /// An older picture, still shown until the new one arrives, does not count.
+    fn handoff_ready(&self) -> Option<u64> {
+        self.awaiting_picture
+            .get()
+            .filter(|generation| self.picture_generation.get() == Some(*generation))
+            .filter(|_| self.snapshot.borrow().is_some())
+    }
+
     /// The tab drew the picture in a frame; hide the view once it is shown.
     fn picture_drawn(self: &Rc<Self>, window: &mut Window) {
-        if let Some(generation) = self.awaiting_picture.get()
-            && self.snapshot.borrow().is_some()
-        {
+        if let Some(generation) = self.handoff_ready() {
             let display = self.clone();
             // Runs before the next frame, so after this one is presented.
             window.on_next_frame(move |_, _| display.finish_handoff(generation));
@@ -2311,8 +2322,23 @@ mod tests {
                 assert!(!has_picture());
                 send(snapshot(cover));
                 assert!(has_picture());
+                assert_eq!(display.handoff_ready(), Some(cover));
                 display.finish_handoff(cover);
                 assert_eq!(display.awaiting_picture.get(), None);
+
+                // Covered again before the live page returned, the old
+                // picture stays as a backdrop but cannot stand in for the
+                // new capture.
+                pane.set_covered(false);
+                assert!(has_picture());
+                pane.set_covered(true);
+                let recover = display.generation.get();
+                assert_eq!(display.awaiting_picture.get(), Some(recover));
+                assert!(has_picture());
+                assert_eq!(display.handoff_ready(), None);
+                send(snapshot(recover));
+                assert_eq!(display.handoff_ready(), Some(recover));
+                display.finish_handoff(recover);
 
                 // Uncovered, the picture waits for the live page to return,
                 // and replies to earlier requests do not count.
