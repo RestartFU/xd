@@ -1,6 +1,6 @@
-//! The Usage page: a large modal opened from the sidebar's chart icon, showing
-//! cost, tokens, and subscription limits. Layout and copy follow T3 Code
-//! (MIT, see `data/licenses/t3code-LICENSE`).
+//! The Usage page: a modal opened from the sidebar's chart icon, showing cost,
+//! tokens, and subscription limits. The cost and token pages follow T3 Code
+//! (MIT, see `data/licenses/t3code-LICENSE`); limits are a compact xd table.
 
 use std::{cell::Cell, collections::BTreeMap, rc::Rc, time::Duration};
 
@@ -21,9 +21,6 @@ use super::*;
 use crate::input::{ComposerEvent, ComposerInput};
 
 pub(super) const USAGE_ICON: &str = "icons/chart-no-axes-column.svg";
-pub(super) const GAUGE_ICON: &str = "icons/gauge.svg";
-pub(super) const TRENDING_UP_ICON: &str = "icons/trending-up.svg";
-pub(super) const TRENDING_DOWN_ICON: &str = "icons/trending-down.svg";
 pub(super) const REFRESH_ICON: &str = "icons/refresh.svg";
 pub(super) const INFO_ICON: &str = "icons/info.svg";
 pub(super) const SLIDERS_ICON: &str = "icons/sliders-horizontal.svg";
@@ -41,6 +38,9 @@ const WINDOW_OPTIONS: [(u32, &str); 4] = [
 const METRIC_OPTIONS: [(&str, &str); 3] =
     [("cost", "Cost"), ("tokens", "Tokens"), ("limits", "Limits")];
 const PLOT_HEIGHT: f32 = 224.0;
+/// Limits are a few rows, so their panel hugs them instead of filling the window.
+const LIMITS_PANEL_WIDTH: f32 = 760.0;
+const LIMIT_ROW_HEIGHT: f32 = 30.0;
 const CLAUDE_COLOR: u32 = 0xd97757;
 const PRICE_FIELDS: [(&str, bool); 4] = [
     ("Input", false),
@@ -275,9 +275,10 @@ impl Render for UsageTooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let colors = self.colors;
         div()
-            .max_w(px(320.0))
+            .max_w(px(400.0))
             .px_2()
             .py_1()
+            .font_family(UI_FONT)
             .flex()
             .flex_col()
             .gap(px(2.0))
@@ -327,17 +328,8 @@ fn figures(element: gpui::Div, loading: bool) -> gpui::Div {
     element.when(loading, |element| element.opacity(0.4))
 }
 
-fn segmented_shell(colors: ThemeColors) -> gpui::Div {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(2.0))
-        .p(px(2.0))
-        .rounded(px(8.0))
-        .bg(rgb(colors.surface))
-        .border_1()
-        .border_color(rgb(colors.border))
+fn segmented_shell() -> gpui::Div {
+    div().flex().flex_none().items_center().gap(px(2.0))
 }
 
 fn segment_button(
@@ -348,18 +340,20 @@ fn segment_button(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
-        .h(px(24.0))
+        .h(px(26.0))
         .px(px(9.0))
         .flex()
         .items_center()
-        .rounded(px(6.0))
+        .rounded(px(7.0))
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .cursor_pointer()
         .text_color(rgb(if active { colors.text } else { colors.muted }))
-        .when(active, |button| button.bg(rgb(colors.selected_surface)))
+        .when(active, |button| {
+            button.bg(rgb(ink(colors.text, colors.chrome, 14)))
+        })
         .when(!active, |button| {
-            button.hover(|style| style.bg(rgb(colors.surface_high)))
+            button.hover(|style| style.bg(rgb(ink(colors.text, colors.chrome, 7))))
         })
         .child(label)
 }
@@ -424,6 +418,154 @@ fn metric_cell(
                 .child(value),
             loading,
         ))
+}
+
+/// One line of the limits table. The fixed columns keep every row's figures in
+/// line, whichever provider or account they belong to.
+struct LimitRow {
+    label: SharedString,
+    /// An account under its pooled total.
+    nested: bool,
+    remaining: i64,
+    time_left: Option<i64>,
+    pace: Option<Pace>,
+    detail: Option<String>,
+    credits: u64,
+    /// Some row on the page has credits, so every row keeps their column.
+    credit_column: bool,
+}
+
+/// Neutral until the limit needs attention: spent, or running out early.
+fn limit_tone(remaining: i64, pace: Option<Pace>, colors: ThemeColors) -> u32 {
+    if remaining <= 0 {
+        colors.danger
+    } else if pace == Some(Pace::Ahead) {
+        colors.waiting
+    } else {
+        colors.muted
+    }
+}
+
+fn limit_bar(row: &LimitRow, tone: u32, colors: ThemeColors) -> gpui::Div {
+    let remaining = (row.remaining as f32 / 100.0).clamp(0.0, 1.0);
+    div()
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .h(px(14.0))
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .w_full()
+                .h(px(6.0))
+                .rounded(px(3.0))
+                // Stays visible on a hovered or selected row, unlike a border role.
+                .bg(rgb(ink(colors.text, colors.background, 22)))
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(remaining))
+                        .rounded(px(3.0))
+                        .bg(rgb(tone)),
+                ),
+        )
+        .when_some(row.time_left, |bar, left| {
+            // Where even spending would be by now.
+            bar.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(relative((left as f32 / 100.0).clamp(0.0, 1.0)))
+                    .w(px(2.0))
+                    .ml(px(-1.0))
+                    .rounded_full()
+                    .bg(rgb(colors.text)),
+            )
+        })
+}
+
+fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
+    let tone = limit_tone(row.remaining, row.pace, colors);
+    let bar = limit_bar(&row, tone, colors);
+    div()
+        .h(px(LIMIT_ROW_HEIGHT))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded(px(6.0))
+        .text_size(px(12.0))
+        .text_color(rgb(colors.muted))
+        .child(
+            div()
+                .w(px(116.0))
+                .flex_none()
+                .truncate()
+                .when(row.nested, |label| label.pl_3())
+                .when(!row.nested, |label| {
+                    label.text_size(px(13.0)).text_color(rgb(colors.text))
+                })
+                .child(row.label),
+        )
+        .child(bar)
+        .child(
+            div()
+                .w(px(64.0))
+                .flex_none()
+                .flex()
+                .items_baseline()
+                .justify_end()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(if row.remaining <= 0 {
+                            colors.danger
+                        } else {
+                            colors.text
+                        }))
+                        .child(format!("{}%", row.remaining)),
+                )
+                .child("left"),
+        )
+        .child(
+            div()
+                .w(px(84.0))
+                .flex_none()
+                .truncate()
+                .when(row.pace == Some(Pace::Ahead), |pace| {
+                    pace.text_color(rgb(colors.waiting))
+                })
+                .children(row.pace.map(Pace::short_label)),
+        )
+        .child(
+            div()
+                .w(px(112.0))
+                .flex_none()
+                .truncate()
+                .text_right()
+                .children(row.detail),
+        )
+        .when(row.credit_column, |line| {
+            line.child(
+                div()
+                    .w(px(28.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_1()
+                    .when(row.credits > 0, |credits| {
+                        credits
+                            .text_color(rgb(colors.text))
+                            .child(icon(TICKET_ICON, 12.0, colors.muted))
+                            .child(row.credits.to_string())
+                    }),
+            )
+        })
 }
 
 struct ShareSegment {
@@ -607,6 +749,13 @@ fn share_bar(
             )
             .into_any_element(),
     )
+}
+
+fn account_credits(account: &LimitAccount) -> u64 {
+    account
+        .reset_credits
+        .as_ref()
+        .map_or(0, |credits| credits.available_count)
 }
 
 fn format_tokens_value(value: f64) -> String {
@@ -1414,6 +1563,7 @@ impl XdDesktop {
                 "Select"
             };
             div()
+                .when(showing_limits, |message| message.px_2().py_1())
                 .text_size(px(13.5))
                 .text_color(rgb(colors.muted))
                 .child(format!("{verb} an environment to see {noun}."))
@@ -1427,14 +1577,14 @@ impl XdDesktop {
         };
         let modal = div()
             .relative()
-            .size_full()
-            .max_w(px(1280.0))
+            .when(showing_limits, |modal| {
+                modal.w_full().max_w(px(LIMITS_PANEL_WIDTH)).max_h_full()
+            })
+            .when(!showing_limits, |modal| modal.size_full().max_w(px(1280.0)))
             .flex()
             .flex_col()
             .min_h_0()
-            .rounded(px(12.0))
-            .border_1()
-            .border_color(rgb(colors.border))
+            .rounded(px(16.0))
             .bg(rgb(colors.background))
             .shadow_lg()
             .on_mouse_down(
@@ -1450,17 +1600,16 @@ impl XdDesktop {
             .child(
                 div()
                     .id("usage-scroll")
-                    .flex_1()
+                    .when(!showing_limits, |scroll| scroll.flex_1())
                     .min_h_0()
                     .overflow_y_scroll()
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(1120.0))
-                            .mx_auto()
-                            .px_6()
-                            .pt_6()
-                            .pb_8()
+                            .when(showing_limits, |page| page.px_3().py_2())
+                            .when(!showing_limits, |page| {
+                                page.max_w(px(1120.0)).mx_auto().px_6().pt_6().pb_8()
+                            })
                             .child(body),
                     ),
             )
@@ -1473,10 +1622,13 @@ impl XdDesktop {
             .when_some(
                 self.render_usage_price_dialog(colors, cx),
                 |modal, dialog| modal.child(dialog),
-            )
-            .when_some(self.usage.confirm_reset.clone(), |modal, confirm| {
-                modal.child(self.render_usage_reset_confirm(confirm, colors, cx))
-            });
+            );
+        // Over the whole window: a table of one row is shorter than this dialog.
+        let confirm_reset = self
+            .usage
+            .confirm_reset
+            .clone()
+            .map(|confirm| self.render_usage_reset_confirm(confirm, colors, cx));
         div()
             .id("usage-page")
             .occlude()
@@ -1492,9 +1644,18 @@ impl XdDesktop {
             .on_key_down(cx.listener(|this, event, _, cx| this.usage_key_down(event, cx)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, window, cx| this.close_usage(window, cx)),
+                cx.listener(|this, _, window, cx| {
+                    // The panel is short, so a press beside an open popover or
+                    // menu is usually meant for that alone.
+                    if this.usage.menu.take().is_some() || this.usage.segment.take().is_some() {
+                        cx.notify();
+                    } else {
+                        this.close_usage(window, cx);
+                    }
+                }),
             )
             .child(modal)
+            .children(confirm_reset)
             .into_any_element()
     }
 
@@ -1540,16 +1701,18 @@ impl XdDesktop {
             refresh_icon.into_any_element()
         };
         div()
-            .min_h(px(48.0))
+            .min_h(px(44.0))
             .flex_none()
             .pl_5()
             .pr_2()
-            .py_2()
+            .py_1()
             .flex()
             .flex_wrap()
             .items_center()
             .gap_x_3()
             .gap_y_2()
+            .rounded_t(px(16.0))
+            .bg(rgb(colors.chrome))
             .border_b_1()
             .border_color(rgb(colors.border))
             .child(
@@ -1575,8 +1738,8 @@ impl XdDesktop {
             })
             .child(div().flex_1())
             .when(!showing_limits, |header| {
-                header.child(segmented_shell(colors).children(WINDOW_OPTIONS.map(
-                    |(option, label)| {
+                header.child(
+                    segmented_shell().children(WINDOW_OPTIONS.map(|(option, label)| {
                         segment_button(
                             ("usage-window", option as usize),
                             label,
@@ -1586,11 +1749,11 @@ impl XdDesktop {
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.select_usage_window(option, cx)),
                         )
-                    },
-                )))
+                    })),
+                )
             })
             .child(
-                segmented_shell(colors).children(METRIC_OPTIONS.map(|(option, label)| {
+                segmented_shell().children(METRIC_OPTIONS.map(|(option, label)| {
                     segment_button(
                         gpui::ElementId::Name(format!("usage-metric-{option}").into()),
                         label,
@@ -2291,7 +2454,7 @@ impl XdDesktop {
                     .gap_3()
                     .child(section_title("Breakdown", colors))
                     .child(
-                        segmented_shell(colors)
+                        segmented_shell()
                             .child(
                                 segment_button("usage-breakdown-model", "Model", !by_time, colors)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -3392,7 +3555,6 @@ impl XdDesktop {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(12.0))
             .bg(rgba(colors.backdrop))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
@@ -3476,17 +3638,23 @@ impl XdDesktop {
             .reset_busy
             .map(|_| "Using reset credit…".to_owned())
             .or_else(|| self.usage.reset_status.clone());
+        let credit_column = pools
+            .iter()
+            .flat_map(|pool| &pool.accounts)
+            .any(|account| account_credits(account) > 0);
         let sections: Vec<AnyElement> = pools
             .iter()
-            .map(|pool| self.render_usage_pool(pool, now, colors, cx))
+            .map(|pool| self.render_usage_pool(pool, now, credit_column, colors, cx))
             .collect();
         div()
             .flex()
             .flex_col()
-            .gap_8()
+            .gap_2()
             .when(empty, |page| {
                 page.child(
                     div()
+                        .px_2()
+                        .py_1()
                         .text_size(px(13.5))
                         .text_color(rgb(colors.muted))
                         .child(if loading {
@@ -3500,22 +3668,24 @@ impl XdDesktop {
             })
             .children(sections)
             .when_some(status, |page, status| {
-                page.child(small_muted(status, colors))
+                page.child(div().px_2().child(small_muted(status, colors)))
             })
             .when(!notices.is_empty(), |page| {
                 page.child(
                     div()
-                        .p_3()
+                        .px_2()
+                        .py_1()
                         .flex()
                         .items_start()
                         .gap_2()
-                        .rounded(px(8.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .text_size(px(13.0))
+                        .text_size(px(12.0))
                         .text_color(rgb(colors.waiting))
-                        .child(icon(ALERT_ICON, 15.0, colors.waiting))
-                        .child(div().flex().flex_col().gap_1().children(notices)),
+                        .child(div().flex_none().mt(px(1.0)).child(icon(
+                            ALERT_ICON,
+                            14.0,
+                            colors.waiting,
+                        )))
+                        .child(div().min_w_0().flex().flex_col().gap_1().children(notices)),
                 )
             })
             .into_any_element()
@@ -3525,61 +3695,49 @@ impl XdDesktop {
         &self,
         pool: &LimitPool,
         now: i64,
+        credit_column: bool,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let cards: Vec<AnyElement> = pool
+        let rows: Vec<AnyElement> = pool
             .windows
             .iter()
-            .map(|window| self.render_usage_pool_card(pool, window, now, colors, cx))
+            .flat_map(|window| {
+                self.render_usage_pool_rows(pool, window, now, credit_column, colors, cx)
+            })
             .collect();
         div()
             .flex()
             .flex_col()
-            .gap_3()
             .child(
                 div()
+                    .h(px(26.0))
+                    .px_2()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(13.5))
+                    .text_size(px(12.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(colors.text))
-                    .child(icon(provider_icon(&pool.provider), 16.0, colors.text))
+                    .text_color(rgb(colors.muted))
+                    .child(icon(provider_icon(&pool.provider), 14.0, colors.muted))
                     .child(provider_label(&pool.provider).to_owned()),
             )
-            .children(cards)
+            .children(rows)
             .into_any_element()
     }
 
-    fn render_usage_pool_card(
+    /// One row for a window one account reports; a pooled total over one row per
+    /// account when several share it.
+    fn render_usage_pool_rows(
         &self,
         pool: &LimitPool,
         window: &PoolWindow,
         now: i64,
+        credit_column: bool,
         colors: ThemeColors,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let color = provider_color(&pool.provider, colors);
-        let next_refill = window
-            .resets
-            .iter()
-            .find(|reset| reset.restores_percent > 0);
-        let many = pool.accounts.len() > 1;
-        let pace_icon = window.pace.map(|pace| {
-            let path = match pace {
-                Pace::Ahead => TRENDING_UP_ICON,
-                Pace::On => GAUGE_ICON,
-                Pace::Under => TRENDING_DOWN_ICON,
-            };
-            div()
-                .id(gpui::ElementId::Name(
-                    format!("usage-pace-{}", window.id).into(),
-                ))
-                .tooltip(usage_tooltip(vec![pace.label().to_owned()], colors))
-                .child(icon(path, 14.0, colors.muted))
-        });
-        let segments: Vec<AnyElement> = pool
+    ) -> Vec<AnyElement> {
+        let members: Vec<(&LimitAccount, &xd_desktop::usage::PoolMember)> = pool
             .accounts
             .iter()
             .filter_map(|account| {
@@ -3587,106 +3745,100 @@ impl XdDesktop {
                     .members
                     .iter()
                     .find(|member| member.account == account.key)?;
-                let reset = window
-                    .resets
-                    .iter()
-                    .find(|reset| reset.account == account.key);
-                Some(self.render_usage_segment(
-                    pool,
-                    window,
-                    account,
-                    &member.window,
-                    member.refill_percent,
-                    reset.map(|reset| reset.restores_percent),
-                    color,
-                    now,
-                    many,
-                    colors,
-                    cx,
-                ))
+                Some((account, member))
             })
             .collect();
-        div()
-            .p_4()
-            .flex()
-            .items_center()
-            .gap_6()
-            .rounded(px(8.0))
-            .border_1()
-            .border_color(with_alpha(colors.border, 0.6))
-            .child(
-                div()
-                    .w(px(176.0))
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(section_title(window.label.clone(), colors))
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(30.0))
-                                    .line_height(px(36.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(colors.text))
-                                    .child(format!("{}%", window.remaining_percent)),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_size(px(13.5))
-                                    .text_color(rgb(colors.muted))
-                                    .child("left")
-                                    .children(pace_icon),
-                            ),
-                    )
-                    .when_some(next_refill.filter(|_| many), |column, reset| {
-                        column.child(
-                            div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(colors.text))
-                                .child(format!("↻ +{}%", reset.restores_percent)),
-                        )
-                    }),
-            )
-            .child(div().flex_1().min_w_0().flex().gap_1().children(segments))
-            .into_any_element()
+        let shared = members.len() > 1;
+        let mut rows = Vec::with_capacity(members.len() + 1);
+        if shared {
+            let next_refill = window
+                .resets
+                .iter()
+                .find(|reset| reset.restores_percent > 0);
+            rows.push(
+                limit_row(
+                    LimitRow {
+                        label: window.label.clone().into(),
+                        nested: false,
+                        remaining: window.remaining_percent,
+                        time_left: None,
+                        pace: window.pace,
+                        detail: next_refill
+                            .map(|reset| format!("+{}% next reset", reset.restores_percent)),
+                        credits: 0,
+                        credit_column,
+                    },
+                    colors,
+                )
+                .id(gpui::ElementId::Name(
+                    format!("usage-pool-{}-{}", pool.provider, window.id).into(),
+                ))
+                .when_some(window.pace, |row, pace| {
+                    row.tooltip(usage_tooltip(vec![pace.label().to_owned()], colors))
+                })
+                .into_any_element(),
+            );
+        }
+        let many_accounts = pool.accounts.len() > 1;
+        for (account, member) in members {
+            let environments = account.environments.join(", ");
+            let label = if shared {
+                environments
+            } else if many_accounts {
+                format!("{} · {environments}", window.label)
+            } else {
+                window.label.clone()
+            };
+            let restores = window
+                .resets
+                .iter()
+                .find(|reset| reset.account == account.key)
+                .map(|reset| reset.restores_percent);
+            rows.push(self.render_usage_account_row(
+                pool,
+                window,
+                account,
+                &member.window,
+                label,
+                shared,
+                restores,
+                credit_column,
+                now,
+                colors,
+                cx,
+            ));
+        }
+        rows
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_usage_segment(
+    fn render_usage_account_row(
         &self,
         pool: &LimitPool,
         pool_window: &PoolWindow,
         account: &LimitAccount,
         window: &xd_desktop::usage::LimitWindow,
-        refill_percent: f64,
+        label: String,
+        nested: bool,
         restores: Option<i64>,
-        color: u32,
+        credit_column: bool,
         now: i64,
-        many: bool,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let remaining = window.remaining_percent();
         let time_left = window.pace_remaining_percent(now);
         let resets_in = window.resets_in(now);
-        let credits = account
-            .reset_credits
-            .as_ref()
-            .map_or(0, |credits| credits.available_count);
+        let credits = account_credits(account);
         let key = format!("{}:{}:{}", pool.provider, pool_window.id, account.key);
+        let pace = window.pace(now);
         let mut lines = vec![format!(
             "{remaining}% left{}",
             time_left.map_or_else(String::new, |left| format!(" · {left}% of the window left"))
         )];
+        if let Some(pace) = pace {
+            lines.push(pace.label().to_owned());
+        }
         if time_left.is_some() {
             lines.push("The line is where even spending would be.".to_owned());
         }
@@ -3698,36 +3850,41 @@ impl XdDesktop {
                     .map_or_else(String::new, |resets| format!(" · {resets}"))
             ));
         }
+        if let Some(banked) = account.reset_credits.as_ref().filter(|_| credits > 0) {
+            lines.push(banked.summary(now));
+        }
         let open = self.usage.segment.as_deref() == Some(key.as_str());
-        let badge = resets_in
-            .as_ref()
-            .map(|resets| resets.replace("resets in ", "↻ "));
         let popover = open.then(|| {
             self.render_usage_segment_popover(account, window, restores, now, credits, colors, cx)
         });
-        let hatch_width = (100 - remaining).min(refill_percent.round() as i64).max(0);
-        let hatch = (remaining < 100 && window.resets_at_ms.is_some() && refill_percent > 0.0)
-            .then_some(hatch_width);
-        let hatch_color = color;
         let click_key = key.clone();
+        let row = limit_row(
+            LimitRow {
+                label: label.into(),
+                nested,
+                remaining,
+                time_left,
+                pace,
+                detail: resets_in.map(|resets| resets.replacen("resets", "Resets", 1)),
+                credits,
+                credit_column,
+            },
+            colors,
+        );
         div()
             .relative()
-            .flex_1()
-            .min_w_0()
             .child(
-                div()
-                    .id(gpui::ElementId::Name(format!("usage-segment-{key}").into()))
-                    .relative()
-                    .h(px(32.0))
-                    .rounded(px(6.0))
-                    .bg(rgb(colors.surface_high))
-                    .overflow_hidden()
+                row.id(gpui::ElementId::Name(format!("usage-limit-{key}").into()))
                     .cursor_pointer()
-                    .when(open, |bar| bar.border_1().border_color(rgb(colors.border)))
+                    .when(open, |row| row.bg(rgb(colors.selected_surface)))
                     // The open popover already says all of this.
-                    .when(!open, |bar| bar.tooltip(usage_tooltip(lines, colors)))
+                    .when(!open, |row| {
+                        row.hover(|style| style.bg(rgb(colors.surface_high)))
+                            .tooltip(usage_tooltip(lines, colors))
+                    })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.usage.menu = None;
                         this.usage.segment =
                             if this.usage.segment.as_deref() == Some(click_key.as_str()) {
                                 None
@@ -3735,111 +3892,7 @@ impl XdDesktop {
                                 Some(click_key.clone())
                             };
                         cx.notify();
-                    }))
-                    .when(remaining > 0, |bar| {
-                        bar.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left_0()
-                                .w(relative(remaining as f32 / 100.0))
-                                .rounded(px(6.0))
-                                .bg(with_alpha(color, 0.35)),
-                        )
-                    })
-                    .when_some(hatch, |bar, width| {
-                        bar.child(
-                            canvas(
-                                |_, _, _| (),
-                                move |bounds, _, window, _| {
-                                    paint_usage_hatch(bounds, hatch_color, window);
-                                },
-                            )
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right_0()
-                            .w(relative(width as f32 / 100.0)),
-                        )
-                    })
-                    .when_some(time_left, |bar, left| {
-                        // The slot and its tick mark where even spending would be.
-                        let at = relative((left as f32 / 100.0).clamp(0.0, 1.0));
-                        bar.child(
-                            div()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .left(at)
-                                .w(px(6.0))
-                                .ml(px(-3.0))
-                                .flex()
-                                .justify_center()
-                                .bg(rgb(colors.background))
-                                .child(
-                                    div()
-                                        .mt(px(2.0))
-                                        .mb(px(2.0))
-                                        .w(px(2.0))
-                                        .rounded_full()
-                                        .bg(rgb(colors.text)),
-                                ),
-                        )
-                    })
-                    .child(
-                        div()
-                            .relative()
-                            .h_full()
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .text_size(px(12.0))
-                            .text_color(rgb(colors.text))
-                            .when(many, |row| {
-                                row.child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(account.environments.join(", ")),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(format!("{remaining}%")),
-                                )
-                            })
-                            .child(div().flex_1())
-                            .when(badge.is_some() || credits > 0, |row| {
-                                row.child(
-                                    div()
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded(px(4.0))
-                                        .bg(with_alpha(colors.background, 0.85))
-                                        .text_size(px(11.0))
-                                        .children(badge.clone())
-                                        .when(credits > 0, |tag| {
-                                            tag.child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(2.0))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(icon(TICKET_ICON, 12.0, colors.text))
-                                                    .child(credits.to_string()),
-                                            )
-                                        }),
-                                )
-                            }),
-                    ),
+                    })),
             )
             .children(popover)
             .into_any_element()
@@ -3887,7 +3940,7 @@ impl XdDesktop {
             anchored().snap_to_window_with_margin(px(8.0)).child(
                 div()
                     .occlude()
-                    .mt(px(36.0))
+                    .mt(px(2.0))
                     .w(px(288.0))
                     .p_3()
                     .flex()
@@ -3900,10 +3953,6 @@ impl XdDesktop {
                     .shadow_lg()
                     .text_size(px(12.0))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                        this.usage.segment = None;
-                        cx.notify();
-                    }))
                     .child(
                         div()
                             .flex()
@@ -4127,26 +4176,6 @@ fn paint_usage_chart(
             rgb(muted),
         ));
     }
-}
-
-/// The quota this window would restore when it resets, as a faint diagonal hatch.
-fn paint_usage_hatch(bounds: Bounds<Pixels>, color: u32, window: &mut Window) {
-    let height = f32::from(bounds.size.height);
-    let width = f32::from(bounds.size.width);
-    let spacing = 7.0;
-    let stroke_color = with_alpha(color, 0.2);
-    window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
-        let mut x = -height;
-        while x < width {
-            let mut stroke = PathBuilder::stroke(px(1.0));
-            stroke.move_to(point(bounds.left() + px(x), bounds.bottom()));
-            stroke.line_to(point(bounds.left() + px(x + height), bounds.top()));
-            if let Ok(path) = stroke.build() {
-                window.paint_path(path, stroke_color);
-            }
-            x += spacing;
-        }
-    });
 }
 
 #[cfg(test)]
@@ -4394,6 +4423,62 @@ mod tests {
             let names: Vec<&str> = rows.iter().map(|row| row.model.as_str()).collect();
             assert_eq!(names, ["a", "b"]);
         });
+    }
+
+    #[test]
+    fn a_limit_is_neutral_until_it_needs_attention() {
+        let colors = xd_desktop::theme::ThemePreset::Dark.colors();
+        assert_eq!(limit_tone(100, Some(Pace::Under), colors), colors.muted);
+        assert_eq!(limit_tone(8, Some(Pace::On), colors), colors.muted);
+        assert_eq!(limit_tone(50, None, colors), colors.muted);
+        assert_eq!(limit_tone(7, Some(Pace::Ahead), colors), colors.waiting);
+        assert_eq!(limit_tone(0, Some(Pace::Ahead), colors), colors.danger);
+        assert_eq!(limit_tone(0, None, colors), colors.danger);
+    }
+
+    #[gpui::test]
+    fn limits_panel_hugs_its_rows_and_a_press_beside_it_closes_one_layer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1600.0), px(1000.0)));
+        let open = |metric: &str, cx: &mut gpui::VisualTestContext| {
+            cx.update_window_entity(&desktop, |desktop, _, cx| {
+                desktop.settings.usage_metric = metric.to_owned();
+                desktop.usage_open = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+        };
+        let press = |at: Point<Pixels>, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_click(at, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        let below_panel = point(px(800.0), px(900.0));
+
+        open("limits", cx);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.usage.segment = Some("codex:weekly:account".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+        press(below_panel, cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.usage_open, "the press only closes the popover");
+            assert!(desktop.usage.segment.is_none());
+        });
+        press(below_panel, cx);
+        desktop.read_with(cx, |desktop, _| {
+            assert!(
+                !desktop.usage_open,
+                "nothing but backdrop is left down there"
+            );
+        });
+
+        // The charts still fill the window, so the same spot is inside the panel.
+        open("cost", cx);
+        press(below_panel, cx);
+        desktop.read_with(cx, |desktop, _| assert!(desktop.usage_open));
     }
 
     #[gpui::test]

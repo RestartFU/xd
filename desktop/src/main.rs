@@ -107,8 +107,8 @@ use source_build::{SourceBuildEvent, SourceBuildRun, SourceTarget};
 use speech::SpeechOutput;
 use terminal::TerminalScreen;
 use usage_view::{
-    ALERT_ICON, GAUGE_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON,
-    TICKET_ICON, TRENDING_DOWN_ICON, TRENDING_UP_ICON, USAGE_ICON, UsagePage,
+    ALERT_ICON, INFO_ICON, PLUS_ICON, REFRESH_ICON, ROTATE_CCW_ICON, SLIDERS_ICON, TICKET_ICON,
+    USAGE_ICON, UsagePage,
 };
 
 pub(crate) const UI_FONT: &str = "Inter";
@@ -17683,15 +17683,6 @@ impl AssetSource for EmbeddedIcons {
             SETTINGS_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/settings.svg").as_slice(),
             )),
-            GAUGE_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/gauge.svg").as_slice(),
-            )),
-            TRENDING_UP_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/trending-up.svg").as_slice(),
-            )),
-            TRENDING_DOWN_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/trending-down.svg").as_slice(),
-            )),
             REFRESH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/refresh.svg").as_slice(),
             )),
@@ -19097,7 +19088,11 @@ Binary files /dev/null and b/image.png differ\n";
         cx.simulate_click(point(px(82.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
         // A press on the page stays on it; one on the backdrop dismisses it.
-        cx.simulate_click(point(px(700.0), px(300.0)), gpui::Modifiers::default());
+        let center = cx.update(|window, _| {
+            let viewport = window.viewport_size();
+            point(viewport.width / 2.0, viewport.height / 2.0)
+        });
+        cx.simulate_click(center, gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
         cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).usage_open));
