@@ -583,7 +583,7 @@ a private directory of its own and appends `[file: <host path>]`, which the
 agent reads from disk. An unusable name becomes `file`.
 
 A message takes from the chat's draft exactly the attachments it carries: each
-one removes one equal entry (same `mime` and `data`). Anything else in the draft
+one removes one equal entry (same kept name, `mime`, and `data`). Anything else in the draft
 stays, such as a file another device added meanwhile, or the files an image-only
 client never saw. A message sent apart from the draft, such as a shortcut,
 leaves the draft's attachments alone.

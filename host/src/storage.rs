@@ -8630,14 +8630,8 @@ fn validate_attachment_list(
                 }
             }
             total += data.len();
-            let fallback = if image { "image.png" } else { "file" };
-            let name = object
-                .get("name")
-                .and_then(Value::as_str)
-                .map(attachment_file_name)
-                .unwrap_or(fallback);
             Ok(ValidatedAttachment {
-                name: if name.is_empty() { fallback } else { name }.to_owned(),
+                name: stored_attachment_name(attachment).to_owned(),
                 mime: mime.to_owned(),
                 encoded: encoded.to_owned(),
                 data,
@@ -8666,7 +8660,7 @@ fn stored_draft_attachments(database: &Connection, chat_id: &str) -> Result<Valu
 }
 
 /// A stored draft without the attachments a message took from it: each one
-/// sent removes one equal entry. What reached the draft from elsewhere while
+/// sent removes one entry with the same name, type, and content. What reached the draft from elsewhere while
 /// the message was written stays, so no client clears what it never saw.
 fn without_sent(stored: &Value, request: &Value) -> Value {
     let mut left = stored.as_array().cloned().unwrap_or_default();
@@ -8676,8 +8670,11 @@ fn without_sent(stored: &Value, request: &Value) -> Value {
         .into_iter()
         .flatten();
     for attachment in sent {
+        let name = stored_attachment_name(attachment);
         let same = |entry: &Value| {
-            entry["mime"] == attachment["mime"] && entry["data"] == attachment["data"]
+            entry["mime"] == attachment["mime"]
+                && entry["data"] == attachment["data"]
+                && entry["name"].as_str() == Some(name)
         };
         if let Some(index) = left.iter().position(same) {
             left.remove(index);
@@ -8729,6 +8726,20 @@ fn valid_attachment_mime(mime: &str) -> bool {
             !kind.is_empty() && !subtype.is_empty() && !subtype.contains('/')
         })
         && mime.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// The name an attachment is kept under: its sent name made safe, or a
+/// stand-in when nothing of it is.
+fn stored_attachment_name(attachment: &Value) -> &str {
+    let fallback = if attachment["mime"] == PNG_MIME {
+        "image.png"
+    } else {
+        "file"
+    };
+    match attachment["name"].as_str().map(attachment_file_name) {
+        Some(name) if !name.is_empty() => name,
+        _ => fallback,
+    }
 }
 
 /// The last component of a sent name, safe to create as a file of that name,
@@ -12979,6 +12990,29 @@ mod tests {
         };
         let snapshot = store.chat("chat-1").unwrap();
         assert_eq!(snapshot["draft_files"], json!([]));
+        // The same content under another name is another attachment.
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        let named = |name: &str| json!({"name": name, "mime": "application/json", "data": STANDARD.encode(b"{}")});
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [named("config.dev.json")],
+            }))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "attachments": [named("../config.prod.json")]}))
+            .unwrap();
+        assert_eq!(
+            names(&store.chat("chat-1").unwrap()["draft_files"]),
+            ["config.dev.json"]
+        );
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .prepare_send(
+                &json!({"chat": "chat-1", "attachments": [named("/elsewhere/config.dev.json")]}),
+            )
+            .unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["draft_files"], json!([]));
         // A shortcut sent apart from the draft takes nothing from it.
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         store
