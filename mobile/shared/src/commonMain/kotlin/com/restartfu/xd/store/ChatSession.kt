@@ -93,8 +93,8 @@ public class ChatSession internal constructor(
         images: List<PngAttachment>? = null,
     ): Unit = core.call(Ops.setDraft(core.chatId, text, images))
 
-    public suspend fun dropQueued(index: Int? = null, text: String? = null): Unit =
-        core.call(Ops.dropQueue(core.chatId, index, text))
+    public suspend fun dropQueued(index: Int? = null, text: String? = null, seen: List<String>? = null): Unit =
+        core.call(Ops.dropQueue(core.chatId, index, text, seen))
 
     public suspend fun editQueued(
         index: Int,
@@ -113,7 +113,8 @@ public class ChatSession internal constructor(
         anchor: Int,
         anchorText: String,
         after: Boolean,
-    ): Unit = core.call(Ops.reorderQueue(core.chatId, source, sourceText, anchor, anchorText, after))
+        seen: List<String>? = null,
+    ): Unit = core.call(Ops.reorderQueue(core.chatId, source, sourceText, anchor, anchorText, after, seen))
 
     /** Continues the chat's cut-short turn; see [Ops.resumeTurn]. */
     public suspend fun resumeTurn(): Unit = core.call(Ops.resumeTurn(core.chatId))

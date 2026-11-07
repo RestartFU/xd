@@ -72,6 +72,8 @@ data class SettledNotice(
     val sessionId: String,
     val title: String,
     val serial: Long,
+    /** The paired host it was settled on; Undo goes nowhere else. */
+    val generation: Long = 0,
 )
 
 data class CreatedDirectSession(
@@ -132,6 +134,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             client.sessionGeneration.collect {
                 autoSettleRequests++
                 _autoSettleError.value = null
+                // An Undo offered for another host must not reach this one.
+                _settledNotice.value = null
             }
         }
     }
@@ -381,8 +385,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * says why.
      */
     fun settleSession(sessionId: String, title: String) = treeAction("Could not settle the session") {
+        val generation = client.sessionGeneration.value
         client.settleSession(sessionId)
-        _settledNotice.value = SettledNotice(sessionId, title, ++settledSerial)
+        if (generation == client.sessionGeneration.value) {
+            _settledNotice.value = SettledNotice(sessionId, title, ++settledSerial, generation)
+        }
+    }
+
+    /** Brings back what [notice] settled, only on the host it was settled on. */
+    fun undoSettle(notice: SettledNotice) {
+        if (notice.generation == client.sessionGeneration.value) unsettleSession(notice.sessionId)
     }
 
     fun consumeSettledNotice(notice: SettledNotice) {
@@ -903,7 +915,7 @@ class ChatViewModel(
         val anchor = if (up) index - 1 else index + 1
         if (queue.getOrNull(index) != text || anchor !in queue.indices) return
         launchGuarded(_droppingQueued) {
-            session.reorderQueued(index, text, anchor, queue[anchor], after = !up)
+            session.reorderQueued(index, text, anchor, queue[anchor], after = !up, seen = opened)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != queue }
             }
@@ -920,7 +932,7 @@ class ChatViewModel(
         val before = state.value.queue
         if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
         launchGuarded(_droppingQueued) {
-            session.dropQueued(index, text)
+            session.dropQueued(index, text, opened)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }

@@ -254,7 +254,7 @@ internal fun MinimalMobileApp(
             actionLabel = "Undo",
             duration = SnackbarDuration.Short,
         )
-        if (result == SnackbarResult.ActionPerformed) model.unsettleSession(notice.sessionId)
+        if (result == SnackbarResult.ActionPerformed) model.undoSettle(notice)
         model.consumeSettledNotice(notice)
     }
     Box(Modifier.fillMaxSize()) {

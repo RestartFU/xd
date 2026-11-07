@@ -4554,7 +4554,11 @@ impl StateStore {
         // The text the client saw there, when it sends one, so a queue another
         // device changed meanwhile loses nothing it did not mean to drop.
         let expected = optional_string(request, "text")?.map(str::to_owned);
+        let seen = seen_queue(request)?;
         self.mutate_queue(chat_id, move |queue| match index {
+            _ if seen.as_ref().is_some_and(|seen| seen != queue) => Err(
+                StorageError::InvalidRequest("That queued message changed; try again.".into()),
+            ),
             Some(index)
                 if expected.as_ref().is_some_and(|text| {
                     usize::try_from(index)
@@ -4617,8 +4621,12 @@ impl StateStore {
             .get("after")
             .and_then(Value::as_bool)
             .ok_or_else(|| StorageError::InvalidRequest(message.into()))?;
+        let seen = seen_queue(request)?;
         self.mutate_queue(chat_id, move |queue| {
-            if queue.get(source) != Some(&source_text) || queue.get(anchor) != Some(&anchor_text) {
+            if seen.as_ref().is_some_and(|seen| seen != queue)
+                || queue.get(source) != Some(&source_text)
+                || queue.get(anchor) != Some(&anchor_text)
+            {
                 return Err(StorageError::InvalidRequest(
                     "That queued message changed; try again.".into(),
                 ));
@@ -8025,6 +8033,25 @@ fn message_from_page_row(row: &Row<'_>) -> rusqlite::Result<Value> {
     Ok(message)
 }
 
+/// The whole queue a client saw, when it sends one. Queued messages have no
+/// identity but their place and texts can repeat, so this is what tells two
+/// equal messages apart: a change made meanwhile refuses the request.
+fn seen_queue(request: &Value) -> Result<Option<Vec<String>>, StorageError> {
+    let Some(value) = request.get("queue") else {
+        return Ok(None);
+    };
+    value
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        })
+        .map(Some)
+        .ok_or_else(|| StorageError::InvalidRequest("queue must be an array of messages.".into()))
+}
+
 fn optional_string<'a>(request: &'a Value, key: &str) -> Result<Option<&'a str>, StorageError> {
     match request.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -10553,8 +10580,16 @@ mod tests {
                 .is_err(),
             "a drop naming the text it saw refuses a different message"
         );
+        assert!(
+            store
+                .drop_queue(
+                    &json!({"chat": "chat-1", "index": 0, "text": "edited", "queue": ["edited"]})
+                )
+                .is_err(),
+            "a drop naming the queue it saw refuses a queue that changed"
+        );
         let (_, event) = store
-            .drop_queue(&json!({"chat": "chat-1", "index": 0, "text": "edited"}))
+            .drop_queue(&json!({"chat": "chat-1", "index": 0, "text": "edited", "queue": ["edited", "first"]}))
             .unwrap();
         assert_eq!(event["queue"], json!(["first"]));
         let (_, event) = store.drop_queue(&json!({"chat": "chat-1"})).unwrap();

@@ -149,13 +149,15 @@ public object Ops {
      * what the client saw there; the host refuses if another message now holds
      * that place. Hosts that predate the check ignore it.
      */
-    public fun dropQueue(chatId: String, index: Int?, text: String? = null): JsonObject = buildJsonObject {
+    public fun dropQueue(chatId: String, index: Int?, text: String? = null, seen: List<String>? = null): JsonObject = buildJsonObject {
         put("op", "drop-queue")
         put("chat", chatId)
         if (index != null) {
             require(index >= 0) { "Queue index must not be negative" }
             put("index", index)
             if (text != null) put("text", text)
+            // The whole queue as seen: equal texts are only told apart by it.
+            if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
         }
     }
 
@@ -316,8 +318,10 @@ public object Ops {
         anchor: Int,
         anchorText: String,
         after: Boolean,
+        seen: List<String>? = null,
     ): JsonObject = buildJsonObject {
         require(source >= 0 && anchor >= 0) { "Queue indexes must not be negative" }
+        if (seen != null) put("queue", buildJsonArray { seen.forEach { add(it) } })
         put("op", "reorder-queue")
         put("chat", chatId)
         put("source", source)
