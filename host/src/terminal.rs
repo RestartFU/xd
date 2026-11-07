@@ -444,15 +444,17 @@ impl TerminalManager {
     /// `idle_since`, including one closed since [`Self::usage`] last looked.
     /// Input and output are held off while it checks, and input is refused
     /// from then on, so nothing typed meanwhile runs in a session that is going
-    /// away. A terminal busy taking input counts as used. Opening a terminal
+    /// away. A terminal busy taking input, printing, or closing counts as used. Opening a terminal
     /// waits on the engine's session lock, which the caller holds. Returns
     /// whether they are closed.
     pub(crate) fn close_unused(&self, owners: &HashSet<String>, idle_since: i64) -> bool {
         let sessions = self.owned_by(owners);
-        // `output_use` before `writer`, the order closing a terminal takes them.
+        // `output_use` before `writer`, the order closing a terminal takes them,
+        // and neither waited for: a terminal anything else holds is in use, and
+        // the sweep must never hang behind blocked input.
         let mut marking = Vec::with_capacity(sessions.len());
         for session in &sessions {
-            let Ok(output) = session.output_use.lock() else {
+            let Ok(output) = session.output_use.try_lock() else {
                 return false;
             };
             marking.push(output);
