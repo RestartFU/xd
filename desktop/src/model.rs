@@ -111,6 +111,8 @@ pub struct Attachment {
     pub mime: String,
     pub data: String,
     pub preview: Arc<Image>,
+    /// Pixel size from the PNG's header, when it has a readable one.
+    pub size: Option<(u32, u32)>,
 }
 
 impl Attachment {
@@ -118,11 +120,15 @@ impl Attachment {
         if !bytes.starts_with(PNG_SIGNATURE) {
             return Err("Only PNG images can be attached.".into());
         }
+        let size = image::ImageReader::with_format(Cursor::new(&bytes), image::ImageFormat::Png)
+            .into_dimensions()
+            .ok();
         Ok(Self {
             name: name.into(),
             mime: "image/png".into(),
             data: STANDARD.encode(&bytes),
             preview: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+            size,
         })
     }
 
@@ -2849,6 +2855,20 @@ mod tests {
         assert_eq!(model.draft, "shared");
         assert_eq!(model.queue, ["next"]);
         assert!(model.working);
+    }
+
+    #[test]
+    fn an_attachment_reads_its_size_from_the_png_header() {
+        let encoded = encoded_png(7, 3, [10, 20, 30, 255]);
+        let attachment = Attachment::from_value(&serde_json::json!({
+            "name": "screen.png", "mime": "image/png", "data": encoded
+        }))
+        .unwrap();
+        assert_eq!(attachment.size, Some((7, 3)));
+
+        // Still attachable, as it always was, with nothing to size it by.
+        let truncated = Attachment::from_png("broken.png", PNG_SIGNATURE.to_vec()).unwrap();
+        assert_eq!(truncated.size, None);
     }
 
     #[test]

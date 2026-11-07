@@ -58,6 +58,7 @@ use xd_desktop::{
 mod browser;
 mod editor;
 mod files;
+mod image_preview;
 mod input;
 mod minimal;
 mod selection;
@@ -137,6 +138,7 @@ const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
 const TRASH_ICON: &str = "icons/trash.svg";
+const CHEVRON_LEFT_ICON: &str = "icons/chevron-left.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
@@ -1857,6 +1859,8 @@ struct XdDesktop {
     draft_dirty: bool,
     attachments_dirty: bool,
     attachment_generation: u64,
+    composer_thumbnails: image_preview::ComposerThumbnails,
+    image_preview: Option<image_preview::ImagePreview>,
     sending: bool,
     pending_send: Option<PendingSend>,
     open_question: Option<OpenQuestion>,
@@ -2414,6 +2418,8 @@ impl XdDesktop {
             draft_dirty: false,
             attachments_dirty: false,
             attachment_generation: 0,
+            composer_thumbnails: HashMap::new(),
+            image_preview: None,
             sending: false,
             pending_send: None,
             open_question: None,
@@ -5861,7 +5867,8 @@ impl XdDesktop {
     }
 
     fn browser_occluded_by_popup(&self) -> bool {
-        self.auth_open
+        self.image_preview.is_some()
+            || self.auth_open
             || self.update_popup_open
             || self.usage_open
             || self.native_option_open.is_some()
@@ -13873,45 +13880,7 @@ impl XdDesktop {
         let can_submit = can_send || can_resume;
         let agent = AgentCli::from_backend(&self.model.backend);
 
-        let attachments = self
-            .model
-            .draft_attachments
-            .clone()
-            .into_iter()
-            .enumerate()
-            .map(|(index, attachment)| {
-                let name = attachment.name.clone();
-                div()
-                    .id(("draft-image", index))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        gpui::img(attachment.preview)
-                            .w(px(96.0))
-                            .h(px(72.0))
-                            .object_fit(gpui::ObjectFit::Contain),
-                    )
-                    .child(div().text_xs().text_color(rgb(colors.muted)).child(name))
-                    .child(
-                        div()
-                            .id(("remove-draft-image", index))
-                            .text_xs()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if index < this.model.draft_attachments.len() {
-                                    this.model.draft_attachments.remove(index);
-                                    this.attachments_dirty = true;
-                                    this.attachment_generation =
-                                        this.attachment_generation.saturating_add(1);
-                                    this.schedule_draft_sync(cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child("Remove"),
-                    )
-            })
-            .collect::<Vec<_>>();
+        let attachments = self.render_composer_attachments(colors, window, cx);
         let interaction = self.render_interaction(colors, cx);
         let agents_tray =
             Self::render_agents_tray(colors, &self.transcript_snapshot.running_agents);
@@ -14042,17 +14011,6 @@ impl XdDesktop {
                         },
                     ),
             )
-            .when(!attachments.is_empty(), |chat| {
-                chat.child(
-                    div()
-                        .w_full()
-                        .max_w(px(736.0))
-                        .mb_2()
-                        .flex()
-                        .gap_3()
-                        .children(attachments),
-                )
-            })
             .when_some(interaction, |chat, card| {
                 chat.child(div().w_full().max_w(px(736.0)).mb_3().child(card))
             })
@@ -14190,6 +14148,7 @@ impl XdDesktop {
                         let focus = this.composer_input.read(cx).focus_handle(cx);
                         window.focus(&focus);
                     }))
+                    .children(attachments)
                     .child(
                         div()
                             .id("native-composer")
@@ -15224,6 +15183,7 @@ impl XdDesktop {
         let update_overlay = self
             .update_popup_open
             .then(|| self.render_update_popup(colors, cx));
+        let image_preview_overlay = self.render_image_preview(colors, window, cx);
         let share_overlay = self.share_panel.clone().map(|panel| {
             let pairing_code = xd_transport::PairingCode { code: panel.code.clone(), fingerprint: panel.fingerprint.clone() }.encode().ok().filter(|_| !panel.loading);
             let can_copy = pairing_code.is_some();
@@ -16838,6 +16798,10 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if this.image_preview.is_some() {
+                    this.close_image_preview(window, cx);
+                    return;
+                }
                 if this.dismiss_usage_layer(window, cx) {
                     return;
                 }
@@ -17004,6 +16968,7 @@ impl XdDesktop {
             })
             .when_some(chat_delete_overlay, |root, overlay| root.child(overlay))
             .when_some(chat_overlay, |root, overlay| root.child(overlay))
+            .when_some(image_preview_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
             .when(!minimal_popup_open, |root| {
                 root.child(
@@ -17304,6 +17269,9 @@ impl AssetSource for EmbeddedIcons {
             )),
             TRASH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/trash.svg").as_slice(),
+            )),
+            CHEVRON_LEFT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/chevron-left.svg").as_slice(),
             )),
             CHEVRON_RIGHT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/chevron-right.svg").as_slice(),
@@ -17719,7 +17687,7 @@ mod tests {
 
     use super::*;
 
-    fn grouped_workspace_fixture() -> AppModel {
+    pub(super) fn grouped_workspace_fixture() -> AppModel {
         let mut model = AppModel::default();
         model.apply_tree(&serde_json::json!({
             "folders":[{"id":"atlas","name":"Atlas"}],
