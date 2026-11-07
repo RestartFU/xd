@@ -15,6 +15,7 @@ A local-first desktop workspace for user-installed Codex, Claude Code, and JCode
 ## Highlights
 
 - Native chat for Codex, Claude Code, and JCode, with streamed replies, activity cards, queues, and optional shell panes.
+- Agents can show you images: a screenshot or chart they name in a reply appears in the chat, on desktop and Android, even after the original file is gone.
 - Live subagent cards: each delegated agent shows its model, current step, tools, tokens, and elapsed time, and keeps its task, steps, and report once it finishes. Claude agents can be stopped or sent to the background from the card.
 - Tool approvals and questions inline in the chat, with the command or diff they would apply, on desktop and Android.
 - One persistent daemon owns local and remote sessions; work continues when clients disconnect.

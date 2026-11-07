@@ -62,6 +62,37 @@ class ImageReferenceTest {
     }
 
     @Test
+    fun aMarkerInAReplysCodeFenceIsCode() {
+        val text = "```text\n[image: /a.png]\n```\n[image: /b.png]"
+
+        assertEquals(
+            listOf(
+                MessagePart.Prose("```text\n[image: /a.png]\n```"),
+                MessagePart.Image("/b.png"),
+            ),
+            ImageReference.parts(text, markdown = true),
+        )
+    }
+
+    @Test
+    fun aShorterOrDifferentFenceDoesNotCloseABlock() {
+        val text = "````\n```\n~~~~\n[image: /a.png]\n````"
+
+        assertEquals(
+            listOf(MessagePart.Prose(text)),
+            ImageReference.parts(text, markdown = true),
+        )
+    }
+
+    @Test
+    fun aUsersUnclosedFenceDoesNotHideTheirAttachment() {
+        assertEquals(
+            listOf(MessagePart.Prose("```\ncode"), MessagePart.Image("/a.png")),
+            ImageReference.parts("```\ncode\n[image: /a.png]"),
+        )
+    }
+
+    @Test
     fun reportsWhetherAMessageCarriesAnImage() {
         assertTrue(ImageReference.hasImage("a\n[image: /a.png]\nb"))
         assertFalse(ImageReference.hasImage("[image: ]"))

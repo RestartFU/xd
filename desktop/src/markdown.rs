@@ -11,6 +11,24 @@ pub struct Document {
     pub truncated: bool,
 }
 
+impl Document {
+    /// Every image the document shows, wherever it sits.
+    pub fn image_paths(&self) -> Vec<String> {
+        fn collect(blocks: &[Block], paths: &mut Vec<String>) {
+            for block in blocks {
+                match block {
+                    Block::Image(path) => paths.push(path.clone()),
+                    Block::Analysis(blocks) => collect(blocks, paths),
+                    _ => {}
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        collect(&self.blocks, &mut paths);
+        paths
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     Heading {
@@ -28,6 +46,8 @@ pub enum Block {
     Code(CodeBlock),
     Table(TableBlock),
     Analysis(Vec<Block>),
+    /// An image on the host, named by its path there.
+    Image(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,14 +100,21 @@ pub enum CodeKind {
 }
 
 pub fn parse(source: &str) -> Document {
-    parse_document(source, false)
+    parse_document(source, false, false)
 }
 
 pub fn parse_assistant(source: &str) -> Document {
-    parse_document(source, true)
+    parse_document(source, true, false)
 }
 
-fn parse_document(source: &str, assistant: bool) -> Document {
+/// An assistant's reply to the user, which is where an image can appear. The
+/// host has already kept each image and written its own path into the marker;
+/// any other text, such as a subagent's report, never went through that.
+pub fn parse_reply(source: &str) -> Document {
+    parse_document(source, true, true)
+}
+
+fn parse_document(source: &str, assistant: bool, images: bool) -> Document {
     let source = final_display_text(source);
     let (source, byte_truncated) = bounded_prefix(&source, MAX_MARKDOWN_BYTES);
     let sections = if assistant {
@@ -107,7 +134,8 @@ fn parse_document(source: &str, assistant: bool) -> Document {
             break;
         }
         let content_budget = block_budget.saturating_sub(usize::from(section.analysis));
-        let (section_blocks, section_truncated) = parse_blocks(&section.text, content_budget);
+        let (section_blocks, section_truncated) =
+            parse_blocks(&section.text, content_budget, images);
         truncated |= section_truncated;
         let used = section_blocks.len() + usize::from(section.analysis);
         block_budget = block_budget.saturating_sub(used);
@@ -125,7 +153,7 @@ fn parse_document(source: &str, assistant: bool) -> Document {
     Document { blocks, truncated }
 }
 
-fn parse_blocks(source: &str, block_limit: usize) -> (Vec<Block>, bool) {
+fn parse_blocks(source: &str, block_limit: usize, images: bool) -> (Vec<Block>, bool) {
     let lines = source.lines().collect::<Vec<_>>();
     let mut blocks = Vec::new();
     let mut paragraph = Vec::new();
@@ -135,6 +163,15 @@ fn parse_blocks(source: &str, block_limit: usize) -> (Vec<Block>, bool) {
         let line = lines[index];
         if line.trim().is_empty() {
             flush_paragraph(&mut blocks, &mut paragraph);
+            index += 1;
+            continue;
+        }
+
+        if images && let Some(path) = image_marker(line) {
+            flush_paragraph(&mut blocks, &mut paragraph);
+            if blocks.len() < block_limit {
+                blocks.push(Block::Image(path.to_owned()));
+            }
             index += 1;
             continue;
         }
@@ -247,7 +284,7 @@ pub fn code_document(language: Option<&str>, source: &str, truncated: bool) -> D
 /// tags stay hidden, and an unclosed fence reads as a code block, so closing
 /// the text later changes nothing on screen.
 pub fn parse_streaming(source: &str) -> Document {
-    parse(&display_text(source))
+    parse_document(&display_text(source), false, true)
 }
 
 pub fn plain_document(source: &str) -> Document {
@@ -588,6 +625,12 @@ pub fn spoken_text(source: &str) -> Option<String> {
     } else {
         Some(spoken.chars().take(MAX_SPEECH_CHARS).collect())
     }
+}
+
+fn image_marker(line: &str) -> Option<&str> {
+    line.strip_prefix("[image: ")?
+        .strip_suffix(']')
+        .filter(|path| !path.is_empty())
 }
 
 fn fence_marker(line: &str) -> bool {
@@ -1605,6 +1648,45 @@ mod tests {
             paragraph.spans[2].url.as_deref(),
             Some("https://example.com")
         );
+    }
+
+    #[test]
+    fn only_a_reply_turns_a_marker_line_into_an_image() {
+        let source = "Before\n[image: /kept/a.png]\nAfter";
+        let document = parse_reply(source);
+        assert_eq!(document.blocks[1], Block::Image("/kept/a.png".into()));
+        assert_eq!(document.blocks.len(), 3);
+        assert_eq!(document.image_paths(), ["/kept/a.png"]);
+
+        for literal in [parse(source), parse_assistant(source)] {
+            assert_eq!(literal.blocks.len(), 1);
+            assert!(literal.image_paths().is_empty());
+        }
+        for prose in [
+            "See [image: /a.png] there",
+            "[image: /a.png] there",
+            " [image: /a.png]",
+            "[image: ]",
+        ] {
+            assert!(parse_reply(prose).image_paths().is_empty(), "{prose}");
+        }
+    }
+
+    #[test]
+    fn a_fenced_marker_stays_code_and_an_analysis_image_is_still_found() {
+        let fenced = parse_reply("```\n[image: /a.png]\n```");
+        assert!(matches!(fenced.blocks[0], Block::Code(_)));
+        assert!(fenced.image_paths().is_empty());
+
+        let analysis =
+            parse_reply("<analysis>\n[image: /a.png]\n</analysis>\n<summary>\nDone\n</summary>");
+        assert_eq!(analysis.image_paths(), ["/a.png"]);
+    }
+
+    #[test]
+    fn a_streaming_reply_shows_an_image_as_soon_as_its_line_is_complete() {
+        let document = parse_streaming("Look\n[image: /kept/a.png]\nand");
+        assert_eq!(document.image_paths(), ["/kept/a.png"]);
     }
 
     #[test]

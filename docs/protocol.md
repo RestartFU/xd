@@ -333,7 +333,7 @@ boundary, not an event cursor.
 | `usage-summary` | `days` of `1`, `7`, `30`, or `90`, optional IANA `time_zone`, optional `now_ms`, optional `refresh: boolean`, optional `generation` | `pending: true`; the asking connection then receives a `usage-summary` event with `generation` and `summary:{resolution,window_label,periods,buckets,sessions,sources,pricing}`, read from the host's Claude Code and Codex transcripts and priced from a daily LiteLLM price list |
 | `usage-limits` | optional IANA `time_zone`, optional `generation` | `pending: true`; the asking connection then receives a `usage-limits` event with `generation` and `accounts:[{provider,account_key,plan,windows,reset_credits,unavailable}]`, asked of each installed assistant; `account_key` is a hash, so no address crosses the wire |
 | `usage-prices` | none | saved `prices:{model:{input,output,cache_read,cache_write}}` in USD per million tokens, and `aliases:{model:target}` |
-| `image-read` | absolute host `path`, optional `preview: boolean` | `mime:"image/png"`, base64 `data`; only host-created remote pastes |
+| `image-read` | absolute host `path`, optional `preview: boolean` | `mime` of `image/png`, `image/jpeg`, `image/gif`, or `image/webp`, and base64 `data`; only images the host stored itself: remote pastes and [images in replies](#images-in-replies) |
 | `search` | `query` | matching stored messages |
 | `diff-read` | `chat` plus one `read` of `base`, `working-status`, `branch-status` (with `base`), `working-all`, `branch-all` (with `base`), `working-file`/`untracked-file` (with a safe relative `path`), or `branch-file` (with `base` and `path`) | `output: string`, limited to 8 MiB |
 | `ping` | none | no members beyond `ok` |
@@ -785,6 +785,34 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `terminal-output`, `terminal-closed` | `terminal`, … | Shared pty; output is base64. |
 | `auth`, `agent-auth-changed` | … | Assistant authentication state. |
 | `owner-icon` | `owner`, optional `mime` and base64 `data`, optional `retry` | A pending `owner-icon` fetch finished. Without `mime` and `data` the account has no avatar; keep the folder icon. With `retry` the fetch failed instead, so ask again later; the host answers from a short cooldown rather than refetching each time. |
+
+### Images in replies
+
+An assistant shows the user an image by putting a marker on a line of its own,
+outside any code fence:
+
+```
+[image: /absolute/path/to/shot.png]
+```
+
+Assistants are told this in their instructions. A relative path starts from the
+chat's working directory. The host handles the marker before the text is stored
+or sent, and a line that could still become one is withheld until it ends, so no
+client ever sees the original path:
+
+- A PNG, JPEG, GIF, or WebP file of at most 10 MiB is copied into the host's
+  private image store and the marker is rewritten to point at the copy, which is
+  the path to pass to `image-read`. The copy remains after the original is gone,
+  and an identical image shares it. Clients show the first frame of a GIF.
+- Anything else becomes the text
+  `Image unavailable: <path> (<reason>)`, as does every image past the 32nd in a
+  turn.
+
+A client draws a marker line where it stands in the reply, and leaves one in a
+code fence, or with anything else on its line, as text. A user's message carries
+the same marker for each attachment, after any text, and there every such line is
+an image, because what a user types is not Markdown. Markers in subagent reports
+are not handled and stay text.
 
 ### Tagged questions
 

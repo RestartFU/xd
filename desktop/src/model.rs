@@ -1,11 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::Cursor,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use gpui::{Image, ImageFormat};
+use gpui::{Image, ImageFormat, RenderImage};
+use image::Frame;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,6 +28,81 @@ pub fn owner_icon(mime: &str, data: &str) -> Option<Arc<Image>> {
     };
     let bytes = STANDARD.decode(data).ok()?;
     (!bytes.is_empty()).then(|| Arc::new(Image::from_bytes(format, bytes)))
+}
+
+/// The most pixels a chat will decode for one image. A small file can still
+/// describe an enormous picture, and decoding it would allocate all of it.
+const MAX_MESSAGE_IMAGE_PIXELS: u64 = 64_000_000;
+/// The largest pixels worth keeping: twice the widest and tallest a transcript
+/// draws an image, for dense displays. Layout goes by the original's size.
+const MAX_KEPT_WIDTH: u32 = 1560;
+const MAX_KEPT_HEIGHT: u32 = 960;
+/// What one decoded image can hold in memory at most.
+pub const MAX_MESSAGE_IMAGE_BYTES: usize = MAX_KEPT_WIDTH as usize * MAX_KEPT_HEIGHT as usize * 4;
+
+fn worth_decoding(width: u32, height: u32) -> bool {
+    let pixels = u64::from(width) * u64::from(height);
+    pixels > 0 && pixels <= MAX_MESSAGE_IMAGE_PIXELS
+}
+
+/// An image a message shows, ready to draw. The size is the original's, which is
+/// what it is laid out by.
+#[derive(Clone)]
+pub struct MessageImage {
+    pub image: Arc<RenderImage>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MessageImage {
+    /// Decodes an `image-read` reply. This is the slow part of showing an image,
+    /// so it does not belong on the UI thread.
+    pub fn decode(mime: &str, data: &str) -> Option<Self> {
+        if !matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
+            return None;
+        }
+        let bytes = STANDARD.decode(data).ok()?;
+        let reader = || {
+            image::ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .ok()
+        };
+        let (width, height) = reader()?.into_dimensions().ok()?;
+        if !worth_decoding(width, height) {
+            return None;
+        }
+        let mut decoded = reader()?.decode().ok()?;
+        if width > MAX_KEPT_WIDTH || height > MAX_KEPT_HEIGHT {
+            decoded = decoded.thumbnail(MAX_KEPT_WIDTH, MAX_KEPT_HEIGHT);
+        }
+        let mut frame = decoded.into_rgba8();
+        // The renderer takes BGRA.
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Some(Self {
+            image: Arc::new(RenderImage::new(vec![Frame::new(frame)])),
+            width,
+            height,
+        })
+    }
+
+    /// The memory its pixels hold.
+    pub fn bytes(&self) -> usize {
+        self.image.as_bytes(0).map_or(0, <[u8]>::len)
+    }
+
+    /// The size to draw at: shrunk to fit the bounds, and never enlarged.
+    pub fn fitted(&self, max_width: f32, max_height: f32) -> (f32, f32) {
+        let (width, height) = (self.width as f32, self.height as f32);
+        let scale = (max_width.max(1.0) / width)
+            .min(max_height.max(1.0) / height)
+            .min(1.0);
+        ((width * scale).max(1.0), (height * scale).max(1.0))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,13 +280,15 @@ impl Message {
     ) -> Self {
         let content = content.into();
         let role = role.into();
-        let (shown, image_paths) = message_content(&role, &content);
+        let (shown, mut image_paths) = message_content(&role, &content);
         // A tool row draws its card, not its text as markdown; a patch can be
         // large, so its document is only built if something asks for it.
         let tool = (role == "tool").then(|| Arc::new(ToolView::parse(&content)));
         let markdown = tool.is_none().then(|| {
             Arc::new(if role == "assistant" {
-                markdown::parse_assistant(&shown)
+                let document = markdown::parse_reply(&shown);
+                image_paths = document.image_paths();
+                document
             } else {
                 markdown::parse(&shown)
             })
@@ -234,8 +313,9 @@ impl Message {
     ) -> Self {
         let content = content.into();
         let role = role.into();
-        let (_, image_paths) = message_content(&role, &content);
-        let markdown = Some(Arc::new(markdown::parse_streaming(&content)));
+        let document = markdown::parse_streaming(&content);
+        let image_paths = document.image_paths();
+        let markdown = Some(Arc::new(document));
         Self {
             id,
             role,
@@ -285,13 +365,15 @@ impl Message {
     }
 
     fn cache_markdown(&mut self) {
-        let (shown, image_paths) = message_content(&self.role, &self.content);
+        let (shown, mut image_paths) = message_content(&self.role, &self.content);
         if self.role == "tool" {
             self.tool = Some(Arc::new(ToolView::parse(&self.content)));
             self.markdown = None;
         } else {
             self.markdown = Some(Arc::new(if self.role == "assistant" {
-                markdown::parse_assistant(&shown)
+                let document = markdown::parse_reply(&shown);
+                image_paths = document.image_paths();
+                document
             } else {
                 markdown::parse(&shown)
             }));
@@ -2717,6 +2799,130 @@ mod tests {
             message_content("assistant", "Keep [image: /not/a/reference.png] literal");
         assert!(paths.is_empty());
         assert_eq!(shown, "Keep [image: /not/a/reference.png] literal");
+    }
+
+    #[test]
+    fn a_reply_shows_its_images_where_it_names_them() {
+        let message = Message::new(
+            Some(1),
+            "assistant",
+            "Before\n[image: /kept/a.png]\nAfter\n\n```\n[image: /in/a/fence.png]\n```",
+            None,
+        );
+        assert_eq!(message.image_paths(), ["/kept/a.png"]);
+        let document = message.markdown();
+        assert!(matches!(document.blocks[0], markdown::Block::Paragraph(_)));
+        assert_eq!(
+            document.blocks[1],
+            markdown::Block::Image("/kept/a.png".into())
+        );
+        assert!(matches!(document.blocks[2], markdown::Block::Paragraph(_)));
+        assert!(matches!(document.blocks[3], markdown::Block::Code(_)));
+
+        let streaming =
+            Message::new_streaming(None, "assistant", "Look\n[image: /kept/b.png]", None);
+        assert_eq!(streaming.image_paths(), ["/kept/b.png"]);
+    }
+
+    #[test]
+    fn a_user_message_keeps_its_images_apart_from_its_text() {
+        let message = Message::new(Some(1), "user", "```\nunclosed\n[image: /kept/a.png]", None);
+        assert_eq!(message.image_paths(), ["/kept/a.png"]);
+        assert!(
+            message
+                .markdown()
+                .blocks
+                .iter()
+                .all(|block| !matches!(block, markdown::Block::Image(_)))
+        );
+    }
+
+    /// A PNG of one color, as base64.
+    fn encoded_png(width: u32, height: u32, color: [u8; 4]) -> String {
+        use image::ImageEncoder;
+        let pixels = color.repeat(width as usize * height as usize);
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&pixels, width, height, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        STANDARD.encode(png)
+    }
+
+    #[test]
+    fn a_message_image_keeps_its_shape_and_is_never_enlarged() {
+        let image = |width, height| MessageImage {
+            image: Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(
+                1, 1,
+            ))])),
+            width,
+            height,
+        };
+        assert_eq!(image(1920, 1080).fitted(960.0, 480.0), (853.3333, 480.0));
+        assert_eq!(image(2000, 500).fitted(500.0, 480.0), (500.0, 125.0));
+        assert_eq!(image(64, 32).fitted(780.0, 480.0), (64.0, 32.0));
+        // Before the column has a width there is still something to measure.
+        assert_eq!(image(64, 64).fitted(0.0, 0.0), (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_message_image_is_decoded_ready_for_the_renderer() {
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(2, 1, [255, 10, 20, 255])).unwrap();
+        assert_eq!((shown.width, shown.height), (2, 1));
+        assert_eq!(shown.bytes(), 8);
+        // The renderer takes BGRA.
+        assert_eq!(&shown.image.as_bytes(0).unwrap()[..4], &[20, 10, 255, 255]);
+    }
+
+    #[test]
+    fn a_large_image_keeps_its_size_for_layout_but_not_its_pixels() {
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(3120, 960, [9, 9, 9, 255])).unwrap();
+        assert_eq!((shown.width, shown.height), (3120, 960));
+        assert_eq!(shown.bytes(), 1560 * 480 * 4);
+
+        // A square one is limited by the height it can be drawn at.
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(1920, 1920, [9, 9, 9, 255])).unwrap();
+        assert_eq!(shown.bytes(), 960 * 960 * 4);
+        assert!(shown.bytes() <= MAX_MESSAGE_IMAGE_BYTES);
+
+        // One that already fits is left alone.
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(1560, 960, [9, 9, 9, 255])).unwrap();
+        assert_eq!(shown.bytes(), MAX_MESSAGE_IMAGE_BYTES);
+    }
+
+    #[test]
+    fn only_the_first_frame_of_a_gif_is_decoded() {
+        // Every frame held in memory would make one small file very expensive.
+        let frame = |shade| {
+            image::Frame::new(image::RgbaImage::from_pixel(
+                4,
+                4,
+                image::Rgba([shade, shade, shade, 255]),
+            ))
+        };
+        let mut gif = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut gif)
+            .encode_frames([frame(10), frame(200)])
+            .unwrap();
+        let shown = MessageImage::decode("image/gif", &STANDARD.encode(gif)).unwrap();
+        assert_eq!(shown.image.frame_count(), 1);
+        assert_eq!(shown.bytes(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn a_message_image_refuses_what_it_should_not_decode() {
+        assert!(worth_decoding(8000, 8000));
+        assert!(!worth_decoding(8001, 8000));
+        assert!(!worth_decoding(0, 8000));
+        // Multiplying these as 32 bits would wrap around to something small.
+        assert!(!worth_decoding(u32::MAX, u32::MAX));
+        assert!(MessageImage::decode("image/png", &STANDARD.encode(b"junk")).is_none());
+        assert!(MessageImage::decode("image/png", "not base64 ~~").is_none());
+        let png = encoded_png(1, 1, [0, 0, 0, 255]);
+        assert!(MessageImage::decode("image/svg+xml", &png).is_none());
     }
 
     #[test]

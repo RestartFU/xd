@@ -13,12 +13,16 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::private_fs::{create_private_file, secure_directory};
-use crate::settlement::{
-    self, AutoSettleSettings, PullRequestSnapshot, PullRequestState, SettlementCandidate,
+use crate::{
+    private_fs::{create_private_file, open_without_waiting, secure_directory},
+    reply_images,
+    settlement::{
+        self, AutoSettleSettings, PullRequestSnapshot, PullRequestState, SettlementCandidate,
+    },
 };
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
@@ -37,7 +41,11 @@ Use two to six options. When the answer must be free-form text, put <input> on i
 
 For an optional concise spoken response, wrap only the words that should be read aloud in an exact <speak>...</speak> block. Do not wrap code, tool output, analysis, or questions. The client may ignore speech tags when speech is disabled.
 
-Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all."#;
+Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all.
+
+To show the user an image file from this machine, such as a screenshot or chart you made, put it on a line of its own in your reply, outside any code block, in exactly this form:
+[image: /absolute/path/to/image.png]
+The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files."#;
 const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
 /// Sent as a normal message, so the transcript shows why the agent carried on.
 pub(crate) const RESUME_PROMPT: &str =
@@ -1919,6 +1927,59 @@ impl StateStore {
         Ok(materialized)
     }
 
+    /// Copies an image a reply names into the store `image-read` serves, so the
+    /// chat keeps showing it whatever happens to the original.
+    pub(crate) fn keep_reply_image(&self, workdir: &str, path: &str) -> Result<PathBuf, String> {
+        let source = fs::canonicalize(reply_images::source_path(workdir, path))
+            .map_err(|_| "the file was not found".to_owned())?;
+        // A FIFO would stall the whole turn, so nothing waits on what this is.
+        let file =
+            open_without_waiting(&source).map_err(|_| "the file could not be read".to_owned())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "the file could not be read".to_owned())?;
+        if !metadata.is_file() {
+            return Err("it is not a file".to_owned());
+        }
+        if metadata.len() > MAX_IMAGE_BYTES as u64 {
+            return Err("it is larger than 10 MiB".to_owned());
+        }
+        let mut data = Vec::new();
+        file.take(MAX_IMAGE_BYTES as u64 + 1)
+            .read_to_end(&mut data)
+            .map_err(|_| "the file could not be read".to_owned())?;
+        if data.len() > MAX_IMAGE_BYTES {
+            return Err("it is larger than 10 MiB".to_owned());
+        }
+        let extension = reply_images::image_extension(&data)
+            .ok_or_else(|| "it is not a PNG, JPEG, GIF or WebP image".to_owned())?;
+        self.store_reply_image(&data, extension)
+            .map_err(|_| "the host could not store it".to_owned())
+    }
+
+    /// Named for its content, so an image shown again takes no more disk. It
+    /// appears under that name only once whole, so one found there is complete.
+    fn store_reply_image(&self, data: &[u8], extension: &str) -> std::io::Result<PathBuf> {
+        fs::create_dir_all(&self.paste_root)?;
+        secure_directory(&self.paste_root)?;
+        let digest = Sha256::digest(data);
+        let path = self
+            .paste_root
+            .join(format!("paste-{digest:x}.{extension}"));
+        if path.is_file() {
+            return Ok(path);
+        }
+        let partial = self.paste_root.join(format!(".partial-{}", Uuid::new_v4()));
+        let written = create_private_file(&partial)
+            .and_then(|mut file| file.write_all(data))
+            .and_then(|()| fs::rename(&partial, &path));
+        if let Err(error) = written {
+            let _ = fs::remove_file(&partial);
+            return Err(error);
+        }
+        Ok(path)
+    }
+
     pub(crate) fn materialize_terminal_image(
         &self,
         request: &Value,
@@ -2483,12 +2544,13 @@ impl StateStore {
             return Err(invalid_remote_paste());
         }
         let data = fs::read(&canonical).map_err(|_| invalid_remote_paste())?;
-        if data.len() > MAX_IMAGE_BYTES || !data.starts_with(PNG_SIGNATURE) {
+        if data.len() > MAX_IMAGE_BYTES {
             return Err(invalid_remote_paste());
         }
+        let mime = reply_images::image_mime(&data).ok_or_else(invalid_remote_paste)?;
         Ok(json!({
             "ok": true,
-            "mime": "image/png",
+            "mime": mime,
             "data": STANDARD.encode(data),
         }))
     }
@@ -8272,6 +8334,77 @@ mod tests {
             .messages(&json!({"chat": "chat-1", "before": 2}))
             .unwrap_err();
         assert!(unbounded_cursor.to_string().contains("positive limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reply_image_is_copied_privately_and_only_real_images_are_kept() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let work = fixture.root.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let workdir = work.to_string_lossy();
+        const JPEG: &[u8] = b"\xff\xd8\xff\xe0pixels";
+        fs::write(work.join("shot.jpg"), JPEG).unwrap();
+
+        let kept = store.keep_reply_image(&workdir, "shot.jpg").unwrap();
+        assert!(kept.starts_with(fixture.root.join("remote-pasted")));
+        assert_eq!(kept.extension().unwrap(), "jpg");
+        assert_eq!(
+            fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // The same image again takes no more disk.
+        assert_eq!(store.keep_reply_image(&workdir, "shot.jpg").unwrap(), kept);
+        fs::write(work.join("again.jpg"), JPEG).unwrap();
+        assert_eq!(store.keep_reply_image(&workdir, "again.jpg").unwrap(), kept);
+        assert_eq!(
+            fs::read_dir(fixture.root.join("remote-pasted"))
+                .unwrap()
+                .count(),
+            1,
+            "nothing but the one image is left in the store"
+        );
+        // The copy is what is served, so the original can go away.
+        fs::remove_file(work.join("shot.jpg")).unwrap();
+        let read = store
+            .image_read(&json!({"path": kept.to_string_lossy()}))
+            .unwrap();
+        assert_eq!(read["mime"], "image/jpeg");
+        assert_eq!(
+            STANDARD.decode(read["data"].as_str().unwrap()).unwrap(),
+            JPEG
+        );
+
+        let refused = |path: &str, reason: &str| {
+            assert_eq!(
+                store.keep_reply_image(&workdir, path).unwrap_err(),
+                reason,
+                "{path}"
+            );
+        };
+        refused("missing.png", "the file was not found");
+        refused(".", "it is not a file");
+        // Waiting on this would hang the test, as it would the turn.
+        let fifo =
+            std::ffi::CString::new(work.join("fifo.png").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        refused("fifo.png", "it is not a file");
+        fs::write(work.join("secret.png"), b"not really an image").unwrap();
+        refused("secret.png", "it is not a PNG, JPEG, GIF or WebP image");
+        let large = fs::File::create(work.join("large.png")).unwrap();
+        large.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        refused("large.png", "it is larger than 10 MiB");
+
+        // The original's location still does not become readable.
+        fs::write(work.join("beside.png"), PNG_SIGNATURE).unwrap();
+        assert!(
+            store
+                .image_read(&json!({"path": work.join("beside.png").to_string_lossy()}))
+                .is_err()
+        );
     }
 
     #[test]

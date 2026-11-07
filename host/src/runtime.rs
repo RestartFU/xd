@@ -17,6 +17,7 @@ use crate::{
     EventBus, StateStore,
     agent::{AgentCommand, AgentEvent, AgentParser, TodoItem, TodoUpdate},
     ask::{self, Ask},
+    reply_images::ReplyImages,
     secrets::SecretsStore,
     storage::TurnSpec,
     subagent::{SubagentPatch, SubagentRun, SubagentStatus},
@@ -1157,12 +1158,31 @@ impl TurnRuntime {
         let mut published_text = false;
         let mut context_usage = None;
         let mut parked = Instant::now();
+        let mut reply_images = ReplyImages::default();
+        let store = self.inner.store.clone();
+        let workdir = turn.workdir.clone();
+        let mut keep_image = move |path: &str| store.keep_reply_image(&workdir, path);
 
         let mut line = String::new();
         // Stores the reply streamed so far as its own message, which a tool
-        // card that follows it must come after.
+        // card that follows it must come after. A line still held back as a
+        // possible image ends with the message.
         macro_rules! close_segment {
             () => {
+                let held = reply_images.finish(&mut keep_image);
+                if !held.is_empty() {
+                    streamed_text.push_str(&held);
+                    assistant_text.push_str(&held);
+                    if self.publish_streamed(
+                        &turn,
+                        turn_id,
+                        &progress,
+                        &streamed_text,
+                        &mut visible_streamed_bytes,
+                    ) {
+                        published_text = true;
+                    }
+                }
                 if !streamed_text.is_empty() {
                     let segment = std::mem::take(&mut streamed_text);
                     if let Err(error) = self.inner.store.append_turn_message(
@@ -1284,6 +1304,7 @@ impl TurnRuntime {
                         }));
                     }
                     AgentEvent::Text(text) => {
+                        let text = reply_images.whole(&text, &mut keep_image);
                         assistant_text.push_str(&text);
                         match self.inner.store.append_turn_message(
                             &turn.chat_id,
@@ -1312,18 +1333,16 @@ impl TurnRuntime {
                         }
                     }
                     AgentEvent::TextDelta(text) => {
+                        let text = reply_images.push(&text, &mut keep_image);
                         streamed_text.push_str(&text);
                         assistant_text.push_str(&text);
-                        let visible = ask::visible_bytes(&streamed_text);
-                        if visible > visible_streamed_bytes {
-                            self.publish_sequenced(
-                                "text",
-                                &turn,
-                                turn_id,
-                                &progress,
-                                json!({"text": &streamed_text[visible_streamed_bytes..visible]}),
-                            );
-                            visible_streamed_bytes = visible;
+                        if self.publish_streamed(
+                            &turn,
+                            turn_id,
+                            &progress,
+                            &streamed_text,
+                            &mut visible_streamed_bytes,
+                        ) {
                             published_text = true;
                             // A client that loads the chat now has to be handed
                             // the same text the live events already carried.
@@ -1444,6 +1463,18 @@ impl TurnRuntime {
             }
         }
 
+        let held = reply_images.finish(&mut keep_image);
+        if !held.is_empty() {
+            streamed_text.push_str(&held);
+            assistant_text.push_str(&held);
+            self.publish_streamed(
+                &turn,
+                turn_id,
+                &progress,
+                &streamed_text,
+                &mut visible_streamed_bytes,
+            );
+        }
         if !streamed_text.is_empty() {
             match self.inner.store.append_turn_message(
                 &turn.chat_id,
@@ -1833,6 +1864,31 @@ impl TurnRuntime {
         }
     }
 
+    /// Passes on whatever of the streamed reply is ready to be seen, and says
+    /// whether there was any.
+    fn publish_streamed(
+        &self,
+        turn: &TurnSpec,
+        turn_id: u64,
+        progress: &TurnProgress,
+        streamed_text: &str,
+        visible_streamed_bytes: &mut usize,
+    ) -> bool {
+        let visible = ask::visible_bytes(streamed_text);
+        if visible <= *visible_streamed_bytes {
+            return false;
+        }
+        self.publish_sequenced(
+            "text",
+            turn,
+            turn_id,
+            progress,
+            json!({"text": &streamed_text[*visible_streamed_bytes..visible]}),
+        );
+        *visible_streamed_bytes = visible;
+        true
+    }
+
     fn publish_sequenced(
         &self,
         name: &str,
@@ -2205,6 +2261,111 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// An assistant names an image, streamed across deltas and in a block that
+    /// arrives whole. The user gets the host's own copy, in the stored reply and
+    /// in the live text alike, and that copy outlives the original.
+    #[cfg(unix)]
+    #[test]
+    fn an_image_an_assistant_names_is_kept_and_shown_from_the_host_copy() {
+        use std::{env, fs, os::unix::fs::PermissionsExt};
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = env::temp_dir().join(format!(
+            "xd-runtime-images-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let original = root.join("shot.png");
+        fs::write(&original, b"\x89PNG\r\n\x1a\npixels").unwrap();
+        let agent = root.join("claude");
+        let delta = |text: &str| {
+            let event = json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}}});
+            format!("printf '%s\\n' '{event}'\n")
+        };
+        let path = original.to_string_lossy();
+        let mut script = String::from(
+            "#!/bin/sh\nread first\necho '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}'\n",
+        );
+        script.push_str(&delta("Here it is:\n[ima"));
+        script.push_str(&delta(&format!("ge: {path}")));
+        script.push_str(&delta("]\nand again\n"));
+        script.push_str(&delta(&format!("[image: {path}]")));
+        script.push_str(&delta("\n[image: shot-missing.png]"));
+        script.push_str("echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}'\nread second\n");
+        fs::write(&agent, script).unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "claude"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let events = Arc::new(EventBus::default());
+        let (sender, live) = std::sync::mpsc::sync_channel(256);
+        let (connection, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        events.subscribe(sender, connection).unwrap();
+        let runtime = TurnRuntime::new(store.clone(), events, Arc::new(SecretsStore::new(None)));
+        match store
+            .prepare_send(&json!({"chat": chat, "text": "show me"}))
+            .unwrap()
+        {
+            crate::storage::SendDisposition::Start { turn, .. } => runtime.start(turn).unwrap(),
+            crate::storage::SendDisposition::Queued { .. } => panic!("the message was queued"),
+        }
+        wait_for("the reply", || {
+            contents(&store, &chat)
+                .iter()
+                .any(|(role, _)| role == "assistant")
+        });
+        wait_for("the turn to end", || runtime.live_turn(&chat).is_none());
+
+        let reply = contents(&store, &chat)
+            .into_iter()
+            .find(|(role, _)| role == "assistant")
+            .unwrap()
+            .1;
+        assert!(!reply.contains(path.as_ref()), "{reply}");
+        let lines = reply.lines().collect::<Vec<_>>();
+        assert_eq!(lines[0], "Here it is:");
+        assert_eq!(lines[2], "and again");
+        assert_eq!(
+            lines[4],
+            "Image unavailable: shot-missing.png (the file was not found)"
+        );
+        let kept = |line: &str| {
+            line.strip_prefix("[image: ")
+                .and_then(|line| line.strip_suffix(']'))
+                .expect("a kept image")
+                .to_owned()
+        };
+        let (first, second) = (kept(lines[1]), kept(lines[3]));
+        // Named twice, stored once.
+        assert_eq!(first, second);
+
+        fs::remove_file(&original).unwrap();
+        let read = store.image_read(&json!({"path": first})).unwrap();
+        assert_eq!(read["mime"], "image/png");
+
+        let mut streamed = String::new();
+        while let Ok(event) = live.try_recv() {
+            if event["event"] == "text" {
+                streamed.push_str(event["text"].as_str().unwrap());
+            }
+        }
+        assert_eq!(streamed, reply);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Claude ends a turn while a background agent still runs, then reports
