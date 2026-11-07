@@ -1881,6 +1881,9 @@ struct XdDesktop {
     message_image_queue: VecDeque<String>,
     message_image_fetching: Option<String>,
     message_image_decoding: bool,
+    /// Pixels of closed chats' images that have not been let go of yet, which
+    /// count against the budget until they are.
+    message_images_closing: usize,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
@@ -2426,6 +2429,7 @@ impl XdDesktop {
             message_image_queue: VecDeque::new(),
             message_image_fetching: None,
             message_image_decoding: false,
+            message_images_closing: 0,
             owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
@@ -8623,6 +8627,13 @@ impl XdDesktop {
         if self.message_image_fetching.is_some() || self.message_image_decoding {
             return None;
         }
+        // Waits for a closed chat's images to go, if there is no room until then.
+        if self.message_images_closing > 0
+            && self.message_image_bytes() + self.message_images_closing + MAX_MESSAGE_IMAGE_BYTES
+                > MESSAGE_IMAGE_BUDGET
+        {
+            return None;
+        }
         while let Some(path) = self.message_image_queue.pop_front() {
             if matches!(
                 self.message_images.get(&path),
@@ -8718,7 +8729,8 @@ impl XdDesktop {
                 _ => None,
             })
             .collect();
-        let evicted = images_over_budget(held, MESSAGE_IMAGE_BUDGET, self.message_image_frame);
+        let budget = MESSAGE_IMAGE_BUDGET.saturating_sub(self.message_images_closing);
+        let evicted = images_over_budget(held, budget, self.message_image_frame);
         if evicted.is_empty() {
             return;
         }
@@ -8729,39 +8741,50 @@ impl XdDesktop {
                 Some(MessageImageState::Ready(ready)) => Some(ready.image.image),
                 _ => None,
             })
-            .collect();
-        Self::release_message_images(released, cx);
+            .collect::<Vec<_>>();
+        // The frame on screen did not draw any of these, so they can go now. Our
+        // handle is not enough: each window keeps its own copy of what it drew.
+        // Deferred, because a window that is being updated would keep its copy.
+        cx.defer(move |cx| {
+            for image in released {
+                cx.drop_image(image, None);
+            }
+        });
     }
 
     /// Lets go of the open chat's images, as it closes. A fetch or decode under
     /// way finds nothing waiting for it when it ends, and its result is dropped.
+    ///
+    /// The frame on screen may still be drawing them and can be presented again
+    /// without being rebuilt, so unlike eviction this waits for the next frame.
+    /// Until then they count against the budget, and a chat opened meanwhile
+    /// loads only what fits alongside them.
     fn forget_message_images(&mut self, cx: &mut Context<Self>) {
         self.message_image_queue.clear();
         self.message_image_fetching = None;
         let images = std::mem::take(&mut self.message_images);
-        let released = images
+        let closing = images
             .values()
             .filter_map(|state| match state {
-                MessageImageState::Ready(ready) => Some(ready.image.image.clone()),
+                MessageImageState::Ready(ready) => Some(ready.image.clone()),
                 _ => None,
             })
-            .collect();
-        Self::release_message_images(released, cx);
-    }
-
-    /// Dropping our handle is not enough: each window keeps its own copy of an
-    /// image it drew. The frame on screen may still use that copy and can be
-    /// presented again without being rebuilt, so it goes after the next one.
-    fn release_message_images(images: Vec<Arc<gpui::RenderImage>>, cx: &mut Context<Self>) {
-        if images.is_empty() {
+            .collect::<Vec<_>>();
+        if closing.is_empty() {
             return;
         }
-        cx.spawn(async move |_, cx| {
+        let bytes = closing.iter().map(MessageImage::bytes).sum::<usize>();
+        self.message_images_closing += bytes;
+        cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(2)).await;
             let _ = cx.update(|cx| {
-                for image in images {
-                    cx.drop_image(image, None);
+                for image in closing {
+                    cx.drop_image(image.image, None);
                 }
+            });
+            let _ = this.update(cx, |this, _| {
+                this.message_images_closing = this.message_images_closing.saturating_sub(bytes);
+                this.pump_message_images();
             });
         })
         .detach();
@@ -13523,7 +13546,7 @@ impl XdDesktop {
         self.message_image_frame += 1;
         let image_frame = self.message_image_frame;
         let desktop = cx.entity().downgrade();
-        if self.message_image_bytes() > MESSAGE_IMAGE_BUDGET {
+        if self.message_image_bytes() + self.message_images_closing > MESSAGE_IMAGE_BUDGET {
             // After the list has marked what this frame draws.
             let desktop = desktop.clone();
             cx.defer(move |cx| {
@@ -18633,6 +18656,56 @@ mod tests {
         assert_eq!(working_dot_alphas(2), [0xff, 0xff, 0x4d]);
         assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
+    }
+
+    /// Images on their way out still hold memory, so they count until they go.
+    #[gpui::test]
+    fn images_on_their_way_out_count_against_the_budget(cx: &mut gpui::TestAppContext) {
+        let ready = |drawn: u64| {
+            MessageImageState::Ready(ReadyImage {
+                image: MessageImage {
+                    image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                        image::RgbaImage::new(1, 1),
+                    )])),
+                    width: 1,
+                    height: 1,
+                },
+                drawn: Rc::new(Cell::new(drawn)),
+            })
+        };
+
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            // A closing chat leaves no room, so an undrawn image goes, and what
+            // the latest frame drew stays.
+            desktop.message_image_frame = 5;
+            desktop.message_images_closing = MESSAGE_IMAGE_BUDGET;
+            Arc::make_mut(&mut desktop.message_images).extend([
+                ("/scrolled-away".to_owned(), ready(4)),
+                ("/on-screen".to_owned(), ready(5)),
+            ]);
+            desktop.evict_message_images(cx);
+            assert!(!desktop.message_images.contains_key("/scrolled-away"));
+            assert!(desktop.message_images.contains_key("/on-screen"));
+
+            // Nor does anything new load until there is room again.
+            Arc::make_mut(&mut desktop.message_images)
+                .insert("/next".to_owned(), MessageImageState::Loading);
+            desktop.message_image_queue.push_back("/next".to_owned());
+            assert_eq!(desktop.next_message_image(), None);
+            assert_eq!(desktop.message_image_queue.len(), 1, "it keeps its place");
+            desktop.message_images_closing = 0;
+            assert_eq!(desktop.next_message_image().as_deref(), Some("/next"));
+
+            // A closed chat's images count until the frame after it has passed.
+            desktop.forget_message_images(cx);
+            assert_eq!(desktop.message_images_closing, 4, "/on-screen, 1x1 RGBA");
+        });
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert_eq!(desktop.message_images_closing, 0);
+        });
     }
 
     /// A reply is megabytes of base64 and decoding holds all of an image's pixels,
