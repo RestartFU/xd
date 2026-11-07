@@ -23,6 +23,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -88,14 +89,16 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                 if (providers == null) {
                     if (error == null) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
                 } else {
-                    providers.forEach { provider -> AccountRow(provider, model) }
+                    // Keyed, so an entered sign-in code stays with its assistant
+                    // when another appears above it.
+                    providers.forEach { provider -> key(provider.provider) { AccountRow(provider, model) } }
                 }
                 HorizontalDivider()
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Command-line tools", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
                     TextButton(onClick = model::checkCliUpdates) { Text("Check for updates") }
                 }
-                clis?.values?.sortedBy { it.displayName }?.forEach { cli -> CliRow(cli, model) }
+                clis?.values?.sortedBy { it.displayName }?.forEach { cli -> key(cli.provider) { CliRow(cli, model) } }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },

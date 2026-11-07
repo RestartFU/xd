@@ -90,14 +90,46 @@ public class XdClient(
     /** Asked for on this host, so a reconnect reads them again even if no answer landed. */
     private val agentAuthWanted = MutableStateFlow(false)
     private val agentClisWanted = MutableStateFlow(false)
-    private val _agentAuthStale = MutableStateFlow(false)
-    private val _agentClisStale = MutableStateFlow(false)
+    private val agentAuthFreshness = Freshness()
+    private val agentClisFreshness = Freshness()
 
-    /** Sign-in state may be out of date: a refresh after reconnecting failed. */
-    public val agentAuthStale: StateFlow<Boolean> = _agentAuthStale.asStateFlow()
+    /** Sign-in state may be out of date: the newest read of it failed. */
+    public val agentAuthStale: StateFlow<Boolean> = agentAuthFreshness.stale
 
-    /** CLI state may be out of date: a refresh after reconnecting failed. */
-    public val agentClisStale: StateFlow<Boolean> = _agentClisStale.asStateFlow()
+    /** CLI state may be out of date: the newest read of it failed. */
+    public val agentClisStale: StateFlow<Boolean> = agentClisFreshness.stale
+
+    /**
+     * Whether state shown may be out of date, with failures and answers
+     * ordered by request: an older answer cannot clear a newer failure, and
+     * an older failure cannot mark a newer answer stale.
+     */
+    private class Freshness {
+        private val lock = Mutex()
+        private var calls = 0L
+        private var failed = 0L
+        private var applied = 0L
+        private val _stale = MutableStateFlow(false)
+        val stale: StateFlow<Boolean> = _stale.asStateFlow()
+
+        suspend fun start(): Long = lock.withLock { ++calls }
+
+        suspend fun failed(call: Long) = lock.withLock {
+            failed = maxOf(failed, call)
+            if (call > applied) _stale.value = true
+        }
+
+        suspend fun applied(call: Long) = lock.withLock {
+            applied = maxOf(applied, call)
+            if (call > failed) _stale.value = false
+        }
+
+        suspend fun reset() = lock.withLock {
+            failed = 0
+            applied = 0
+            _stale.value = false
+        }
+    }
 
     /** Each assistant's sign-in on the host, kept current by its broadcasts. */
     public val agentAuth: StateFlow<Map<String, AgentAuthProviderReply>?> = agentAuthStates.items
@@ -253,10 +285,10 @@ public class XdClient(
                     // A failure is not dropped: what is shown may be out of
                     // date, and the next read that lands clears the mark.
                     if (agentAuthWanted.value) {
-                        backgroundRead(_agentAuthStale) { loadAgentAuth() }
+                        scope.launch { runCatching { loadAgentAuth() } }
                     }
                     if (agentClisWanted.value) {
-                        backgroundRead(_agentClisStale) { agentCliUpdates("status") }
+                        scope.launch { runCatching { agentCliUpdates("status") } }
                     }
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
@@ -349,8 +381,8 @@ public class XdClient(
         agentCliStates.clear()
         agentAuthWanted.value = false
         agentClisWanted.value = false
-        _agentAuthStale.value = false
-        _agentClisStale.value = false
+        agentAuthFreshness.reset()
+        agentClisFreshness.reset()
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -477,24 +509,19 @@ public class XdClient(
     public suspend fun loadAgentAuth() {
         agentAuthWanted.value = true
         val generation = _sessionGeneration.value
+        val call = agentAuthFreshness.start()
         val mark = agentAuthStates.mark()
-        val reply = actor.decodeReply(actor.call(Ops.agentAuth())) { it.decodeReply<AgentAuthReply>() }
+        val reply = try {
+            actor.decodeReply(actor.call(Ops.agentAuth())) { it.decodeReply<AgentAuthReply>() }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (generation == _sessionGeneration.value) agentAuthFreshness.failed(call)
+            throw error
+        }
         if (generation == _sessionGeneration.value) {
             agentAuthStates.reply(reply.providers, mark)
-            _agentAuthStale.value = false
-        }
-    }
-
-    private fun backgroundRead(stale: MutableStateFlow<Boolean>, read: suspend () -> Unit) {
-        val generation = _sessionGeneration.value
-        scope.launch {
-            try {
-                read()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == _sessionGeneration.value) stale.value = true
-            }
+            agentAuthFreshness.applied(call)
         }
     }
 
@@ -507,13 +534,21 @@ public class XdClient(
     public suspend fun agentCliUpdates(action: String = "status", provider: String? = null) {
         agentClisWanted.value = true
         val generation = _sessionGeneration.value
+        val call = agentClisFreshness.start()
         val mark = agentCliStates.mark()
-        val reply = actor.decodeReply(actor.call(Ops.agentCliUpdates(action, provider))) {
-            it.decodeReply<AgentCliUpdatesReply>()
+        val reply = try {
+            actor.decodeReply(actor.call(Ops.agentCliUpdates(action, provider))) {
+                it.decodeReply<AgentCliUpdatesReply>()
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (generation == _sessionGeneration.value) agentClisFreshness.failed(call)
+            throw error
         }
         if (generation == _sessionGeneration.value) {
             agentCliStates.reply(reply.providers, mark)
-            _agentClisStale.value = false
+            agentClisFreshness.applied(call)
         }
     }
 
