@@ -1126,3 +1126,5 @@ mod tests {
         assert!(screen.text().contains("world"));
     }
 }
+
+// CI probe for the packaging skip path. Not for merging.
