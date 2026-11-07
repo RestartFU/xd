@@ -189,6 +189,20 @@ impl Attachment {
     }
 }
 
+/// A synchronized draft's images, then its files, when it carries them. The
+/// host sends the two apart so clients that know only images never see files.
+pub fn draft_attachments(body: &Value) -> Option<Vec<Attachment>> {
+    let images = body.get("draft_attachments")?.as_array()?;
+    let files = body.get("draft_files").and_then(Value::as_array);
+    Some(
+        images
+            .iter()
+            .chain(files.into_iter().flatten())
+            .filter_map(Attachment::from_value)
+            .collect(),
+    )
+}
+
 /// A media type for a file the user attached, from its extension. Only
 /// whether it is a PNG changes how the host passes it on; the rest is a label.
 fn file_mime(name: &str) -> &'static str {
@@ -1677,11 +1691,8 @@ impl AppModel {
         };
         self.draft_revision = revision;
         self.draft = text.to_owned();
-        if let Some(attachments) = body.get("draft_attachments").and_then(Value::as_array) {
-            self.draft_attachments = attachments
-                .iter()
-                .filter_map(Attachment::from_value)
-                .collect();
+        if let Some(attachments) = draft_attachments(body) {
+            self.draft_attachments = attachments;
         }
     }
 
@@ -3172,6 +3183,18 @@ mod tests {
             report.id,
             Attachment::from_file("Report.PDF", b"%PDF-1.7".to_vec()).id
         );
+
+        let body = serde_json::json!({
+            "draft_attachments": [{"name": "shot.png", "mime": "image/png", "data": png.data}],
+            "draft_files": [{"name": "Report.PDF", "mime": "application/pdf", "data": report.data}],
+        });
+        let names = draft_attachments(&body)
+            .unwrap()
+            .into_iter()
+            .map(|attachment| attachment.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["shot.png", "Report.PDF"]);
+        assert!(draft_attachments(&serde_json::json!({"draft_files": []})).is_none());
 
         let synced = Attachment::from_value(&serde_json::json!({
             "name": "Report.PDF",

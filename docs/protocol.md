@@ -608,8 +608,10 @@ are not resent on every keystroke. An empty array clears them. Without
 `"files":true`, as for `send`, the list replaces only the draft's images: the
 files the client cannot see are kept after them, within the same limits. A
 client that shows only images skips the other files. The `chat` snapshot returns `draft`,
-`draft_revision`, and `draft_attachments` so a newly connected device starts
-with the same composer.
+`draft_revision`, `draft_attachments`, and `draft_files` so a newly connected
+device starts with the same composer. `draft_attachments` holds only the draft's
+PNG images and `draft_files` its other files, so a client that knows only images
+never sees a file; a client that shows files reads both.
 
 ### `queue`, `drop-queue`, `edit-queue`, `steer-queue`
 
@@ -907,7 +909,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |
 | `queued` | `chat`, `queue`, `text` | Queue replaced. `text` is the first item. |
-| `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` | Composer text changed; attachments are present only when replaced. |
+| `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` and `draft_files` | Composer text changed; attachments are present only when replaced, images in `draft_attachments` and other files in `draft_files`. |
 | `commands` | `chat`, `backend`, `commands` | Slash-command list for a backend. |
 | `turn-started` | `chat`, `label`, `turn_id`, `turn_sequence` | A turn began. |
 | `text` | `chat`, `text`, `turn_id`, `turn_sequence` | Assistant text delta. |

@@ -2072,9 +2072,13 @@ fn with_process_errors(message: &str, errors: Option<&Arc<Mutex<Vec<u8>>>>) -> S
 }
 
 fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachment>> {
-    let value = body.remove("draft_attachments")?;
-    let values = value.as_array()?;
-    Some(values.iter().filter_map(Attachment::from_value).collect())
+    let mut taken = Map::new();
+    for key in ["draft_attachments", "draft_files"] {
+        if let Some(value) = body.remove(key) {
+            taken.insert(key.to_owned(), value);
+        }
+    }
+    crate::model::draft_attachments(&Value::Object(taken))
 }
 
 fn disconnect(updates: &Sender<HostUpdate>, message: String) {

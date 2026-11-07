@@ -910,7 +910,8 @@ impl StateStore {
             "queue": queue,
             "queue_revision": row.17,
             "draft": row.12,
-            "draft_attachments": attachments,
+            "draft_attachments": draft_images(&attachments),
+            "draft_files": kept_draft_files(&attachments),
             "draft_revision": row.14,
             "shortcuts": shortcuts,
             "working": row.11,
@@ -3247,8 +3248,10 @@ impl StateStore {
         });
         if attachments.is_some() {
             let attachments = serde_json::from_str::<Value>(&state.1).unwrap_or_else(|_| json!([]));
-            reply["draft_attachments"] = attachments.clone();
-            event["draft_attachments"] = attachments;
+            for body in [&mut reply, &mut event] {
+                body["draft_attachments"] = draft_images(&attachments);
+                body["draft_files"] = Value::Array(kept_draft_files(&attachments));
+            }
         }
         Ok((reply, event))
     }
@@ -8592,6 +8595,21 @@ fn stored_draft_attachments(database: &Connection, chat_id: &str) -> Result<Valu
     Ok(serde_json::from_str(&stored).unwrap_or_else(|_| json!([])))
 }
 
+/// The images in a stored draft. They alone go out as `draft_attachments`,
+/// which clients from before files could be attached decode as PNGs; files go
+/// out as `draft_files`, which those clients never read.
+fn draft_images(stored: &Value) -> Value {
+    Value::Array(
+        stored
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|attachment| attachment.get("mime").and_then(Value::as_str) == Some(PNG_MIME))
+            .cloned()
+            .collect(),
+    )
+}
+
 /// The files, not images, in a stored draft.
 fn kept_draft_files(stored: &Value) -> Vec<Value> {
     stored
@@ -12818,12 +12836,16 @@ mod tests {
         let (reply, event) = store
             .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": [png("b.png")]}))
             .unwrap();
-        assert_eq!(names(&reply["draft_attachments"]), ["b.png", "Report.pdf"]);
+        // Images and files go out apart, so such a client never sees a file.
+        assert_eq!(names(&reply["draft_attachments"]), ["b.png"]);
+        assert_eq!(names(&reply["draft_files"]), ["Report.pdf"]);
         assert_eq!(event["draft_attachments"], reply["draft_attachments"]);
+        assert_eq!(event["draft_files"], reply["draft_files"]);
         let (reply, _) = store
             .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": []}))
             .unwrap();
-        assert_eq!(names(&reply["draft_attachments"]), ["Report.pdf"]);
+        assert_eq!(reply["draft_attachments"], json!([]));
+        assert_eq!(names(&reply["draft_files"]), ["Report.pdf"]);
 
         // Its send leaves them in the draft; a client that shows files clears it.
         let SendDisposition::Start { turn, .. } = store
@@ -12833,18 +12855,14 @@ mod tests {
             panic!("idle send should start");
         };
         assert!(!turn.prompt.contains("[file: "));
-        assert_eq!(
-            names(&store.chat("chat-1").unwrap()["draft_attachments"]),
-            ["Report.pdf"]
-        );
+        let snapshot = store.chat("chat-1").unwrap();
+        assert_eq!(snapshot["draft_attachments"], json!([]));
+        assert_eq!(names(&snapshot["draft_files"]), ["Report.pdf"]);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         store
             .prepare_send(&json!({"chat": "chat-1", "text": "hi", "files": true}))
             .unwrap();
-        assert_eq!(
-            store.chat("chat-1").unwrap()["draft_attachments"],
-            json!([])
-        );
+        assert_eq!(store.chat("chat-1").unwrap()["draft_files"], json!([]));
 
         // A full draft refuses images it has no room left for.
         store

@@ -10152,6 +10152,7 @@ impl XdDesktop {
         let Some(chat) = self.model.selected_chat.clone() else {
             return;
         };
+        let endpoint = self.active_endpoint;
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -10175,7 +10176,9 @@ impl XdDesktop {
                 }
             };
             let _ = this.update_in(cx, |this, window, cx| {
-                if this.model.selected_chat.as_deref() == Some(chat.as_str()) {
+                if this.active_endpoint == endpoint
+                    && this.model.selected_chat.as_deref() == Some(chat.as_str())
+                {
                     window.focus(&composer);
                     this.attach_paths(chat, paths, cx);
                 }
@@ -10203,6 +10206,7 @@ impl XdDesktop {
             bytes: MAX_TOTAL_ATTACHMENT_BYTES
                 .saturating_sub(draft.iter().map(|attachment| attachment.bytes).sum()),
         };
+        let endpoint = self.active_endpoint;
         let read = cx.background_spawn(async move { read_attachments(paths, room) });
         self.attachments_reading += 1;
         cx.notify();
@@ -10211,8 +10215,11 @@ impl XdDesktop {
             let _ = this.update(cx, |this, cx| {
                 this.attachments_reading = this.attachments_reading.saturating_sub(1);
                 cx.notify();
-                // The files belong to the draft they were chosen for.
-                if this.model.selected_chat.as_deref() != Some(chat.as_str()) {
+                // The files belong to the draft they were chosen for, on the
+                // host it was chosen on.
+                if this.active_endpoint != endpoint
+                    || this.model.selected_chat.as_deref() != Some(chat.as_str())
+                {
                     return;
                 }
                 let mut error = None;
