@@ -99,8 +99,19 @@ public class XdClient(
      */
     public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> = _autoSettleSettings.asStateFlow()
 
+    private val _autoSettleInFlight = MutableStateFlow(0)
+
+    /**
+     * Rules requests still waiting on the host, including the reads a
+     * broadcast starts. While any is out the rules shown may be about to
+     * change, so a client should not offer edits computed from them.
+     */
+    public val autoSettleInFlight: StateFlow<Int> = _autoSettleInFlight.asStateFlow()
+
     private fun rereadAutoSettle() {
-        scope.launch { autoSettleCall(Ops.autoSettleSettings(), background = true) }
+        // Counted before launching, so there is no moment the read is due but not counted.
+        _autoSettleInFlight.update { it + 1 }
+        scope.launch { autoSettleCall(Ops.autoSettleSettings(), background = true, counted = true) }
     }
 
     /** Chats with an approval or question waiting on the user, across every chat. */
@@ -391,27 +402,33 @@ public class XdClient(
     private suspend fun autoSettleCall(
         request: kotlinx.serialization.json.JsonObject,
         background: Boolean = false,
+        counted: Boolean = false,
     ) {
-        autoSettleWanted.value = true
-        val generation = _sessionGeneration.value
-        val broadcasts = autoSettleBroadcasts.value
-        val call = autoSettleCalls.updateAndGet { it + 1 }
-        val rules = try {
-            val value = actor.call(request)
-            actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            if (!background) throw error
-            if (generation == _sessionGeneration.value && call == autoSettleCalls.value) {
-                _autoSettleStale.value = true
+        if (!counted) _autoSettleInFlight.update { it + 1 }
+        try {
+            autoSettleWanted.value = true
+            val generation = _sessionGeneration.value
+            val broadcasts = autoSettleBroadcasts.value
+            val call = autoSettleCalls.updateAndGet { it + 1 }
+            val rules = try {
+                val value = actor.call(request)
+                actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (!background) throw error
+                if (generation == _sessionGeneration.value && call == autoSettleCalls.value) {
+                    _autoSettleStale.value = true
+                }
+                return
             }
-            return
-        }
-        // Otherwise the read that broadcast started decides the value.
-        if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
-            _autoSettleSettings.value = rules
-            _autoSettleStale.value = false
+            // Otherwise the read that broadcast started decides the value.
+            if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
+                _autoSettleSettings.value = rules
+                _autoSettleStale.value = false
+            }
+        } finally {
+            _autoSettleInFlight.update { it - 1 }
         }
     }
 

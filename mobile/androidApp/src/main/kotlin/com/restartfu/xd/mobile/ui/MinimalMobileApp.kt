@@ -1580,6 +1580,10 @@ private fun AutoSettleSettings(model: MainViewModel) {
     val error by model.autoSettleError.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { model.loadAutoSettle() }
     val current = rules
+    // Edits wait until no request is out, so none is computed from rules that
+    // are about to change and no tap is lost.
+    val busy by model.autoSettleBusy.collectAsStateWithLifecycle()
+    val editable = busy == 0
     if (current == null) {
         Text(
             error ?: "Reading auto-settle rules…",
@@ -1595,6 +1599,7 @@ private fun AutoSettleSettings(model: MainViewModel) {
         detail = "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on.",
         checked = current.onMerge,
         onCheckedChange = { model.setAutoSettle(onMerge = it) },
+        enabled = editable,
     )
     SettingSwitch(
         title = "Auto-settle inactive sessions",
@@ -1603,20 +1608,10 @@ private fun AutoSettleSettings(model: MainViewModel) {
         onCheckedChange = { on ->
             model.setAutoSettle(afterDays = if (on) Ops.AfterDays.Days(DEFAULT_SETTLE_DAYS) else Ops.AfterDays.Off)
         },
+        enabled = editable,
     )
-    // Taps add up before the host answers, rather than each starting from the
-    // shown value. Once nothing is in flight the host's value is shown again,
-    // whatever it turned out to be.
-    val busy by model.autoSettleBusy.collectAsStateWithLifecycle()
-    var wantedDays by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(busy) {
-        if (busy == 0) wantedDays = null
-    }
-    val setDays = { days: Int ->
-        wantedDays = days
-        model.setAutoSettle(afterDays = Ops.AfterDays.Days(days))
-    }
-    (if (current.afterDays != null) wantedDays ?: current.afterDays else null)?.let { days ->
+    val setDays = { days: Int -> model.setAutoSettle(afterDays = Ops.AfterDays.Days(days)) }
+    current.afterDays?.let { days ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 8.dp)) {
                 Text("Days before auto-settle", fontWeight = FontWeight.SemiBold)
@@ -1628,12 +1623,12 @@ private fun AutoSettleSettings(model: MainViewModel) {
             }
             IconButton(
                 onClick = { setDays(days - 1) },
-                enabled = days > 1,
+                enabled = editable && days > 1,
             ) { Text("\u2212", style = MaterialTheme.typography.titleMedium) }
             Text(days.toString(), fontWeight = FontWeight.SemiBold, modifier = Modifier.widthIn(min = 24.dp))
             IconButton(
                 onClick = { setDays(days + 1) },
-                enabled = days < 90,
+                enabled = editable && days < 90,
             ) { Text("+", style = MaterialTheme.typography.titleMedium) }
         }
     }
@@ -1642,13 +1637,14 @@ private fun AutoSettleSettings(model: MainViewModel) {
         detail = "Inactivity does not settle sessions with a pull request. Merge and close still do.",
         checked = current.keepPullRequests,
         onCheckedChange = { model.setAutoSettle(keepPullRequests = it) },
+        enabled = editable,
     )
-    error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
     val stale by model.autoSettleStale.collectAsStateWithLifecycle()
-    if (stale && error == null) {
+    // Any failure keeps Try again in reach, including a failed retry.
+    if (stale || error != null) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "These rules changed on the host and could not be read again.",
+                error ?: "These rules changed on the host and could not be read again.",
                 modifier = Modifier.weight(1f),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
@@ -1667,6 +1663,7 @@ private fun SettingSwitch(
     detail: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
@@ -1677,7 +1674,7 @@ private fun SettingSwitch(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 

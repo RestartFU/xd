@@ -118,9 +118,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
     private val _autoSettleError = MutableStateFlow<String?>(null)
     private var autoSettleRequests = 0L
-    private val _autoSettleBusy = MutableStateFlow(0)
-    /** Auto-settle requests still waiting on the host. */
-    val autoSettleBusy: StateFlow<Int> = _autoSettleBusy.asStateFlow()
+    /** Auto-settle requests still waiting on the host, including reads a broadcast started. */
+    val autoSettleBusy: StateFlow<Int> = client.autoSettleInFlight
 
     /** The connected host's rules; the client keeps them current and clears them on forgetting. */
     val autoSettle: StateFlow<AutoSettleSettingsReply?> = client.autoSettleSettings
@@ -436,7 +435,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun autoSettleRequest(failure: String, request: suspend () -> Unit) {
         val serial = ++autoSettleRequests
         _autoSettleError.value = null
-        _autoSettleBusy.update { it + 1 }
         viewModelScope.launch {
             try {
                 request()
@@ -444,8 +442,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 throw error
             } catch (error: Throwable) {
                 if (serial == autoSettleRequests) _autoSettleError.value = error.message ?: failure
-            } finally {
-                _autoSettleBusy.update { it - 1 }
             }
         }
     }
