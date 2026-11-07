@@ -3429,6 +3429,19 @@ impl StateStore {
                 StorageError::InvalidRequest("keep_parent must be true or false".into())
             })?,
         };
+        // The parent the client saw the anchor in, null for the top level.
+        // A drop beside a row that has since moved elsewhere is refused rather
+        // than landing somewhere the client never showed.
+        let expected_parent = match request.get("expect_parent") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(parent)) => Some(Some(parent.as_str())),
+            Some(_) => {
+                return Err(StorageError::InvalidRequest(
+                    "expect_parent must be a folder or null".into(),
+                ));
+            }
+        };
         if before_id.is_some() && after_id.is_some() {
             return Err(StorageError::InvalidRequest(
                 "Choose either a workspace before or after which to move.".into(),
@@ -3475,6 +3488,11 @@ impl StateStore {
         } else {
             requested_parent_id.map(str::to_owned)
         };
+        if expected_parent.is_some_and(|expected| parent_id.as_deref() != expected) {
+            return Err(StorageError::InvalidRequest(
+                "That spot has moved since. Drag it there again.".into(),
+            ));
+        }
         let parent_relative = match parent_id.as_deref() {
             Some(parent_id) => workspace_relative(&database, root.as_ref(), parent_id)?,
             None => String::new(),
@@ -10017,6 +10035,40 @@ mod tests {
             .move_folder(&json!({"folder": top, "before": sibling, "keep_parent": true}))
             .unwrap();
         assert_eq!(ids()[..2], [top, sibling]);
+    }
+
+    #[test]
+    fn a_move_beside_an_anchor_that_has_since_moved_is_refused() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let id = |reply: Value| reply["id"].as_str().unwrap().to_owned();
+        let notes = id(store.new_folder(&json!({"name": "notes"})).unwrap());
+        let clients = id(store
+            .new_folder(&json!({"name": "Clients", "group": true}))
+            .unwrap());
+        let web = id(store
+            .new_folder(&json!({"name": "web", "parent": clients}))
+            .unwrap());
+
+        // The client saw web at the top level; it is inside Clients now.
+        let error = store
+            .move_folder(&json!({"folder": notes, "after": web, "expect_parent": null}))
+            .unwrap_err();
+        assert!(error.to_string().contains("moved since"), "{error}");
+        assert!(fixture.workspaces.join("notes").is_dir());
+        store
+            .move_folder(&json!({"folder": notes, "after": web, "expect_parent": 7}))
+            .unwrap_err();
+
+        store
+            .move_folder(&json!({"folder": notes, "after": web, "expect_parent": clients}))
+            .unwrap();
+        assert!(fixture.workspaces.join("Clients/notes").is_dir());
+        // And back out beside a top-level row.
+        store
+            .move_folder(&json!({"folder": notes, "before": clients, "expect_parent": null}))
+            .unwrap();
+        assert!(fixture.workspaces.join("notes").is_dir());
     }
 
     #[test]

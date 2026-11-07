@@ -8900,7 +8900,9 @@ impl XdDesktop {
                 &reorder.project_id,
                 &reorder.anchor_id,
             )
-            .is_none_or(|current| current.moves != reorder.moves)
+            .is_none_or(|current| current.moves != reorder.moves || current.parent != reorder.parent)
+            // Only a host that checks `expect_parent` is sent a move.
+            || (reorder.moves && !self.model.folder_groups_supported)
         {
             return;
         }
@@ -8909,7 +8911,12 @@ impl XdDesktop {
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|host| {
                 if reorder.moves {
-                    host.move_folder_beside(&reorder.project_id, &reorder.anchor_id, reorder.after)
+                    host.move_folder_beside(
+                        &reorder.project_id,
+                        &reorder.anchor_id,
+                        reorder.after,
+                        reorder.parent.as_deref(),
+                    )
                 } else {
                     host.reorder_folder(&reorder.project_id, &reorder.anchor_id, reorder.after)
                 }
@@ -19252,6 +19259,9 @@ struct ProjectReorder {
     /// The anchor sits in another folder, so the project moves into that
     /// folder on disk to land beside it.
     moves: bool,
+    /// The folder the anchor was in when the drop showed, `None` for the top
+    /// level. A move is refused once the anchor is elsewhere.
+    parent: Option<String>,
 }
 
 /// A project or folder dropped onto a folder, to go inside it.
@@ -19312,6 +19322,7 @@ fn project_reorder_for_drop(
         anchor_id: target_id.to_owned(),
         after: source_position < target_position,
         moves: source.parent != target.parent,
+        parent: target.parent.clone(),
     })
 }
 
@@ -23471,6 +23482,7 @@ Binary files /dev/null and b/image.png differ\n";
                 anchor_id: "a".into(),
                 after: false,
                 moves: false,
+                parent: None,
             })
         );
         assert_eq!(
@@ -23480,6 +23492,7 @@ Binary files /dev/null and b/image.png differ\n";
                 anchor_id: "c".into(),
                 after: true,
                 moves: false,
+                parent: None,
             })
         );
         assert_eq!(project_reorder_for_drop(&folders, "b", "b"), None);
@@ -23515,6 +23528,13 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(placed("child", "root"), Some((false, true)));
         assert_eq!(placed("child", "elsewhere"), Some((false, true)));
         assert_eq!(placed("elsewhere", "sibling"), Some((true, true)));
+        assert_eq!(
+            project_reorder_for_drop(&folders, "child", "elsewhere")
+                .and_then(|reorder| reorder.parent)
+                .as_deref(),
+            Some("root"),
+            "the move names the folder it expects the anchor in"
+        );
         // A folder cannot land beside what it holds: that is inside itself.
         assert_eq!(placed("parent", "child"), None);
         assert_eq!(placed("root", "elsewhere"), None);
@@ -23556,6 +23576,7 @@ Binary files /dev/null and b/image.png differ\n";
                 anchor_id: "org".into(),
                 after: true,
                 moves: true,
+                parent: None,
             })
         );
         assert_eq!(
@@ -23605,6 +23626,7 @@ Binary files /dev/null and b/image.png differ\n";
                 anchor_id: anchor.into(),
                 after: false,
                 moves: false,
+                parent: None,
             };
 
             // An older host could move the folder on disk, so nothing is sent.
@@ -23619,6 +23641,47 @@ Binary files /dev/null and b/image.png differ\n";
             desktop.reorder_project_from_drop(reorder("c", "a"), cx);
             assert_eq!(order(desktop), ["a", "b", "c"]);
             assert!(desktop.model.connection_error.is_some());
+
+            // A move into another folder: c goes beside b inside folder f.
+            desktop.model.folders = vec![
+                project("a", None),
+                Folder {
+                    group: true,
+                    ..project("f", None)
+                },
+                project("b", Some("f")),
+                project("c", None),
+            ];
+            let into_f = ProjectReorder {
+                project_id: "c".into(),
+                anchor_id: "b".into(),
+                after: true,
+                moves: true,
+                parent: Some("f".into()),
+            };
+            assert_eq!(
+                project_reorder_for_drop(&desktop.model.folders, "c", "b"),
+                Some(ProjectReorder {
+                    after: false,
+                    ..into_f.clone()
+                })
+            );
+            desktop.model.connection_error = None;
+            // An older host would not check where the anchor is now.
+            desktop.model.folder_groups_supported = false;
+            desktop.reorder_project_from_drop(into_f.clone(), cx);
+            assert!(desktop.model.connection_error.is_none());
+            desktop.model.folder_groups_supported = true;
+            // b left f after the drop line showed: nothing is sent.
+            desktop.model.folders[2].parent = None;
+            desktop.reorder_project_from_drop(into_f.clone(), cx);
+            assert!(desktop.model.connection_error.is_none());
+            desktop.model.folders[2].parent = Some("f".into());
+            desktop.reorder_project_from_drop(into_f, cx);
+            assert!(
+                desktop.model.connection_error.is_some(),
+                "sent, with no host"
+            );
         });
     }
 

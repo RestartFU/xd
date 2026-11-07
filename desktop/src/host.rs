@@ -981,30 +981,38 @@ impl HostHandle {
         anchor_id: &str,
         after: bool,
     ) -> Result<(), String> {
-        self.place_folder_beside(folder_id, anchor_id, after, true)
+        self.place_folder_beside(folder_id, anchor_id, after, Ok(()))
     }
 
     /// Places a folder before or after `anchor_id`, moving it into the
-    /// anchor's parent on disk first when they differ.
+    /// anchor's parent on disk first when they differ. The host refuses it if
+    /// the anchor is no longer in `expect_parent` (`None`: the top level), so
+    /// a stale tree cannot send the folder somewhere the user never saw.
     pub fn move_folder_beside(
         &self,
         folder_id: &str,
         anchor_id: &str,
         after: bool,
+        expect_parent: Option<&str>,
     ) -> Result<(), String> {
-        self.place_folder_beside(folder_id, anchor_id, after, false)
+        self.place_folder_beside(folder_id, anchor_id, after, Err(expect_parent))
     }
 
+    /// `placement` is `Ok(())` to keep the parent, or the parent the anchor
+    /// is expected in for a move.
     fn place_folder_beside(
         &self,
         folder_id: &str,
         anchor_id: &str,
         after: bool,
-        keep_parent: bool,
+        placement: Result<(), Option<&str>>,
     ) -> Result<(), String> {
         let mut body = json!({"op": "move-folder", "folder": folder_id});
-        if keep_parent {
-            body["keep_parent"] = Value::Bool(true);
+        match placement {
+            Ok(()) => body["keep_parent"] = Value::Bool(true),
+            Err(parent) => {
+                body["expect_parent"] = parent.map_or(Value::Null, |parent| parent.into());
+            }
         }
         body[if after { "after" } else { "before" }] = Value::String(anchor_id.to_owned());
         self.send(
@@ -2603,8 +2611,10 @@ mod tests {
                 assert_eq!(request.get("parent"), None);
                 if keep_parent {
                     assert_eq!(request["keep_parent"], true);
+                    assert_eq!(request.get("expect_parent"), None);
                 } else {
                     assert_eq!(request.get("keep_parent"), None, "a move may change parent");
+                    assert_eq!(request["expect_parent"], "folder-3");
                 }
                 let request_id = request["_xd_request"].as_u64().unwrap();
                 writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
@@ -2626,7 +2636,7 @@ mod tests {
                 } if folder_id == "folder-1"
             ));
         }
-        host.move_folder_beside("folder-1", "folder-2", true)
+        host.move_folder_beside("folder-1", "folder-2", true, Some("folder-3"))
             .unwrap();
         assert!(matches!(
             updates.recv_blocking().unwrap(),
