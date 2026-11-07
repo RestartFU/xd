@@ -623,7 +623,8 @@ mod tests {
     use super::*;
 
     fn lock_fixture() -> (PathBuf, Paths, File) {
-        let root = std::env::temp_dir().join(format!("xd-lock-test-{}", uuid::Uuid::new_v4()));
+        // Not the temporary directory: on macOS its path is too long for a socket.
+        let root = PathBuf::from(format!("/tmp/xd-lock-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         let paths = Paths {
             socket: root.join("socket"),
