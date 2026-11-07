@@ -1,9 +1,14 @@
-# Every commit pushed to a pull request, built and tested.
+# Every commit pushed to a pull request, tested and linted on each platform.
+#
+# Packaging only runs when the pull request touches something packaging reads,
+# because tests catch nearly everything a package build would and the package
+# is most of the wait. The nightly packages every platform after a merge, and
+# dispatching this workflow on a branch packages it regardless.
 #
 # Nothing is published. A branch is tried by building it: the nightly's own
-# build button fetches it, builds the bundle the same way this does and
-# installs the result over itself, so there is no rolling release to keep
-# moving and no third kind of build that can break on its own.
+# build button fetches it, builds the bundle the same way a packaged run here
+# does and installs the result over itself, so there is no rolling release to
+# keep moving and no third kind of build that can break on its own.
 #
 # Built from the pull request's head commit rather than the merge commit GitHub
 # hands to `pull_request` runs: what is checked is the code that was pushed.
@@ -25,7 +30,50 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.packaging.outputs.package }}
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # Whole directories, so a new script or asset is covered without anyone
+      # remembering this list. Anything but a clean "no difference" packages,
+      # including a dispatch, which has no pull request to compare, and any
+      # error from git: a needless package only costs minutes.
+      - name: Detect packaging changes
+        id: packaging
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          package=true
+          if [ -n "$PR_BASE" ]; then
+            status=0
+            git diff --quiet "$PR_BASE...$PR_HEAD" -- \
+              .dockerignore \
+              .github/workflows \
+              Dockerfile \
+              data \
+              desktop/assets \
+              installer \
+              scripts \
+              '*/Cargo.lock' \
+              '*/Cargo.toml' \
+              || status=$?
+            if [ "$status" -eq 0 ]; then
+              package=false
+            fi
+          fi
+          echo "package=$package" | tee -a "$GITHUB_OUTPUT"
+
   linux:
+    needs: changes
     # GitHub's runner for every branch and fork: this repository is public,
     # and a pull request runs whatever it contains, so it never gets a
     # machine of ours.
@@ -46,24 +94,34 @@ jobs:
           docker system prune -af >/dev/null
           df -h /
 
-      # Everything is built in Docker, so the runner needs nothing else. Both
-      # builds share layers, which is why the tests are cheap to gate on.
+      # Everything is built in Docker, so the runner needs nothing else.
       - name: Run the headless tests
         run: ./scripts/test.sh
 
       - name: Build the bundle
+        if: ${{ needs.changes.outputs.package == 'true' }}
         run: ./scripts/build.sh --build-arg PROFILE=nightly
 
+      # Last, and despite a failure above, so one push reports tests and lints
+      # together.
+      - name: Lint the Rust crates
+        if: ${{ !cancelled() }}
+        run: ./scripts/clippy.sh
+
   windows:
+    needs: changes
     uses: ./.github/workflows/windows.yml
     with:
       profile: nightly
       ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      skip_package: ${{ needs.changes.outputs.package != 'true' }}
+      lint: true
 
   macos:
+    needs: changes
     # Apple desktop code must be compiled on Apple hardware because GPUI links
-    # native frameworks. This gate covers the Rust app, local helpers, and the
-    # complete ad-hoc-signed bundle.
+    # native frameworks. This gate covers the Rust app and local helpers, plus
+    # the complete ad-hoc-signed bundle when packaging inputs changed.
     runs-on: macos-15
 
     steps:
@@ -77,6 +135,7 @@ jobs:
           rustup toolchain install 1.95.0
           --profile minimal
           --component rustfmt
+          --component clippy
           --no-self-update
 
       - name: Limit build parallelism
@@ -104,6 +163,7 @@ jobs:
 
       # Native packaging inputs are pinned by the scripts that put them here.
       - uses: actions/cache@v4
+        if: ${{ needs.changes.outputs.package == 'true' }}
         with:
           path: .build-cache
           key: >-
@@ -125,6 +185,7 @@ jobs:
           cargo test --locked --manifest-path host/Cargo.toml
 
       - name: Build and smoke-test the native app bundle
+        if: ${{ needs.changes.outputs.package == 'true' }}
         env:
           PROFILE: nightly
           RUSTUP_TOOLCHAIN: 1.95.0
@@ -132,3 +193,16 @@ jobs:
           brew install librsvg
           ./scripts/build-macos.sh
           ./scripts/smoke-macos.sh dist/macos/xd-nightly.app
+
+      # Last, and despite a failure above, so one push reports tests and lints
+      # together.
+      - name: Lint the native Rust targets
+        if: ${{ !cancelled() }}
+        env:
+          RUSTUP_TOOLCHAIN: 1.95.0
+        run: |
+          status=0
+          for crate in terminal-core transport-core desktop host; do
+            cargo clippy --locked --all-targets --manifest-path "$crate/Cargo.toml" -- -D warnings || status=1
+          done
+          exit "$status"
