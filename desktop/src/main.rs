@@ -5132,7 +5132,7 @@ impl XdDesktop {
             RequestKind::DeleteChat { .. } => self.request_tree(),
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
                 // The reload a failed clear asked for has the host's list.
-                self.draft_reload_pending = false;
+                let reloading = std::mem::take(&mut self.draft_reload_pending);
                 let local_attachments = (self.attachments_dirty
                     || self.awaiting_sent_clear.is_some())
                 .then(|| self.model.draft_attachments.clone());
@@ -5141,10 +5141,20 @@ impl XdDesktop {
                 self.transcript_snapshot.sync_live_items(&self.model);
                 self.transcript_snapshot.sync_live_text(&self.model);
                 self.sync_transcript_count(false);
-                if let Some(local_attachments) = local_attachments {
-                    self.model.draft_attachments = local_attachments;
-                } else if let Some(attachments) = attachments {
-                    self.model.draft_attachments = attachments;
+                match (local_attachments, attachments) {
+                    // A failed send gave this list back; the host's may hold
+                    // files from elsewhere too, and the next upload keeps both.
+                    (Some(mut local), Some(host)) if reloading => {
+                        for attachment in host {
+                            if !local.iter().any(|kept| kept.same_as(&attachment)) {
+                                local.push(attachment);
+                            }
+                        }
+                        self.model.draft_attachments = local;
+                    }
+                    (Some(local), _) => self.model.draft_attachments = local,
+                    (None, Some(host)) => self.model.draft_attachments = host,
+                    (None, None) => {}
                 }
                 if !self.draft_dirty {
                     let draft = self.model.draft.clone();
@@ -5313,6 +5323,10 @@ impl XdDesktop {
             } if self.chat_is_active(&chat_id) => {
                 let attachment_reply_is_current = attachment_generation
                     .is_some_and(|generation| generation == self.attachment_generation);
+                // The awaited clear fills the list in even if an event already
+                // showed its revision while the list was held back.
+                let awaited_clear = attachment_generation.is_some()
+                    && attachment_generation == self.awaiting_sent_clear;
                 let local_attachments = (!attachment_reply_is_current
                     && (self.attachments_dirty || self.awaiting_sent_clear.is_some()))
                 .then(|| self.model.draft_attachments.clone());
@@ -5323,7 +5337,7 @@ impl XdDesktop {
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
                 } else if attachment_reply_is_current
-                    && accepted
+                    && (accepted || awaited_clear)
                     && let Some(attachments) = attachments
                 {
                     self.model.draft_attachments = attachments;

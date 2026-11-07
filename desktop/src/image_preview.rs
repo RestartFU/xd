@@ -1656,6 +1656,66 @@ mod tests {
             assert!(desktop.awaiting_sent_clear.is_none() && desktop.draft_reload_pending);
             let blocked = Attachment::from_file("blocked.txt", vec![1]);
             assert!(desktop.add_attachment(blocked).unwrap_err().contains("Wait"));
+
+            // The reload keeps a list a failed send gave back and adds the
+            // host's files to it, then attaching opens again.
+            let restored = Attachment::from_file("restored.txt", b"mine".to_vec());
+            let elsewhere = Attachment::from_file("elsewhere.txt", b"theirs".to_vec());
+            desktop.model.draft_attachments = vec![restored.clone()];
+            desktop.attachments_dirty = true;
+            let mut chat = serde_json::Map::new();
+            chat.insert("ok".into(), true.into());
+            desktop.handle_reply(
+                RequestKind::Chat {
+                    chat_id: "implementation".into(),
+                },
+                chat,
+                Some(vec![restored, elsewhere]),
+                cx,
+            );
+            let names = desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["restored.txt", "elsewhere.txt"]);
+            assert!(!desktop.draft_reload_pending && desktop.attachments_dirty);
+        });
+    }
+
+    #[gpui::test]
+    fn the_awaited_clear_fills_in_a_revision_an_event_already_showed(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        desktop.update(cx, |desktop, cx| {
+            desktop.awaiting_sent_clear = Some(3);
+            desktop.attachment_generation = 3;
+            let left = Attachment::from_file("left.txt", b"from elsewhere".to_vec());
+            desktop.handle_event(
+                "draft",
+                serde_json::json!({"chat": "implementation", "draft": "", "draft_revision": 70}),
+                Some(vec![left.clone()]),
+                cx,
+            );
+            assert!(desktop.model.draft_attachments.is_empty());
+            let mut reply = serde_json::Map::new();
+            reply.insert("ok".into(), true.into());
+            reply.insert("draft".into(), "".into());
+            reply.insert("draft_revision".into(), 70.into());
+            desktop.handle_reply(
+                RequestKind::SetDraft {
+                    chat_id: "implementation".into(),
+                    text: String::new(),
+                    attachment_generation: Some(3),
+                },
+                reply,
+                Some(vec![left]),
+                cx,
+            );
+            assert_eq!(desktop.model.draft_attachments.len(), 1);
+            assert!(desktop.awaiting_sent_clear.is_none());
         });
     }
 
