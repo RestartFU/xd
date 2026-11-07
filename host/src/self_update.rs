@@ -10,22 +10,20 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{
-    EventBus,
-    cli_updates::{collect_output, drain, wait_with_timeout},
-    private_fs::executable_file,
-};
+use crate::{EventBus, private_fs::executable_file};
 
 const NIGHTLY_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/nightly";
-const REPOSITORY_URL: &str = "https://github.com/RestartFU/xd.git";
+const MASTER_REFS_URL: &str =
+    "https://github.com/RestartFU/xd.git/info/refs?service=git-upload-pack";
 const STABLE_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/latest";
 const MAX_RELEASE_BYTES: u64 = 256 * 1024;
+const MAX_REFS_BYTES: u64 = 4 * 1024 * 1024;
 const INSTALL_OUTPUT_LIMIT: usize = 16 * 1024;
 // Match T3 Code's packaged-app polling cadence.
 const STARTUP_DELAY: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_secs(4 * 60);
 const DEV_POLL_INTERVAL: Duration = Duration::from_secs(60);
-const MASTER_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+const FEED_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub(crate) struct SelfUpdate {
@@ -358,44 +356,60 @@ fn latest_build(channel: UpdateChannel) -> Result<String, String> {
     }
 }
 
-/// Asks Git rather than the GitHub API, whose limit of sixty unauthenticated
-/// requests an hour would leave nothing for anything else at one check a minute.
-fn latest_master_commit() -> Result<String, String> {
-    use std::os::unix::process::CommandExt;
-
-    let unreachable = || format!("Could not reach the {}.", UpdateChannel::Dev.feed_name());
-    let mut child = crate::background_process::command("git")
-        .args(["ls-remote", REPOSITORY_URL, "refs/heads/master"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-        .map_err(|_| unreachable())?;
-    let stdout = child.stdout.take().map(drain);
-    let status = wait_with_timeout(&mut child, MASTER_CHECK_TIMEOUT).map_err(|_| unreachable())?;
-    if !status.success() {
-        return Err(unreachable());
-    }
-    master_commit_in(&collect_output(stdout)).ok_or_else(unreachable)
+fn feed_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(FEED_TIMEOUT))
+        .build()
+        .into()
 }
 
-fn master_commit_in(output: &str) -> Option<String> {
-    let mut fields = output.lines().next()?.split_whitespace();
-    let commit = fields.next()?;
-    (fields.next() == Some("refs/heads/master")
-        && commit.len() == 40
-        && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
-    .then(|| commit.to_owned())
+/// Reads the endpoint behind `git ls-remote` rather than the GitHub API, whose
+/// limit of sixty unauthenticated requests an hour would leave nothing for
+/// anything else at one check a minute. Going over HTTP rather than through the
+/// `git` command keeps this public read clear of the machine's Git setup: an
+/// `insteadOf` rule can turn the same URL into an SSH connection, which then
+/// fails for want of a key that opens without a prompt.
+fn latest_master_commit() -> Result<String, String> {
+    let unreachable = || format!("Could not reach the {}.", UpdateChannel::Dev.feed_name());
+    let mut response = feed_agent()
+        .get(MASTER_REFS_URL)
+        .header("User-Agent", "xd")
+        .call()
+        .map_err(|_| unreachable())?;
+    let refs = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_REFS_BYTES)
+        .read_to_vec()
+        .map_err(|_| unreachable())?;
+    master_commit_in(&refs).ok_or_else(unreachable)
+}
+
+/// Finds master in a Git ref advertisement, a series of packets that each open
+/// with their own length in four hex digits. The first ref's packet also carries
+/// a capability list naming `refs/heads/master`, so only a whole ref entry counts.
+fn master_commit_in(advertisement: &[u8]) -> Option<String> {
+    let mut rest = advertisement;
+    while let Some(header) = rest.get(..4) {
+        let length = usize::from_str_radix(std::str::from_utf8(header).ok()?, 16).ok()?;
+        if length == 0 {
+            rest = &rest[4..];
+            continue;
+        }
+        let packet = rest.get(4..length)?;
+        rest = &rest[length..];
+        let entry = packet.split(|byte| *byte == 0).next()?;
+        let entry = entry.strip_suffix(b"\n").unwrap_or(entry);
+        if let Some(commit) = entry.strip_suffix(b" refs/heads/master") {
+            return (commit.len() == 40 && commit.iter().all(u8::is_ascii_hexdigit))
+                .then(|| String::from_utf8_lossy(commit).into_owned());
+        }
+    }
+    None
 }
 
 fn latest_release(channel: UpdateChannel, url: &str) -> Result<String, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(20)))
-        .build()
-        .into();
-    let mut response = agent
+    let mut response = feed_agent()
         .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "xd")
@@ -572,19 +586,52 @@ mod tests {
         assert!(UpdateChannel::Dev.check_installer().is_err());
     }
 
+    fn packet(payload: &str) -> String {
+        format!("{:04x}{payload}", payload.len() + 4)
+    }
+
     #[test]
-    fn reads_the_master_commit_from_git_output() {
+    fn reads_the_master_commit_from_a_ref_advertisement() {
         let commit = "77af5848ea1eb3941752a3de6a31ee9da5ed8a2f";
+        let head = "27351c94ac57a0988e8667ef81707555af83ad6a";
+        // Shaped like GitHub's reply: the first ref's capabilities name master,
+        // against a different commit, before master's own entry arrives.
+        let advertisement = [
+            packet("# service=git-upload-pack\n"),
+            "0000".to_owned(),
+            packet(&format!(
+                "{head} HEAD\0multi_ack symref=HEAD:refs/heads/master agent=git/github\n"
+            )),
+            packet(&format!("{head} refs/heads/feature\n")),
+            packet(&format!("{commit} refs/heads/master\n")),
+            packet(&format!("{head} refs/pull/1/head\n")),
+            "0000".to_owned(),
+        ]
+        .concat();
         assert_eq!(
-            master_commit_in(&format!("{commit}\trefs/heads/master\n")).as_deref(),
+            master_commit_in(advertisement.as_bytes()).as_deref(),
             Some(commit)
         );
-        assert_eq!(master_commit_in(""), None);
-        assert_eq!(master_commit_in("not-a-commit\trefs/heads/master\n"), None);
-        assert_eq!(
-            master_commit_in(&format!("{commit}\trefs/heads/other\n")),
-            None
-        );
+    }
+
+    #[test]
+    fn rejects_an_advertisement_without_a_valid_master_commit() {
+        let commit = "77af5848ea1eb3941752a3de6a31ee9da5ed8a2f";
+        let master = packet(&format!("{commit} refs/heads/master\n"));
+        for advertisement in [
+            String::new(),
+            "<!DOCTYPE html><html></html>".to_owned(),
+            "0000".to_owned(),
+            packet(&format!("{commit} refs/heads/other\n")),
+            packet(&format!("{commit} refs/heads/master-old\n")),
+            packet("not-a-commit refs/heads/master\n"),
+            // A reply cut off partway through master's own packet.
+            master[..master.len() - 1].to_owned(),
+            // A length too short to cover its own header.
+            "0001".to_owned(),
+        ] {
+            assert_eq!(master_commit_in(advertisement.as_bytes()), None);
+        }
     }
 
     #[test]
