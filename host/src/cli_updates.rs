@@ -521,37 +521,54 @@ fn run_update(executable: &Path, timeout: Duration) -> Result<String, String> {
     }
 }
 
-/// Waits only briefly: a helper left running can hold the pipes open for good.
-fn collect_output(output: Option<Receiver<Vec<u8>>>) -> String {
-    output
-        .and_then(|output| output.recv_timeout(OUTPUT_DRAIN_TIMEOUT).ok())
+/// Output being read from a process, available even if the stream never ends.
+struct Capture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    finished: Receiver<()>,
+}
+
+/// Waits only briefly: a helper left running can hold the pipes open for good,
+/// and what the process itself printed has already arrived by then.
+fn collect_output(capture: Option<Capture>) -> String {
+    let Some(capture) = capture else {
+        return String::new();
+    };
+    let _ = capture.finished.recv_timeout(OUTPUT_DRAIN_TIMEOUT);
+    capture
+        .bytes
+        .lock()
         .map(|bytes| clean_output(&bytes))
         .unwrap_or_default()
 }
 
-fn drain(stream: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
-    let (sender, receiver) = mpsc::channel();
+fn drain(stream: impl Read + Send + 'static) -> Capture {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let (done, finished) = mpsc::channel();
+    let kept = bytes.clone();
     thread::spawn(move || {
-        let _ = sender.send(read_tail(stream, OUTPUT_LIMIT));
+        read_tail(stream, OUTPUT_LIMIT, &kept);
+        drop(done);
     });
-    receiver
+    Capture { bytes, finished }
 }
 
 /// Reads to the end but keeps only the last `limit` bytes, where a failing
 /// command reports what went wrong.
-fn read_tail(mut stream: impl Read, limit: usize) -> Vec<u8> {
-    let mut output = Vec::new();
+fn read_tail(mut stream: impl Read, limit: usize, kept: &Mutex<Vec<u8>>) {
     let mut buffer = [0_u8; 4096];
     while let Ok(count) = stream.read(&mut buffer) {
         if count == 0 {
             break;
         }
+        let Ok(mut output) = kept.lock() else {
+            break;
+        };
         output.extend_from_slice(&buffer[..count]);
         if output.len() > limit {
-            output.drain(..output.len() - limit);
+            let excess = output.len() - limit;
+            output.drain(..excess);
         }
     }
-    output
 }
 
 fn wait_with_timeout(
@@ -848,12 +865,15 @@ mod tests {
 
     #[test]
     fn captured_output_keeps_its_end() {
-        let output = read_tail(&b"0123456789"[..], 4);
-        assert_eq!(output, b"6789");
+        let kept = Mutex::new(Vec::new());
+        read_tail(&b"0123456789"[..], 4, &kept);
+        assert_eq!(*kept.lock().unwrap(), b"6789");
         let long = vec![b'x'; OUTPUT_LIMIT * 2];
         let mut failing = long.clone();
         failing.extend_from_slice(b"the reason");
-        let output = read_tail(failing.as_slice(), OUTPUT_LIMIT);
+        let kept = Mutex::new(Vec::new());
+        read_tail(failing.as_slice(), OUTPUT_LIMIT, &kept);
+        let output = kept.lock().unwrap();
         assert_eq!(output.len(), OUTPUT_LIMIT);
         assert!(output.ends_with(b"the reason"));
     }
@@ -868,7 +888,7 @@ mod tests {
         );
         let executable = cli.directory.join("assistant");
         let started = Instant::now();
-        assert_eq!(installed_version(&executable), None);
+        assert_eq!(installed_version(&executable).as_deref(), Some("1.0.0"));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
