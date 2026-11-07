@@ -26,6 +26,7 @@ mod model_catalog;
 mod owner_icon;
 mod pairing;
 mod private_fs;
+mod reply_images;
 mod repository_monitor;
 mod runtime;
 mod secrets;

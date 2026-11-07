@@ -1779,15 +1779,13 @@ fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachmen
 }
 
 fn take_image(body: &mut Map<String, Value>, path: &str) -> Option<Attachment> {
-    let value = json!({
-        "name": Path::new(path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("image.png"),
-        "mime": body.remove("mime")?,
-        "data": body.remove("data")?,
-    });
-    Attachment::from_value(&value)
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("image");
+    let mime = body.remove("mime")?;
+    let data = body.remove("data")?;
+    Attachment::from_image_reply(name, mime.as_str()?, data.as_str()?)
 }
 
 fn disconnect(updates: &Sender<HostUpdate>, message: String) {

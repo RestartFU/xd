@@ -817,7 +817,9 @@ private fun QueuedMessageDialog(
  */
 @Composable
 private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
-    val parts = remember(item.text) { ImageReference.parts(item.text) }
+    val parts = remember(item.text, item.kind) {
+        ImageReference.parts(item.text, markdown = item.kind == TranscriptKind.ASSISTANT)
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         parts.forEach { part ->

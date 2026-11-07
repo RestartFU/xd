@@ -37,7 +37,10 @@ use xd_desktop::{
     activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
-    model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, ToolView, Worktree},
+    model::{
+        AppModel, Attachment, ChatSummary, Message, MessageImage, MessagePageDirection, ToolView,
+        Worktree,
+    },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
     session_host::{SessionHost, SshCommand, TMUX_CONFIGURATION},
@@ -1165,6 +1168,20 @@ struct RunningAgent {
     view: SubagentView,
 }
 
+/// Where an image in the transcript has got to.
+#[derive(Clone, PartialEq)]
+enum MessageImageState {
+    Loading,
+    Ready(MessageImage),
+    Unavailable,
+}
+
+type MessageImages = HashMap<String, MessageImageState>;
+
+/// The tallest an image is drawn in a transcript, so a long screenshot cannot
+/// push the rest of the turn out of view.
+const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
+
 #[derive(Clone, Default)]
 struct TranscriptSnapshot {
     messages: Arc<Vec<Message>>,
@@ -1684,6 +1701,8 @@ struct XdDesktop {
     /// recorded `None` is an owner the host found no avatar for, which keeps
     /// the folder icon without asking again.
     owner_icons: HashMap<String, Option<Arc<Image>>>,
+    /// The images of the open chat, kept for its rows to draw.
+    message_images: Arc<MessageImages>,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
@@ -2212,6 +2231,7 @@ impl XdDesktop {
             workflow_statuses: Arc::new(HashMap::new()),
             workflow_pending: Arc::new(HashSet::new()),
             owner_icons: HashMap::new(),
+            message_images: Arc::default(),
             owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
@@ -2515,6 +2535,7 @@ impl XdDesktop {
         self.restore_collapsed_folders();
         self.model.selected_chat = None;
         self.invalidate_live_render();
+        self.message_images = Arc::default();
         self.transcript_snapshot = TranscriptSnapshot::default();
         self.transcript_loaded = false;
         self.transcript.reset(0);
@@ -2778,6 +2799,7 @@ impl XdDesktop {
                     // Answers in flight are lost with the connection; a
                     // reconnect asks again for the avatars still unknown.
                     self.owner_icons_requested.clear();
+                    self.forget_unanswered_images();
                     self.speech_output.stop();
                     self.restore_pending_send(cx);
                     if let Some(diff) = &mut self.diff_panel {
@@ -3080,6 +3102,7 @@ impl XdDesktop {
                 self.pending_speech = None;
                 Arc::make_mut(&mut self.workflow_pending).clear();
                 self.owner_icons_requested.clear();
+                self.forget_unanswered_images();
                 self.speech_output.stop();
                 if let Some(defaults) = &mut self.workspace_defaults {
                     defaults.loading = false;
@@ -3203,6 +3226,7 @@ impl XdDesktop {
                 );
             }
             match &kind {
+                RequestKind::ImageRead { path } => self.record_message_image(path.clone(), None),
                 RequestKind::Send { .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -3670,6 +3694,7 @@ impl XdDesktop {
                 }
                 if selected_before.is_some() && self.model.selected_chat.is_none() {
                     self.invalidate_live_render();
+                    self.message_images = Arc::default();
                     self.transcript_snapshot = TranscriptSnapshot::default();
                     self.transcript_loaded = false;
                     self.transcript.reset(0);
@@ -3765,6 +3790,15 @@ impl XdDesktop {
             RequestKind::OwnerIcon { owner } => {
                 let owner = owner.clone();
                 self.record_owner_icon(owner, &value);
+            }
+            RequestKind::ImageRead { path } => {
+                let path = path.clone();
+                let image = attachments
+                    .into_iter()
+                    .flatten()
+                    .next()
+                    .and_then(|attachment| MessageImage::new(attachment.preview));
+                self.record_message_image(path, image);
             }
             RequestKind::AgentCatalog => {
                 if let Err(error) = self.model.apply_agent_catalog(&value) {
@@ -8150,6 +8184,40 @@ impl XdDesktop {
         }
     }
 
+    /// Asks the host for images a row is about to show. An image it could not
+    /// ask for stays unknown, so the row asks again once there is a connection.
+    fn request_message_images(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+        let mut asked = false;
+        for path in paths {
+            if self.message_images.contains_key(&path) {
+                continue;
+            }
+            let requested = self
+                .active_host()
+                .ok_or_else(|| "The xd host is offline.".to_owned())
+                .and_then(|host| host.image_read(&path));
+            if requested.is_ok() {
+                Arc::make_mut(&mut self.message_images).insert(path, MessageImageState::Loading);
+                asked = true;
+            }
+        }
+        if asked {
+            cx.notify();
+        }
+    }
+
+    fn record_message_image(&mut self, path: String, image: Option<MessageImage>) {
+        let state = image.map_or(MessageImageState::Unavailable, MessageImageState::Ready);
+        Arc::make_mut(&mut self.message_images).insert(path, state);
+    }
+
+    /// Answers in flight are lost with the connection, so the rows waiting on
+    /// them, or told that the host could not provide them, ask again.
+    fn forget_unanswered_images(&mut self) {
+        Arc::make_mut(&mut self.message_images)
+            .retain(|_, state| matches!(state, MessageImageState::Ready(_)));
+    }
+
     /// Asks the host for the avatar of every account behind a workspace it
     /// has not answered for yet.
     fn request_owner_icons(&mut self) {
@@ -9100,6 +9168,7 @@ impl XdDesktop {
             self.attachments_dirty = false;
             self.remember_last_chat(&chat_id);
             self.invalidate_live_render();
+            self.message_images = Arc::default();
             self.transcript_snapshot = TranscriptSnapshot::default();
             self.transcript_loaded = false;
             self.transcript_loading = false;
@@ -10659,12 +10728,70 @@ impl XdDesktop {
         .into_any_element()
     }
 
+    fn render_message_image(
+        colors: ThemeColors,
+        path: &str,
+        images: &MessageImages,
+        max_width: f32,
+    ) -> gpui::AnyElement {
+        fn note(colors: ThemeColors, text: String) -> gpui::AnyElement {
+            div()
+                .max_w_full()
+                .px_3()
+                .py_2()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .bg(rgb(colors.surface))
+                .text_size(px(12.5))
+                .text_color(rgb(colors.muted))
+                .child(text)
+                .into_any_element()
+        }
+        match images.get(path) {
+            Some(MessageImageState::Ready(image)) => {
+                let (width, height) = image.fitted(max_width, MESSAGE_IMAGE_MAX_HEIGHT);
+                let fallback = format!("Image unavailable: {path}");
+                // Out of flow, so the image gives its row no intrinsic width. When
+                // a card's narrowest possible width equals its real width, layout
+                // reuses the measurement made at the narrowest, where every line
+                // of text wrapped to nothing, and the row claims thousands of
+                // pixels of empty space.
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(height))
+                    .child(
+                        img(image.image.clone())
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w(px(width))
+                            .h(px(height))
+                            .rounded(px(8.0))
+                            // The header can be sound while the pixels are not.
+                            .with_fallback(move || note(colors, fallback.clone())),
+                    )
+                    .into_any_element()
+            }
+            Some(MessageImageState::Unavailable) => {
+                note(colors, format!("Image unavailable: {path}"))
+            }
+            Some(MessageImageState::Loading) | None => note(colors, "Loading image…".to_owned()),
+        }
+    }
+
     fn render_native_markdown_block(
         colors: ThemeColors,
         block: &markdown::Block,
         index: usize,
+        images: &MessageImages,
+        image_width: f32,
     ) -> gpui::AnyElement {
         match block {
+            markdown::Block::Image(path) => {
+                Self::render_message_image(colors, path, images, image_width)
+            }
             markdown::Block::Heading { level, content } => div()
                 .id(("native-heading", index))
                 .text_size(px(match level {
@@ -10775,7 +10902,13 @@ impl XdDesktop {
                             let child_index =
                                 scoped_element_id(&format!("native-analysis:{index}"), child_index)
                                     as usize;
-                            Self::render_native_markdown_block(colors, block, child_index)
+                            Self::render_native_markdown_block(
+                                colors,
+                                block,
+                                child_index,
+                                images,
+                                image_width,
+                            )
                         })
                         .collect::<Vec<_>>(),
                 )
@@ -11556,10 +11689,13 @@ impl XdDesktop {
                                 .iter()
                                 .enumerate()
                                 .map(|(block_index, block)| {
+                                    // A report is never parsed for images.
                                     Self::render_native_markdown_block(
                                         colors,
                                         block,
                                         scoped_element_id(&scope, block_index) as usize,
+                                        &MessageImages::default(),
+                                        0.0,
                                     )
                                 }),
                         )
@@ -11623,6 +11759,8 @@ impl XdDesktop {
         subagent: Option<(SubagentView, Option<&'static str>)>,
         index: usize,
         expanded: bool,
+        images: &MessageImages,
+        column: f32,
     ) -> gpui::AnyElement {
         let role = message.role.as_str();
         if role == "duration" {
@@ -11694,20 +11832,44 @@ impl XdDesktop {
         let error = role == "error";
         let markdown = message.markdown();
         let block_scope = format!("native-message:{}", message.id.unwrap_or(index as i64));
-        let body = div().w_full().flex().flex_col().gap_2().children(
-            markdown
-                .blocks
-                .iter()
-                .enumerate()
-                .map(|(block_index, block)| {
-                    Self::render_native_markdown_block(
-                        colors,
-                        block,
-                        scoped_element_id(&block_scope, block_index) as usize,
-                    )
-                })
-                .collect::<Vec<_>>(),
-        );
+        // The widths the card below allows its content.
+        let image_width = if user {
+            column.min(600.0) - 28.0
+        } else {
+            column.min(780.0)
+        };
+        // A reply's images sit among its blocks, where it named them; anyone
+        // else's follow the text they were sent with.
+        let attached = (role != "assistant")
+            .then_some(message.image_paths())
+            .unwrap_or_default();
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(
+                markdown
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .map(|(block_index, block)| {
+                        Self::render_native_markdown_block(
+                            colors,
+                            block,
+                            scoped_element_id(&block_scope, block_index) as usize,
+                            images,
+                            image_width,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .children(
+                attached
+                    .iter()
+                    .map(|path| Self::render_message_image(colors, path, images, image_width))
+                    .collect::<Vec<_>>(),
+            );
         // Prose sits on the page; only what the user wrote and host errors are
         // set apart, the way a conversation reads.
         let card = div()
@@ -11715,6 +11877,10 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .gap_2()
+            // Images are out of flow, so a bubble cannot take its width from them.
+            .when(user && !attached.is_empty(), |card| {
+                card.w(px(column.min(600.0)))
+            })
             .when(user, |card| {
                 card.max_w(px(600.0))
                     .px(px(14.0))
@@ -12152,6 +12318,8 @@ impl XdDesktop {
         let workflow_statuses = self.workflow_statuses.clone();
         let workflow_pending = self.workflow_pending.clone();
         let column = self.chat_column_width;
+        let message_images = self.message_images.clone();
+        let desktop = cx.entity().downgrade();
         let empty_ready = transcript_empty && !transcript_loading && self.transcript_loaded;
         let transcript = if transcript_loading {
             div()
@@ -12216,7 +12384,7 @@ impl XdDesktop {
                 )
                 .into_any_element()
         } else {
-            list(self.transcript.clone(), move |index, _window, _cx| {
+            list(self.transcript.clone(), move |index, _window, cx| {
                 // The list's count follows the snapshot; should they ever
                 // disagree for a frame, draw nothing rather than crash.
                 let Some(message) = messages.get(index) else {
@@ -12258,6 +12426,22 @@ impl XdDesktop {
                         )))
                         .into_any_element();
                 }
+                // Images load as their rows come into view, so a long chat
+                // does not hold every image it ever showed.
+                let unknown_images = message
+                    .image_paths()
+                    .iter()
+                    .filter(|path| !message_images.contains_key(*path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if message.tool_view().is_none() && !unknown_images.is_empty() {
+                    let desktop = desktop.clone();
+                    cx.defer(move |cx| {
+                        let _ = desktop.update(cx, |desktop, cx| {
+                            desktop.request_message_images(unknown_images, cx);
+                        });
+                    });
+                }
                 div()
                     .w_full()
                     .flex()
@@ -12272,6 +12456,8 @@ impl XdDesktop {
                         }),
                         index,
                         expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
+                        &message_images,
+                        column,
                     )))
                     .into_any_element()
             })
@@ -16923,6 +17109,100 @@ mod tests {
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
     }
 
+    /// In flow, an image exactly as wide as the column, or wider than a user's
+    /// text, made its row claim thousands of pixels of empty space, and the whole
+    /// chat looked blank.
+    #[gpui::test]
+    fn an_image_does_not_inflate_its_row(cx: &mut gpui::TestAppContext) {
+        const COLUMN: f32 = 736.0;
+        struct Row {
+            state: ListState,
+            messages: Vec<Message>,
+            images: Arc<MessageImages>,
+        }
+        impl Render for Row {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let messages = self.messages.clone();
+                let images = self.images.clone();
+                let colors = ThemePreset::default().colors();
+                // The same nesting the transcript draws its rows in.
+                list(self.state.clone(), move |index, _, _| {
+                    let message = &messages[index];
+                    div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(div().w(px(COLUMN)).child(XdDesktop::render_native_message(
+                            colors, message, None, None, index, false, &images, COLUMN,
+                        )))
+                        .into_any_element()
+                })
+                .size_full()
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let state = ListState::new(3, ListAlignment::Top, px(0.0));
+        let messages = vec![
+            Message::new(
+                Some(1),
+                "assistant",
+                "Here is the chart:\n[image: /kept/full.png]\nThat is all of it.",
+                None,
+            ),
+            // As wide as a bubble allows, and far wider than the text with it.
+            Message::new(
+                Some(2),
+                "user",
+                "The old one\n[image: /kept/bubble.png]",
+                None,
+            ),
+            Message::new(
+                Some(3),
+                "user",
+                "The old one\n[image: /kept/small.png]",
+                None,
+            ),
+        ];
+        let image = |width, height| {
+            MessageImageState::Ready(MessageImage {
+                image: Arc::new(Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
+                width,
+                height,
+            })
+        };
+        let images = Arc::new(MessageImages::from([
+            ("/kept/full.png".to_owned(), image(COLUMN as u32, 414)),
+            ("/kept/bubble.png".to_owned(), image(572, 322)),
+            ("/kept/small.png".to_owned(), image(200, 100)),
+        ]));
+        cx.draw(
+            point(px(0.0), px(0.0)),
+            size(px(1000.0), px(1200.0)),
+            |_, cx| {
+                cx.new(|_| Row {
+                    state: state.clone(),
+                    messages,
+                    images,
+                })
+            },
+        );
+
+        for (index, least, most) in [(0, 414.0, 800.0), (1, 322.0, 500.0), (2, 100.0, 280.0)] {
+            let height = f32::from(
+                state
+                    .bounds_for_item(index)
+                    .expect("a measured row")
+                    .size
+                    .height,
+            );
+            assert!(
+                (least..most).contains(&height),
+                "row {index} should be {least} to {most}px but measured {height}px"
+            );
+        }
+    }
+
     #[gpui::test]
     fn native_message_list_reserves_the_height_of_wrapped_text(cx: &mut gpui::TestAppContext) {
         struct MessageList {
@@ -16936,7 +17216,16 @@ mod tests {
                 let message = self.message.clone();
                 let colors = self.colors;
                 list(self.state.clone(), move |index, _, _| {
-                    XdDesktop::render_native_message(colors, &message, None, None, index, false)
+                    XdDesktop::render_native_message(
+                        colors,
+                        &message,
+                        None,
+                        None,
+                        index,
+                        false,
+                        &MessageImages::default(),
+                        720.0,
+                    )
                 })
                 .size_full()
             }

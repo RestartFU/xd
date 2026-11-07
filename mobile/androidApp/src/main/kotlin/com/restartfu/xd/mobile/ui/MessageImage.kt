@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -28,6 +29,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.restartfu.xd.mobile.ChatViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+/** Larger than a phone can show, and small enough for it to draw. */
+private const val MAX_BITMAP_SIDE = 2048
+
+/**
+ * Decodes at a size that fits. A small file can still describe an enormous
+ * picture, and a bitmap too large to draw takes the whole app down.
+ */
+private fun decodeBounded(bytes: ByteArray): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth, bounds.outHeight) / sample > MAX_BITMAP_SIDE) sample *= 2
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+}
 
 private sealed interface Loaded {
     data object Loading : Loaded
@@ -54,7 +74,7 @@ internal fun MessageImage(
     LaunchedEffect(path) {
         state = try {
             val bytes = model.session.readImage(path)
-            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            val bitmap = withContext(Dispatchers.Default) { decodeBounded(bytes) }
             if (bitmap == null) {
                 Loaded.Failed("That image could not be decoded")
             } else {
@@ -99,7 +119,7 @@ internal fun MessageImage(
         is Loaded.Ready -> {
             Image(
                 bitmap = current.bitmap,
-                contentDescription = "Attached image",
+                contentDescription = "Image",
                 modifier = modifier
                     .fillMaxWidth()
                     // Bounded, so a tall screenshot cannot push the rest of
@@ -113,7 +133,7 @@ internal fun MessageImage(
                 Dialog(onDismissRequest = { zoomed = false }) {
                     Image(
                         bitmap = current.bitmap,
-                        contentDescription = "Attached image",
+                        contentDescription = "Image",
                         modifier = Modifier
                             .fillMaxSize()
                             .clickable { zoomed = false },

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io::Cursor,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -28,6 +29,44 @@ pub fn owner_icon(mime: &str, data: &str) -> Option<Arc<Image>> {
     (!bytes.is_empty()).then(|| Arc::new(Image::from_bytes(format, bytes)))
 }
 
+/// The most pixels a chat will decode for one image. A small file can still
+/// describe an enormous picture, and decoding it would allocate all of it.
+const MAX_MESSAGE_IMAGE_PIXELS: u64 = 64_000_000;
+
+/// An image a message shows, with the size it needs to be laid out at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageImage {
+    pub image: Arc<Image>,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MessageImage {
+    /// Reads only the image's header; the pixels are decoded when it is drawn.
+    pub fn new(image: Arc<Image>) -> Option<Self> {
+        let (width, height) = image::ImageReader::new(Cursor::new(&image.bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()?;
+        let pixels = u64::from(width) * u64::from(height);
+        (pixels > 0 && pixels <= MAX_MESSAGE_IMAGE_PIXELS).then_some(Self {
+            image,
+            width,
+            height,
+        })
+    }
+
+    /// The size to draw at: shrunk to fit the bounds, and never enlarged.
+    pub fn fitted(&self, max_width: f32, max_height: f32) -> (f32, f32) {
+        let (width, height) = (self.width as f32, self.height as f32);
+        let scale = (max_width.max(1.0) / width)
+            .min(max_height.max(1.0) / height)
+            .min(1.0);
+        ((width * scale).max(1.0), (height * scale).max(1.0))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub name: String,
@@ -46,6 +85,26 @@ impl Attachment {
             mime: "image/png".into(),
             data: STANDARD.encode(&bytes),
             preview: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+        })
+    }
+
+    /// An image the host served for a message. Unlike a draft, which is sent
+    /// on to an assistant, this one is only drawn, so any format the host
+    /// serves will do.
+    pub(crate) fn from_image_reply(name: &str, mime: &str, data: &str) -> Option<Self> {
+        let format = match mime {
+            "image/png" => ImageFormat::Png,
+            "image/jpeg" => ImageFormat::Jpeg,
+            "image/gif" => ImageFormat::Gif,
+            "image/webp" => ImageFormat::Webp,
+            _ => return None,
+        };
+        let bytes = STANDARD.decode(data).ok()?;
+        Some(Self {
+            name: name.to_owned(),
+            mime: mime.to_owned(),
+            data: String::new(),
+            preview: Arc::new(Image::from_bytes(format, bytes)),
         })
     }
 
@@ -172,13 +231,15 @@ impl Message {
     ) -> Self {
         let content = content.into();
         let role = role.into();
-        let (shown, image_paths) = message_content(&role, &content);
+        let (shown, mut image_paths) = message_content(&role, &content);
         // A tool row draws its card, not its text as markdown; a patch can be
         // large, so its document is only built if something asks for it.
         let tool = (role == "tool").then(|| Arc::new(ToolView::parse(&content)));
         let markdown = tool.is_none().then(|| {
             Arc::new(if role == "assistant" {
-                markdown::parse_assistant(&shown)
+                let document = markdown::parse_reply(&shown);
+                image_paths = document.image_paths();
+                document
             } else {
                 markdown::parse(&shown)
             })
@@ -203,8 +264,9 @@ impl Message {
     ) -> Self {
         let content = content.into();
         let role = role.into();
-        let (_, image_paths) = message_content(&role, &content);
-        let markdown = Some(Arc::new(markdown::parse_streaming(&content)));
+        let document = markdown::parse_streaming(&content);
+        let image_paths = document.image_paths();
+        let markdown = Some(Arc::new(document));
         Self {
             id,
             role,
@@ -254,13 +316,15 @@ impl Message {
     }
 
     fn cache_markdown(&mut self) {
-        let (shown, image_paths) = message_content(&self.role, &self.content);
+        let (shown, mut image_paths) = message_content(&self.role, &self.content);
         if self.role == "tool" {
             self.tool = Some(Arc::new(ToolView::parse(&self.content)));
             self.markdown = None;
         } else {
             self.markdown = Some(Arc::new(if self.role == "assistant" {
-                markdown::parse_assistant(&shown)
+                let document = markdown::parse_reply(&shown);
+                image_paths = document.image_paths();
+                document
             } else {
                 markdown::parse(&shown)
             }));
@@ -2604,6 +2668,77 @@ mod tests {
             message_content("assistant", "Keep [image: /not/a/reference.png] literal");
         assert!(paths.is_empty());
         assert_eq!(shown, "Keep [image: /not/a/reference.png] literal");
+    }
+
+    #[test]
+    fn a_reply_shows_its_images_where_it_names_them() {
+        let message = Message::new(
+            Some(1),
+            "assistant",
+            "Before\n[image: /kept/a.png]\nAfter\n\n```\n[image: /in/a/fence.png]\n```",
+            None,
+        );
+        assert_eq!(message.image_paths(), ["/kept/a.png"]);
+        let document = message.markdown();
+        assert!(matches!(document.blocks[0], markdown::Block::Paragraph(_)));
+        assert_eq!(
+            document.blocks[1],
+            markdown::Block::Image("/kept/a.png".into())
+        );
+        assert!(matches!(document.blocks[2], markdown::Block::Paragraph(_)));
+        assert!(matches!(document.blocks[3], markdown::Block::Code(_)));
+
+        let streaming =
+            Message::new_streaming(None, "assistant", "Look\n[image: /kept/b.png]", None);
+        assert_eq!(streaming.image_paths(), ["/kept/b.png"]);
+    }
+
+    #[test]
+    fn a_user_message_keeps_its_images_apart_from_its_text() {
+        let message = Message::new(Some(1), "user", "```\nunclosed\n[image: /kept/a.png]", None);
+        assert_eq!(message.image_paths(), ["/kept/a.png"]);
+        assert!(
+            message
+                .markdown()
+                .blocks
+                .iter()
+                .all(|block| !matches!(block, markdown::Block::Image(_)))
+        );
+    }
+
+    #[test]
+    fn a_message_image_keeps_its_shape_and_is_never_enlarged() {
+        let image = |width, height| MessageImage {
+            image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
+            width,
+            height,
+        };
+        assert_eq!(image(1920, 1080).fitted(960.0, 480.0), (853.3333, 480.0));
+        assert_eq!(image(2000, 500).fitted(500.0, 480.0), (500.0, 125.0));
+        assert_eq!(image(64, 32).fitted(780.0, 480.0), (64.0, 32.0));
+        // Before the column has a width there is still something to measure.
+        assert_eq!(image(64, 64).fitted(0.0, 0.0), (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_message_image_reads_its_size_and_refuses_an_enormous_one() {
+        use base64::Engine as _;
+        // A real 1x1 PNG.
+        const ONE_PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/AAAMBAQA0L2W5AAAAAElFTkSuQmCC";
+        let png = Attachment::from_image_reply("a.png", "image/png", ONE_PIXEL).unwrap();
+        let shown = MessageImage::new(png.preview).unwrap();
+        assert_eq!((shown.width, shown.height), (1, 1));
+
+        // Only the header is read, so an IHDR claiming 20000x20000 is enough.
+        let mut bytes = STANDARD.decode(ONE_PIXEL).unwrap();
+        bytes[16..20].copy_from_slice(&20_000u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&20_000u32.to_be_bytes());
+        let enormous = Arc::new(Image::from_bytes(ImageFormat::Png, bytes));
+        assert_eq!(MessageImage::new(enormous), None);
+
+        let junk = Arc::new(Image::from_bytes(ImageFormat::Png, b"junk".to_vec()));
+        assert_eq!(MessageImage::new(junk), None);
+        assert!(Attachment::from_image_reply("a.svg", "image/svg+xml", ONE_PIXEL).is_none());
     }
 
     #[test]
