@@ -1195,7 +1195,8 @@ const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
 /// should not keep every image it passes.
 const MESSAGE_IMAGE_BUDGET: usize = 256 * 1024 * 1024;
 /// The most images the host lets one reply show. All of a row's images count as
-/// drawn together, so a full row has to fit the budget for eviction to hold.
+/// drawn together, so a full row has to fit the budget for scrolling away from
+/// anything else to be enough to get back under it.
 const MAX_IMAGES_IN_A_ROW: usize = 32;
 const _: () = assert!(MAX_IMAGES_IN_A_ROW * MAX_MESSAGE_IMAGE_BYTES <= MESSAGE_IMAGE_BUDGET);
 
@@ -1742,9 +1743,11 @@ struct XdDesktop {
     /// The images of the open chat, kept for its rows to draw.
     message_images: Arc<MessageImages>,
     message_image_frame: u64,
-    /// Replies waiting to be decoded. Decoding takes all of an image's pixels
-    /// before it is scaled, so doing one at a time bounds what that can cost.
-    message_image_decodes: VecDeque<(String, String, String)>,
+    /// Images waiting their turn. One is fetched and decoded at a time: a reply
+    /// is megabytes of base64, and decoding holds all of an image's pixels before
+    /// scaling them, so only the paths wait in memory.
+    message_image_queue: VecDeque<String>,
+    message_image_fetching: Option<String>,
     message_image_decoding: bool,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
@@ -2276,7 +2279,8 @@ impl XdDesktop {
             owner_icons: HashMap::new(),
             message_images: Arc::default(),
             message_image_frame: 0,
-            message_image_decodes: VecDeque::new(),
+            message_image_queue: VecDeque::new(),
+            message_image_fetching: None,
             message_image_decoding: false,
             owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
@@ -3273,7 +3277,11 @@ impl XdDesktop {
             }
             match &kind {
                 RequestKind::ImageRead { path } => {
-                    self.record_message_image(path.clone(), None, cx)
+                    if self.message_image_fetching.as_deref() == Some(path.as_str()) {
+                        self.message_image_fetching = None;
+                        self.record_message_image(path.clone(), None, cx);
+                        self.pump_message_images();
+                    }
                 }
                 RequestKind::Send { .. } => {
                     self.sending = false;
@@ -3840,12 +3848,14 @@ impl XdDesktop {
                 self.record_owner_icon(owner, &value);
             }
             RequestKind::ImageRead { path } => {
-                let field = |name| value.get(name).and_then(Value::as_str).map(str::to_owned);
-                let mime = field("mime").unwrap_or_default();
-                let data = field("data").unwrap_or_default();
-                self.message_image_decodes
-                    .push_back((path.clone(), mime, data));
-                self.decode_next_message_image(cx);
+                // Anything else is an answer for a chat that has since closed.
+                if self.message_image_fetching.as_deref() == Some(path.as_str()) {
+                    self.message_image_fetching = None;
+                    let field = |name| value.get(name).and_then(Value::as_str).map(str::to_owned);
+                    let mime = field("mime").unwrap_or_default();
+                    let data = field("data").unwrap_or_default();
+                    self.decode_message_image(path.clone(), mime, data, cx);
+                }
             }
             RequestKind::AgentCatalog => {
                 if let Err(error) = self.model.apply_agent_catalog(&value) {
@@ -8231,35 +8241,66 @@ impl XdDesktop {
         }
     }
 
-    /// Asks the host for images a row is about to show. An image it could not
-    /// ask for stays unknown, so the row asks again once there is a connection.
+    /// Queues images a row is about to show. Without a connection they stay
+    /// unknown, so the row asks again once there is one.
     fn request_message_images(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
-        let mut asked = false;
+        if self.active_host().is_none() {
+            return;
+        }
+        let images = Arc::make_mut(&mut self.message_images);
         for path in paths {
-            if self.message_images.contains_key(&path) {
-                continue;
-            }
-            let requested = self
-                .active_host()
-                .ok_or_else(|| "The xd host is offline.".to_owned())
-                .and_then(|host| host.image_read(&path));
-            if requested.is_ok() {
-                Arc::make_mut(&mut self.message_images).insert(path, MessageImageState::Loading);
-                asked = true;
+            if !images.contains_key(&path) {
+                images.insert(path.clone(), MessageImageState::Loading);
+                self.message_image_queue.push_back(path);
             }
         }
-        if asked {
+        self.pump_message_images();
+        // A send that failed forgot them again, and redrawing now would only ask
+        // again, and again, as fast as frames can be drawn.
+        if self.message_image_fetching.is_some() || self.message_image_decoding {
             cx.notify();
         }
     }
 
-    fn decode_next_message_image(&mut self, cx: &mut Context<Self>) {
-        if self.message_image_decoding {
-            return;
+    /// The image to fetch next, if nothing is under way. One that stopped waiting
+    /// while it was queued is passed over.
+    fn next_message_image(&mut self) -> Option<String> {
+        if self.message_image_fetching.is_some() || self.message_image_decoding {
+            return None;
         }
-        let Some((path, mime, data)) = self.message_image_decodes.pop_front() else {
+        while let Some(path) = self.message_image_queue.pop_front() {
+            if matches!(
+                self.message_images.get(&path),
+                Some(MessageImageState::Loading)
+            ) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn pump_message_images(&mut self) {
+        let Some(path) = self.next_message_image() else {
             return;
         };
+        let requested = self
+            .active_host()
+            .ok_or_else(|| "The xd host is offline.".to_owned())
+            .and_then(|host| host.image_read(&path));
+        if requested.is_ok() {
+            self.message_image_fetching = Some(path);
+        } else {
+            self.forget_unanswered_images();
+        }
+    }
+
+    fn decode_message_image(
+        &mut self,
+        path: String,
+        mime: String,
+        data: String,
+        cx: &mut Context<Self>,
+    ) {
         self.message_image_decoding = true;
         cx.spawn(async move |this, cx| {
             let image = cx
@@ -8267,8 +8308,14 @@ impl XdDesktop {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.message_image_decoding = false;
-                this.record_message_image(path, image, cx);
-                this.decode_next_message_image(cx);
+                // Its chat may have closed while it decoded.
+                if matches!(
+                    this.message_images.get(&path),
+                    Some(MessageImageState::Loading)
+                ) {
+                    this.record_message_image(path, image, cx);
+                }
+                this.pump_message_images();
                 cx.notify();
             });
         })
@@ -8289,12 +8336,25 @@ impl XdDesktop {
                 drawn: Rc::new(Cell::new(frame)),
             })
         });
-        let images = Arc::make_mut(&mut self.message_images);
-        let mut released = Vec::new();
-        if let Some(MessageImageState::Ready(old)) = images.insert(path, state) {
-            released.push(old.image.image);
-        }
-        let held = images
+        Arc::make_mut(&mut self.message_images).insert(path, state);
+        self.evict_message_images(cx);
+    }
+
+    fn message_image_bytes(&self) -> usize {
+        self.message_images
+            .values()
+            .map(|state| match state {
+                MessageImageState::Ready(ready) => ready.image.bytes(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Lets go of images past the budget. Scrolling away from images is what
+    /// makes them eligible, so this runs after frames as well as new arrivals.
+    fn evict_message_images(&mut self, cx: &mut Context<Self>) {
+        let held = self
+            .message_images
             .iter()
             .filter_map(|(path, state)| match state {
                 MessageImageState::Ready(ready) => {
@@ -8303,17 +8363,26 @@ impl XdDesktop {
                 _ => None,
             })
             .collect();
-        for path in images_over_budget(held, MESSAGE_IMAGE_BUDGET, frame) {
-            if let Some(MessageImageState::Ready(ready)) = images.remove(&path) {
-                released.push(ready.image.image);
-            }
+        let evicted = images_over_budget(held, MESSAGE_IMAGE_BUDGET, self.message_image_frame);
+        if evicted.is_empty() {
+            return;
         }
+        let images = Arc::make_mut(&mut self.message_images);
+        let released = evicted
+            .iter()
+            .filter_map(|path| match images.remove(path) {
+                Some(MessageImageState::Ready(ready)) => Some(ready.image.image),
+                _ => None,
+            })
+            .collect();
         Self::release_message_images(released, cx);
     }
 
-    /// Lets go of the open chat's images, as it closes.
+    /// Lets go of the open chat's images, as it closes. A fetch or decode under
+    /// way finds nothing waiting for it when it ends, and its result is dropped.
     fn forget_message_images(&mut self, cx: &mut Context<Self>) {
-        self.message_image_decodes.clear();
+        self.message_image_queue.clear();
+        self.message_image_fetching = None;
         let images = std::mem::take(&mut self.message_images);
         let released = images
             .values()
@@ -8346,6 +8415,8 @@ impl XdDesktop {
     /// Answers in flight are lost with the connection, so the rows waiting on
     /// them, or told that the host could not provide them, ask again.
     fn forget_unanswered_images(&mut self) {
+        self.message_image_queue.clear();
+        self.message_image_fetching = None;
         Arc::make_mut(&mut self.message_images)
             .retain(|_, state| matches!(state, MessageImageState::Ready(_)));
     }
@@ -12451,6 +12522,13 @@ impl XdDesktop {
         self.message_image_frame += 1;
         let image_frame = self.message_image_frame;
         let desktop = cx.entity().downgrade();
+        if self.message_image_bytes() > MESSAGE_IMAGE_BUDGET {
+            // After the list has marked what this frame draws.
+            let desktop = desktop.clone();
+            cx.defer(move |cx| {
+                let _ = desktop.update(cx, |desktop, cx| desktop.evict_message_images(cx));
+            });
+        }
         let empty_ready = transcript_empty && !transcript_loading && self.transcript_loaded;
         let transcript = if transcript_loading {
             div()
@@ -17242,10 +17320,10 @@ mod tests {
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
     }
 
-    /// Decoding holds all of an image's pixels before scaling them, so a reply
-    /// full of large images must not decode them all at once.
+    /// A reply is megabytes of base64 and decoding holds all of an image's pixels,
+    /// so a row full of images must not have them all in memory at once.
     #[gpui::test]
-    fn message_images_decode_one_at_a_time_and_all_arrive(cx: &mut gpui::TestAppContext) {
+    fn message_images_arrive_one_at_a_time(cx: &mut gpui::TestAppContext) {
         let pixel = {
             use base64::Engine as _;
             use image::ImageEncoder as _;
@@ -17255,53 +17333,97 @@ mod tests {
                 .unwrap();
             base64::engine::general_purpose::STANDARD.encode(png)
         };
-        let body = |value: Value| value.as_object().unwrap().clone();
+        let answer = move || {
+            serde_json::json!({"ok": true, "mime": "image/png", "data": pixel})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
         let read = |path: &str| RequestKind::ImageRead {
             path: path.to_owned(),
         };
+        let waiting = |desktop: &mut XdDesktop, paths: &[&str]| {
+            for path in paths {
+                Arc::make_mut(&mut desktop.message_images)
+                    .insert((*path).to_owned(), MessageImageState::Loading);
+                desktop.message_image_queue.push_back((*path).to_owned());
+            }
+        };
+        let ready = |desktop: &XdDesktop, path: &str| {
+            matches!(
+                desktop.message_images.get(path),
+                Some(MessageImageState::Ready(_))
+            )
+        };
 
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
-        desktop.update(cx, |desktop, cx| {
-            for path in ["/kept/a.png", "/kept/b.png", "/kept/c.png"] {
-                let reply =
-                    body(serde_json::json!({"ok": true, "mime": "image/png", "data": pixel}));
-                desktop.handle_reply(read(path), reply, None, cx);
-            }
-            assert!(desktop.message_image_decoding);
-            assert_eq!(desktop.message_image_decodes.len(), 2);
 
-            // A refusal has nothing to decode, and is answered at once.
-            let refused = body(serde_json::json!({"ok": false, "error": "no"}));
-            desktop.handle_reply(read("/kept/refused.png"), refused, None, cx);
+        // Only one is taken at a time, and one nobody waits for is passed over.
+        let answer_a = answer.clone();
+        desktop.update(cx, |desktop, cx| {
+            waiting(desktop, &["/gone", "/a", "/b"]);
+            Arc::make_mut(&mut desktop.message_images).remove("/gone");
+            assert_eq!(desktop.next_message_image().as_deref(), Some("/a"));
+            desktop.message_image_fetching = Some("/a".into());
+            assert_eq!(
+                desktop.next_message_image(),
+                None,
+                "/a is still being fetched"
+            );
+
+            // An answer nobody is waiting on is dropped, whole.
+            desktop.handle_reply(read("/stale"), answer_a(), None, cx);
+            assert!(!desktop.message_image_decoding);
+            assert!(!desktop.message_images.contains_key("/stale"));
+
+            desktop.handle_reply(read("/a"), answer_a(), None, cx);
+            assert!(desktop.message_image_decoding);
+            assert_eq!(desktop.message_image_fetching, None);
+            assert_eq!(
+                desktop.next_message_image(),
+                None,
+                "/a is still being decoded"
+            );
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(ready(desktop, "/a"));
+            assert!(!desktop.message_image_decoding);
+        });
+
+        // A chat closed mid-decode does not get its image back.
+        let answer_c = answer.clone();
+        desktop.update(cx, |desktop, cx| {
+            waiting(desktop, &["/c"]);
+            desktop.message_image_fetching = Some("/c".into());
+            desktop.handle_reply(read("/c"), answer_c(), None, cx);
+            assert!(desktop.message_image_decoding);
+            desktop.forget_message_images(cx);
+            assert!(desktop.message_images.is_empty());
+            assert!(desktop.message_image_queue.is_empty());
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.message_images.is_empty(), "the result was dropped");
+            assert!(!desktop.message_image_decoding);
+        });
+
+        // A refusal has nothing to decode, and is no connection problem.
+        desktop.update(cx, |desktop, cx| {
+            waiting(desktop, &["/refused"]);
+            desktop.message_image_fetching = Some("/refused".into());
+            let refused = serde_json::json!({"ok": false, "error": "no"});
+            desktop.handle_reply(
+                read("/refused"),
+                refused.as_object().unwrap().clone(),
+                None,
+                cx,
+            );
             assert!(matches!(
-                desktop.message_images.get("/kept/refused.png"),
+                desktop.message_images.get("/refused"),
                 Some(MessageImageState::Unavailable)
             ));
             assert_eq!(desktop.model.connection_error, None);
-        });
-        cx.run_until_parked();
-        desktop.update(cx, |desktop, cx| {
-            assert!(!desktop.message_image_decoding);
-            assert!(desktop.message_image_decodes.is_empty());
-            for path in ["/kept/a.png", "/kept/b.png", "/kept/c.png"] {
-                assert!(
-                    matches!(
-                        desktop.message_images.get(path),
-                        Some(MessageImageState::Ready(_))
-                    ),
-                    "{path} should have arrived"
-                );
-            }
-
-            // Leaving the chat drops what was still waiting.
-            desktop.message_image_decodes.push_back((
-                "/kept/d.png".into(),
-                "image/png".into(),
-                pixel.clone(),
-            ));
-            desktop.forget_message_images(cx);
-            assert!(desktop.message_image_decodes.is_empty());
-            assert!(desktop.message_images.is_empty());
         });
     }
 
