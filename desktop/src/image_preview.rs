@@ -159,6 +159,12 @@ impl ImagePreview {
         }
     }
 
+    fn is_over_image(&self, (x, y): (f32, f32)) -> bool {
+        let layout = self.layout();
+        (layout.x..layout.x + layout.width).contains(&x)
+            && (layout.y..layout.y + layout.height).contains(&y)
+    }
+
     fn clamp_scroll(&mut self) {
         let layout = self.layout();
         self.scroll.0 = self
@@ -764,7 +770,17 @@ impl XdDesktop {
                     }
                 }))
                 .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                    if event.standard_click() {
+                    // The backdrop also sees a press on the image, so a drag let
+                    // go out here arrives as a click. It was not one outside.
+                    let began_on_image = match event {
+                        ClickEvent::Mouse(click) => {
+                            this.image_preview.as_ref().is_some_and(|preview| {
+                                preview.is_over_image(point_tuple(click.down.position))
+                            })
+                        }
+                        ClickEvent::Keyboard(_) => false,
+                    };
+                    if event.standard_click() && !began_on_image {
                         this.close_image_preview(window, cx);
                     }
                 }))
@@ -1276,6 +1292,35 @@ mod tests {
             assert!(preview.drag.is_none());
             assert_close(preview.scroll, (scroll.0 + 40.0, scroll.1 + 20.0));
         });
+    }
+
+    #[gpui::test]
+    fn a_drag_released_outside_the_image_keeps_the_viewer_open(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[(4000, 3000)]);
+        click(cx, "draft-image-0");
+        click(cx, "image-preview-viewer");
+
+        let start = cx.debug_bounds("image-preview-viewer").unwrap().center();
+        let outside = point(px(10.0), px(10.0));
+        let modifiers = gpui::Modifiers::default();
+        cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+        cx.simulate_mouse_move(outside, MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(outside, MouseButton::Left, modifiers);
+        cx.run_until_parked();
+
+        desktop.read_with(cx, |desktop, _| {
+            let preview = desktop
+                .image_preview
+                .as_ref()
+                .expect("the viewer stays open");
+            assert_eq!(preview.zoom, CLICK_ZOOM);
+            assert!(preview.drag.is_none());
+        });
+
+        // The drag does not swallow the click that really is outside.
+        cx.simulate_click(outside, modifiers);
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| assert!(desktop.image_preview.is_none()));
     }
 
     #[gpui::test]
