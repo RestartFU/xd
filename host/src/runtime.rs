@@ -145,6 +145,9 @@ struct Router {
     quiet_since: Instant,
     /// It has timers of its own that only keep running while it does.
     wakes_itself: bool,
+    /// A background task finished between turns, and the agent has not yet had
+    /// a turn in which to report on it.
+    report_due: bool,
     /// It was stopped for being idle, so what it said last has nowhere to go.
     released: bool,
 }
@@ -278,6 +281,13 @@ fn claude_idle_line(line: &str) -> IdleLine {
         }
         _ => IdleLine::Ignore,
     }
+}
+
+/// Whether a line of agent output says a background task has finished.
+fn finishes_a_task(line: &str) -> bool {
+    line.contains("task_notification")
+        && serde_json::from_str::<Value>(line)
+            .is_ok_and(|root| root["type"] == "system" && root["subtype"] == "task_notification")
 }
 
 /// Whether a line of agent output shows the agent setting a timer.
@@ -992,6 +1002,7 @@ impl TurnRuntime {
                     };
                     router.quiet_since = Instant::now();
                     router.wakes_itself |= schedules_a_wakeup(&text);
+                    router.report_due |= router.sink.is_none() && finishes_a_task(&text);
                     router.backlog.push_back(text);
                     runtime.pump(&chat_id, &mut router);
                 }
@@ -1043,6 +1054,7 @@ impl TurnRuntime {
         };
         router.sink = None;
         router.quiet_since = Instant::now();
+        router.report_due = false;
         let mut unread = Vec::new();
         let mut steers = Vec::new();
         while let Ok(feed) = lines.try_recv() {
@@ -1250,6 +1262,7 @@ impl TurnRuntime {
             template: turn.clone(),
             quiet_since: Instant::now(),
             wakes_itself: false,
+            report_due: false,
             released: false,
         }));
         Self::spawn_reader(
@@ -1322,14 +1335,17 @@ impl TurnRuntime {
         let mut due = Vec::new();
         if let Ok(sessions) = self.inner.sessions.lock() {
             for (chat_id, session) in sessions.iter() {
-                let limit = if settled_chats.contains(chat_id) {
+                let Ok(router) = session.router.lock() else {
+                    continue;
+                };
+                // An agent can take its time to report on a finished task, and
+                // that report is lost if it is stopped first.
+                let limit = if settled_chats.contains(chat_id) && !router.report_due {
                     settled
                 } else {
                     idle
                 };
-                if let Ok(router) = session.router.lock()
-                    && router.at_rest_for(limit)
-                {
+                if router.at_rest_for(limit) {
                     due.push((chat_id.clone(), router.quiet_since));
                 }
             }
@@ -3364,6 +3380,44 @@ read next"#,
         wait_for("the idle agent to be stopped", || {
             agent.release_any_quiet() == 1
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_settled_chat_waits_longer_for_the_report_on_a_finished_task() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+{}
+read poke
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_shell","status":"completed"}}'
+read next"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        agent.send_and_finish("first");
+        agent
+            .store
+            .settle_session(&json!({"session": agent.session}))
+            .unwrap();
+        agent.poke();
+        wait_for("the task to finish", || {
+            contents(&agent.store, &agent.chat)
+                .iter()
+                .filter_map(|(_, content)| crate::subagent::decode(content))
+                .any(|record| record["status"] == "completed")
+        });
+
+        let runtime = &agent.runtime;
+        assert_eq!(
+            runtime.release_quiet_agents(KeptAgent::LONG, Duration::ZERO),
+            0
+        );
+        assert_eq!(
+            runtime.release_quiet_agents(Duration::ZERO, KeptAgent::LONG),
+            1
+        );
     }
 
     #[cfg(unix)]

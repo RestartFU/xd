@@ -5,6 +5,9 @@ use std::collections::HashSet;
 /// Every process with a child that is still running, or `None` when the machine
 /// will not say. A process that exits hands its children to init, so anything
 /// still descended from a process keeps one of its direct children alive.
+///
+/// A system that hides other users' processes from `/proc` altogether, with
+/// `hidepid=2`, looks the same as one where they are not running.
 pub(crate) fn parents() -> Option<HashSet<u32>> {
     read_parents()
 }
@@ -21,14 +24,20 @@ fn read_parents() -> Option<HashSet<u32>> {
         if !is_process {
             continue;
         }
-        // A process that has exited since the directory was listed is no one's
-        // living child.
-        let Ok(stat) = std::fs::read_to_string(path.join("stat")) else {
-            continue;
-        };
-        parents.extend(living_parent_in_stat(&stat));
+        match std::fs::read_to_string(path.join("stat")) {
+            Ok(stat) => parents.extend(living_parent_in_stat(&stat)),
+            // It has exited since the directory was listed.
+            Err(error) if process_has_gone(&error) => {}
+            // It may be anyone's child, so nothing can be said about anyone.
+            Err(_) => return None,
+        }
     }
     Some(parents)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn process_has_gone(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -79,6 +88,15 @@ mod tests {
         );
         assert_eq!(living_parent_in_stat("9 (bash) Z 7 9 9 0"), None);
         assert_eq!(living_parent_in_stat("damaged"), None);
+    }
+
+    #[test]
+    fn only_a_process_that_has_gone_is_passed_over() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(process_has_gone(&Error::from(ErrorKind::NotFound)));
+        assert!(process_has_gone(&Error::from_raw_os_error(libc::ESRCH)));
+        assert!(!process_has_gone(&Error::from(ErrorKind::PermissionDenied)));
     }
 
     #[test]
