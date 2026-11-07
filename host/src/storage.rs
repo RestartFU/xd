@@ -4070,45 +4070,30 @@ impl StateStore {
         Ok(settings)
     }
 
-    /// Deletes a session a sweep picked, with the worktrees xd generated for
-    /// it, unless the session or the rule changed since the sweep looked.
+    /// Decides what deleting a session a sweep picked would remove, unless
+    /// the session or the rule changed since the sweep looked.
     ///
-    /// Every worktree is checked before anything is deleted, so one with
-    /// uncommitted changes keeps the whole session. Git removes the worktree
-    /// without forcing, and the branch stays in the repository. A worktree
-    /// another session still uses, or one xd did not generate, is left alone.
-    pub(crate) fn auto_delete_session(
+    /// Every worktree is checked here, before anything is deleted, so one with
+    /// uncommitted changes, or with commits no branch holds, keeps the whole
+    /// session. Git runs without the database lock. Nothing changes until
+    /// [`Self::finish_auto_delete`].
+    pub(crate) fn plan_auto_delete(
         &self,
         candidate: &SettlementCandidate,
         decided_under: &AutoDeleteSettings,
-    ) -> Result<AutoDeletion, StorageError> {
-        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        if read_auto_delete_settings(&database)? != *decided_under {
-            return Ok(AutoDeletion::Changed);
-        }
-        let transaction = database.transaction()?;
-        let quiet: bool = transaction.query_row(
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM workspace_sessions s \
-                   WHERE s.id = ?1 AND {DELETABLE_SESSION}) \
-                 AND NOT {SESSION_CHANGED_SINCE}"
-            ),
-            params![
-                candidate.session,
-                candidate.user_anchor_at,
-                candidate.activity_at
-            ],
-            |row| row.get(0),
-        )?;
-        if !quiet {
-            return Ok(AutoDeletion::Changed);
-        }
-        let members = {
-            let mut statement = transaction.prepare(
+    ) -> Result<Result<AutoDeletePlan, AutoDeletion>, StorageError> {
+        let (members, known) = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            if read_auto_delete_settings(&database)? != *decided_under
+                || !session_deletable(&database, candidate)?
+            {
+                return Ok(Err(AutoDeletion::Changed));
+            }
+            let mut statement = database.prepare(
                 "SELECT id, workdir, original_workdir FROM chats \
                  WHERE workspace_session_id = ? ORDER BY id",
             )?;
-            statement
+            let members = statement
                 .query_map([&candidate.session], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -4116,28 +4101,75 @@ impl StateStore {
                         row.get::<_, Option<String>>(2)?,
                     ))
                 })?
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            (
+                members,
+                KnownWorktrees::read(&database, &candidate.session)?,
+            )
         };
-        let worktrees = match generated_worktrees(&transaction, &candidate.session, &members)? {
+        let worktrees = match generated_worktrees(&members, &known)? {
             Ok(worktrees) => worktrees,
-            Err(reason) => return Ok(AutoDeletion::Kept(reason)),
+            Err(reason) => return Ok(Err(AutoDeletion::Kept(reason))),
         };
-        transaction.execute(
-            "DELETE FROM chats WHERE workspace_session_id = ?",
-            [&candidate.session],
-        )?;
-        let mut removed = Vec::new();
-        for worktree in worktrees {
-            if let Err(reason) = remove_generated_worktree(&worktree) {
-                // Dropping the transaction keeps the session.
-                return Ok(AutoDeletion::Kept(reason));
-            }
-            removed.push(worktree.path.to_string_lossy().into_owned());
-        }
-        transaction.commit()?;
-        Ok(AutoDeletion::Deleted {
+        Ok(Ok(AutoDeletePlan {
             chats: members.into_iter().map(|(chat, _, _)| chat).collect(),
+            worktrees,
+        }))
+    }
+
+    /// Deletes the session a plan describes, then removes its worktrees with
+    /// Git, which never forces, keeping their branches. It checks once more
+    /// that nothing happened in the session, in the same transaction that
+    /// deletes it, and drops any worktree another session has taken up since.
+    ///
+    /// The session goes first, so a worktree Git refuses at the last moment
+    /// stays on disk with everything in it, and no chat is left pointing at a
+    /// folder that is gone.
+    pub(crate) fn finish_auto_delete(
+        &self,
+        candidate: &SettlementCandidate,
+        decided_under: &AutoDeleteSettings,
+        plan: AutoDeletePlan,
+    ) -> Result<AutoDeletion, StorageError> {
+        let worktrees = {
+            let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            if read_auto_delete_settings(&database)? != *decided_under {
+                return Ok(AutoDeletion::Changed);
+            }
+            let transaction = database.transaction()?;
+            if !session_deletable(&transaction, candidate)? {
+                return Ok(AutoDeletion::Changed);
+            }
+            let elsewhere = KnownWorktrees::read(&transaction, &candidate.session)?.elsewhere;
+            transaction.execute(
+                "DELETE FROM chats WHERE workspace_session_id = ?",
+                [&candidate.session],
+            )?;
+            transaction.commit()?;
+            plan.worktrees
+                .into_iter()
+                .filter(|worktree| !elsewhere.contains(&worktree.path))
+                .collect::<Vec<_>>()
+        };
+        let mut removed = Vec::new();
+        let mut left = Vec::new();
+        for worktree in worktrees {
+            match remove_generated_worktree(&worktree) {
+                Ok(()) => removed.push(worktree.path.to_string_lossy().into_owned()),
+                Err(reason) => left.push(reason),
+            }
+        }
+        if !removed.is_empty() {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            for path in &removed {
+                database.execute("DELETE FROM generated_worktrees WHERE path = ?", [path])?;
+            }
+        }
+        Ok(AutoDeletion::Deleted {
+            chats: plan.chats,
             worktrees: removed,
+            left,
         })
     }
 
@@ -4708,6 +4740,8 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            fast INTEGER NOT NULL DEFAULT 0, claude_mode INTEGER NOT NULL DEFAULT 0); \
          CREATE TABLE IF NOT EXISTS worktree_containers (path TEXT PRIMARY KEY, \
            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL); \
+         CREATE TABLE IF NOT EXISTS generated_worktrees (path TEXT PRIMARY KEY, \
+           created_at INTEGER NOT NULL); \
          CREATE TABLE IF NOT EXISTS devices (token_hash TEXT PRIMARY KEY, name TEXT NOT NULL, \
            created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL); \
          CREATE TABLE IF NOT EXISTS shared_events (id INTEGER PRIMARY KEY AUTOINCREMENT, \
@@ -5314,43 +5348,123 @@ fn read_auto_delete_settings(database: &Connection) -> Result<AutoDeleteSettings
         .unwrap_or_default())
 }
 
+/// What deleting a session will remove, decided before its terminals close.
+pub(crate) struct AutoDeletePlan {
+    chats: Vec<String>,
+    worktrees: Vec<GeneratedWorktree>,
+}
+
 /// A worktree xd generated for a session that is about to be deleted.
 struct GeneratedWorktree {
     path: PathBuf,
     /// The repository's main checkout, where Git is asked to remove it.
     main: PathBuf,
-    /// The registered folder xd generates worktrees in.
-    container: PathBuf,
+    /// The registered folder xd generated it in, when it is in one.
+    container: Option<PathBuf>,
+}
+
+/// What the database knows about worktrees, read under its lock so Git can
+/// then run without it.
+struct KnownWorktrees {
+    /// Folders xd generates worktrees in.
+    containers: Vec<PathBuf>,
+    /// Worktrees xd recorded generating.
+    generated: HashSet<PathBuf>,
+    /// Folders chats outside the session work in.
+    elsewhere: HashSet<PathBuf>,
+}
+
+impl KnownWorktrees {
+    fn read(database: &Connection, session: &str) -> Result<Self, StorageError> {
+        let paths = |query: &str, parameters: &[&dyn rusqlite::ToSql]| {
+            let mut statement = database.prepare(query)?;
+            let paths = statement
+                .query_map(parameters, |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, StorageError>(paths)
+        };
+        Ok(Self {
+            containers: paths("SELECT path FROM worktree_containers", &[])?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            generated: paths("SELECT path FROM generated_worktrees", &[])?
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            elsewhere: paths(
+                "SELECT workdir FROM chats WHERE workspace_session_id != ? AND workdir IS NOT NULL",
+                &[&session],
+            )?
+            .into_iter()
+            .map(|workdir| PathBuf::from(normalize_existing_path(Path::new(&workdir))))
+            .collect(),
+        })
+    }
+}
+
+/// Whether the session can still be deleted under the rule: nothing in it is
+/// running or queued, nothing happened since the sweep looked, and the user
+/// has neither asked for it back nor kept it out of the rules.
+fn session_deletable(
+    database: &Connection,
+    candidate: &SettlementCandidate,
+) -> Result<bool, StorageError> {
+    Ok(database.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM workspace_sessions s \
+               WHERE s.id = ?1 AND {DELETABLE_SESSION}) \
+             AND NOT {SESSION_CHANGED_SINCE}"
+        ),
+        params![
+            candidate.session,
+            candidate.user_anchor_at,
+            candidate.activity_at
+        ],
+        |row| row.get(0),
+    )?)
+}
+
+fn record_generated_worktree(
+    transaction: &rusqlite::Transaction<'_>,
+    path: &str,
+) -> Result<(), StorageError> {
+    transaction.execute(
+        "INSERT INTO generated_worktrees (path, created_at) VALUES (?, ?) \
+         ON CONFLICT(path) DO NOTHING",
+        params![path, now_seconds()],
+    )?;
+    Ok(())
+}
+
+/// Whether xd made this worktree for one of these chats before it recorded
+/// the worktrees it generates: it sits in a generated-worktree folder and
+/// has the branch xd names after the chat that asked for it.
+fn generated_before_records(branch: Option<&str>, chats: &[&str]) -> bool {
+    let Some(name) = branch.and_then(|branch| branch.strip_prefix("xd/")) else {
+        return false;
+    };
+    chats.iter().any(|chat| {
+        name == *chat
+            || name
+                .strip_suffix(&glib_hash(chat))
+                .is_some_and(|slug| slug.ends_with('-'))
+    })
 }
 
 /// The worktrees that should go with a session: generated by xd, still a
 /// linked worktree of their repository, and used by no other session. The
-/// inner error says why the session has to stay, such as uncommitted work.
+/// inner error says why the session has to stay instead: uncommitted work,
+/// commits on a detached HEAD that no branch or tag holds, or a worktree Git
+/// cannot describe.
 fn generated_worktrees(
-    database: &Connection,
-    session: &str,
     members: &[(String, Option<String>, Option<String>)],
+    known: &KnownWorktrees,
 ) -> Result<Result<Vec<GeneratedWorktree>, String>, StorageError> {
-    let containers = {
-        let mut statement = database.prepare("SELECT path FROM worktree_containers")?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(PathBuf::from)
-            .collect::<Vec<_>>()
-    };
-    let elsewhere = {
-        let mut statement = database.prepare(
-            "SELECT workdir FROM chats WHERE workspace_session_id != ? AND workdir IS NOT NULL",
-        )?;
-        statement
-            .query_map([session], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .map(|workdir| PathBuf::from(normalize_existing_path(Path::new(&workdir))))
-            .collect::<HashSet<_>>()
-    };
+    let chats = members
+        .iter()
+        .map(|(chat, _, _)| chat.as_str())
+        .collect::<Vec<_>>();
     let mut found = Vec::<GeneratedWorktree>::new();
     for (_, workdir, original) in members {
         // A chat that never left its folder's checkout has no worktree of its own.
@@ -5359,17 +5473,16 @@ fn generated_worktrees(
         };
         let path = PathBuf::from(normalize_existing_path(Path::new(workdir)));
         if !path.is_dir()
-            || elsewhere.contains(&path)
+            || known.elsewhere.contains(&path)
             || found.iter().any(|worktree| worktree.path == path)
         {
             continue;
         }
-        let Some(container) = containers
+        let container = known
+            .containers
             .iter()
             .find(|container| path != **container && path.starts_with(container))
-        else {
-            continue;
-        };
+            .cloned();
         let worktrees = match list_git_worktrees(&path) {
             Ok(worktrees) => worktrees,
             Err(error) => return Ok(Err(format!("{}: {error}", path.display()))),
@@ -5377,11 +5490,16 @@ fn generated_worktrees(
         let Some(main) = worktrees.first() else {
             continue;
         };
-        if !worktrees
+        let Some(linked) = worktrees
             .iter()
             .skip(1)
-            .any(|worktree| Path::new(&normalize_existing_path(&worktree.path)) == path)
-        {
+            .find(|worktree| Path::new(&normalize_existing_path(&worktree.path)) == path)
+        else {
+            continue;
+        };
+        let generated = known.generated.contains(&path)
+            || (container.is_some() && generated_before_records(linked.branch.as_deref(), &chats));
+        if !generated {
             continue;
         }
         let status = run_git(&path, &["status", "--porcelain", "--untracked-files=all"])?;
@@ -5395,10 +5513,29 @@ fn generated_worktrees(
         if !status.1.is_empty() {
             return Ok(Err(format!("{} has uncommitted changes", path.display())));
         }
+        if linked.detached {
+            let holders = run_git(
+                &path,
+                &[
+                    "for-each-ref",
+                    "--count=1",
+                    "--contains=HEAD",
+                    "refs/heads",
+                    "refs/remotes",
+                    "refs/tags",
+                ],
+            )?;
+            if !holders.0.success() || holders.1.is_empty() {
+                return Ok(Err(format!(
+                    "{} has a detached HEAD whose commits no branch or tag holds",
+                    path.display()
+                )));
+            }
+        }
         found.push(GeneratedWorktree {
             path,
             main: main.path.clone(),
-            container: container.clone(),
+            container,
         });
     }
     Ok(Ok(found))
@@ -5419,9 +5556,10 @@ fn remove_generated_worktree(worktree: &GeneratedWorktree) -> Result<(), String>
             command_error(&removed.2, "git worktree remove failed")
         ));
     }
-    if let Some(parent) = worktree.path.parent()
-        && parent != worktree.container
-        && parent.starts_with(&worktree.container)
+    if let Some(container) = &worktree.container
+        && let Some(parent) = worktree.path.parent()
+        && parent != container
+        && parent.starts_with(container)
     {
         // Only succeeds while empty, so nothing else in it is lost.
         let _ = fs::remove_dir(parent);
@@ -6136,7 +6274,9 @@ fn create_worktree(
                 .as_deref()
                 .is_some_and(|candidate| candidate == branch || candidate == legacy_branch)
     }) {
-        return Ok(normalize_existing_path(&existing.path));
+        let path = normalize_existing_path(&existing.path);
+        record_generated_worktree(transaction, &path)?;
+        return Ok(path);
     }
 
     for suffix in 1..=10_000_u32 {
@@ -6174,7 +6314,9 @@ fn create_worktree(
                     message
                 }));
             }
-            return Ok(normalize_existing_path(Path::new(target)));
+            let path = normalize_existing_path(Path::new(target));
+            record_generated_worktree(transaction, &path)?;
+            return Ok(path);
         }
     }
     Err(StorageError::InvalidRequest(

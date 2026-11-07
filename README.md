@@ -59,7 +59,8 @@ days a session may sit idle; it is off until you do, because deleting can't be
 undone. The session goes with its chats and terminals, and so does the worktree
 xd made for it, but its branch and every commit on it stay in the repository. A
 worktree with uncommitted changes or untracked files keeps its whole session
-until you commit or clean it up. Sessions you've kept out of auto-settle are not
+until you commit or clean it up, and so do commits on a detached HEAD that no
+branch holds. Using a session's terminal counts as activity. Sessions you've kept out of auto-settle are not
 deleted, and neither is one you brought back from the **Settled** shelf, until
 it sees new activity.
 

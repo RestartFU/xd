@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
     thread,
     time::Duration,
@@ -93,6 +93,8 @@ struct TerminalSession {
     writer: Mutex<Option<File>>,
     state: Mutex<TerminalState>,
     activity: Arc<TerminalActivityState>,
+    /// When the terminal last took input or printed output, in seconds.
+    last_used: AtomicI64,
 }
 
 impl TerminalManager {
@@ -298,9 +300,11 @@ impl TerminalManager {
             .writer
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_string())?;
-        writer
+        let writer = writer
             .as_mut()
-            .ok_or_else(|| "The terminal is closed.".to_string())?
+            .ok_or_else(|| "The terminal is closed.".to_string())?;
+        session.mark_used();
+        writer
             .write_all(&data)
             .map_err(|error| format!("Cannot write terminal: {error}."))?;
         Ok(json!({"ok": true}))
@@ -321,9 +325,11 @@ impl TerminalManager {
             .writer
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_owned())?;
-        writer
+        let writer = writer
             .as_mut()
-            .ok_or_else(|| "The terminal is closed.".to_owned())?
+            .ok_or_else(|| "The terminal is closed.".to_owned())?;
+        session.mark_used();
+        writer
             .write_all(&data)
             .map_err(|error| format!("Cannot write terminal: {error}."))?;
         Ok(json!({"ok": true, "path": path}))
@@ -417,6 +423,57 @@ impl TerminalManager {
         for session in sessions {
             close_session(&session, &self.sessions, &self.events);
         }
+    }
+
+    /// When any terminal of these owners last took input or printed output.
+    pub(crate) fn last_used(&self, owners: &HashSet<String>) -> Option<i64> {
+        self.owned_by(owners)
+            .iter()
+            .map(|session| session.last_used.load(Ordering::Acquire))
+            .max()
+    }
+
+    /// Closes every terminal of these owners, unless one has been used after
+    /// `idle_since`. Input is refused from the moment the check begins, so a
+    /// command typed meanwhile cannot run in a session that is going away.
+    /// Opening a terminal waits on the engine's session lock, which the
+    /// caller holds. Returns whether they are closed.
+    pub(crate) fn close_unused(&self, owners: &HashSet<String>, idle_since: i64) -> bool {
+        let sessions = self.owned_by(owners);
+        let mut writers = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            let Ok(writer) = session.writer.lock() else {
+                return false;
+            };
+            writers.push(writer);
+        }
+        if sessions
+            .iter()
+            .any(|session| session.last_used.load(Ordering::Acquire) > idle_since)
+        {
+            return false;
+        }
+        for writer in &mut writers {
+            writer.take();
+        }
+        drop(writers);
+        for session in sessions {
+            close_session(&session, &self.sessions, &self.events);
+        }
+        true
+    }
+
+    fn owned_by(&self, owners: &HashSet<String>) -> Vec<Arc<TerminalSession>> {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .filter(|session| owners.contains(&session.owner()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn has_sessions(&self) -> bool {
@@ -557,6 +614,7 @@ impl TerminalSession {
             writer: Mutex::new(Some(writer)),
             activity,
             state: Mutex::new(TerminalState::new(columns, rows)),
+            last_used: AtomicI64::new(crate::settlement::now_seconds()),
         });
         Ok((session, reader))
     }
@@ -591,6 +649,11 @@ impl TerminalSession {
             "sequence": state.sequence,
             "replay": replay,
         }))
+    }
+
+    fn mark_used(&self) {
+        self.last_used
+            .store(crate::settlement::now_seconds(), Ordering::Release);
     }
 
     fn owner(&self) -> String {
@@ -793,6 +856,7 @@ fn start_reader(
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
+                session.mark_used();
                 let data = buffer[..count].to_vec();
                 let activity_updates = activity.feed(&data);
                 let replies = queries.feed(&data);

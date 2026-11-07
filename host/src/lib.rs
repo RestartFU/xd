@@ -1245,10 +1245,12 @@ impl Engine {
     }
 
     /// One pass of the deletion rule. A session waits while it has an approval
-    /// or question open or a command running in its terminal, as it would for
-    /// the user. `reported` holds sessions already logged as kept, so a
-    /// worktree with uncommitted work is mentioned once rather than every
-    /// sweep. Returns how many sessions it deleted.
+    /// or question open, and typing in or output from its terminal counts as
+    /// activity. Its terminals close only once its worktrees have passed their
+    /// checks, and refuse input from then on. `reported` holds sessions
+    /// already logged as kept, so a worktree with uncommitted work is
+    /// mentioned once rather than every sweep. Returns how many sessions it
+    /// deleted.
     fn auto_delete_sweep(&self, now: i64, reported: &mut HashSet<String>) -> usize {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return 0;
@@ -1263,19 +1265,32 @@ impl Engine {
                 return 0;
             }
         };
+        let Some(days) = settings.after_days else {
+            return 0;
+        };
+        let idle_since = now - days * settlement::DAY_SECONDS;
         let mut deleted = 0;
         let mut worktrees_changed = false;
         for candidate in candidates {
             let terminal = format!("session:{}", candidate.session);
-            let working = self.terminals.activity_snapshot().working_chats;
-            if working.contains(&terminal)
-                || candidate
-                    .chats
-                    .iter()
-                    .any(|chat| working.contains(chat) || runtime.has_interactions(chat))
+            let owners = candidate
+                .chats
+                .iter()
+                .cloned()
+                .chain([terminal.clone()])
+                .collect::<HashSet<_>>();
+            if candidate
+                .chats
+                .iter()
+                .any(|chat| runtime.has_interactions(chat))
+                || self
+                    .terminals
+                    .last_used(&owners)
+                    .is_some_and(|used| used > idle_since)
             {
                 continue;
             }
+            // Opening a terminal for the session waits on this.
             let Ok(_resources) = self.session_resources.lock() else {
                 return deleted;
             };
@@ -1283,25 +1298,48 @@ impl Engine {
                 eprintln!("xd: automatic deletion skipped: {error}");
                 return deleted;
             }
-            match store.auto_delete_session(&candidate, &settings) {
-                Ok(deletion::AutoDeletion::Deleted { chats, worktrees }) => {
-                    for chat in &chats {
-                        runtime.discard_chat(chat);
-                    }
-                    self.terminals.kill_chat(&terminal);
-                    reported.remove(&candidate.session);
-                    worktrees_changed |= !worktrees.is_empty();
-                    deleted += 1;
-                }
-                Ok(deletion::AutoDeletion::Changed) => {}
-                Ok(deletion::AutoDeletion::Kept(reason)) => {
+            let plan = match store.plan_auto_delete(&candidate, &settings) {
+                Ok(Ok(plan)) => plan,
+                Ok(Err(deletion::AutoDeletion::Kept(reason))) => {
                     if reported.insert(candidate.session.clone()) {
                         eprintln!(
                             "xd: keeping idle session {} instead of deleting it: {reason}",
                             candidate.session
                         );
                     }
+                    continue;
                 }
+                Ok(Err(_)) => continue,
+                Err(error) => {
+                    eprintln!("xd: automatic deletion skipped: {error}");
+                    continue;
+                }
+            };
+            // Closing publishes events the store records, so it happens
+            // between the two steps rather than under the store's lock.
+            if !self.terminals.close_unused(&owners, idle_since) {
+                continue;
+            }
+            match store.finish_auto_delete(&candidate, &settings, plan) {
+                Ok(deletion::AutoDeletion::Deleted {
+                    chats,
+                    worktrees,
+                    left,
+                }) => {
+                    for chat in &chats {
+                        runtime.discard_chat(chat);
+                    }
+                    for reason in left {
+                        eprintln!(
+                            "xd: deleted idle session {} but kept its worktree: {reason}",
+                            candidate.session
+                        );
+                    }
+                    reported.remove(&candidate.session);
+                    worktrees_changed |= !worktrees.is_empty();
+                    deleted += 1;
+                }
+                Ok(_) => {}
                 Err(error) => eprintln!("xd: automatic deletion skipped: {error}"),
             }
         }
@@ -2355,6 +2393,52 @@ mod tests {
         let tree = engine.dispatch(json!({"op": "tree"}));
         assert!(tree["chats"].as_array().unwrap().is_empty());
         assert!(tree["sessions"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn using_a_terminal_keeps_an_idle_session_and_deleting_closes_it() {
+        let root = test_directory();
+        let store = StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder}));
+        let resource = chat["terminal_chat"].as_str().unwrap().to_owned();
+        let opened = engine
+            .terminals
+            .open(&json!({"chat": resource}), &root.join("Workspaces/Project"))
+            .unwrap();
+        let old = settlement::now_seconds() - 40 * settlement::DAY_SECONDS;
+        rusqlite::Connection::open(root.join("chats.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "UPDATE chats SET created_at = {old}, last_user_message_at = {micros}; \
+                 UPDATE workspace_sessions SET created_at = {old};",
+                micros = old * 1_000_000
+            ))
+            .unwrap();
+        engine.dispatch(json!({"op": "set-auto-delete-settings", "after_days": 30}));
+        let mut reported = HashSet::new();
+
+        assert_eq!(
+            engine.auto_delete_sweep(settlement::now_seconds(), &mut reported),
+            0,
+            "the terminal was just used"
+        );
+        let owners = HashSet::from([resource.clone()]);
+        assert!(!engine.terminals.close_unused(&owners, old));
+
+        let later = settlement::now_seconds() + 31 * settlement::DAY_SECONDS;
+        assert_eq!(engine.auto_delete_sweep(later, &mut reported), 1);
+        assert!(engine.terminals.last_used(&owners).is_none());
+        assert!(
+            engine
+                .terminals
+                .input(&json!({"terminal": opened["id"], "data": STANDARD.encode(b"ls\n")}))
+                .is_err(),
+            "the terminal is closed"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

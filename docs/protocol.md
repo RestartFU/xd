@@ -470,17 +470,19 @@ is deleted, until a client chooses a number of days. A request without
 The rule skips the sessions automatic settling would skip: a member chat is
 running a turn, has a queued message, or is waiting on an approval or question,
 the user un-settled the session, or `set-session-auto-settle` keeps it out of
-the rules. It also waits while a command runs in the session's terminal.
-Settled sessions are deleted like active ones.
+the rules. Typing in the session's terminals, and output from them, counts as
+activity. Settled sessions are deleted like active ones.
 
 Deleting a session closes its terminals, as `delete-session` does, and removes
-the worktree xd generated for it with `git worktree remove`, which never forces.
-The branch stays in the repository with every commit on it. Ignored files in
-the worktree, such as build output, go with it. If the worktree has uncommitted
-changes or untracked files, or Git cannot remove it, the whole session stays and
-the next sweep tries again. A worktree xd did not generate, or one another
-session still uses, is left where it is. Each deletion broadcasts `tree`, and
-`worktrees-changed` when a worktree went with it.
+each worktree xd generated for it with `git worktree remove`, which never
+forces. The branch stays in the repository with every commit on it. Ignored
+files in the worktree, such as build output, go with it. The whole session
+stays, and the next sweep tries again, if one of those worktrees has
+uncommitted changes or untracked files, or a detached HEAD whose commits no
+branch or tag holds. A worktree xd did not generate, or one another session
+still uses, is left where it is. If Git refuses a worktree after the session is
+deleted, the worktree stays on disk with everything in it. Each deletion
+broadcasts `tree`, and `worktrees-changed` when a worktree went with it.
 
 ### Shared session terminals
 

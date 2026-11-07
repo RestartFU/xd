@@ -3,9 +3,10 @@
 //!
 //! It is off until the user picks a number of days, since it cannot be undone.
 //! It runs in the daemon, on the same schedule as settling; see
-//! [`crate::settlement`]. A worktree is only removed when Git can remove it
-//! without forcing, so uncommitted work keeps its session, and the branch is
-//! left in the repository with every commit on it.
+//! [`crate::settlement`]. Using a session's terminal counts as activity. A
+//! worktree is only removed when xd recorded generating it, it is clean, and
+//! its commits are on a branch or tag; otherwise the whole session stays. Git
+//! removes it without forcing, and the branch is left in the repository.
 
 use serde_json::{Value, json};
 
@@ -48,6 +49,8 @@ pub(crate) enum AutoDeletion {
     Deleted {
         chats: Vec<String>,
         worktrees: Vec<String>,
+        /// Why a worktree Git refused at the last moment is still on disk.
+        left: Vec<String>,
     },
     /// Something happened in the session, or to the rule, after the sweep
     /// looked. The next sweep decides again.
@@ -63,7 +66,7 @@ mod tests {
     use super::*;
     use crate::{
         StateStore,
-        settlement::{DAY_SECONDS, now_seconds},
+        settlement::{DAY_SECONDS, SettlementCandidate, now_seconds},
     };
 
     #[test]
@@ -143,12 +146,22 @@ mod tests {
                 .deletion_candidates(now_seconds(), &settings)
                 .unwrap()
                 .iter()
-                .map(|candidate| {
-                    self.store
-                        .auto_delete_session(candidate, &settings)
-                        .unwrap()
-                })
+                .map(|candidate| self.delete(candidate, &settings))
                 .collect()
+        }
+
+        fn delete(
+            &self,
+            candidate: &SettlementCandidate,
+            settings: &AutoDeleteSettings,
+        ) -> AutoDeletion {
+            match self.store.plan_auto_delete(candidate, settings).unwrap() {
+                Ok(plan) => self
+                    .store
+                    .finish_auto_delete(candidate, settings, plan)
+                    .unwrap(),
+                Err(outcome) => outcome,
+            }
         }
 
         fn chats(&self) -> usize {
@@ -253,6 +266,7 @@ mod tests {
             vec![AutoDeletion::Deleted {
                 chats: vec![fixture.chat.clone()],
                 worktrees: Vec::new(),
+                left: Vec::new(),
             }]
         );
         assert_eq!(fixture.chats(), 0);
@@ -305,14 +319,15 @@ mod tests {
             .remove(0);
 
         let longer = fixture.enable(20);
-        assert_eq!(
-            fixture
-                .store
-                .auto_delete_session(&candidate, &settings)
-                .unwrap(),
-            AutoDeletion::Changed
-        );
+        assert_eq!(fixture.delete(&candidate, &settings), AutoDeletion::Changed);
 
+        // Planned before the message, finished after it.
+        let plan = fixture
+            .store
+            .plan_auto_delete(&candidate, &longer)
+            .unwrap()
+            .ok()
+            .unwrap();
         fixture
             .store
             .prepare_send(&json!({"chat": fixture.chat, "text": "hold on"}))
@@ -321,10 +336,11 @@ mod tests {
         assert_eq!(
             fixture
                 .store
-                .auto_delete_session(&candidate, &longer)
+                .finish_auto_delete(&candidate, &longer, plan)
                 .unwrap(),
             AutoDeletion::Changed
         );
+        assert_eq!(fixture.delete(&candidate, &longer), AutoDeletion::Changed);
         assert_eq!(fixture.chats(), 1);
     }
 
@@ -346,6 +362,7 @@ mod tests {
             vec![AutoDeletion::Deleted {
                 chats: vec![fixture.chat.clone()],
                 worktrees: vec![worktree.to_string_lossy().into_owned()],
+                left: Vec::new(),
             }]
         );
         assert!(!worktree.exists());
@@ -446,5 +463,113 @@ mod tests {
             "{deleted:?}"
         );
         assert!(worktree.exists(), "another session still works in it");
+    }
+
+    #[test]
+    fn commits_only_a_detached_head_holds_keep_the_session() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        fixture.git(&worktree, &["checkout", "-q", "--detach"]);
+        fixture.git(&worktree, &["commit", "-q", "--allow-empty", "-m", "loose"]);
+        fixture.enable(1);
+        fixture.age(3);
+        let kept = fixture.sweep();
+        assert!(
+            matches!(kept.as_slice(), [AutoDeletion::Kept(_)]),
+            "{kept:?}"
+        );
+        assert!(worktree.exists());
+
+        fixture.git(&worktree, &["branch", "keep-loose"]);
+        assert!(matches!(
+            fixture.sweep().as_slice(),
+            [AutoDeletion::Deleted { worktrees, .. }] if worktrees.len() == 1
+        ));
+        assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn a_worktree_the_user_made_in_the_generated_folder_is_left_alone() {
+        let fixture = Fixture::new();
+        let generated = fixture.generated_worktree();
+        let repository = fixture.root.join("Workspaces/Project");
+        let own = generated
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("own/Project");
+        fixture.git(
+            &repository,
+            &["worktree", "add", "-q", "-b", "mine", own.to_str().unwrap()],
+        );
+        let folder = fixture.store.tree().unwrap()["folders"][0]["id"].clone();
+        let other = fixture
+            .store
+            .new_chat(&json!({"folder": folder, "title": "Mine"}))
+            .unwrap();
+        fixture
+            .store
+            .set_option(&json!({
+                "chat": other["id"],
+                "option": "workspace",
+                "value": own.to_str().unwrap(),
+            }))
+            .unwrap();
+        fixture.enable(1);
+        fixture.age(3);
+        let deleted = fixture.sweep();
+        assert_eq!(deleted.len(), 2, "{deleted:?}");
+        assert!(!generated.exists());
+        assert!(own.exists(), "xd did not make this one");
+    }
+
+    #[test]
+    fn a_worktree_from_before_xd_kept_records_still_goes_with_its_session() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        fixture.sql("DELETE FROM generated_worktrees");
+        fixture.enable(1);
+        fixture.age(3);
+        assert!(matches!(
+            fixture.sweep().as_slice(),
+            [AutoDeletion::Deleted { worktrees, .. }] if worktrees.len() == 1
+        ));
+        assert!(!worktree.exists());
+    }
+
+    #[test]
+    fn a_worktree_git_refuses_at_the_last_moment_stays_on_disk() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        fixture.enable(1);
+        fixture.age(3);
+        let settings = fixture.store.auto_delete_settings().unwrap();
+        let candidate = fixture
+            .store
+            .deletion_candidates(now_seconds(), &settings)
+            .unwrap()
+            .remove(0);
+        let plan = fixture
+            .store
+            .plan_auto_delete(&candidate, &settings)
+            .unwrap()
+            .ok()
+            .unwrap();
+        std::fs::write(worktree.join("late.txt"), "written after the check").unwrap();
+        let finished = fixture
+            .store
+            .finish_auto_delete(&candidate, &settings, plan)
+            .unwrap();
+        assert!(
+            matches!(
+                &finished,
+                AutoDeletion::Deleted { worktrees, left, .. }
+                    if worktrees.is_empty() && left.len() == 1
+            ),
+            "{finished:?}"
+        );
+        assert!(worktree.join("late.txt").exists());
+        assert_eq!(fixture.chats(), 0);
     }
 }
