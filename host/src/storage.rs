@@ -2085,6 +2085,11 @@ impl StateStore {
              ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
             params![chat_id, backend, session_id],
         )?;
+        // The agent reports its session once it has the turn's request.
+        database.execute(
+            "UPDATE chats SET unrecorded_request = NULL WHERE id = ?",
+            [chat_id],
+        )?;
         Ok(())
     }
 
@@ -2162,7 +2167,7 @@ impl StateStore {
         };
         transaction.execute(
             "UPDATE chats SET queued = ?, host_working = ?, partial_reply = '', \
-             partial_reply_label = NULL, updated_at = ? WHERE id = ?",
+             partial_reply_label = NULL, unrecorded_request = NULL, updated_at = ? WHERE id = ?",
             params![encoded, next_text.is_some(), now_seconds(), chat_id],
         )?;
         let last_message_id = transaction.query_row(
@@ -2186,31 +2191,8 @@ impl StateStore {
     /// it what happened. Resuming cannot: the request is not in its session.
     /// Stopping several in a row keeps them all, newest last.
     pub fn mark_cut_off_turn(&self, chat_id: &str, request: &str) -> Result<(), StorageError> {
-        let request = match request.char_indices().nth(MAX_CUT_OFF_REQUEST_CHARS) {
-            Some((end, _)) => format!("{}...", &request[..end]),
-            None => request.to_owned(),
-        };
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let earlier = database
-            .query_row(
-                "SELECT cut_off_turn FROM chats WHERE id = ?",
-                [chat_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten();
-        let requests = match earlier {
-            Some(earlier) => format!("{earlier}\n\n{request}"),
-            None => request,
-        };
-        let kept = match requests.char_indices().rev().nth(MAX_CUT_OFF_CHARS) {
-            Some((start, _)) => format!("...{}", &requests[start..]),
-            None => requests,
-        };
-        database.execute(
-            "UPDATE chats SET cut_off_turn = ? WHERE id = ?",
-            params![kept, chat_id],
-        )?;
+        append_cut_off_request(&database, chat_id, request)?;
         Ok(())
     }
 
@@ -2380,7 +2362,7 @@ impl StateStore {
         )?;
         transaction.execute(
             "UPDATE chats SET host_working = 0, partial_reply = '', \
-             partial_reply_label = NULL, updated_at = ? WHERE id = ?",
+             partial_reply_label = NULL, unrecorded_request = NULL, updated_at = ? WHERE id = ?",
             params![now_seconds(), chat_id],
         )?;
         transaction.commit()?;
@@ -4463,7 +4445,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
            session_mode TEXT NOT NULL DEFAULT 'chat', \
            host_working INTEGER NOT NULL DEFAULT 0, draft TEXT NOT NULL DEFAULT '', \
            draft_attachments TEXT NOT NULL DEFAULT '[]', draft_revision INTEGER NOT NULL DEFAULT 0, \
-           partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, cut_off_turn TEXT, \
+           partial_reply TEXT NOT NULL DEFAULT '', partial_reply_label TEXT, cut_off_turn TEXT, unrecorded_request TEXT, \
            sort_order INTEGER NOT NULL DEFAULT 0, \
            last_user_message_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, \
            updated_at INTEGER NOT NULL, FOREIGN KEY(folder_id) REFERENCES workspace_folders(id)); \
@@ -4814,6 +4796,9 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     }
     if !columns.contains("cut_off_turn") {
         database.execute("ALTER TABLE chats ADD COLUMN cut_off_turn TEXT", [])?;
+    }
+    if !columns.contains("unrecorded_request") {
+        database.execute("ALTER TABLE chats ADD COLUMN unrecorded_request TEXT", [])?;
     }
     Ok(())
 }
@@ -6852,6 +6837,38 @@ fn write_browsable_file(
         })
 }
 
+fn append_cut_off_request(
+    connection: &Connection,
+    chat_id: &str,
+    request: &str,
+) -> Result<(), rusqlite::Error> {
+    let request = match request.char_indices().nth(MAX_CUT_OFF_REQUEST_CHARS) {
+        Some((end, _)) => format!("{}...", &request[..end]),
+        None => request.to_owned(),
+    };
+    let earlier = connection
+        .query_row(
+            "SELECT cut_off_turn FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let requests = match earlier {
+        Some(earlier) => format!("{earlier}\n\n{request}"),
+        None => request,
+    };
+    let kept = match requests.char_indices().rev().nth(MAX_CUT_OFF_CHARS) {
+        Some((start, _)) => format!("...{}", &requests[start..]),
+        None => requests,
+    };
+    connection.execute(
+        "UPDATE chats SET cut_off_turn = ? WHERE id = ?",
+        params![kept, chat_id],
+    )?;
+    Ok(())
+}
+
 /// Puts cut-off requests in front of the next message, where they stay in the
 /// agent's session from then on, and says whether it did. They stay stored until
 /// the turn ends in a way that shows the agent got them. A slash command only
@@ -6991,6 +7008,12 @@ fn prepare_turn(
     )?;
     clear_session_settlement(transaction, chat_id)?;
     let (prompt, carries_cut_off_note) = with_cut_off_note(transaction, chat_id, text)?;
+    // Claude alone can lose a turn this way. Stored now, so that a host which
+    // dies before Claude reports the session still knows what was lost.
+    transaction.execute(
+        "UPDATE chats SET unrecorded_request = ? WHERE id = ?",
+        params![(chat.1 == "claude").then_some(text), chat_id],
+    )?;
     Ok(TurnSpec {
         chat_id: chat_id.into(),
         backend: chat.1.clone(),
@@ -7069,9 +7092,20 @@ fn end_interrupted_turn(
         "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'error', ?, ?)",
         params![chat_id, INTERRUPTED_TURN, now_seconds()],
     )?;
+    let unrecorded = transaction
+        .query_row(
+            "SELECT unrecorded_request FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(request) = unrecorded {
+        append_cut_off_request(transaction, chat_id, &request)?;
+    }
     transaction.execute(
         "UPDATE chats SET host_working = 0, turn_resumable = 1, partial_reply = '', \
-         partial_reply_label = NULL, updated_at = ? WHERE id = ?",
+         partial_reply_label = NULL, unrecorded_request = NULL, updated_at = ? WHERE id = ?",
         params![now_seconds(), chat_id],
     )?;
     Ok(())
@@ -11511,5 +11545,59 @@ mod tests {
             next.prompt.matches('é').count() <= MAX_CUT_OFF_CHARS,
             "older requests give way, on a character boundary"
         );
+    }
+
+    #[test]
+    fn a_host_that_dies_before_claude_reports_the_session_keeps_the_request() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        fixture.insert_chat(&database, "chat-2", "folder");
+        database
+            .execute(
+                "UPDATE chats SET backend = 'claude', model = 'claude-opus-5', effort = 'high' \
+                 WHERE id = 'chat-1'",
+                [],
+            )
+            .unwrap();
+        drop(database);
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let start = |chat: &str, text: &str| match store
+            .prepare_send(&json!({"chat": chat, "text": text}))
+            .unwrap()
+        {
+            SendDisposition::Start { turn, .. } => turn,
+            SendDisposition::Queued { .. } => panic!("{text} was queued"),
+        };
+
+        start("chat-1", "/code-review 1193");
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["chat-1"]);
+        let next = start("chat-1", "are you ok?");
+        assert!(next.prompt.contains("/code-review 1193"), "{}", next.prompt);
+
+        // The note is still undelivered when this turn dies too, and now this
+        // request is unrecorded as well.
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["chat-1"]);
+        let next = start("chat-1", "still there?");
+        assert!(next.prompt.contains("/code-review 1193"), "{}", next.prompt);
+        assert!(next.prompt.contains("are you ok?"), "{}", next.prompt);
+        store.clear_cut_off_turn("chat-1").unwrap();
+
+        // Once Claude reports the session it has the request, so nothing is lost.
+        store.set_session("chat-1", "claude", "session").unwrap();
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["chat-1"]);
+        let next = start("chat-1", "recorded");
+        assert_eq!(next.prompt, "recorded");
+
+        // A finished turn leaves nothing behind for a later recovery.
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        assert!(store.recover_interrupted_turns().unwrap().is_empty());
+
+        // Only Claude loses a turn this way.
+        start("chat-2", "codex turn");
+        assert_eq!(store.recover_interrupted_turns().unwrap(), ["chat-2"]);
+        assert_eq!(start("chat-2", "next").prompt, "next");
     }
 }
