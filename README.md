@@ -20,6 +20,7 @@ A local-first desktop workspace for user-installed Codex, Claude Code, and JCode
 - One persistent daemon owns local and remote sessions; work continues when clients disconnect.
 - Direct remote connections over pinned TLS, with expiring pairing codes and revocable devices.
 - Projects, Git worktrees, branches, and pull requests in one workspace.
+- Settle finished sessions with one click: they move to a Settled shelf and come back when you message them. Idle and merged sessions settle by themselves, even while the app is closed.
 - An integrated browser with separate tabs for each chat and shared site data.
 - Uses your installed CLI tools, authentication, and configuration.
 - Dark and light themes, chosen in Settings.
@@ -30,6 +31,23 @@ pane starts with a browser page; use its `+` menu to add another page, Files, or
 Changes. The bottom control opens a shell terminal below the chat. Both panes
 can stay open together, and hiding them keeps their content. Hover over either
 layout icon to see its label.
+
+Hover over a session in the sidebar and press its check mark to settle it, or use
+its right-click menu. The session moves to the **Settled** shelf below your
+projects without being deleted, and **Undo** appears beside the sidebar's Settings
+button for five seconds. If it was the open session, the next one down opens. A
+session can't be settled while it is running, has a queued message, or is waiting
+on an approval or question.
+
+Press a settled session's undo arrow to bring it back. Sending it a message does
+the same, and hands it back to the automatic rules. By default the host settles
+sessions after three days without activity and when their pull request merges or
+closes; change this in **Settings → General → Auto-settle**. Those rules belong to
+the host, so they keep running while the app is closed, and each host keeps its
+own. To keep one session out of them, choose **Disable auto-settle** from its
+right-click menu. Settling only changes where a session is listed: its agent and
+terminals keep running. The Android app still lists settled sessions with the
+active ones.
 
 ## Install
 

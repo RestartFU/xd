@@ -37,7 +37,10 @@ use xd_desktop::{
     activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
-    model::{AppModel, Attachment, ChatSummary, Message, MessagePageDirection, ToolView, Worktree},
+    model::{
+        AppModel, Attachment, AutoSettleRules, ChatSummary, Message, MessagePageDirection,
+        ToolView, Worktree,
+    },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
     session_host::{SessionHost, SshCommand, TMUX_CONFIGURATION},
@@ -89,8 +92,8 @@ use input::{
     Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight, terminal_paste_bytes,
 };
 use minimal::{
-    AgentCli, MinimalRoute, SessionCard, project_cards, project_sessions, reconcile_route,
-    resumable_session,
+    AgentCli, MinimalRoute, SessionCard, SettledCard, age_label, next_active_session,
+    project_cards, project_sessions, reconcile_route, resumable_session, settled_cards,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -127,6 +130,7 @@ const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
 const CHECK_ICON: &str = "icons/check.svg";
+const UNDO_ICON: &str = "icons/undo.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
 const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
@@ -148,6 +152,11 @@ const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
 const CATALOG_WIDTH: f32 = 256.0;
 /// Every session row shares one height and baseline.
 const CARD_HEIGHT: f32 = 30.0;
+/// How long the sidebar offers to undo a settle.
+const SETTLE_UNDO_LIFETIME: Duration = Duration::from_secs(5);
+/// Rows of the Settled shelf shown at first, and how many Show more adds.
+const SETTLED_INITIAL_ROWS: usize = 10;
+const SETTLED_MORE_ROWS: usize = 25;
 const BROWSER_DIVIDER_WIDTH: f32 = 1.0;
 /// How often working dots, pulses, and running timers advance. They move a
 /// few times a second instead of on every frame: a repeating animation asks
@@ -339,6 +348,38 @@ fn turn_status(waiting: bool, colors: ThemeColors) -> (&'static str, u32) {
     } else {
         ("Working", colors.working)
     }
+}
+
+/// The action a session row offers while the pointer is over it. It sits on top
+/// of the row's trailing label, so nothing on the row moves when it appears.
+fn session_row_action(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    path: &'static str,
+    selected: bool,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .invisible()
+        .group_hover("catalog-session", |style| style.visible())
+        .absolute()
+        .right_0()
+        .top_0()
+        .bottom_0()
+        .w(px(30.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.0))
+        .bg(rgb(if selected {
+            colors.selected_surface
+        } else {
+            colors.surface_high
+        }))
+        .cursor_pointer()
+        .tooltip(move |_, cx| cx.new(|_| PaneTooltip { label, colors }).into())
+        .child(icon(path, 13.0, colors.muted))
 }
 
 /// The marks a collapsed project shows for its sessions that need a look.
@@ -1401,6 +1442,12 @@ struct SidebarEdit {
     submitting: bool,
 }
 
+/// Sessions just settled by hand, which the sidebar still offers to bring back.
+struct SettleUndo {
+    sessions: Vec<String>,
+    generation: u64,
+}
+
 #[derive(Clone)]
 struct SidebarContextMenu {
     target: SidebarTarget,
@@ -1661,6 +1708,13 @@ struct XdDesktop {
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
     sidebar_context_menu: Option<SidebarContextMenu>,
+    settle_undo: Option<SettleUndo>,
+    settle_undo_generation: u64,
+    /// Where to go once a settle of the open session succeeds, by session:
+    /// the next row chosen before the list changed, or the project page.
+    settle_advances: HashMap<String, Option<(String, String, AgentCli)>>,
+    settled_visible: usize,
+    auto_settle: Option<AutoSettleRules>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -2202,6 +2256,11 @@ impl XdDesktop {
             queue_edit: None,
             sidebar_edit: None,
             sidebar_context_menu: None,
+            settle_undo: None,
+            settle_undo_generation: 0,
+            settle_advances: HashMap::new(),
+            settled_visible: SETTLED_INITIAL_ROWS,
+            auto_settle: None,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -2502,6 +2561,11 @@ impl XdDesktop {
                 | RequestKind::RenameSession { .. }
                 | RequestKind::MoveSession { .. }
                 | RequestKind::DeleteSession { .. }
+                | RequestKind::SettleSession { .. }
+                | RequestKind::UnsettleSession { .. }
+                | RequestKind::SetSessionAutoSettle { .. }
+                | RequestKind::AutoSettleSettings
+                | RequestKind::SetAutoSettleSettings
                 | RequestKind::RenameFolder { .. }
                 | RequestKind::MoveFolder { .. }
                 | RequestKind::TrashFolder { .. }
@@ -2529,6 +2593,7 @@ impl XdDesktop {
                 | "shortcuts-changed"
                 | "workflow-status"
                 | "owner-icon"
+                | "auto-settle-settings"
                 | "terminal-opened"
                 | "terminal-activity"
                 | "terminal-output"
@@ -2572,6 +2637,12 @@ impl XdDesktop {
         self.active_endpoint = endpoint;
         self.remember_active_connection();
         self.restore_collapsed_folders();
+        self.settle_undo = None;
+        self.settle_advances.clear();
+        self.auto_settle = None;
+        if self.minimal_theme_open {
+            self.request_auto_settle_settings();
+        }
         self.model.selected_chat = None;
         self.invalidate_live_render();
         self.transcript_snapshot = TranscriptSnapshot::default();
@@ -3305,6 +3376,7 @@ impl XdDesktop {
                     | RequestKind::Shortcuts { .. }
                     | RequestKind::SetShortcuts { .. }
                     | RequestKind::SetChatTitleSettings
+                    | RequestKind::AutoSettleSettings
             ) {
                 self.model.connection_error = Some(
                     value
@@ -3315,6 +3387,10 @@ impl XdDesktop {
                 );
             }
             match &kind {
+                RequestKind::SettleSession { session_id } => {
+                    self.settle_advances.remove(session_id);
+                }
+                RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::Send { .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -3859,6 +3935,7 @@ impl XdDesktop {
                         .any(|folder| &folder.id == folder_id)
                 });
                 self.persist_collapsed_folders();
+                self.prune_settle_undo();
                 if self
                     .workspace_context_folder
                     .as_ref()
@@ -4517,7 +4594,16 @@ impl XdDesktop {
             }
             RequestKind::RenameSession { .. }
             | RequestKind::MoveSession { .. }
-            | RequestKind::DeleteSession { .. } => self.request_tree(),
+            | RequestKind::DeleteSession { .. }
+            | RequestKind::UnsettleSession { .. }
+            | RequestKind::SetSessionAutoSettle { .. } => self.request_tree(),
+            RequestKind::SettleSession { session_id } => {
+                self.session_settled(&session_id, cx);
+                self.request_tree();
+            }
+            RequestKind::AutoSettleSettings | RequestKind::SetAutoSettleSettings => {
+                self.auto_settle = AutoSettleRules::from_value(&value);
+            }
             RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder { .. } => self.request_tree(),
             RequestKind::TrashFolder { .. } => self.request_tree(),
@@ -5176,6 +5262,9 @@ impl XdDesktop {
                     self.invalidate_workflow_rows(&marker);
                     self.schedule_workflow_refresh(marker, cx);
                 }
+            }
+            "auto-settle-settings" => {
+                self.auto_settle = AutoSettleRules::from_value(&body);
             }
             "owner-icon" => {
                 if let Some(owner) = body.get("owner").and_then(Value::as_str).map(str::to_owned) {
@@ -8087,7 +8176,7 @@ impl XdDesktop {
     ) {
         let viewport = window.bounds().size;
         let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 196.0).max(8.0));
-        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 112.0).max(8.0));
+        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 196.0).max(8.0));
         self.sidebar_context_menu = Some(SidebarContextMenu {
             target,
             title,
@@ -9449,6 +9538,7 @@ impl XdDesktop {
         self.minimal_theme_open = !self.minimal_theme_open;
         if self.minimal_theme_open {
             self.request_chat_title_settings();
+            self.request_auto_settle_settings();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.restore_minimal_popup_focus(window);
@@ -10216,6 +10306,212 @@ impl XdDesktop {
         )
     }
 
+    /// `(settled, auto-settle disabled)`, when the host can settle at all.
+    fn session_settlement(&self, session_id: &str) -> Option<(bool, bool)> {
+        if !self.model.settlement_supported {
+            return None;
+        }
+        let session = self
+            .model
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)?;
+        let chat = self
+            .model
+            .chats
+            .iter()
+            .find(|chat| session.chats.contains(&chat.id))?;
+        Some((chat.settled_at.is_some(), chat.auto_settle_disabled))
+    }
+
+    fn settle_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        // Chosen now: the tree the reply brings no longer lists this session,
+        // so "the row below it" cannot be worked out afterwards.
+        let advance = self.plan_settle_advance(session_id);
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.settle_session(session_id));
+        match result {
+            Ok(()) => {
+                if let Some(advance) = advance {
+                    self.settle_advances.insert(session_id.to_owned(), advance);
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    /// `None` when this session is not what the window shows, so settling it
+    /// leaves the window alone.
+    #[allow(clippy::option_option)]
+    fn plan_settle_advance(&self, session_id: &str) -> Option<Option<(String, String, AgentCli)>> {
+        if !matches!(self.minimal_route, MinimalRoute::Cli { .. }) {
+            return None;
+        }
+        let selected = self.model.selected_chat.as_ref()?;
+        let session = self
+            .model
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)?;
+        if !session.chats.contains(selected) {
+            return None;
+        }
+        let active = self
+            .catalog_session_chats()
+            .into_iter()
+            .filter(|chat| chat.settled_at.is_none())
+            .collect::<Vec<_>>();
+        Some(next_active_session(
+            &self.model.folders,
+            &active,
+            &session.chats,
+        ))
+    }
+
+    fn session_settled(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.settle_undo_generation += 1;
+        let generation = self.settle_undo_generation;
+        let undo = self.settle_undo.get_or_insert_with(|| SettleUndo {
+            sessions: Vec::new(),
+            generation,
+        });
+        undo.generation = generation;
+        if !undo.sessions.iter().any(|session| session == session_id) {
+            undo.sessions.push(session_id.to_owned());
+        }
+        cx.spawn(async move |this, cx| {
+            Timer::after(SETTLE_UNDO_LIFETIME).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .settle_undo
+                    .as_ref()
+                    .is_some_and(|undo| undo.generation == generation)
+                {
+                    this.settle_undo = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
+        let Some(advance) = self.settle_advances.remove(session_id) else {
+            return;
+        };
+        let still_open = self
+            .model
+            .selected_chat
+            .as_ref()
+            .zip(
+                self.model
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id),
+            )
+            .is_some_and(|(selected, session)| session.chats.contains(selected));
+        if !still_open {
+            return;
+        }
+        match advance {
+            Some((project_id, chat_id, agent)) => {
+                self.select_minimal_session(project_id, chat_id, agent, cx);
+            }
+            None => self.show_minimal_projects(cx),
+        }
+    }
+
+    fn unsettle_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.forget_settle_undo(session_id);
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.unsettle_session(session_id));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn undo_settle(&mut self, cx: &mut Context<Self>) {
+        let Some(undo) = self.settle_undo.take() else {
+            return;
+        };
+        for session_id in undo.sessions {
+            self.unsettle_session(&session_id, cx);
+        }
+    }
+
+    fn forget_settle_undo(&mut self, session_id: &str) {
+        if let Some(undo) = &mut self.settle_undo {
+            undo.sessions.retain(|session| session != session_id);
+            if undo.sessions.is_empty() {
+                self.settle_undo = None;
+            }
+        }
+    }
+
+    /// An undo has nothing left to do once its session is back or gone.
+    fn prune_settle_undo(&mut self) {
+        let Some(undo) = &self.settle_undo else {
+            return;
+        };
+        let stale = undo
+            .sessions
+            .iter()
+            .filter(|session| {
+                self.session_settlement(session)
+                    .is_none_or(|(settled, _)| !settled)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for session in stale {
+            self.forget_settle_undo(&session);
+        }
+    }
+
+    fn set_session_auto_settle(&mut self, session_id: &str, enabled: bool, cx: &mut Context<Self>) {
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.set_session_auto_settle(session_id, enabled));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn toggle_settled_shelf(&mut self, cx: &mut Context<Self>) {
+        self.settings.settled_shelf_expanded = !self.settings.settled_shelf_expanded;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn request_auto_settle_settings(&mut self) {
+        let result = self
+            .active_host()
+            .map(|host| host.auto_settle_settings())
+            .unwrap_or(Ok(()));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn change_auto_settle(&mut self, rules: AutoSettleRules, cx: &mut Context<Self>) {
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.set_auto_settle_settings(rules));
+        match result {
+            Ok(()) => self.auto_settle = Some(rules),
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn toggle_drawer(&mut self, project_id: String, current: bool, cx: &mut Context<Self>) {
         if current {
             self.toggle_folder_collapsed(project_id, cx);
@@ -10258,9 +10554,16 @@ impl XdDesktop {
         let drop_project_id = project_id.to_owned();
         let drop_chat_id = session.id.clone();
         let agent = session.agent;
+        let settle_session = self
+            .model
+            .settlement_supported
+            .then(|| self.model.session_for_chat(&session.id))
+            .flatten()
+            .map(|group| group.id.clone());
 
         div()
             .id(("minimal-session-card", instance))
+            .group("catalog-session")
             .relative()
             .w_full()
             .h(px(CARD_HEIGHT))
@@ -10375,7 +10678,271 @@ impl XdDesktop {
                 },
             )
             .children(signal_tab(signal, colors))
+            .when_some(settle_session, |row, session_id| {
+                row.child(
+                    session_row_action(
+                        ("minimal-session-settle", instance),
+                        "Settle session",
+                        CHECK_ICON,
+                        emphasized,
+                        colors,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.settle_session(&session_id, cx);
+                    })),
+                )
+            })
             .into_any_element()
+    }
+
+    /// A row on the Settled shelf. It reads like a session card but says which
+    /// project it came from and when it settled, since the shelf mixes them.
+    fn render_settled_card(
+        &mut self,
+        colors: ThemeColors,
+        card: SettledCard,
+        instance: usize,
+        selected: bool,
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let open_project_id = card.project_id.clone();
+        let chat_id = card.id.clone();
+        let agent = card.agent;
+        let session_id = self
+            .model
+            .session_for_chat(&card.id)
+            .map(|group| group.id.clone());
+        let unsettle_session = session_id.clone();
+        let context_title = card.title.clone();
+        div()
+            .id(("minimal-settled-card", instance))
+            .group("catalog-session")
+            .relative()
+            .w_full()
+            .h(px(CARD_HEIGHT))
+            .flex_none()
+            .pl(px(10.0))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(7.0))
+            .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+            .cursor_pointer()
+            .hover(|style| {
+                if selected {
+                    style
+                } else {
+                    style.bg(rgb(colors.surface_high))
+                }
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_minimal_session(
+                    open_project_id.clone(),
+                    chat_id.clone(),
+                    agent,
+                    window,
+                    cx,
+                );
+            }))
+            .when_some(session_id, |row, session_id| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_sidebar_context_menu(
+                            SidebarTarget::Session(session_id.clone()),
+                            context_title.clone(),
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+            })
+            .child(
+                svg()
+                    .path(agent_icon(agent))
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(rgb(if selected { colors.text } else { colors.faint })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(rgb(if selected { colors.text } else { colors.muted }))
+                    .when(selected, |title| title.font_weight(FontWeight::MEDIUM))
+                    .child(card.title),
+            )
+            .child(
+                div()
+                    .max_w(px(96.0))
+                    .flex_none()
+                    .truncate()
+                    .font_family(MONO)
+                    .text_size(px(10.5))
+                    .text_color(rgb(colors.faint))
+                    .child(format!(
+                        "{} \u{b7} {}",
+                        card.project,
+                        age_label(card.settled_at, now)
+                    )),
+            )
+            .when_some(unsettle_session, |row, session_id| {
+                row.child(
+                    session_row_action(
+                        ("minimal-session-unsettle", instance),
+                        "Un-settle session",
+                        UNDO_ICON,
+                        selected,
+                        colors,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.unsettle_session(&session_id, cx);
+                    })),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The Settled shelf below the projects: collapsed by default, with only
+    /// the open session still listed then, so the sidebar always shows where
+    /// you are. Finding opens it, so a match cannot hide inside it.
+    fn render_settled_shelf(
+        &mut self,
+        colors: ThemeColors,
+        cards: Vec<SettledCard>,
+        active_chat_id: Option<&str>,
+        finding: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if cards.is_empty() {
+            return None;
+        }
+        let count = cards.len();
+        let open = finding || self.settings.settled_shelf_expanded;
+        let hidden = if finding {
+            0
+        } else {
+            count.saturating_sub(self.settled_visible)
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let is_selected = |card: &SettledCard, model: &AppModel| {
+            active_chat_id.is_some_and(|active| {
+                card.id == active
+                    || model
+                        .session_for_chat(&card.id)
+                        .is_some_and(|group| group.chats.iter().any(|chat| chat == active))
+            })
+        };
+        let mut rows = Vec::new();
+        for (index, card) in cards.into_iter().enumerate() {
+            let selected = is_selected(&card, &self.model);
+            let listed = if open {
+                finding || index < self.settled_visible || selected
+            } else {
+                selected
+            };
+            if listed {
+                rows.push(self.render_settled_card(colors, card, index, selected, now, cx));
+            }
+        }
+        Some(
+            div()
+                .id("minimal-settled-shelf")
+                .w_full()
+                .mt(px(6.0))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("minimal-settled-header")
+                        .h(px(30.0))
+                        .w_full()
+                        .pl(px(4.0))
+                        .pr(px(2.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded(px(7.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_settled_shelf(cx)))
+                        .child(
+                            div()
+                                .size(px(20.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon(
+                                    if open {
+                                        CHEVRON_DOWN_ICON
+                                    } else {
+                                        CHEVRON_RIGHT_ICON
+                                    },
+                                    12.0,
+                                    colors.faint,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(colors.muted))
+                                .child("Settled"),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(rgb(colors.faint))
+                                .child(count.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(px(1.0))
+                        .mb(px(6.0))
+                        .pl(px(12.0))
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.0))
+                        .children(rows)
+                        .when(open && hidden > 0, |list| {
+                            list.child(
+                                div()
+                                    .id("minimal-settled-more")
+                                    .h(px(CARD_HEIGHT))
+                                    .pl(px(10.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(7.0))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(colors.faint))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settled_visible += SETTLED_MORE_ROWS;
+                                        cx.notify();
+                                    }))
+                                    .child("Show more"),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The catalog: one drawer per project, each holding its session cards.
@@ -10387,7 +10954,16 @@ impl XdDesktop {
         active_chat_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let projects = project_cards(&self.model.folders, &self.catalog_session_chats());
+        let (settled_chats, active_chats): (Vec<_>, Vec<_>) = self
+            .catalog_session_chats()
+            .into_iter()
+            .partition(|chat| chat.settled_at.is_some());
+        let mut settled = settled_cards(&self.model.folders, &settled_chats);
+        let settled_projects = settled
+            .iter()
+            .map(|card| card.project_id.clone())
+            .collect::<HashSet<_>>();
+        let projects = project_cards(&self.model.folders, &active_chats);
         let current_project = self.selected_minimal_project_id();
         let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
@@ -10397,7 +10973,7 @@ impl XdDesktop {
         for (project_index, project) in projects.iter().enumerate() {
             let current = current_project.as_deref() == Some(project.id.as_str())
                 && !matches!(self.minimal_route, MinimalRoute::Terminal);
-            let mut sessions = project_sessions(&project.id, &self.catalog_session_chats());
+            let mut sessions = project_sessions(&project.id, &active_chats);
             let finding = !query.is_empty();
             if finding && !project.name.to_lowercase().contains(&query) {
                 sessions.retain(|session| {
@@ -10565,7 +11141,11 @@ impl XdDesktop {
                                             .py_2()
                                             .text_size(px(12.0))
                                             .text_color(rgb(colors.muted))
-                                            .child("No sessions yet."),
+                                            .child(if settled_projects.contains(&project.id) {
+                                                "No active sessions."
+                                            } else {
+                                                "No sessions yet."
+                                            }),
                                     )
                                 }),
                         )
@@ -10573,6 +11153,23 @@ impl XdDesktop {
             );
         }
 
+        let finding = !query.is_empty();
+        if finding {
+            settled.retain(|card| {
+                card.title.to_lowercase().contains(&query)
+                    || card.branch.to_lowercase().contains(&query)
+                    || card.project.to_lowercase().contains(&query)
+            });
+            matches += settled.len();
+        }
+        let settled_shelf = self.render_settled_shelf(colors, settled, active_chat_id, finding, cx);
+        let settle_notice = self
+            .settle_undo
+            .as_ref()
+            .map(|undo| match undo.sessions.len() {
+                1 => "Settled".to_owned(),
+                count => format!("Settled {count}"),
+            });
         let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
         let settings_open = self.minimal_theme_open;
         let offers_update = self
@@ -10657,6 +11254,7 @@ impl XdDesktop {
                     .flex_col()
                     .gap(px(1.0))
                     .children(drawers)
+                    .children(settled_shelf)
                     .when(projects.is_empty(), |list| {
                         list.child(
                             div()
@@ -10692,7 +11290,35 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .overflow_hidden()
+                            .text_size(px(11.5))
+                            .text_color(rgb(colors.faint))
+                            .when_some(settle_notice, |notice, summary| {
+                                notice.child(div().flex_none().child(summary)).child(
+                                    div()
+                                        .id("minimal-settle-undo")
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .text_color(rgb(colors.muted))
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(rgb(colors.text)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.undo_settle(cx);
+                                        }))
+                                        .child(icon(UNDO_ICON, 12.0, colors.muted))
+                                        .child("Undo"),
+                                )
+                            }),
+                    )
                     .when(offers_update, |footer| {
                         footer.child(
                             ui_button("minimal-update", ButtonKind::Secondary, colors)
@@ -13832,6 +14458,12 @@ impl XdDesktop {
             let delete_target = menu.target.clone();
             let project = matches!(menu.target, SidebarTarget::Folder(_));
             let chat = matches!(menu.target, SidebarTarget::Chat(_));
+            let settlement = match &menu.target {
+                SidebarTarget::Session(session_id) => self
+                    .session_settlement(session_id)
+                    .map(|state| (session_id.clone(), state)),
+                _ => None,
+            };
             div()
                 .occlude()
                 .absolute()
@@ -13890,6 +14522,65 @@ impl XdDesktop {
                                 } else {
                                     "Rename session"
                                 }),
+                        )
+                        .when_some(
+                            settlement,
+                            |card, (session_id, (settled, auto_disabled))| {
+                                let settle_session = session_id.clone();
+                                let row = |id: &'static str, label: &'static str| {
+                                    div()
+                                        .id(id)
+                                        .w_full()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .text_sm()
+                                        .text_color(rgb(colors.text))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                        .child(label)
+                                };
+                                card.child(
+                                    row(
+                                        "minimal-settle-session",
+                                        if settled {
+                                            "Un-settle session"
+                                        } else {
+                                            "Settle session"
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.close_sidebar_context_menu(window, cx);
+                                            if settled {
+                                                this.unsettle_session(&settle_session, cx);
+                                            } else {
+                                                this.settle_session(&settle_session, cx);
+                                            }
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    row(
+                                        "minimal-session-auto-settle",
+                                        if auto_disabled {
+                                            "Enable auto-settle"
+                                        } else {
+                                            "Disable auto-settle"
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.close_sidebar_context_menu(window, cx);
+                                            this.set_session_auto_settle(
+                                                &session_id,
+                                                auto_disabled,
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                                )
+                            },
                         )
                         .child(
                             div()
@@ -16012,6 +16703,9 @@ impl AssetSource for EmbeddedIcons {
             DOWNLOAD_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/download.svg").as_slice(),
             )),
+            UNDO_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/undo.svg").as_slice(),
+            )),
             SEARCH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/search.svg").as_slice(),
             )),
@@ -18065,6 +18759,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
             for chat_id in ["kept", "removed"] {
                 desktop.minimal_route = MinimalRoute::Cli {
@@ -18143,6 +18839,8 @@ mod tests {
                     branch: None,
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
                 ChatSummary {
                     id: "chat-b".into(),
@@ -18152,6 +18850,8 @@ mod tests {
                     branch: None,
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
             ];
             desktop.model.selected_chat = Some("chat-a".into());
@@ -18311,6 +19011,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
 
             desktop.open_minimal_session(
@@ -18497,6 +19199,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
 
             // Tree loading primes an empty, non-loading panel before the chat
@@ -19029,6 +19733,8 @@ mod tests {
             branch: None,
             working: false,
             terminal_working: false,
+            settled_at: None,
+            auto_settle_disabled: false,
         };
         let mut chats = vec![
             chat("a", "workspace"),
@@ -19103,6 +19809,8 @@ mod tests {
                     branch: Some("main".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
                 ChatSummary {
                     id: "background".into(),
@@ -19112,6 +19820,8 @@ mod tests {
                     branch: Some("session/background".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
             ];
 
@@ -19149,6 +19859,8 @@ mod tests {
                     branch: Some("main".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
                 ChatSummary {
                     id: "background".into(),
@@ -19158,6 +19870,8 @@ mod tests {
                     branch: Some("session/background".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
             ];
 
@@ -19246,6 +19960,8 @@ mod tests {
                 branch: Some("main".into()),
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
 
             desktop.handle_event(
@@ -19296,6 +20012,8 @@ mod tests {
                 branch: Some("main".into()),
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
             let generation = desktop.remote_generation;
             for (terminal, working, aggregate) in [("claude", true, true), ("jcode", false, true)] {
@@ -19354,6 +20072,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }],
             ..Default::default()
         };

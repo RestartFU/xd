@@ -376,6 +376,35 @@ impl TurnRuntime {
             .map_err(|e| e.to_string())
     }
 
+    #[cfg(test)]
+    pub(crate) fn hold_interaction_for_test(&self, chat_id: &str) {
+        let mut all = self.inner.interactions.lock().unwrap();
+        let pending = all
+            .entry(chat_id.to_owned())
+            .or_insert_with(|| PendingInteractions {
+                revision: 0,
+                requests: HashMap::new(),
+            });
+        pending.requests.insert(
+            "test-request".into(),
+            PendingInteraction {
+                id: json!("test-request"),
+                method: "item/commandExecution/requestApproval".into(),
+                params: json!({}),
+                turn_id: 0,
+                claude: false,
+            },
+        );
+    }
+
+    /// Whether the agent is waiting on an approval or question from the user.
+    pub(crate) fn has_interactions(&self, chat_id: &str) -> bool {
+        self.inner.interactions.lock().is_ok_and(|all| {
+            all.get(chat_id)
+                .is_some_and(|pending| !pending.requests.is_empty())
+        })
+    }
+
     pub(crate) fn interactions(&self, chat_id: &str) -> Value {
         self.inner.interactions.lock().ok().and_then(|all| all.get(chat_id).map(|pending| json!({"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":pending.revision,"interactions":pending.requests.iter().map(|(id, request)| json!({"request_id":id,"method":request.method,"params":request.params})).collect::<Vec<_>>()}))).unwrap_or_else(|| json!({"interaction_epoch":self.inner.interaction_epoch,"interaction_revision":0,"interactions":[]}))
     }
@@ -730,6 +759,9 @@ impl TurnRuntime {
     fn start_background(&self, chat_id: &str, router: &mut Router, first: String) -> bool {
         if !matches!(self.inner.store.begin_background_turn(chat_id), Ok(true)) {
             return false;
+        }
+        if matches!(self.inner.store.clear_chat_settlement(chat_id), Ok(true)) {
+            self.inner.events.publish(json!({"event": "tree"}));
         }
         let (sink, lines) = mpsc::channel();
         let _ = sink.send(Feed::Line(first));

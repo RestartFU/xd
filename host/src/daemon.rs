@@ -144,6 +144,7 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
         .recover_interrupted_turns()
         .map_err(io::Error::other)?;
     let engine = Arc::new(Engine::with_store_and_data(store, Some(paths.data.clone())));
+    engine.start_auto_settle();
     let listener = UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;

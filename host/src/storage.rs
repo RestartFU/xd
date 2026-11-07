@@ -17,6 +17,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::private_fs::{create_private_file, secure_directory};
+use crate::settlement::{
+    self, AutoSettleSettings, PullRequestSnapshot, PullRequestState, SettlementCandidate,
+};
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
@@ -581,6 +584,22 @@ impl StateStore {
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
         drop(statement);
 
+        let mut statement = database.prepare(
+            "SELECT id, CASE WHEN settled_override = 'settled' \
+               THEN COALESCE(settled_at, updated_at) END, \
+             auto_settle_disabled_at IS NOT NULL FROM workspace_sessions \
+             WHERE settled_override = 'settled' OR auto_settle_disabled_at IS NOT NULL",
+        )?;
+        let settlement = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, Option<i64>>(1)?, row.get::<_, bool>(2)?),
+                ))
+            })?
+            .collect::<Result<HashMap<_, _>, rusqlite::Error>>()?;
+        drop(statement);
+
         let mut branches = HashMap::<String, Option<String>>::new();
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
@@ -641,6 +660,14 @@ impl StateStore {
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
             }
+            let (settled_at, auto_settle_disabled) =
+                settlement.get(&session).copied().unwrap_or((None, false));
+            if let Some(settled_at) = settled_at {
+                chat["settled_at"] = json!(settled_at);
+            }
+            if auto_settle_disabled {
+                chat["auto_settle_disabled"] = json!(true);
+            }
             if let Some(group) = sessions.iter_mut().find(|group| group["id"] == session) {
                 group["chats"]
                     .as_array_mut()
@@ -660,11 +687,23 @@ impl StateStore {
                 if let Some(branch) = chat.get("branch") {
                     group["branch"] = branch.clone();
                 }
+                if let Some(settled_at) = settled_at {
+                    group["settled_at"] = json!(settled_at);
+                }
+                if auto_settle_disabled {
+                    group["auto_settle_disabled"] = json!(true);
+                }
                 sessions.push(group);
             }
             chats.push(chat);
         }
-        Ok(json!({"ok": true, "folders": folders, "chats": chats, "sessions": sessions}))
+        Ok(json!({
+            "ok": true,
+            "folders": folders,
+            "chats": chats,
+            "sessions": sessions,
+            "settlement": true,
+        }))
     }
 
     pub fn folder_lineage_for_chat(&self, chat_id: &str) -> Result<Vec<String>, StorageError> {
@@ -1523,6 +1562,7 @@ impl StateStore {
                 [chat_id],
                 |row| row.get::<_, String>(0),
             )?;
+            clear_session_settlement(&transaction, chat_id)?;
             let mut queue = queue_from_column(Some(&stored));
             queue.push(message.prompt.clone());
             transaction.execute(
@@ -3493,6 +3533,301 @@ impl StateStore {
         Ok(json!({"ok": true}))
     }
 
+    /// Moves a finished session out of the active list. Work the session still
+    /// owes the user has to be dealt with first, so nothing is hidden mid-way.
+    pub fn settle_session(&self, request: &Value) -> Result<Value, StorageError> {
+        let session = required_string(request, "session", "settle-session needs a session id.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        let mut statement = database
+            .prepare("SELECT host_working, queued FROM chats WHERE workspace_session_id = ?")?;
+        let members = statement
+            .query_map([session], |row| {
+                Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if members.iter().any(|(working, _)| *working) {
+            return Err(StorageError::InvalidRequest(
+                "This session is still running. Stop it before settling.".into(),
+            ));
+        }
+        if members
+            .iter()
+            .any(|(_, queued)| !queue_from_column(queued.as_deref()).is_empty())
+        {
+            return Err(StorageError::InvalidRequest(
+                "This session has a queued message. Send it or remove it from the queue before settling."
+                    .into(),
+            ));
+        }
+        let now = now_seconds();
+        database.execute(
+            "UPDATE workspace_sessions SET settled_at = CASE \
+               WHEN settled_override = 'settled' AND settled_at IS NOT NULL THEN settled_at \
+               ELSE ? END, settled_override = 'settled', updated_at = ? WHERE id = ?",
+            params![now, now, session],
+        )?;
+        Ok(json!({"ok": true}))
+    }
+
+    /// Returns a session to the active list and keeps the automatic rules away
+    /// from it until new activity hands it back to them.
+    pub fn unsettle_session(&self, request: &Value) -> Result<Value, StorageError> {
+        let session = required_string(request, "session", "unsettle-session needs a session id.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        database.execute(
+            "UPDATE workspace_sessions SET settled_override = 'active', settled_at = NULL, \
+             updated_at = ? WHERE id = ?",
+            params![now_seconds(), session],
+        )?;
+        Ok(json!({"ok": true}))
+    }
+
+    /// Keeps one session out of automatic settling, however long it sits idle.
+    /// Settling it by hand still works.
+    pub fn set_session_auto_settle(&self, request: &Value) -> Result<Value, StorageError> {
+        let message = "set-session-auto-settle needs a session id and enabled.";
+        let session = required_string(request, "session", message)?;
+        let enabled = request
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| StorageError::InvalidRequest(message.into()))?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        let now = now_seconds();
+        database.execute(
+            "UPDATE workspace_sessions SET auto_settle_disabled_at = CASE WHEN ? THEN NULL \
+               ELSE COALESCE(auto_settle_disabled_at, ?) END, updated_at = ? WHERE id = ?",
+            params![enabled, now, now, session],
+        )?;
+        Ok(json!({"ok": true}))
+    }
+
+    /// Whether a message in this chat would change how its session is listed.
+    pub fn chat_has_settlement_override(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_sessions WHERE settled_override IS NOT NULL \
+             AND id = (SELECT workspace_session_id FROM chats WHERE id = ?))",
+            [chat_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// New activity un-settles a session and hands it back to the rules.
+    pub fn clear_chat_settlement(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        clear_session_settlement(&database, chat_id)
+    }
+
+    pub fn auto_settle_settings(&self) -> Result<AutoSettleSettings, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        read_auto_settle_settings(&database)
+    }
+
+    /// Changes the rules. Members left out of the request keep their value;
+    /// `after_days: null` turns inactivity settling off.
+    pub fn set_auto_settle_settings(
+        &self,
+        request: &Value,
+    ) -> Result<AutoSettleSettings, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut settings = read_auto_settle_settings(&database)?;
+        if let Some(days) = request.get("after_days") {
+            settings.after_days = match days {
+                Value::Null => None,
+                days => Some(
+                    days.as_i64()
+                        .filter(|days| {
+                            (settlement::MIN_AFTER_DAYS..=settlement::MAX_AFTER_DAYS).contains(days)
+                        })
+                        .ok_or_else(|| {
+                            StorageError::InvalidRequest(format!(
+                                "Auto-settle needs a whole number of days from {} to {}.",
+                                settlement::MIN_AFTER_DAYS,
+                                settlement::MAX_AFTER_DAYS
+                            ))
+                        })?,
+                ),
+            };
+        }
+        for (key, member) in [
+            ("on_merge", &mut settings.on_merge),
+            ("keep_pull_requests", &mut settings.keep_pull_requests),
+        ] {
+            if let Some(value) = request.get(key) {
+                *member = value.as_bool().ok_or_else(|| {
+                    StorageError::InvalidRequest(format!("{key} must be true or false."))
+                })?;
+            }
+        }
+        database.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![AUTO_SETTLE_META_KEY, settings.encoded()],
+        )?;
+        Ok(settings)
+    }
+
+    /// Sessions a sweep may settle: nothing runs or waits in the queue, and
+    /// neither the user nor the session's own opt-out has claimed them.
+    pub(crate) fn settlement_candidates(&self) -> Result<Vec<SettlementCandidate>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let mut statement = database.prepare(
+            "SELECT s.id, s.created_at, c.id, c.folder_id, c.workdir, c.original_workdir, \
+               c.host_working, c.queued, c.created_at, c.last_user_message_at, \
+               (SELECT created_at FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) \
+             FROM workspace_sessions s \
+             JOIN chats c ON c.workspace_session_id = s.id \
+             JOIN workspace_folders f ON f.id = c.folder_id AND f.root_path = ? \
+             WHERE s.settled_override IS NULL AND s.auto_settle_disabled_at IS NULL \
+             ORDER BY s.id, c.sort_order, c.id",
+        )?;
+        let rows = statement
+            .query_map([root.as_ref()], |row| {
+                Ok(SettlementRow {
+                    session: row.get(0)?,
+                    session_created_at: row.get(1)?,
+                    chat: row.get(2)?,
+                    folder: row.get(3)?,
+                    workdir: row.get(4)?,
+                    original_workdir: row.get(5)?,
+                    working: row.get(6)?,
+                    queued: row.get(7)?,
+                    chat_created_at: row.get(8)?,
+                    last_user_message_at: row.get(9)?,
+                    last_message_at: row.get(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut candidates = Vec::<SettlementCandidate>::new();
+        let mut busy = HashSet::new();
+        for row in rows {
+            if row.working || !queue_from_column(row.queued.as_deref()).is_empty() {
+                busy.insert(row.session.clone());
+            }
+            let user_at = row.last_user_message_at / 1_000_000;
+            let anchor = row.session_created_at.max(row.chat_created_at).max(user_at);
+            let activity = anchor.max(row.last_message_at.unwrap_or(0));
+            if let Some(candidate) = candidates
+                .last_mut()
+                .filter(|candidate| candidate.session == row.session)
+            {
+                candidate.chats.push(row.chat);
+                candidate.activity_at = candidate.activity_at.max(activity);
+                candidate.user_anchor_at = candidate.user_anchor_at.max(anchor);
+                continue;
+            }
+            let workdir = resolve_workdir(
+                &database,
+                &self.workspace_root,
+                &row.folder,
+                row.workdir.as_deref(),
+                row.original_workdir.as_deref(),
+            )
+            .ok()
+            .map(PathBuf::from)
+            .filter(|workdir| workdir.is_dir());
+            candidates.push(SettlementCandidate {
+                session: row.session,
+                chats: vec![row.chat],
+                activity_at: activity,
+                user_anchor_at: anchor,
+                workdir,
+            });
+        }
+        candidates.retain(|candidate| !busy.contains(&candidate.session));
+        Ok(candidates)
+    }
+
+    /// Settles a session a sweep picked, unless anything about it changed since
+    /// the sweep looked: what the user does always outranks the rules. One
+    /// statement both checks and updates, so no message can land between them.
+    pub(crate) fn auto_settle_session(
+        &self,
+        candidate: &SettlementCandidate,
+        settled_at: i64,
+    ) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE workspace_sessions SET settled_override = 'settled', settled_at = ?1, \
+             updated_at = ?2 WHERE id = ?3 AND settled_override IS NULL \
+             AND auto_settle_disabled_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.workspace_session_id = ?3 AND ( \
+               c.host_working != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
+               OR c.last_user_message_at / 1000000 > ?4 OR c.created_at > ?4 \
+               OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.created_at > ?5)))",
+            params![
+                settled_at,
+                now_seconds(),
+                candidate.session,
+                candidate.user_anchor_at,
+                candidate.activity_at
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// The pull request of the branch checked out in `workdir`, if it has one.
+    /// An error means GitHub could not say, which is not the same as no.
+    pub(crate) fn pull_request_snapshot(
+        &self,
+        workdir: &Path,
+    ) -> Result<Option<PullRequestSnapshot>, StorageError> {
+        let Ok(worktrees) = list_git_worktrees(workdir) else {
+            return Ok(None);
+        };
+        let current = normalize_existing_path(workdir);
+        if !worktrees.iter().any(|worktree| {
+            normalize_existing_path(&worktree.path) == current && worktree.branch.is_some()
+        }) {
+            return Ok(None);
+        }
+        let (status, stdout, stderr) = run_gh(
+            workdir,
+            &[
+                "pr",
+                "view",
+                "--json",
+                "state,mergedAt,closedAt",
+                "--jq",
+                "{state, finished_at: ((.mergedAt // .closedAt) | if . then fromdate else null end)}",
+            ],
+        )?;
+        if !status.success() {
+            let complaint = String::from_utf8_lossy(&stderr);
+            if complaint.contains("no pull requests found") {
+                return Ok(None);
+            }
+            return Err(command_failure(
+                &stdout,
+                &stderr,
+                "The GitHub CLI could not read this pull request.",
+            ));
+        }
+        let parsed: Value = serde_json::from_slice(&stdout).map_err(|error| {
+            StorageError::InvalidRequest(format!("Unreadable pull request: {error}"))
+        })?;
+        let state = match parsed.get("state").and_then(Value::as_str) {
+            Some("OPEN") => PullRequestState::Open,
+            Some("CLOSED") => PullRequestState::Closed,
+            Some("MERGED") => PullRequestState::Merged,
+            other => {
+                return Err(StorageError::InvalidRequest(format!(
+                    "Unknown pull request state: {other:?}"
+                )));
+            }
+        };
+        Ok(Some(PullRequestSnapshot {
+            state,
+            finished_at: parsed.get("finished_at").and_then(Value::as_i64),
+        }))
+    }
+
     pub fn rename_chat(&self, request: &Value) -> Result<Value, StorageError> {
         let chat_id = required_string(request, "chat", "A chat needs an id and a title.")?;
         let title = required_string(request, "title", "A chat needs an id and a title.")?;
@@ -4030,6 +4365,23 @@ fn ensure_workspace_sessions(database: &Connection) -> Result<(), StorageError> 
         "CREATE TABLE IF NOT EXISTS workspace_sessions (id TEXT PRIMARY KEY, title TEXT, \
          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
     )?;
+    let session_columns = transaction
+        .prepare("PRAGMA table_info(workspace_sessions)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    // `settled_override` is 'settled', 'active' after the user un-settles, or
+    // NULL once new activity hands the session back to the automatic rules.
+    for (column, kind) in [
+        ("settled_override", "TEXT"),
+        ("settled_at", "INTEGER"),
+        ("auto_settle_disabled_at", "INTEGER"),
+    ] {
+        if !session_columns.contains(column) {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE workspace_sessions ADD COLUMN {column} {kind};"
+            ))?;
+        }
+    }
     let columns = transaction
         .prepare("PRAGMA table_info(chats)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -4503,6 +4855,47 @@ fn reorder_chat(
     }
     transaction.commit()?;
     Ok(())
+}
+
+const AUTO_SETTLE_META_KEY: &str = "auto_settle";
+
+struct SettlementRow {
+    session: String,
+    session_created_at: i64,
+    chat: String,
+    folder: String,
+    workdir: Option<String>,
+    original_workdir: Option<String>,
+    working: bool,
+    queued: Option<String>,
+    chat_created_at: i64,
+    last_user_message_at: i64,
+    last_message_at: Option<i64>,
+}
+
+fn read_auto_settle_settings(database: &Connection) -> Result<AutoSettleSettings, StorageError> {
+    let stored = database
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?",
+            [AUTO_SETTLE_META_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored
+        .map(|stored| AutoSettleSettings::decode(&stored))
+        .unwrap_or_default())
+}
+
+/// Un-settles the session this chat belongs to. Returns whether anything
+/// changed, including an override the session no longer needs.
+fn clear_session_settlement(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
+    let changed = database.execute(
+        "UPDATE workspace_sessions SET settled_override = NULL, settled_at = NULL, updated_at = ? \
+         WHERE settled_override IS NOT NULL \
+         AND id = (SELECT workspace_session_id FROM chats WHERE id = ?)",
+        params![now_seconds(), chat_id],
+    )?;
+    Ok(changed > 0)
 }
 
 fn queue_from_column(stored: Option<&str>) -> Vec<String> {
@@ -6359,6 +6752,7 @@ fn prepare_turn(
         "UPDATE chats SET updated_at = ?, last_user_message_at = ? WHERE id = ?",
         params![now, now_microseconds(), chat_id],
     )?;
+    clear_session_settlement(transaction, chat_id)?;
     Ok(TurnSpec {
         chat_id: chat_id.into(),
         backend: chat.1.clone(),

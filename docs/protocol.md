@@ -190,6 +190,15 @@ continue reading `folders` and `chats`; clients reading an older host without
 `sessions` may display one session per chat and retain its chat id as the
 terminal owner.
 
+A host that can settle sessions adds a top-level `"settlement":true`; hide
+settling on one that does not. A settled session has `settled_at`, in seconds,
+on its `sessions` entry and on each of its chats, and a session kept out of
+automatic settling has `auto_settle_disabled:true` there. Both are absent
+otherwise. Settling changes where a session is listed and nothing else: its
+chats still answer `chat` and `messages` and can still be opened. List settled
+sessions apart from active ones, most recently settled first. Clients that
+ignore these members keep listing settled sessions with the active ones.
+
 ### `chat`
 
 ```json
@@ -391,6 +400,49 @@ worktrees. `delete-chat` with an actual chat id removes only that conversation;
 its reply includes `session` and `session_deleted`. Shared terminals close only
 when the final member is deleted. `rename-chat` changes only the conversation
 title. Hiding a client tab does not require either deletion operation.
+
+### Settling sessions
+
+```json
+{"op":"settle-session","session":"session-9"}
+{"op":"unsettle-session","session":"session-9"}
+{"op":"set-session-auto-settle","session":"session-9","enabled":false}
+```
+
+Each operation requires a session id, replies with `ok`, and broadcasts `tree`.
+
+`settle-session` moves finished work out of the active list without deleting it.
+It is refused while any member chat is running a turn, has a queued message, or
+is waiting on an approval or question. Settling a settled session keeps its
+original `settled_at`. No agent process stops and no terminal closes.
+
+`unsettle-session` returns a session to the active list and keeps the automatic
+rules away from it until new activity. `set-session-auto-settle` with
+`enabled:false` keeps a session out of the rules for good; settling by hand
+still works. A message sent to any member chat, or a turn the agent starts on its
+own, un-settles the session and hands it back to the rules.
+
+```json
+{"op":"auto-settle-settings"}
+{"ok":true,"after_days":3,"on_merge":true,"keep_pull_requests":false}
+{"op":"set-auto-settle-settings","after_days":null,"keep_pull_requests":true}
+```
+
+The daemon applies these rules about once a minute, whether or not a client is
+connected:
+
+- `after_days`, from 1 to 90, settles a session after that many days without
+  activity. Here `null` is meaningful: it turns this rule off.
+- `on_merge` settles a session when the pull request of its checked-out branch
+  merges. A closed pull request settles it regardless.
+- `keep_pull_requests` stops inactivity from settling a session that has a pull
+  request. Merging and closing still do.
+
+A pull request that finished before the user's latest message in the session
+does not count. The rules skip sessions the operations above would refuse and
+sessions the user un-settled. `settled_at` is then when the session went quiet,
+not when the sweep ran. `set-auto-settle-settings` changes only the members it
+names, broadcasts `auto-settle-settings`, and applies at once.
 
 ### Shared session terminals
 
@@ -697,6 +749,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | Event | Members | Meaning |
 | --- | --- | --- |
 | `tree` | — | Workspace tree changed; refetch `tree`. |
+| `auto-settle-settings` | `after_days`, `on_merge`, `keep_pull_requests` | The host's automatic settling rules changed. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |

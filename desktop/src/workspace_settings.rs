@@ -244,6 +244,131 @@ impl XdDesktop {
         section
     }
 
+    /// The connected host's settling rules, or nothing while it has not said
+    /// what they are: an older host does not have any.
+    fn auto_settle_rows(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(rules) = self.auto_settle else {
+            return Vec::new();
+        };
+        let mut rows = vec![
+            settings_heading("Auto-settle", colors).into_any_element(),
+            settings_row(
+                "workspace-settings-settle-merged",
+                "Auto-settle merged sessions",
+                "Settle a session when its pull request merges. Closed pull requests still settle automatically.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_auto_settle(
+                    AutoSettleRules {
+                        on_merge: !rules.on_merge,
+                        ..rules
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, rules.on_merge))
+            .into_any_element(),
+            settings_row(
+                "workspace-settings-settle-inactive",
+                "Auto-settle inactive sessions",
+                "Sessions with no activity for this long settle automatically.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_auto_settle(
+                    AutoSettleRules {
+                        after_days: match rules.after_days {
+                            Some(_) => None,
+                            None => Some(AutoSettleRules::DEFAULT_AFTER_DAYS),
+                        },
+                        ..rules
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, rules.after_days.is_some()))
+            .into_any_element(),
+        ];
+        let Some(days) = rules.after_days else {
+            return rows;
+        };
+        let step = |id: &'static str, label: &'static str, to: i64, cx: &mut Context<Self>| {
+            let allowed =
+                (AutoSettleRules::MIN_AFTER_DAYS..=AutoSettleRules::MAX_AFTER_DAYS).contains(&to);
+            ui_button(id, ButtonKind::Secondary, colors)
+                .w(px(30.0))
+                .px_0()
+                .when(!allowed, |button| button.opacity(0.4))
+                .when(allowed, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_auto_settle(
+                            AutoSettleRules {
+                                after_days: Some(to),
+                                ..rules
+                            },
+                            cx,
+                        );
+                    }))
+                })
+                .child(label)
+        };
+        rows.push(
+            settings_row(
+                "workspace-settings-settle-days",
+                "Days before auto-settle",
+                "Any new activity un-settles a session automatically.",
+                colors,
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(step("settle-days-fewer", "\u{2212}", days - 1, cx))
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .flex()
+                            .justify_center()
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .child(days.to_string()),
+                    )
+                    .child(step("settle-days-more", "+", days + 1, cx)),
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            settings_row(
+                "workspace-settings-settle-keep-pr",
+                "Keep sessions with a PR",
+                "Inactivity does not settle sessions with a pull request. Merge and close still do.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_auto_settle(
+                    AutoSettleRules {
+                        keep_pull_requests: !rules.keep_pull_requests,
+                        ..rules
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, rules.keep_pull_requests))
+            .into_any_element(),
+        );
+        rows
+    }
+
     pub(super) fn render_workspace_settings(
         &mut self,
         colors: ThemeColors,
@@ -500,6 +625,7 @@ impl XdDesktop {
                         }))
                         .child(settings_switch(colors, self.settings.auto_resume_chats)),
                     )
+                    .children(self.auto_settle_rows(colors, cx))
                     .child(settings_heading("Updates", colors));
                 let status = self
                     .self_update_panel

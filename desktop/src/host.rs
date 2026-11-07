@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::channel;
 #[cfg(all(test, unix))]
 use crate::local_socket::UnixStream;
-use crate::model::Attachment;
+use crate::model::{Attachment, AutoSettleRules};
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
@@ -224,6 +224,17 @@ pub enum RequestKind {
     DeleteSession {
         session_id: String,
     },
+    SettleSession {
+        session_id: String,
+    },
+    UnsettleSession {
+        session_id: String,
+    },
+    SetSessionAutoSettle {
+        session_id: String,
+    },
+    AutoSettleSettings,
+    SetAutoSettleSettings,
     RenameChat {
         chat_id: String,
         title: String,
@@ -924,6 +935,52 @@ impl HostHandle {
                 session_id: session_id.to_owned(),
             },
             json!({"op": "delete-session", "session": session_id}),
+        )
+    }
+
+    pub fn settle_session(&self, session_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SettleSession {
+                session_id: session_id.to_owned(),
+            },
+            json!({"op": "settle-session", "session": session_id}),
+        )
+    }
+
+    pub fn unsettle_session(&self, session_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::UnsettleSession {
+                session_id: session_id.to_owned(),
+            },
+            json!({"op": "unsettle-session", "session": session_id}),
+        )
+    }
+
+    pub fn set_session_auto_settle(&self, session_id: &str, enabled: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::SetSessionAutoSettle {
+                session_id: session_id.to_owned(),
+            },
+            json!({"op": "set-session-auto-settle", "session": session_id, "enabled": enabled}),
+        )
+    }
+
+    pub fn auto_settle_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::AutoSettleSettings,
+            json!({"op": "auto-settle-settings"}),
+        )
+    }
+
+    pub fn set_auto_settle_settings(&self, rules: AutoSettleRules) -> Result<(), String> {
+        self.send(
+            RequestKind::SetAutoSettleSettings,
+            json!({
+                "op": "set-auto-settle-settings",
+                "after_days": rules.after_days,
+                "on_merge": rules.on_merge,
+                "keep_pull_requests": rules.keep_pull_requests,
+            }),
         )
     }
 
@@ -2518,6 +2575,11 @@ mod tests {
                 json!({"op":"move-session","session":"workspace-session","before":"anchor-session"}),
                 json!({"op":"move-session","session":"workspace-session","after":"anchor-session"}),
                 json!({"op":"delete-session","session":"workspace-session"}),
+                json!({"op":"settle-session","session":"workspace-session"}),
+                json!({"op":"unsettle-session","session":"workspace-session"}),
+                json!({"op":"set-session-auto-settle","session":"workspace-session","enabled":false}),
+                json!({"op":"auto-settle-settings"}),
+                json!({"op":"set-auto-settle-settings","after_days":null,"on_merge":false,"keep_pull_requests":true}),
             ] {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
@@ -2574,6 +2636,46 @@ mod tests {
             kind:RequestKind::DeleteSession {session_id}, ..
         } if session_id == "workspace-session")
         );
+        host.settle_session("workspace-session").unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::SettleSession {session_id}, ..
+        } if session_id == "workspace-session")
+        );
+        host.unsettle_session("workspace-session").unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::UnsettleSession {session_id}, ..
+        } if session_id == "workspace-session")
+        );
+        host.set_session_auto_settle("workspace-session", false)
+            .unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::SetSessionAutoSettle {session_id}, ..
+        } if session_id == "workspace-session")
+        );
+        host.auto_settle_settings().unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::AutoSettleSettings,
+                ..
+            }
+        ));
+        host.set_auto_settle_settings(AutoSettleRules {
+            after_days: None,
+            on_merge: false,
+            keep_pull_requests: true,
+        })
+        .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::SetAutoSettleSettings,
+                ..
+            }
+        ));
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
     }

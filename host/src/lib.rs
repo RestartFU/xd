@@ -33,6 +33,7 @@ mod repository_monitor;
 mod runtime;
 mod secrets;
 mod self_update;
+mod settlement;
 mod storage;
 mod subagent;
 
@@ -62,6 +63,7 @@ use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
 pub use self_update::installed_host_executable;
+use settlement::AutoSettler;
 pub use storage::ChatToResume;
 use storage::SendDisposition;
 pub use storage::{StateStore, StorageError};
@@ -95,6 +97,7 @@ pub struct Engine {
     pairing: PairingService,
     peer_listener: Mutex<Option<PeerListener>>,
     _shared_event_monitor: Option<SharedEventMonitor>,
+    auto_settler: Mutex<Option<AutoSettler>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,6 +160,7 @@ impl Engine {
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
             _shared_event_monitor: None,
+            auto_settler: Mutex::new(None),
             events,
             runtime: None,
         }
@@ -207,6 +211,7 @@ impl Engine {
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
             _shared_event_monitor: shared_event_monitor,
+            auto_settler: Mutex::new(None),
             events,
         };
         engine.auth.refresh_all();
@@ -408,6 +413,19 @@ impl Engine {
             Some("rename-session") => self.tree_mutation(|store| store.rename_session(&request)),
             Some("move-session") => self.tree_mutation(|store| store.move_session(&request)),
             Some("delete-session") => self.delete_session(&request),
+            Some("settle-session") => self.settle_session(&request),
+            Some("unsettle-session") => {
+                self.tree_mutation(|store| store.unsettle_session(&request))
+            }
+            Some("set-session-auto-settle") => {
+                self.tree_mutation(|store| store.set_session_auto_settle(&request))
+            }
+            Some("auto-settle-settings") => self.read(|store| {
+                store
+                    .auto_settle_settings()
+                    .map(|settings| settings.reply())
+            }),
+            Some("set-auto-settle-settings") => self.set_auto_settle_settings(&request),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
             Some("delete-chat") => self.delete_chat(&request),
@@ -1095,6 +1113,71 @@ impl Engine {
         }
     }
 
+    /// Settling waits for what the session still owes the user. The locks keep
+    /// a message from starting a turn between this check and the update.
+    fn settle_session(&self, request: &Value) -> Value {
+        let session =
+            match required_string(request, "session", "settle-session needs a session id.") {
+                Ok(session) => session,
+                Err(error) => return error_reply(error),
+            };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let _resources = match self.session_resources.lock() {
+            Ok(resources) => resources,
+            Err(_) => return error_reply("Session resources are unavailable."),
+        };
+        let chats = match store.session_chats(session) {
+            Ok(chats) => chats,
+            Err(error) => return error_reply(error),
+        };
+        if chats.iter().any(|chat| {
+            self.runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.has_interactions(chat))
+        }) {
+            return error_reply(
+                "This session is waiting on an approval or question. Answer it before settling.",
+            );
+        }
+        self.tree_mutation(|store| store.settle_session(request))
+    }
+
+    fn set_auto_settle_settings(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.set_auto_settle_settings(request) {
+            Ok(settings) => {
+                let reply = settings.reply();
+                let mut event = reply.clone();
+                event["event"] = json!("auto-settle-settings");
+                self.events.publish(event);
+                if let Ok(settler) = self.auto_settler.lock()
+                    && let Some(settler) = settler.as_ref()
+                {
+                    settler.wake();
+                }
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    /// Starts settling sessions on the host's own schedule. Only the daemon
+    /// does this, since it is what outlives the clients.
+    pub fn start_auto_settle(&self) {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return;
+        };
+        if let Ok(mut settler) = self.auto_settler.lock() {
+            settler.get_or_insert_with(|| {
+                AutoSettler::start(store.clone(), runtime.clone(), self.events.clone())
+            });
+        }
+    }
+
     fn terminal_open(&self, request: &Value) -> Value {
         let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
             Ok(chat_id) => chat_id,
@@ -1274,10 +1357,14 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
+        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false);
         let prepared = match continues {
             Some(last_message) => store.prepare_continuation(&request, last_message),
             None => store.prepare_send(&request),
         };
+        if resumes && prepared.is_ok() {
+            self.events.publish(json!({"event": "tree"}));
+        }
         match prepared {
             Ok(SendDisposition::Queued { reply, event }) => {
                 self.events.publish(event);
@@ -1923,6 +2010,84 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    #[cfg(unix)]
+    fn settling_over_the_protocol_updates_every_client_and_respects_a_pending_question() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("xd-engine-settle-{}-{id}", std::process::id()));
+        let workspaces = root.join("Workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        let store = StateStore::open(&root.join("chats.db"), &workspaces).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder, "title": "Task"}));
+        let session = chat["session"].clone();
+        let (sender, events) = sync_channel::<Value>(64);
+        let (connection, _peer) = UnixStream::pair().unwrap();
+        let _subscriber = engine.events.subscribe(sender, connection).unwrap();
+        let saw_tree = |events: &std::sync::mpsc::Receiver<Value>| {
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "tree")
+        };
+
+        engine
+            .runtime
+            .as_ref()
+            .unwrap()
+            .hold_interaction_for_test(chat["id"].as_str().unwrap());
+        let held = engine.dispatch(json!({"op": "settle-session", "session": session}));
+        assert_eq!(held["ok"], false);
+        assert!(
+            held["error"]
+                .as_str()
+                .unwrap()
+                .contains("approval or question")
+        );
+        assert!(!saw_tree(&events));
+        assert!(engine.dispatch(json!({"op": "tree"}))["chats"][0]["settled_at"].is_null());
+
+        engine
+            .runtime
+            .as_ref()
+            .unwrap()
+            .discard_chat(chat["id"].as_str().unwrap());
+        assert_eq!(
+            engine.dispatch(json!({"op": "settle-session", "session": session}))["ok"],
+            true
+        );
+        assert!(saw_tree(&events));
+        assert!(engine.dispatch(json!({"op": "tree"}))["chats"][0]["settled_at"].is_i64());
+
+        assert_eq!(
+            engine.dispatch(json!({"op": "unsettle-session", "session": session}))["ok"],
+            true
+        );
+        assert!(saw_tree(&events));
+        assert!(engine.dispatch(json!({"op": "tree"}))["chats"][0]["settled_at"].is_null());
+
+        assert_eq!(
+            engine.dispatch(json!({"op": "settle-session", "session": "missing"}))["ok"],
+            false
+        );
+
+        let rules = engine.dispatch(json!({"op": "auto-settle-settings"}));
+        assert_eq!(rules["after_days"], 3);
+        assert_eq!(rules["on_merge"], true);
+        assert_eq!(rules["keep_pull_requests"], false);
+        let changed =
+            engine.dispatch(json!({"op": "set-auto-settle-settings", "after_days": null}));
+        assert!(changed["after_days"].is_null());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| event["event"] == "auto-settle-settings"
+                    && event["after_days"].is_null())
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op": "set-auto-settle-settings", "after_days": 91}))["ok"],
+            false
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn outgoing_json_frames_are_written_as_complete_lines() {

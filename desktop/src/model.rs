@@ -89,6 +89,37 @@ pub struct ChatSummary {
     pub working: bool,
     #[serde(default)]
     pub terminal_working: bool,
+    /// When this chat's session settled; absent while it is in the active list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at: Option<i64>,
+    /// The session is kept out of automatic settling.
+    #[serde(default)]
+    pub auto_settle_disabled: bool,
+}
+
+/// How the connected host settles sessions by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoSettleRules {
+    pub after_days: Option<i64>,
+    pub on_merge: bool,
+    pub keep_pull_requests: bool,
+}
+
+impl AutoSettleRules {
+    pub const DEFAULT_AFTER_DAYS: i64 = 3;
+    pub const MIN_AFTER_DAYS: i64 = 1;
+    pub const MAX_AFTER_DAYS: i64 = 90;
+
+    pub fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            after_days: match value.get("after_days")? {
+                Value::Null => None,
+                days => Some(days.as_i64()?),
+            },
+            on_merge: value.get("on_merge")?.as_bool()?,
+            keep_pull_requests: value.get("keep_pull_requests")?.as_bool()?,
+        })
+    }
 }
 
 /// A persistent workspace shared by independent agent conversations.
@@ -324,6 +355,8 @@ pub struct AppModel {
     pub folders: Vec<Folder>,
     pub chats: Vec<ChatSummary>,
     pub sessions: Vec<SessionSummary>,
+    /// The connected host can settle sessions.
+    pub settlement_supported: bool,
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
@@ -378,6 +411,9 @@ struct TreeSnapshot {
     chats: Vec<ChatSummary>,
     #[serde(default)]
     sessions: Vec<SessionSummary>,
+    /// The host can settle sessions; older hosts leave this out.
+    #[serde(default)]
+    settlement: bool,
     #[serde(default)]
     terminal_activity_epoch: Option<String>,
     #[serde(default)]
@@ -629,6 +665,7 @@ impl AppModel {
         self.folders = snapshot.folders;
         self.chats = snapshot.chats;
         self.sessions = snapshot.sessions;
+        self.settlement_supported = snapshot.settlement;
         self.refresh_session_activity();
         self.connected = true;
         self.unread_chats
@@ -1403,6 +1440,7 @@ impl AppModel {
 
     pub fn demo() -> Self {
         let mut model = Self {
+            settlement_supported: true,
             folders: vec![Folder {
                 id: "workspace-xd".into(),
                 name: "xd".into(),
@@ -1418,6 +1456,8 @@ impl AppModel {
                     branch: Some("main".into()),
                     working: true,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
                 ChatSummary {
                     id: "chat-scroll".into(),
@@ -1427,6 +1467,8 @@ impl AppModel {
                     branch: Some("xd/smooth-transcript-scrolling".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
             ],
             sessions: Vec::new(),
@@ -1521,6 +1563,51 @@ fn string_array(values: &[Value]) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_tree_says_which_sessions_settled_and_whether_the_host_can_settle() {
+        let mut model = AppModel::default();
+        model.apply_tree(&grouped_tree()).unwrap();
+        assert!(!model.settlement_supported, "an older host leaves it out");
+        assert_eq!(model.chats[0].settled_at, None);
+        assert!(!model.chats[0].auto_settle_disabled);
+
+        let mut tree = grouped_tree();
+        tree["settlement"] = json!(true);
+        tree["chats"][0]["settled_at"] = json!(1234);
+        tree["chats"][0]["auto_settle_disabled"] = json!(true);
+        model.apply_tree(&tree).unwrap();
+        assert!(model.settlement_supported);
+        assert_eq!(model.chats[0].settled_at, Some(1234));
+        assert!(model.chats[0].auto_settle_disabled);
+        assert_eq!(model.chats[1].settled_at, None);
+    }
+
+    #[test]
+    fn auto_settle_rules_need_every_member() {
+        assert_eq!(
+            AutoSettleRules::from_value(
+                &json!({"ok":true,"after_days":null,"on_merge":false,"keep_pull_requests":true})
+            ),
+            Some(AutoSettleRules {
+                after_days: None,
+                on_merge: false,
+                keep_pull_requests: true,
+            })
+        );
+        assert_eq!(
+            AutoSettleRules::from_value(
+                &json!({"after_days":7,"on_merge":true,"keep_pull_requests":false})
+            )
+            .and_then(|rules| rules.after_days),
+            Some(7)
+        );
+        assert_eq!(AutoSettleRules::from_value(&json!({"ok":false})), None);
+        assert_eq!(
+            AutoSettleRules::from_value(&json!({"on_merge":true,"keep_pull_requests":false})),
+            None
+        );
+    }
 
     fn grouped_tree() -> Value {
         json!({
@@ -2486,6 +2573,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }],
             ..Default::default()
         };
