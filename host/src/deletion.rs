@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn a_worktree_git_refuses_at_the_last_moment_stays_on_disk() {
+    fn work_left_in_the_worktree_after_planning_keeps_the_session() {
         let fixture = Fixture::new();
         let worktree = fixture.generated_worktree();
         fixture.enable(1);
@@ -561,15 +561,44 @@ mod tests {
             .store
             .finish_auto_delete(&candidate, &settings, plan)
             .unwrap();
+        assert!(matches!(finished, AutoDeletion::Kept(_)), "{finished:?}");
+        assert!(worktree.join("late.txt").exists());
+        assert_eq!(
+            fixture.chats(),
+            1,
+            "checked again before anything is deleted"
+        );
+    }
+
+    #[test]
+    fn a_session_working_inside_the_worktree_keeps_it() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        let nested = worktree.join("packages/app");
+        std::fs::create_dir_all(&nested).unwrap();
+        let folder = fixture.store.tree().unwrap()["folders"][0]["id"].clone();
+        let other = fixture
+            .store
+            .new_chat(&json!({"folder": folder, "title": "Nested"}))
+            .unwrap();
+        fixture.enable(1);
+        fixture.age(3);
+        fixture.sql(&format!(
+            "UPDATE chats SET workdir = '{}', created_at = {now} WHERE id = '{id}'; \
+             UPDATE workspace_sessions SET created_at = {now} WHERE id = '{session}'",
+            nested.display(),
+            now = now_seconds(),
+            id = other["id"].as_str().unwrap(),
+            session = other["session"].as_str().unwrap(),
+        ));
+        let deleted = fixture.sweep();
         assert!(
             matches!(
-                &finished,
-                AutoDeletion::Deleted { worktrees, left, .. }
-                    if worktrees.is_empty() && left.len() == 1
+                deleted.as_slice(),
+                [AutoDeletion::Deleted { worktrees, .. }] if worktrees.is_empty()
             ),
-            "{finished:?}"
+            "{deleted:?}"
         );
-        assert!(worktree.join("late.txt").exists());
-        assert_eq!(fixture.chats(), 0);
+        assert!(nested.exists());
     }
 }

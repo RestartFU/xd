@@ -1246,7 +1246,7 @@ impl Engine {
 
     /// One pass of the deletion rule. A session waits while it has an approval
     /// or question open, and typing in or output from its terminal counts as
-    /// activity. Its terminals close only once its worktrees have passed their
+    /// activity, even after the terminal closes. Its terminals close only once its worktrees have passed their
     /// checks, and refuse input from then on. `reported` holds sessions
     /// already logged as kept, so a worktree with uncommitted work is
     /// mentioned once rather than every sweep. Returns how many sessions it
@@ -1255,6 +1255,11 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return 0;
         };
+        // Kept in the store, even while the rule is off, so terminal use still
+        // counts after the terminal closes or the host restarts.
+        if let Err(error) = store.record_terminal_use(&self.terminals.usage()) {
+            eprintln!("xd: cannot record terminal use: {error}");
+        }
         let chosen = store
             .auto_delete_settings()
             .and_then(|settings| Ok((settings, store.deletion_candidates(now, &settings)?)));
@@ -2405,7 +2410,7 @@ mod tests {
         let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
         let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder}));
         let resource = chat["terminal_chat"].as_str().unwrap().to_owned();
-        let opened = engine
+        engine
             .terminals
             .open(&json!({"chat": resource}), &root.join("Workspaces/Project"))
             .unwrap();
@@ -2428,6 +2433,16 @@ mod tests {
         );
         let owners = HashSet::from([resource.clone()]);
         assert!(!engine.terminals.close_unused(&owners, old));
+        engine.terminals.kill_chat(&resource);
+        assert_eq!(
+            engine.auto_delete_sweep(settlement::now_seconds(), &mut reported),
+            0,
+            "a closed terminal's use is remembered"
+        );
+        let opened = engine
+            .terminals
+            .open(&json!({"chat": resource}), &root.join("Workspaces/Project"))
+            .unwrap();
 
         let later = settlement::now_seconds() + 31 * settlement::DAY_SECONDS;
         assert_eq!(engine.auto_delete_sweep(later, &mut reported), 1);

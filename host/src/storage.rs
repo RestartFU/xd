@@ -3922,9 +3922,58 @@ impl StateStore {
         let Some(days) = settings.after_days else {
             return Ok(Vec::new());
         };
+        let terminal_used = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let mut statement = database.prepare(
+                "SELECT id, terminal_used_at FROM workspace_sessions \
+                 WHERE terminal_used_at IS NOT NULL",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<HashMap<_, _>, _>>()?
+        };
+        let idle_since = now - days * settlement::DAY_SECONDS;
         let mut candidates = self.quiet_sessions(DELETABLE_SESSION)?;
-        candidates.retain(|candidate| candidate.activity_at < now - days * settlement::DAY_SECONDS);
+        candidates.retain(|candidate| {
+            candidate.activity_at < idle_since
+                && terminal_used
+                    .get(&candidate.session)
+                    .is_none_or(|used| *used < idle_since)
+        });
         Ok(candidates)
+    }
+
+    /// Remembers when terminals were last used, by their owner: a chat, or
+    /// `session:` and a session id. Only ever moves later.
+    pub(crate) fn record_terminal_use(&self, uses: &[(String, i64)]) -> Result<(), StorageError> {
+        if uses.is_empty() {
+            return Ok(());
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        for (owner, used) in uses {
+            let session = match owner.strip_prefix("session:") {
+                Some(session) => Some(session.to_owned()),
+                None => transaction
+                    .query_row(
+                        "SELECT workspace_session_id FROM chats WHERE id = ?",
+                        [owner],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?,
+            };
+            if let Some(session) = session {
+                transaction.execute(
+                    "UPDATE workspace_sessions SET terminal_used_at = \
+                     MAX(COALESCE(terminal_used_at, 0), ?) WHERE id = ?",
+                    params![used, session],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Sessions in this workspace that match `filter`, a condition on the
@@ -4119,51 +4168,55 @@ impl StateStore {
     }
 
     /// Deletes the session a plan describes, then removes its worktrees with
-    /// Git, which never forces, keeping their branches. It checks once more
-    /// that nothing happened in the session, in the same transaction that
-    /// deletes it, and drops any worktree another session has taken up since.
+    /// Git, which never forces, keeping their branches.
     ///
-    /// The session goes first, so a worktree Git refuses at the last moment
-    /// stays on disk with everything in it, and no chat is left pointing at a
-    /// folder that is gone.
+    /// All of it happens under the store's lock, so no chat can take up a
+    /// worktree meanwhile. It checks once more that nothing happened in the
+    /// session, drops any worktree something else now works in, and checks
+    /// each remaining worktree again, keeping the session if one has changed.
+    /// The session is deleted before Git runs, so a worktree Git refuses at
+    /// the last moment stays on disk with everything in it, and no chat is
+    /// left pointing at a folder that is gone.
     pub(crate) fn finish_auto_delete(
         &self,
         candidate: &SettlementCandidate,
         decided_under: &AutoDeleteSettings,
         plan: AutoDeletePlan,
     ) -> Result<AutoDeletion, StorageError> {
-        let worktrees = {
-            let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-            if read_auto_delete_settings(&database)? != *decided_under {
-                return Ok(AutoDeletion::Changed);
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if read_auto_delete_settings(&database)? != *decided_under {
+            return Ok(AutoDeletion::Changed);
+        }
+        let transaction = database.transaction()?;
+        if !session_deletable(&transaction, candidate)? {
+            return Ok(AutoDeletion::Changed);
+        }
+        let known = KnownWorktrees::read(&transaction, &candidate.session)?;
+        let mut worktrees = Vec::new();
+        for worktree in plan.worktrees {
+            if known.in_use(&worktree.path) {
+                continue;
             }
-            let transaction = database.transaction()?;
-            if !session_deletable(&transaction, candidate)? {
-                return Ok(AutoDeletion::Changed);
+            if let Err(reason) = removable_worktree(&worktree.path)? {
+                return Ok(AutoDeletion::Kept(reason));
             }
-            let elsewhere = KnownWorktrees::read(&transaction, &candidate.session)?.elsewhere;
-            transaction.execute(
-                "DELETE FROM chats WHERE workspace_session_id = ?",
-                [&candidate.session],
-            )?;
-            transaction.commit()?;
-            plan.worktrees
-                .into_iter()
-                .filter(|worktree| !elsewhere.contains(&worktree.path))
-                .collect::<Vec<_>>()
-        };
+            worktrees.push(worktree);
+        }
+        transaction.execute(
+            "DELETE FROM chats WHERE workspace_session_id = ?",
+            [&candidate.session],
+        )?;
+        transaction.commit()?;
         let mut removed = Vec::new();
         let mut left = Vec::new();
         for worktree in worktrees {
             match remove_generated_worktree(&worktree) {
-                Ok(()) => removed.push(worktree.path.to_string_lossy().into_owned()),
+                Ok(()) => {
+                    let path = worktree.path.to_string_lossy().into_owned();
+                    database.execute("DELETE FROM generated_worktrees WHERE path = ?", [&path])?;
+                    removed.push(path);
+                }
                 Err(reason) => left.push(reason),
-            }
-        }
-        if !removed.is_empty() {
-            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-            for path in &removed {
-                database.execute("DELETE FROM generated_worktrees WHERE path = ?", [path])?;
             }
         }
         Ok(AutoDeletion::Deleted {
@@ -4811,6 +4864,9 @@ fn ensure_workspace_sessions(database: &Connection) -> Result<(), StorageError> 
         ("settled_override", "TEXT"),
         ("settled_at", "INTEGER"),
         ("auto_settle_disabled_at", "INTEGER"),
+        // When the session's terminals were last used, as the deletion sweep
+        // saw it. Automatic deletion counts it as activity.
+        ("terminal_used_at", "INTEGER"),
     ] {
         if !session_columns.contains(column) {
             transaction.execute_batch(&format!(
@@ -5370,7 +5426,7 @@ struct KnownWorktrees {
     containers: Vec<PathBuf>,
     /// Worktrees xd recorded generating.
     generated: HashSet<PathBuf>,
-    /// Folders chats outside the session work in.
+    /// Folders chats outside the session, and project folders, work in.
     elsewhere: HashSet<PathBuf>,
 }
 
@@ -5393,13 +5449,23 @@ impl KnownWorktrees {
                 .map(PathBuf::from)
                 .collect(),
             elsewhere: paths(
-                "SELECT workdir FROM chats WHERE workspace_session_id != ? AND workdir IS NOT NULL",
+                "SELECT workdir FROM chats WHERE workspace_session_id != ?1 AND workdir IS NOT NULL \
+                 UNION SELECT original_workdir FROM chats \
+                   WHERE workspace_session_id != ?1 AND original_workdir IS NOT NULL \
+                 UNION SELECT COALESCE(workdir, repo) FROM workspace_folders \
+                   WHERE COALESCE(workdir, repo) IS NOT NULL",
                 &[&session],
             )?
             .into_iter()
             .map(|workdir| PathBuf::from(normalize_existing_path(Path::new(&workdir))))
             .collect(),
         })
+    }
+
+    /// Whether a chat outside the session, or a folder, works in this
+    /// worktree or anywhere inside it.
+    fn in_use(&self, worktree: &Path) -> bool {
+        self.elsewhere.iter().any(|path| path.starts_with(worktree))
     }
 }
 
@@ -5473,7 +5539,7 @@ fn generated_worktrees(
         };
         let path = PathBuf::from(normalize_existing_path(Path::new(workdir)));
         if !path.is_dir()
-            || known.elsewhere.contains(&path)
+            || known.in_use(&path)
             || found.iter().any(|worktree| worktree.path == path)
         {
             continue;
@@ -5502,35 +5568,8 @@ fn generated_worktrees(
         if !generated {
             continue;
         }
-        let status = run_git(&path, &["status", "--porcelain", "--untracked-files=all"])?;
-        if !status.0.success() {
-            return Ok(Err(format!(
-                "{}: {}",
-                path.display(),
-                command_error(&status.2, "cannot inspect the worktree")
-            )));
-        }
-        if !status.1.is_empty() {
-            return Ok(Err(format!("{} has uncommitted changes", path.display())));
-        }
-        if linked.detached {
-            let holders = run_git(
-                &path,
-                &[
-                    "for-each-ref",
-                    "--count=1",
-                    "--contains=HEAD",
-                    "refs/heads",
-                    "refs/remotes",
-                    "refs/tags",
-                ],
-            )?;
-            if !holders.0.success() || holders.1.is_empty() {
-                return Ok(Err(format!(
-                    "{} has a detached HEAD whose commits no branch or tag holds",
-                    path.display()
-                )));
-            }
+        if let Err(reason) = removable_worktree(&path)? {
+            return Ok(Err(reason));
         }
         found.push(GeneratedWorktree {
             path,
@@ -5539,6 +5578,45 @@ fn generated_worktrees(
         });
     }
     Ok(Ok(found))
+}
+
+/// Whether Git can remove this worktree without losing work: nothing is
+/// uncommitted or untracked, and a detached HEAD's commits are held by a
+/// branch, remote branch, or tag. The error says what is in the way.
+fn removable_worktree(path: &Path) -> Result<Result<(), String>, StorageError> {
+    let status = run_git(path, &["status", "--porcelain", "--untracked-files=all"])?;
+    if !status.0.success() {
+        return Ok(Err(format!(
+            "{}: {}",
+            path.display(),
+            command_error(&status.2, "cannot inspect the worktree")
+        )));
+    }
+    if !status.1.is_empty() {
+        return Ok(Err(format!("{} has uncommitted changes", path.display())));
+    }
+    let branch = run_git(path, &["symbolic-ref", "--quiet", "HEAD"])?;
+    if branch.0.success() {
+        return Ok(Ok(()));
+    }
+    let holders = run_git(
+        path,
+        &[
+            "for-each-ref",
+            "--count=1",
+            "--contains=HEAD",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+    )?;
+    if !holders.0.success() || holders.1.is_empty() {
+        return Ok(Err(format!(
+            "{} has a detached HEAD whose commits no branch or tag holds",
+            path.display()
+        )));
+    }
+    Ok(Ok(()))
 }
 
 /// Removes a worktree with Git, without forcing, and the empty folder xd made
@@ -6274,9 +6352,8 @@ fn create_worktree(
                 .as_deref()
                 .is_some_and(|candidate| candidate == branch || candidate == legacy_branch)
     }) {
-        let path = normalize_existing_path(&existing.path);
-        record_generated_worktree(transaction, &path)?;
-        return Ok(path);
+        // Not recorded as generated: it may be a checkout the user made.
+        return Ok(normalize_existing_path(&existing.path));
     }
 
     for suffix in 1..=10_000_u32 {

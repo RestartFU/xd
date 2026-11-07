@@ -463,6 +463,19 @@ impl TerminalManager {
         true
     }
 
+    /// When each open terminal was last used, by owner.
+    pub(crate) fn usage(&self) -> Vec<(String, i64)> {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .map(|session| (session.owner(), session.last_used.load(Ordering::Acquire)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn owned_by(&self, owners: &HashSet<String>) -> Vec<Arc<TerminalSession>> {
         self.sessions
             .lock()
