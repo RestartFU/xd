@@ -748,8 +748,8 @@ private fun Composer(
  * Edit, steer or drop one queued message.
  *
  * Steering is only offered while a turn is running, because that is the only
- * time it means anything: the host promotes the message and stops the turn
- * so the agent takes it up instead of finishing first.
+ * time it means anything: the host redirects the turn to the message so the
+ * agent takes it up instead of finishing first.
  */
 @Composable
 private fun QueuedMessageDialog(

@@ -4289,7 +4289,8 @@ impl StateStore {
         })
     }
 
-    pub fn steer_queue(&self, request: &Value) -> Result<(Value, Value), StorageError> {
+    /// Takes a message out of the queue to send it into the running turn.
+    pub fn take_queued(&self, request: &Value) -> Result<(Value, Value), StorageError> {
         let message = "steer-queue needs a chat id, queue index, and text.";
         let chat_id = required_string(request, "chat", message)?;
         let text = required_string_allow_empty(request, "text", message)?.to_owned();
@@ -4303,13 +4304,27 @@ impl StateStore {
                     "That queued message changed; try again.".into(),
                 ));
             }
-            if index == 0 {
-                return Ok(false);
-            }
-            let selected = queue.remove(index);
-            queue.insert(0, selected);
+            queue.remove(index);
             Ok(true)
         })
+    }
+
+    /// Puts a message at the front of the queue and returns the queue's event.
+    pub fn requeue_front(&self, chat_id: &str, text: &str) -> Result<Value, StorageError> {
+        let (_, event) = self.mutate_queue(chat_id, |queue| {
+            queue.insert(0, text.to_owned());
+            Ok(true)
+        })?;
+        Ok(event)
+    }
+
+    pub fn delete_message(&self, chat_id: &str, message_id: i64) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "DELETE FROM messages WHERE id = ? AND chat_id = ?",
+            params![message_id, chat_id],
+        )?;
+        Ok(changed > 0)
     }
 
     fn mutate_queue(
@@ -9556,8 +9571,16 @@ mod tests {
         assert!(conflict.to_string().contains("changed; try again"));
 
         let (_, event) = store
-            .steer_queue(&json!({"chat": "chat-1", "index": 1, "text": "edited"}))
+            .take_queued(&json!({"chat": "chat-1", "index": 1, "text": "edited"}))
             .unwrap();
+        assert_eq!(event["queue"], json!(["first"]));
+        assert!(
+            store
+                .take_queued(&json!({"chat": "chat-1", "index": 0, "text": "edited"}))
+                .is_err(),
+            "only the message the client saw may be taken"
+        );
+        let event = store.requeue_front("chat-1", "edited").unwrap();
         assert_eq!(event["queue"], json!(["edited", "first"]));
         let (_, event) = store
             .drop_queue(&json!({"chat": "chat-1", "index": 0}))

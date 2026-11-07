@@ -194,6 +194,18 @@ class TranscriptMachineTest {
     }
 
     @Test
+    fun aMessageSentIntoARunningTurnReadsAsTheUsersOwn() {
+        val state = reduce(
+            ChatState("chat"),
+            TranscriptInput.Tool("steer\nDo this instead"),
+        ).state
+
+        val row = state.liveItems.single()
+        assertEquals(TranscriptKind.USER, row.kind)
+        assertEquals("Do this instead", row.text)
+    }
+
+    @Test
     fun todoSnapshotsStayOutOfTheTranscriptAndUpdateLive() {
         val marker = "todo_list\n" +
             "[{\"id\":\"1\",\"text\":\"Build pane\",\"status\":\"in_progress\"}]"

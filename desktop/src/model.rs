@@ -996,6 +996,9 @@ impl AppModel {
                             self.todos = todos;
                             return None;
                         }
+                        if let Some(sent) = steered_text(text) {
+                            return Some(Message::new(None, "user", sent, None));
+                        }
                         Some(Message::new(
                             item.get("message_id").and_then(Value::as_i64),
                             if item.get("tool").and_then(Value::as_bool) == Some(true) {
@@ -1369,6 +1372,14 @@ impl AppModel {
                     self.live_items
                         .push(Message::new(None, "assistant", text, label));
                 }
+                if let Some(sent) = body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .and_then(steered_text)
+                {
+                    self.live_items.push(Message::new(None, "user", sent, None));
+                    return;
+                }
                 self.live_items.push(Message::new(
                     body.get("message_id").and_then(Value::as_i64),
                     "tool",
@@ -1652,6 +1663,13 @@ fn string_array(values: &[Value]) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(ToOwned::to_owned)
         .collect()
+}
+
+/// The text of a live row that is a message the user sent into the running
+/// turn. The host stores it as an ordinary user message, so this only matters
+/// until the transcript is next loaded.
+fn steered_text(text: &str) -> Option<&str> {
+    text.strip_prefix("steer\n")
 }
 
 #[cfg(test)]
@@ -2225,6 +2243,40 @@ mod tests {
 
         assert!(!model.chats[1].terminal_working);
         assert!(model.working);
+    }
+
+    #[test]
+    fn a_message_sent_into_a_running_turn_reads_as_the_users_own() {
+        let mut model = AppModel {
+            selected_chat: Some("chat-1".into()),
+            ..Default::default()
+        };
+        model.apply_event("text", &json!({"chat":"chat-1", "text":"Working"}));
+        model.apply_event(
+            "tool",
+            &json!({"chat":"chat-1", "text":"steer\nDo this instead"}),
+        );
+        let rows = model
+            .live_items
+            .iter()
+            .map(|item| (item.role.as_str(), item.content.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            [("assistant", "Working"), ("user", "Do this instead")]
+        );
+
+        // And the same for a client that opens the chat mid-turn.
+        let mut model = AppModel {
+            selected_chat: Some("chat-1".into()),
+            ..Default::default()
+        };
+        model.apply_chat(
+            &json!({"working":true, "turn_epoch":"d", "turn_id":1, "turn_sequence":1,
+            "items":[{"tool":true, "text":"steer\nDo this instead"}]}),
+        );
+        assert_eq!(model.live_items[0].role, "user");
+        assert_eq!(model.live_items[0].content, "Do this instead");
     }
 
     #[test]

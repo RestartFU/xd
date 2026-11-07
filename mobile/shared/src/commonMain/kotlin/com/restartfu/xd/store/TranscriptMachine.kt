@@ -155,8 +155,12 @@ public object TranscriptMachine {
                 state.copy(
                     liveItems = closedSegment + TranscriptItem(
                         id = "tool-${closedSegment.size}",
-                        kind = TranscriptKind.TOOL,
-                        text = input.name,
+                        kind = if (input.name.startsWith(STEER_ROW_PREFIX)) {
+                            TranscriptKind.USER
+                        } else {
+                            TranscriptKind.TOOL
+                        },
+                        text = input.name.removePrefix(STEER_ROW_PREFIX),
                         live = true,
                         messageId = input.messageId,
                     ),
@@ -298,8 +302,12 @@ public object TranscriptMachine {
             chat.items.filterNot { it.text.todoSnapshot() != null }.mapIndexed { index, item ->
                 TranscriptItem(
                     id = "loaded-live-$index",
-                    kind = if (item.tool) TranscriptKind.TOOL else TranscriptKind.ASSISTANT,
-                    text = item.text,
+                    kind = when {
+                        item.tool && item.text.startsWith(STEER_ROW_PREFIX) -> TranscriptKind.USER
+                        item.tool -> TranscriptKind.TOOL
+                        else -> TranscriptKind.ASSISTANT
+                    },
+                    text = if (item.tool) item.text.removePrefix(STEER_ROW_PREFIX) else item.text,
                     live = true,
                     messageId = item.messageId,
                 )
@@ -379,6 +387,9 @@ public object TranscriptMachine {
         else -> TranscriptKind.SYSTEM
     }
 }
+
+/** Marks a live tool row that is a message the user sent into the running turn. */
+private const val STEER_ROW_PREFIX = "steer\n"
 
 private fun String.todoSnapshot(): List<TodoItem>? {
     if (!startsWith(TODO_PREFIX)) return null

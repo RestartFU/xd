@@ -725,9 +725,9 @@ class ChatViewModel(
      * and the steer would be refused for not matching an edit that had not
      * landed yet.
      *
-     * The host promotes the message and cancels the turn, so this waits for
-     * the turn to actually change rather than reporting success while the old
-     * one is still winding down.
+     * The host may promote the message and cancel the turn, so this waits for
+     * the turn to change or the queue to shrink rather than reporting success
+     * while the old one is still winding down.
      */
     fun steerQueued(index: Int, oldText: String, text: String) {
         val before = state.value
@@ -736,7 +736,9 @@ class ChatViewModel(
             session.steerQueued(index, text)
             withTimeoutOrNull(CANCEL_EVENT_TIMEOUT_MILLIS) {
                 state.first {
-                    !it.working || it.startedAtMillis != before.startedAtMillis
+                    !it.working ||
+                        it.startedAtMillis != before.startedAtMillis ||
+                        it.queue.size < before.queue.size
                 }
             }
         }

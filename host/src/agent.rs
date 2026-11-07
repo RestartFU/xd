@@ -48,6 +48,9 @@ pub enum AgentEvent {
     },
     Completed,
     Error(String),
+    /// The agent refused a message sent into the running turn. It has not read
+    /// it, so it goes back to the front of the queue.
+    SteerRejected(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +131,44 @@ impl AgentParser {
             Self::Codex(parser) => parser.feed(line),
             Self::Claude(parser) => parser.feed(line),
             Self::Jcode(parser) => parser.feed(line),
+        }
+    }
+
+    /// The frame that sends `prompt` into the running turn, or `None` when
+    /// this agent cannot take it right now.
+    pub fn steer_frame(&mut self, prompt: &str) -> Option<Value> {
+        match self {
+            Self::AppServer(parser) => parser.steer_request(prompt),
+            Self::Claude(parser) => parser
+                .begin_steer()
+                .then(|| AgentCommand::encode_steer(prompt)),
+            Self::Codex(_) | Self::Jcode(_) => None,
+        }
+    }
+
+    /// Whether the turn has ended unless a steer it has not answered yet says
+    /// otherwise. Nothing further may ever arrive, so the caller stops waiting
+    /// after a while and takes [`Self::take_settled`] as the outcome.
+    pub fn settling(&self) -> bool {
+        match self {
+            Self::AppServer(parser) => parser.settling(),
+            Self::Claude(parser) => parser.settling,
+            Self::Codex(_) | Self::Jcode(_) => false,
+        }
+    }
+
+    /// How the turn ended, once waiting for a steer's answer has run out.
+    pub fn take_settled(&mut self) -> Vec<AgentEvent> {
+        match self {
+            Self::AppServer(parser) => parser.take_settled(),
+            Self::Claude(parser) => {
+                if std::mem::take(&mut parser.settling) {
+                    vec![AgentEvent::Completed]
+                } else {
+                    Vec::new()
+                }
+            }
+            Self::Codex(_) | Self::Jcode(_) => Vec::new(),
         }
     }
 }
@@ -307,6 +348,18 @@ impl AgentCommand<'_> {
     /// The prompt is not in argv for a kept process: argv was fixed when the
     /// process started, and every turn after the first arrives this way.
     pub fn encode_turn(prompt: &str) -> String {
+        Self::turn_frame(prompt).to_string()
+    }
+
+    /// A message for a turn that is already running. `now` stops the reply in
+    /// progress and answers this instead; a running tool finishes first.
+    pub fn encode_steer(prompt: &str) -> Value {
+        let mut frame = Self::turn_frame(prompt);
+        frame["priority"] = json!("now");
+        frame
+    }
+
+    fn turn_frame(prompt: &str) -> Value {
         json!({
             "type": "user",
             "message": {
@@ -314,7 +367,6 @@ impl AgentCommand<'_> {
                 "content": [{"type": "text", "text": prompt}],
             },
         })
-        .to_string()
     }
 
     fn build_claude(&self) -> Command {
@@ -539,6 +591,15 @@ pub struct ClaudeParser {
     trailing_newlines: usize,
     pending_tools: HashMap<u64, PendingClaudeTool>,
     completed_task_tools: HashMap<String, PendingClaudeTool>,
+    /// Whether this turn's run has begun. A steer sent before that would be
+    /// mistaken for the turn's own start.
+    running: bool,
+    /// Steers written that no run has picked up yet. Each one Claude picks up
+    /// ends the run in progress and opens a new run for the same xd turn.
+    steers: u32,
+    /// A run finished by itself while a steer was still unread. If that steer
+    /// opens a new run the turn goes on; otherwise this was its end.
+    settling: bool,
 }
 
 /// Whether a rate limit report turns work away, or `None` when it says neither.
@@ -636,6 +697,9 @@ impl ClaudeParser {
                 Vec::new()
             }
             Some("system") if root.get("subtype").and_then(Value::as_str) == Some("init") => {
+                self.running = true;
+                self.settling = false;
+                self.steers = self.steers.saturating_sub(1);
                 let mut events = Vec::new();
                 if let Some(session) = root.get("session_id").and_then(Value::as_str) {
                     events.push(AgentEvent::Session(session.to_owned()));
@@ -654,18 +718,36 @@ impl ClaudeParser {
                 }
                 events
             }
-            Some("stream_event") => self.stream_event(&root),
+            Some("stream_event") => {
+                let events = self.stream_event(&root);
+                self.without_superseded_text(events)
+            }
             Some("user") => self.user_event(&root),
-            Some("assistant") if !self.saw_streamed_text => self.assistant_event(&root),
+            Some("assistant") if !self.saw_streamed_text => {
+                let events = self.assistant_event(&root);
+                self.without_superseded_text(events)
+            }
             Some("result") => {
                 let mut events = Vec::new();
                 let limit_rejected = std::mem::take(&mut self.limit_rejected);
+                // A steer ends the run it interrupts with one of these, which
+                // is not the end of the turn however it is flagged.
+                if self.steers > 0
+                    && root
+                        .get("terminal_reason")
+                        .and_then(Value::as_str)
+                        .is_some_and(|reason| reason.starts_with("aborted_"))
+                {
+                    self.begin_next_run();
+                    return events;
+                }
                 let failed = root
                     .get("is_error")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if !failed
                     && !self.saw_text
+                    && self.steers == 0
                     && let Some(text) = root.get("result").and_then(Value::as_str)
                     && !text.is_empty()
                 {
@@ -711,12 +793,42 @@ impl ClaudeParser {
                             window: claude_context_window(&root),
                         });
                     }
-                    events.push(AgentEvent::Completed);
+                    if self.steers > 0 {
+                        self.settling = true;
+                        self.begin_next_run();
+                    } else {
+                        events.push(AgentEvent::Completed);
+                    }
                 }
                 events
             }
             _ => Vec::new(),
         }
+    }
+
+    /// While a steer is unread the reply in progress is being abandoned. Its
+    /// last words must not land after the user's message as part of the answer.
+    fn without_superseded_text(&self, mut events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+        if self.steers > 0 {
+            events.retain(|event| !matches!(event, AgentEvent::Text(_) | AgentEvent::TextDelta(_)));
+        }
+        events
+    }
+
+    fn begin_steer(&mut self) -> bool {
+        if self.running {
+            self.steers += 1;
+        }
+        self.running
+    }
+
+    /// Forgets what the finished run streamed, so the next run's reply is not
+    /// taken for text that has already been seen.
+    fn begin_next_run(&mut self) {
+        self.saw_streamed_text = false;
+        self.saw_text = false;
+        self.trailing_newlines = 0;
+        self.pending_tools.clear();
     }
 
     fn stream_event(&mut self, root: &Value) -> Vec<AgentEvent> {
@@ -1956,6 +2068,104 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["-c", "sandbox_mode=\"read-only\""])
         );
+    }
+
+    #[test]
+    fn a_steered_claude_run_ending_is_not_the_end_of_the_turn() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let completed = |events: &[AgentEvent]| events.contains(&AgentEvent::Completed);
+        for aborted in [
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"terminal_reason":"aborted_tools","result":""}"#,
+        ] {
+            let mut parser = AgentParser::Claude(ClaudeParser::default());
+            assert_eq!(parser.steer_frame("too soon"), None);
+            parser.feed(init);
+            parser.feed(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"One"}]}}"#,
+            );
+
+            let frame = parser.steer_frame("Instead").unwrap();
+            assert_eq!(frame["priority"], "now");
+            assert_eq!(frame["message"]["content"][0]["text"], "Instead");
+
+            assert_eq!(parser.feed(aborted), []);
+            assert!(!parser.settling());
+            parser.feed(init);
+            let reply = parser.feed(
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Two"}]}}"#,
+            );
+            assert_eq!(reply, [AgentEvent::TextDelta("Two".into())]);
+            assert!(completed(&parser.feed(
+                r#"{"type":"result","subtype":"success","terminal_reason":"completed","result":"Two"}"#
+            )));
+        }
+    }
+
+    #[test]
+    fn a_claude_run_finishing_before_it_reads_a_steer_waits_to_see_whether_one_follows() {
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let done = r#"{"type":"result","subtype":"success","terminal_reason":"completed","result":"Done"}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        parser.steer_frame("Instead").unwrap();
+
+        assert!(!parser.feed(done).contains(&AgentEvent::Completed));
+        assert!(parser.settling());
+        // It opens a new run for the steer, so the turn goes on.
+        parser.feed(init);
+        assert!(!parser.settling());
+        assert!(parser.feed(done).contains(&AgentEvent::Completed));
+
+        // Or nothing ever comes, and the turn was over after all.
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        parser.steer_frame("Instead").unwrap();
+        parser.feed(done);
+        assert_eq!(parser.take_settled(), [AgentEvent::Completed]);
+        assert!(!parser.settling());
+    }
+
+    #[test]
+    fn the_last_words_of_a_claude_reply_cut_short_are_dropped() {
+        let delta = |text: &str| {
+            format!(
+                r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}}}"#
+            )
+        };
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        assert_eq!(
+            parser.feed(&delta("Bridges")),
+            [AgentEvent::TextDelta("Bridges".into())]
+        );
+        parser.steer_frame("Instead").unwrap();
+        assert_eq!(parser.feed(&delta(" are old")), []);
+        parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}"#);
+        parser.feed(init);
+        assert_eq!(
+            parser.feed(&delta("Understood")),
+            [AgentEvent::TextDelta("Understood".into())]
+        );
+    }
+
+    #[test]
+    fn an_aborted_claude_run_with_no_steer_keeps_its_meaning() {
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(r#"{"type":"system","subtype":"init","session_id":"s1"}"#);
+        assert_eq!(
+            parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_streaming","result":"Stopped"}"#),
+            [AgentEvent::Error("Stopped".into())]
+        );
+    }
+
+    #[test]
+    fn agents_without_a_live_process_cannot_be_steered() {
+        let mut jcode = AgentParser::new("jcode").unwrap();
+        assert_eq!(jcode.steer_frame("Instead"), None);
+        assert!(!jcode.settling());
+        assert_eq!(jcode.take_settled(), []);
     }
 
     #[test]

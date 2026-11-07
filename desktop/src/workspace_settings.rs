@@ -977,6 +977,14 @@ impl XdDesktop {
                     .children(
                         [
                             ("Send message or queue while working", "Enter"),
+                            (
+                                "Redirect the agent while it works",
+                                if cfg!(target_os = "macos") {
+                                    "Cmd Enter"
+                                } else {
+                                    "Ctrl Enter"
+                                },
+                            ),
                             ("New line", "Shift Enter"),
                             ("Copy / paste", copy),
                         ]
