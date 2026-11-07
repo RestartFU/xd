@@ -1624,6 +1624,38 @@ mod tests {
             assert_eq!(desktop.model.draft_attachments.len(), 1);
             let extra = Attachment::from_file("extra.txt", vec![1]);
             desktop.add_attachment(extra).unwrap();
+
+            // A draft older than the one shown does not bring back its list.
+            desktop.attachments_dirty = false;
+            let shown = desktop.model.draft_attachments.clone();
+            let stale = Attachment::from_file("stale.txt", b"old".to_vec());
+            desktop.handle_event(
+                "draft",
+                serde_json::json!({"chat": "implementation", "draft": "", "draft_revision": 50}),
+                Some(vec![stale]),
+                cx,
+            );
+            assert_eq!(desktop.model.draft_attachments, shown);
+
+            // A clear that fails reloads the draft, and nothing can be
+            // attached until the host's list is back.
+            desktop.awaiting_sent_clear = Some(9);
+            let mut failed = serde_json::Map::new();
+            failed.insert("ok".into(), false.into());
+            failed.insert("error".into(), "no".into());
+            desktop.handle_reply(
+                RequestKind::SetDraft {
+                    chat_id: "implementation".into(),
+                    text: String::new(),
+                    attachment_generation: Some(9),
+                },
+                failed,
+                None,
+                cx,
+            );
+            assert!(desktop.awaiting_sent_clear.is_none() && desktop.draft_reload_pending);
+            let blocked = Attachment::from_file("blocked.txt", vec![1]);
+            assert!(desktop.add_attachment(blocked).unwrap_err().contains("Wait"));
         });
     }
 

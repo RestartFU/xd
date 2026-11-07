@@ -2132,6 +2132,9 @@ struct XdDesktop {
     /// took what was sent, not because the user emptied it, so it is not
     /// uploaded, and drafts arriving meanwhile do not bring the sent ones back.
     awaiting_sent_clear: Option<u64>,
+    /// A send's clear failed, so the draft is reloaded before anything can
+    /// replace its attachments: it may hold files this list does not show.
+    draft_reload_pending: bool,
     attachment_generation: u64,
     /// Batches of chosen files still being read. Sending waits for them, so a
     /// message never leaves without a file the user saw themselves choose.
@@ -2731,6 +2734,7 @@ impl XdDesktop {
             draft_dirty: false,
             attachments_dirty: false,
             awaiting_sent_clear: None,
+            draft_reload_pending: false,
             attachment_generation: 0,
             attachments_reading: 0,
             composer_thumbnails: HashMap::new(),
@@ -3884,6 +3888,7 @@ impl XdDesktop {
                     && *attachment_generation == self.awaiting_sent_clear =>
                 {
                     self.awaiting_sent_clear = None;
+                    self.reload_draft_after_failed_clear();
                 }
                 RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
@@ -5126,6 +5131,8 @@ impl XdDesktop {
             RequestKind::MoveChat { .. } => self.request_tree(),
             RequestKind::DeleteChat { .. } => self.request_tree(),
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
+                // The reload a failed clear asked for has the host's list.
+                self.draft_reload_pending = false;
                 let local_attachments = (self.attachments_dirty
                     || self.awaiting_sent_clear.is_some())
                 .then(|| self.model.draft_attachments.clone());
@@ -5309,10 +5316,16 @@ impl XdDesktop {
                 let local_attachments = (!attachment_reply_is_current
                     && (self.attachments_dirty || self.awaiting_sent_clear.is_some()))
                 .then(|| self.model.draft_attachments.clone());
+                let revision = self.model.draft_revision;
                 self.model.apply_draft_snapshot(&value);
+                // An older draft than the one shown brings older attachments.
+                let accepted = self.model.draft_revision != revision;
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
-                } else if attachment_reply_is_current && let Some(attachments) = attachments {
+                } else if attachment_reply_is_current
+                    && accepted
+                    && let Some(attachments) = attachments
+                {
                     self.model.draft_attachments = attachments;
                 }
                 if self.composer == text {
@@ -5876,10 +5889,13 @@ impl XdDesktop {
                 let local_attachments = (self.attachments_dirty
                     || self.awaiting_sent_clear.is_some())
                 .then(|| self.model.draft_attachments.clone());
+                let revision = self.model.draft_revision;
                 self.model.apply_event(name, &body);
+                // An older draft than the one shown brings older attachments.
+                let accepted = self.model.draft_revision != revision;
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
-                } else if let Some(attachments) = attachments {
+                } else if accepted && let Some(attachments) = attachments {
                     self.model.draft_attachments = attachments;
                 }
                 if !self.draft_dirty {
@@ -9720,6 +9736,9 @@ impl XdDesktop {
             .clear_sent_draft(&chat_id, self.attachment_generation)
             .is_ok()
             .then_some(self.attachment_generation);
+        if self.awaiting_sent_clear.is_none() {
+            self.reload_draft_after_failed_clear();
+        }
         cx.notify();
     }
 
@@ -10179,7 +10198,7 @@ impl XdDesktop {
     fn add_attachment(&mut self, attachment: Attachment) -> Result<(), String> {
         // Until the clear after a send returns, the draft may hold files from
         // elsewhere that this list does not show yet.
-        if self.sending || self.awaiting_sent_clear.is_some() {
+        if self.sending || self.awaiting_sent_clear.is_some() || self.draft_reload_pending {
             return Err("Wait for the message to send before attaching more.".into());
         }
         attachment_fits(&self.model.draft_attachments, &attachment)?;
@@ -10207,6 +10226,13 @@ impl XdDesktop {
             ChatEndpoint::Remote => self.remote_generation,
         };
         (self.active_endpoint, generation)
+    }
+
+    fn reload_draft_after_failed_clear(&mut self) {
+        if let Some(chat_id) = self.model.selected_chat.clone() {
+            self.draft_reload_pending = true;
+            self.request_chat(&chat_id);
+        }
     }
 
     /// Opens the system file picker and attaches what the user chooses.
@@ -10660,6 +10686,7 @@ impl XdDesktop {
             self.draft_dirty = false;
             self.attachments_dirty = false;
             self.awaiting_sent_clear = None;
+            self.draft_reload_pending = false;
             self.remember_last_chat(&chat_id);
             self.invalidate_live_render();
             self.forget_message_images(cx);
