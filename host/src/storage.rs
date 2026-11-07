@@ -1394,8 +1394,8 @@ impl StateStore {
     }
 
     /// Settles what a chat's first turn runs on, so that it does not run on a
-    /// built-in default or on a remembered model the assistant has since retired.
-    /// A new chat cannot check either when nothing has been discovered yet.
+    /// built-in default or on a model the assistant no longer offers. A new chat
+    /// cannot check either when nothing has been discovered yet.
     ///
     /// Call this before taking any lock another chat needs, since discovery can
     /// take seconds.
@@ -1405,7 +1405,6 @@ impl StateStore {
             database
                 .query_row(
                     "SELECT backend, model, effort, \
-                     (SELECT model FROM agent_backend_choices WHERE backend = chats.backend), \
                      EXISTS(SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
                      FROM chats WHERE id = ?",
                     [chat_id],
@@ -1414,24 +1413,22 @@ impl StateStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, Option<String>>(1)?,
                             row.get::<_, Option<String>>(2)?,
-                            row.get::<_, Option<String>>(3)?,
-                            row.get::<_, bool>(4)?,
+                            row.get::<_, bool>(3)?,
                         ))
                     },
                 )
                 .optional()?
         };
-        let Some((backend, model, effort, picked, used)) = chat else {
+        let Some((backend, model, effort, used)) = chat else {
             return Ok(());
         };
-        let on_unused_pick = !used && model.is_some() && model == picked;
-        if model.is_some() && effort.is_some() && !on_unused_pick {
+        if used && model.is_some() && effort.is_some() {
             return Ok(());
         }
         crate::model_catalog::awaited_default_model(&backend);
         let discovered = crate::model_catalog::cached_models(&backend);
         if let Some(model) =
-            model.filter(|model| on_unused_pick && !choice_still_offered(&discovered, model))
+            model.filter(|model| !used && !choice_still_offered(&discovered, model))
         {
             let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
             database.execute(

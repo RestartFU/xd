@@ -344,7 +344,9 @@ otherwise the folder and host defaults apply. Without `backend`, the chat starts
 on the folder's model if it has one; otherwise it takes the model last chosen
 with `set-option` for that assistant, else the assistant's own default. Its effort is
 the one last chosen for that assistant, else the default the assistant reports
-for the chat's model, else `high`. `worktree` may select `new`, an
+for the chat's model, else `high`. A chat's first `send` waits for model discovery if
+either value is unset, and moves a chat on a model the assistant no longer
+offers to its default. `worktree` may select `new`, an
 `existing` path, a full local or remote-tracking branch ref plus its listed
 commit, or a pull request number plus its listed head commit. Branch and pull
 request selections create an isolated managed `xd/*` worktree and are
