@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
     thread,
     time::Duration,
@@ -76,6 +76,9 @@ struct TerminalActivityState {
     epoch: String,
     revision: AtomicU64,
     gate: Mutex<()>,
+    /// When terminals closed since the last [`TerminalManager::usage`] were
+    /// last used, by owner, so their use is not lost with them.
+    closed_usage: Mutex<HashMap<String, i64>>,
 }
 
 pub(crate) struct TerminalActivitySnapshot {
@@ -93,6 +96,11 @@ struct TerminalSession {
     writer: Mutex<Option<File>>,
     state: Mutex<TerminalState>,
     activity: Arc<TerminalActivityState>,
+    /// When the terminal last took input or printed output, in seconds.
+    last_used: AtomicI64,
+    /// Held while output is marked as use, so closing an idle terminal sees
+    /// it. Separate from `writer`, which a blocked input write can hold.
+    output_use: Mutex<()>,
 }
 
 impl TerminalManager {
@@ -106,6 +114,7 @@ impl TerminalManager {
                 epoch: Uuid::new_v4().to_string(),
                 revision: AtomicU64::new(0),
                 gate: Mutex::new(()),
+                closed_usage: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -298,9 +307,11 @@ impl TerminalManager {
             .writer
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_string())?;
-        writer
+        let writer = writer
             .as_mut()
-            .ok_or_else(|| "The terminal is closed.".to_string())?
+            .ok_or_else(|| "The terminal is closed.".to_string())?;
+        session.mark_used();
+        writer
             .write_all(&data)
             .map_err(|error| format!("Cannot write terminal: {error}."))?;
         Ok(json!({"ok": true}))
@@ -321,9 +332,11 @@ impl TerminalManager {
             .writer
             .lock()
             .map_err(|_| "Terminal state is unavailable.".to_owned())?;
-        writer
+        let writer = writer
             .as_mut()
-            .ok_or_else(|| "The terminal is closed.".to_owned())?
+            .ok_or_else(|| "The terminal is closed.".to_owned())?;
+        session.mark_used();
+        writer
             .write_all(&data)
             .map_err(|error| format!("Cannot write terminal: {error}."))?;
         Ok(json!({"ok": true, "path": path}))
@@ -417,6 +430,118 @@ impl TerminalManager {
         for session in sessions {
             close_session(&session, &self.sessions, &self.events);
         }
+    }
+
+    /// When any terminal of these owners last took input or printed output.
+    pub(crate) fn last_used(&self, owners: &HashSet<String>) -> Option<i64> {
+        self.owned_by(owners)
+            .iter()
+            .map(|session| session.last_used.load(Ordering::Acquire))
+            .max()
+    }
+
+    /// Closes every terminal of these owners, unless one has been used after
+    /// `idle_since`, including one closed since [`Self::usage`] last looked.
+    /// Input and output are held off while it checks, and input is refused
+    /// from then on, so nothing typed meanwhile runs in a session that is going
+    /// away. A terminal busy taking input, printing, or closing counts as used. Opening a terminal
+    /// waits on the engine's session lock, which the caller holds. Returns
+    /// whether they are closed.
+    pub(crate) fn close_unused(&self, owners: &HashSet<String>, idle_since: i64) -> bool {
+        let sessions = self.owned_by(owners);
+        // `output_use` before `writer`, the order closing a terminal takes them,
+        // and neither waited for: a terminal anything else holds is in use, and
+        // the sweep must never hang behind blocked input.
+        let mut marking = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            let Ok(output) = session.output_use.try_lock() else {
+                return false;
+            };
+            marking.push(output);
+        }
+        let mut writers = Vec::with_capacity(sessions.len());
+        for session in &sessions {
+            let Ok(writer) = session.writer.try_lock() else {
+                return false;
+            };
+            writers.push(writer);
+        }
+        if self.closed_since(owners, idle_since)
+            || sessions
+                .iter()
+                .any(|session| session.last_used.load(Ordering::Acquire) > idle_since)
+        {
+            return false;
+        }
+        for writer in &mut writers {
+            writer.take();
+        }
+        drop(writers);
+        for session in &sessions {
+            close_session_marking_held(session, &self.sessions, &self.events);
+        }
+        // Output marked from here on belongs to a closed terminal.
+        drop(marking);
+        true
+    }
+
+    /// When each terminal was last used, by owner: those open now, and those
+    /// closed and not yet passed to [`Self::forget_closed_usage`].
+    pub(crate) fn usage(&self) -> Vec<(String, i64)> {
+        let mut usage = self
+            .activity
+            .closed_usage
+            .lock()
+            .map(|closed| {
+                closed
+                    .iter()
+                    .map(|(owner, used)| (owner.clone(), *used))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Ok(sessions) = self.sessions.lock() {
+            usage.extend(
+                sessions
+                    .values()
+                    .map(|session| (session.owner(), session.last_used.load(Ordering::Acquire))),
+            );
+        }
+        usage
+    }
+
+    /// Whether a terminal of these owners that has closed, and whose use the
+    /// store does not have yet, was used after `idle_since`.
+    pub(crate) fn closed_since(&self, owners: &HashSet<String>, idle_since: i64) -> bool {
+        self.activity.closed_usage.lock().map_or(true, |closed| {
+            owners
+                .iter()
+                .any(|owner| closed.get(owner).is_some_and(|used| *used > idle_since))
+        })
+    }
+
+    /// Drops closed terminals' use once it is kept elsewhere, unless a
+    /// terminal of the same owner closed later still.
+    pub(crate) fn forget_closed_usage(&self, kept: &[(String, i64)]) {
+        if let Ok(mut closed) = self.activity.closed_usage.lock() {
+            for (owner, used) in kept {
+                if closed.get(owner).is_some_and(|closed| closed <= used) {
+                    closed.remove(owner);
+                }
+            }
+        }
+    }
+
+    fn owned_by(&self, owners: &HashSet<String>) -> Vec<Arc<TerminalSession>> {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .filter(|session| owners.contains(&session.owner()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn has_sessions(&self) -> bool {
@@ -557,6 +682,8 @@ impl TerminalSession {
             writer: Mutex::new(Some(writer)),
             activity,
             state: Mutex::new(TerminalState::new(columns, rows)),
+            last_used: AtomicI64::new(crate::settlement::now_seconds()),
+            output_use: Mutex::new(()),
         });
         Ok((session, reader))
     }
@@ -591,6 +718,32 @@ impl TerminalSession {
             "sequence": state.sequence,
             "replay": replay,
         }))
+    }
+
+    /// Notes output as use. Under `output_use`, so closing sees it: a terminal
+    /// already closing passes it on as a closed terminal's use instead.
+    fn mark_output(&self) {
+        let Ok(_marking) = self.output_use.lock() else {
+            return;
+        };
+        self.mark_used();
+        if self.is_closing() {
+            self.note_closed_use();
+        }
+    }
+
+    /// Keeps this terminal's last use after it closes, until the store has it.
+    fn note_closed_use(&self) {
+        if let Ok(mut usage) = self.activity.closed_usage.lock() {
+            let used = self.last_used.load(Ordering::Acquire);
+            let entry = usage.entry(self.owner()).or_insert(used);
+            *entry = (*entry).max(used);
+        }
+    }
+
+    fn mark_used(&self) {
+        self.last_used
+            .store(crate::settlement::now_seconds(), Ordering::Release);
     }
 
     fn owner(&self) -> String {
@@ -754,6 +907,21 @@ fn close_session(
     sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
     events: &EventBus,
 ) {
+    // Output marked meanwhile waits, then finds the terminal closing; see
+    // `TerminalSession::mark_output`.
+    let _marking = session
+        .output_use
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    close_session_marking_held(session, sessions, events);
+}
+
+/// [`close_session`] for a caller already holding the terminal's `output_use`.
+fn close_session_marking_held(
+    session: &TerminalSession,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    events: &EventBus,
+) {
     let closed = {
         let _activity = session
             .activity
@@ -763,6 +931,8 @@ fn close_session(
         if !session.begin_close_state() {
             false
         } else {
+            // Before it leaves the open terminals, so its use is never in neither.
+            session.note_closed_use();
             if let Ok(mut sessions) = sessions.lock() {
                 sessions.remove(&session.id);
             }
@@ -793,6 +963,7 @@ fn start_reader(
                     Ok(0) | Err(_) => break,
                     Ok(count) => count,
                 };
+                session.mark_output();
                 let data = buffer[..count].to_vec();
                 let activity_updates = activity.feed(&data);
                 let replies = queries.feed(&data);

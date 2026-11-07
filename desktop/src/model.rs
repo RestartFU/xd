@@ -207,6 +207,37 @@ impl AutoSettleRules {
     }
 }
 
+/// How the connected host deletes idle sessions by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoDeleteRules {
+    pub after_days: Option<i64>,
+}
+
+impl AutoDeleteRules {
+    pub const DEFAULT_AFTER_DAYS: i64 = 30;
+    /// The choices the stepper moves through. The host takes any whole number
+    /// of days from 1 to 365, so a value set elsewhere steps to its neighbours.
+    pub const STEPS: [i64; 11] = [1, 2, 3, 5, 7, 14, 30, 60, 90, 180, 365];
+
+    pub fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            after_days: match value.get("after_days")? {
+                Value::Null => None,
+                days => Some(days.as_i64()?),
+            },
+        })
+    }
+
+    /// The next choice after `days`, longer or shorter, if there is one.
+    pub fn step(days: i64, longer: bool) -> Option<i64> {
+        if longer {
+            Self::STEPS.into_iter().find(|step| *step > days)
+        } else {
+            Self::STEPS.into_iter().rev().find(|step| *step < days)
+        }
+    }
+}
+
 /// A persistent workspace shared by independent agent conversations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSummary {
@@ -1726,6 +1757,27 @@ mod tests {
         tree["folder_reorder"] = json!(true);
         model.apply_tree(&tree).unwrap();
         assert!(model.folder_reorder_supported);
+    }
+
+    #[test]
+    fn auto_delete_rules_read_the_host_and_step_through_the_choices() {
+        assert_eq!(
+            AutoDeleteRules::from_value(&json!({"ok":true,"after_days":null})),
+            Some(AutoDeleteRules { after_days: None })
+        );
+        assert_eq!(
+            AutoDeleteRules::from_value(&json!({"after_days":45})),
+            Some(AutoDeleteRules {
+                after_days: Some(45)
+            })
+        );
+        assert_eq!(AutoDeleteRules::from_value(&json!({"ok":false})), None);
+        assert_eq!(AutoDeleteRules::step(30, true), Some(60));
+        assert_eq!(AutoDeleteRules::step(30, false), Some(14));
+        assert_eq!(AutoDeleteRules::step(45, true), Some(60));
+        assert_eq!(AutoDeleteRules::step(45, false), Some(30));
+        assert_eq!(AutoDeleteRules::step(365, true), None);
+        assert_eq!(AutoDeleteRules::step(1, false), None);
     }
 
     #[test]
