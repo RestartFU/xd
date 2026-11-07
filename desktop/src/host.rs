@@ -48,6 +48,7 @@ pub enum RequestKind {
     HostUpdate {
         action: String,
     },
+    AgentCliUpdates,
     AgentSecrets {
         folder_id: Option<String>,
     },
@@ -474,6 +475,14 @@ impl HostHandle {
             },
             json!({"op": "host-update", "action": action}),
         )
+    }
+
+    pub fn agent_cli_updates(&self, action: &str, provider: Option<&str>) -> Result<(), String> {
+        let mut body = json!({"op": "agent-cli-updates", "action": action});
+        if let Some(provider) = provider {
+            body["provider"] = json!(provider);
+        }
+        self.send(RequestKind::AgentCliUpdates, body)
     }
 
     pub fn agent_auth_action(
@@ -2785,6 +2794,49 @@ mod tests {
                 ..
             } if folder_id.as_deref() == Some("folder-1")
         ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn asks_the_host_to_update_a_single_assistant() {
+        let directory = env::temp_dir().join(format!("xd-cli-updates-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for (action, provider) in [("status", Value::Null), ("install", json!("claude"))] {
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["op"], "agent-cli-updates");
+                assert_eq!(request["action"], action);
+                assert_eq!(request["provider"], provider);
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+            }
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        host.agent_cli_updates("status", None).unwrap();
+        host.agent_cli_updates("install", Some("claude")).unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                updates.recv_blocking().unwrap(),
+                HostUpdate::Reply {
+                    kind: RequestKind::AgentCliUpdates,
+                    ..
+                }
+            ));
+        }
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);

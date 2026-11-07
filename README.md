@@ -65,12 +65,15 @@ machine. Settings → **Assistant accounts** refreshes the CLI's current status.
 Agent binaries and separate copies of their credentials are not included in xd.
 
 Installed Linux and macOS builds check their own release channel for app updates
-shortly after startup and every four minutes. Open **Settings → Updates** to check
-manually, install an available update, and restart xd. Restart is blocked while
-chats are running or terminal tabs are open; close the terminal tabs first.
-Stored conversations can resume afterward. Updates always target
-the local app, including while you are viewing a remote workspace. Source builds
-and Windows installations require a manual update. Set `XD_DISABLE_AUTO_UPDATE=1`
+shortly after startup and every four minutes. xd also compares installed Codex and
+Claude Code versions with their npm releases every 30 minutes; only the package
+names are sent. When something is out of date, an **Update** button appears beside
+the terminal and Settings buttons. It lists what will change, and nothing is
+installed until you confirm. **Settings → Updates** checks manually. Restart is
+blocked while chats are running or terminal tabs are open; close the terminal tabs
+first. Stored conversations can resume afterward. Updates always target the local
+machine, including while you are viewing a remote workspace. Source builds and
+Windows installations require a manual app update. Set `XD_DISABLE_AUTO_UPDATE=1`
 to disable background checks.
 
 The CLI discovery and update behavior adapt portions of

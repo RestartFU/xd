@@ -57,6 +57,7 @@ mod settings;
 mod source_build;
 mod speech;
 mod terminal;
+mod update_popup;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 mod workspace_settings;
@@ -131,6 +132,7 @@ const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
 const BROWSER_ICON: &str = "icons/browser.svg";
 const TERMINAL_ICON: &str = "icons/terminal.svg";
+const DOWNLOAD_ICON: &str = "icons/download.svg";
 const SEARCH_ICON: &str = "icons/search.svg";
 const MINIMIZE_ICON: &str = "icons/minimize.svg";
 const MAXIMIZE_ICON: &str = "icons/maximize.svg";
@@ -598,9 +600,27 @@ struct SelfUpdateStatus {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CliUpdateStatus {
+    provider: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    latest: Option<String>,
+    #[serde(default)]
+    available: bool,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
 #[derive(Clone, Default)]
 struct SelfUpdatePanel {
     status: Option<SelfUpdateStatus>,
+    clis: Vec<CliUpdateStatus>,
     busy: bool,
     error: Option<String>,
 }
@@ -1519,6 +1539,7 @@ struct XdDesktop {
     active_endpoint: ChatEndpoint,
     minimal_route: MinimalRoute,
     minimal_theme_open: bool,
+    update_popup_open: bool,
     minimal_popup_focus: FocusHandle,
     minimal_popup_previous_focus: Option<WeakFocusHandle>,
     minimal_popup_focus_captured: bool,
@@ -2066,6 +2087,7 @@ impl XdDesktop {
             active_endpoint,
             minimal_route: MinimalRoute::default(),
             minimal_theme_open: false,
+            update_popup_open: false,
             minimal_popup_focus,
             minimal_popup_previous_focus: None,
             minimal_popup_focus_captured: false,
@@ -2498,6 +2520,7 @@ impl XdDesktop {
         matches!(
             kind,
             RequestKind::HostUpdate { .. }
+                | RequestKind::AgentCliUpdates
                 | RequestKind::Devices
                 | RequestKind::PeerPairing
                 | RequestKind::PairRemote
@@ -2507,7 +2530,7 @@ impl XdDesktop {
     }
 
     fn local_admin_event(name: &str) -> bool {
-        name == "host-update"
+        matches!(name, "host-update" | "agent-cli-update")
     }
 
     fn switch_active_endpoint(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) -> bool {
@@ -3004,6 +3027,7 @@ impl XdDesktop {
                         let _ = host.tree();
                         let _ = host.agent_catalog();
                         let _ = host.host_update("status");
+                        let _ = host.agent_cli_updates("status", None);
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
                             let _ = host.git_state(chat_id);
                         }
@@ -3232,6 +3256,7 @@ impl XdDesktop {
                     | RequestKind::SetAgentSecrets { .. }
                     | RequestKind::AgentClis
                     | RequestKind::HostUpdate { .. }
+                    | RequestKind::AgentCliUpdates
                     | RequestKind::Devices
                     | RequestKind::PeerPairing
                     | RequestKind::RenameDevice { .. }
@@ -3587,6 +3612,17 @@ impl XdDesktop {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
+                RequestKind::AgentCliUpdates => {
+                    if let Some(panel) = &mut self.self_update_panel {
+                        panel.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("The assistant update request failed.")
+                                .to_owned(),
+                        );
+                    }
+                }
                 RequestKind::HostUpdate { action: _ } => {
                     if let Some(panel) = &mut self.self_update_panel {
                         panel.busy = false;
@@ -3823,6 +3859,7 @@ impl XdDesktop {
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
             RequestKind::AgentClis => self.apply_cli_versions(&value),
+            RequestKind::AgentCliUpdates => self.apply_cli_updates(&value),
             RequestKind::HostUpdate { action } => {
                 self.apply_self_update(&value);
                 if action == "restart" && !cfg!(test) {
@@ -5280,6 +5317,7 @@ impl XdDesktop {
             "agent-auth-changed" => self.apply_auth_provider(&body),
             "agent-cli-changed" => self.apply_cli_version(&body),
             "host-update" => self.apply_self_update(&body),
+            "agent-cli-update" => self.apply_cli_update(&body),
             _ => {}
         }
         cx.notify();
@@ -5390,6 +5428,11 @@ impl XdDesktop {
         let panel = self.self_update_panel.get_or_insert_with(Default::default);
         panel.busy = result.is_ok();
         panel.error = result.err();
+        if action == "check"
+            && let Some(host) = &self.host
+        {
+            let _ = host.agent_cli_updates("check", None);
+        }
         cx.notify();
     }
 
@@ -5511,6 +5554,7 @@ impl XdDesktop {
 
     fn browser_occluded_by_popup(&self) -> bool {
         self.auth_open
+            || self.update_popup_open
             || self.native_option_open.is_some()
             || self.share_panel.is_some()
             || self.devices_panel.is_some()
@@ -10453,6 +10497,10 @@ impl XdDesktop {
 
         let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
         let settings_open = self.minimal_theme_open;
+        let offers_update = self
+            .self_update_panel
+            .as_ref()
+            .is_some_and(SelfUpdatePanel::offers_update);
 
         div()
             .id("minimal-session-board")
@@ -10567,6 +10615,16 @@ impl XdDesktop {
                     .items_center()
                     .gap_2()
                     .child(div().flex_1())
+                    .when(offers_update, |footer| {
+                        footer.child(
+                            ui_button("minimal-update", ButtonKind::Secondary, colors)
+                                .child(icon(DOWNLOAD_ICON, 15.0, colors.text))
+                                .child("Update")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_update_popup(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
                             .when(terminal_active, |button| {
@@ -13786,6 +13844,9 @@ impl XdDesktop {
         let theme_overlay = self
             .minimal_theme_open
             .then(|| self.render_workspace_settings(colors, window, cx));
+        let update_overlay = self
+            .update_popup_open
+            .then(|| self.render_update_popup(colors, cx));
         let share_overlay = self.share_panel.clone().map(|panel| {
             let pairing_code = xd_transport::PairingCode { code: panel.code.clone(), fingerprint: panel.fingerprint.clone() }.encode().ok().filter(|_| !panel.loading);
             let can_copy = pairing_code.is_some();
@@ -15405,6 +15466,10 @@ impl XdDesktop {
                     cx.notify();
                     return;
                 }
+                if this.update_popup_open {
+                    this.close_update_popup(window, cx);
+                    return;
+                }
                 if this.share_panel.take().is_some() || this.devices_panel.take().is_some() {
                     cx.notify();
                     return;
@@ -15527,6 +15592,7 @@ impl XdDesktop {
             )
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
+            .when_some(update_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(share_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
@@ -15864,6 +15930,9 @@ impl AssetSource for EmbeddedIcons {
             TERMINAL_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/terminal.svg").as_slice(),
             )),
+            DOWNLOAD_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/download.svg").as_slice(),
+            )),
             SEARCH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/search.svg").as_slice(),
             )),
@@ -15898,6 +15967,7 @@ impl AssetSource for EmbeddedIcons {
             CHANGES_ICON.into(),
             BROWSER_ICON.into(),
             TERMINAL_ICON.into(),
+            DOWNLOAD_ICON.into(),
             SEARCH_ICON.into(),
             MINIMIZE_ICON.into(),
             MAXIMIZE_ICON.into(),
@@ -18736,6 +18806,9 @@ mod tests {
         assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentAuth));
         assert!(!XdDesktop::local_admin_event("agent-auth-changed"));
         assert!(XdDesktop::local_admin_event("host-update"));
+        assert!(XdDesktop::local_admin_event("agent-cli-update"));
+        assert!(!XdDesktop::local_admin_event("agent-cli-changed"));
+        assert!(XdDesktop::local_admin_reply(&RequestKind::AgentCliUpdates));
         assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
         assert!(XdDesktop::remote_read_event("terminal-activity"));

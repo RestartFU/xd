@@ -279,6 +279,26 @@ fn one_daemon_shares_local_and_paired_sessions_and_revokes_immediately() {
 }
 
 #[test]
+fn reports_assistant_updates_and_refuses_unknown_requests() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let reply = client.call(json!({"op":"agent-cli-updates"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let providers = reply["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+    assert!(
+        providers
+            .iter()
+            .all(|provider| { provider["state"] == "idle" && provider["available"] == false })
+    );
+    let refused =
+        client.call(json!({"op":"agent-cli-updates", "action":"install", "provider":"jcode"}));
+    assert_eq!(refused["ok"], false, "{refused}");
+    let refused = client.call(json!({"op":"agent-cli-updates", "action":"nope"}));
+    assert_eq!(refused["ok"], false, "{refused}");
+}
+
+#[test]
 fn update_restart_protects_open_shells() {
     let daemon = Daemon::start();
     let mut client = daemon.client();

@@ -18,6 +18,7 @@ mod agent;
 mod ask;
 mod auth;
 mod background_process;
+mod cli_updates;
 mod cli_versions;
 mod codex_app;
 mod git_draft;
@@ -47,6 +48,7 @@ mod workflow;
 mod worktree_name;
 
 use auth::AuthManager;
+use cli_updates::CliUpdates;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
 use local_socket::UnixStream;
@@ -73,6 +75,7 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
+    cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
     owner_icons: Arc<OwnerIcons>,
@@ -133,6 +136,7 @@ impl Engine {
             shutdown: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone()),
+            cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
@@ -161,6 +165,7 @@ impl Engine {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::with_store(store.clone()));
         let auth = AuthManager::new(events.clone());
+        let cli_updates = CliUpdates::new(events.clone());
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
@@ -176,6 +181,7 @@ impl Engine {
             )),
             store: Some(store),
             auth,
+            cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
@@ -283,9 +289,18 @@ impl Engine {
                 self.auth.snapshots()
             }
             Some("agent-clis") => self.cli_versions.snapshots(),
+            Some("agent-cli-updates") => self
+                .cli_updates
+                .perform(
+                    request.get("action").and_then(Value::as_str),
+                    request.get("provider").and_then(Value::as_str),
+                )
+                .unwrap_or_else(error_reply),
             Some("host-update") => {
                 let action = request.get("action").and_then(Value::as_str);
-                if action == Some("restart")
+                if action == Some("restart") && self.cli_updates.is_updating() {
+                    error_reply("Wait for the assistant updates to finish before restarting.")
+                } else if action == Some("restart")
                     && (self
                         .runtime
                         .as_ref()

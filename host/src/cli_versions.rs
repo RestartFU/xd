@@ -172,7 +172,7 @@ fn snapshot_value(provider: &str, snapshot: &CliSnapshot) -> Value {
     value
 }
 
-fn read_version(executable: &Path, timeout: Duration) -> Result<String, String> {
+pub(crate) fn read_version(executable: &Path, timeout: Duration) -> Result<String, String> {
     let mut child = background_command(executable)
         .arg("--version")
         .env("DISABLE_AUTOUPDATER", "1")
@@ -222,7 +222,7 @@ fn read_version(executable: &Path, timeout: Duration) -> Result<String, String> 
     parse_version_output(status, &stdout, &stderr)
 }
 
-fn read_limited(mut stream: impl Read) -> Vec<u8> {
+pub(crate) fn read_limited(mut stream: impl Read) -> Vec<u8> {
     let mut output = Vec::new();
     let mut buffer = [0_u8; 1024];
     loop {
@@ -266,7 +266,7 @@ fn parse_version_output(
     }
 }
 
-fn clean_output(output: &[u8]) -> String {
+pub(crate) fn clean_output(output: &[u8]) -> String {
     let mut without_ansi = Vec::with_capacity(output.len());
     let mut bytes = output.iter().copied().peekable();
     while let Some(byte) = bytes.next() {
