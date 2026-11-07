@@ -128,11 +128,12 @@ class UsageViewModel(
         // Each account's unsettled attempt is kept on disk until the host
         // settles it, so retrying after a lost answer, another account, or the
         // app being killed cannot spend a second credit, as the desktop keeps them.
-        val attempt = settings.resetAttempt(accountKey) ?: UUID.randomUUID().toString().also { fresh ->
-            if (!settings.saveResetAttempt(accountKey, fresh)) {
-                _state.update { it.copy(resetMessage = "Could not keep a record of the reset, so it was not sent.") }
-                return
-            }
+        val attempt = settings.resetAttempt(accountKey) ?: UUID.randomUUID().toString()
+        // Committed before every send, not just the first: a failed commit can
+        // still leave the key readable in memory without it being on disk.
+        if (!settings.saveResetAttempt(accountKey, attempt)) {
+            _state.update { it.copy(resetMessage = "Could not keep a record of the reset, so it was not sent.") }
+            return
         }
         _state.update { it.copy(resetting = true, resetMessage = null, unsettledResets = it.unsettledResets + accountKey) }
         viewModelScope.launch {
