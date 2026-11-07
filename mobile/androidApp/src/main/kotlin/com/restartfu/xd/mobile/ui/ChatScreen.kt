@@ -260,7 +260,8 @@ internal fun ChatScreen(
                         openPullRequest = openLink,
                         pane = pane,
                         onPane = { pane = it },
-                        onBack = goBack,
+                        // Back steps out of a workspace view to the chat first, as system Back does.
+                        onBack = { if (pane != Pane.CHAT) pane = Pane.CHAT else goBack() },
                         onChatSettings = { choosingOptions = true },
                         chats = sessionChats,
                     )
@@ -800,58 +801,15 @@ private fun Composer(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.weight(1f))
-                    // One round button that sends and then stops, as on the
-                    // desktop: an arrow in the accent while it is yours to send,
-                    // a neutral stop while the turn is the assistant's to finish.
-                    // With nothing typed after a turn was cut short, the same button
-                    // continues it, as the desktop's play button does.
-                    val resuming = !state.working && state.resumable &&
-                        composer.isBlank() && attachments.isEmpty()
-                    FilledIconButton(
-                        onClick = {
-                            when {
-                                state.working -> model.cancel()
-                                resuming -> model.resumeTurn()
-                                else -> model.send()
-                            }
-                        },
-                        enabled = when {
-                            state.working -> !cancelling && !steering
-                            resuming -> !sending
-                            // The host accepts text, images, or both.
-                            else -> !sending && (composer.isNotBlank() || attachments.isNotEmpty())
-                        },
-                        modifier = Modifier.size(48.dp),
-                        colors = if (state.working) {
-                            IconButtonDefaults.filledIconButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                contentColor = MaterialTheme.colorScheme.onSurface,
-                            )
-                        } else {
-                            IconButtonDefaults.filledIconButtonColors(
-                                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                disabledContentColor = LocalXdSignals.current.faint,
-                            )
-                        },
-                    ) {
-                        Icon(
-                            painter = painterResource(
-                                when {
-                                    state.working -> R.drawable.ic_stop
-                                    resuming -> R.drawable.ic_play
-                                    else -> R.drawable.ic_send
-                                },
-                            ),
-                            contentDescription = when {
-                                cancelling -> "Stopping"
-                                state.working -> "Stop"
-                                sending -> "Sending"
-                                resuming -> "Continue where it left off"
-                                else -> "Send"
-                            },
-                            modifier = Modifier.size(if (state.working || resuming) 16.dp else 20.dp),
-                        )
-                    }
+                    SendButton(
+                        state = state,
+                        empty = composer.isBlank() && attachments.isEmpty(),
+                        sending = sending,
+                        cancelling = cancelling,
+                        steering = steering,
+                        model = model,
+                        size = 48.dp,
+                    )
                 }
             }
         }
@@ -950,38 +908,80 @@ private fun CompactComposerRow(
             }
             }
             }
-            FilledIconButton(
-                onClick = { if (state.working) model.cancel() else model.send() },
-                enabled = if (state.working) {
-                    !cancelling && !steering
-                } else {
-                    !sending && (composer.isNotBlank() || attached > 0)
-                },
-                modifier = Modifier.size(40.dp),
-                colors = if (state.working) {
-                    IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        contentColor = MaterialTheme.colorScheme.onSurface,
-                    )
-                } else {
-                    IconButtonDefaults.filledIconButtonColors(
-                        disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        disabledContentColor = faint,
-                    )
-                },
-            ) {
-                Icon(
-                    painter = painterResource(if (state.working) R.drawable.ic_stop else R.drawable.ic_send),
-                    contentDescription = when {
-                        cancelling -> "Stopping"
-                        state.working -> "Stop"
-                        sending -> "Sending"
-                        else -> "Send"
-                    },
-                    modifier = Modifier.size(if (state.working) 14.dp else 18.dp),
-                )
-            }
+            SendButton(
+                state = state,
+                empty = composer.isBlank() && attached == 0,
+                sending = sending,
+                cancelling = cancelling,
+                steering = steering,
+                model = model,
+                size = 40.dp,
+            )
         }
+    }
+}
+
+/**
+ * One round button that sends and then stops, as on the desktop: an arrow in
+ * the accent while it is yours to send, a neutral stop while the turn is the
+ * assistant's to finish. With nothing typed after a turn was cut short, the
+ * same button continues it, as the desktop's play button does.
+ */
+@Composable
+private fun SendButton(
+    state: com.restartfu.xd.model.ChatState,
+    empty: Boolean,
+    sending: Boolean,
+    cancelling: Boolean,
+    steering: Boolean,
+    model: ChatViewModel,
+    size: androidx.compose.ui.unit.Dp,
+) {
+    val resuming = !state.working && state.resumable && empty
+    FilledIconButton(
+        onClick = {
+            when {
+                state.working -> model.cancel()
+                resuming -> model.resumeTurn()
+                else -> model.send()
+            }
+        },
+        enabled = when {
+            state.working -> !cancelling && !steering
+            resuming -> !sending
+            // The host accepts text, images, or both.
+            else -> !sending && !empty
+        },
+        modifier = Modifier.size(size),
+        colors = if (state.working) {
+            IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+            )
+        } else {
+            IconButtonDefaults.filledIconButtonColors(
+                disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                disabledContentColor = LocalXdSignals.current.faint,
+            )
+        },
+    ) {
+        Icon(
+            painter = painterResource(
+                when {
+                    state.working -> R.drawable.ic_stop
+                    resuming -> R.drawable.ic_play
+                    else -> R.drawable.ic_send
+                },
+            ),
+            contentDescription = when {
+                cancelling -> "Stopping"
+                state.working -> "Stop"
+                sending -> "Sending"
+                resuming -> "Continue where it left off"
+                else -> "Send"
+            },
+            modifier = Modifier.size(if (state.working || resuming) size / 3 else size * 5 / 12),
+        )
     }
 }
 
