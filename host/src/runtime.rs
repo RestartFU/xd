@@ -439,14 +439,44 @@ impl TurnRuntime {
     }
 
     /// Puts messages the agent never read back at the front of the queue, in
-    /// the order they were sent.
-    fn requeue_steers(&self, chat_id: &str, prompts: &[String]) {
-        for prompt in prompts.iter().rev() {
-            match self.inner.store.requeue_front(chat_id, prompt) {
-                Ok(event) => self.inner.events.publish(event),
+    /// the order they were sent. `returned` counts those this turn has already
+    /// put back, so a later one lines up behind them instead of jumping ahead.
+    fn requeue_steers(&self, chat_id: &str, prompts: &[String], returned: &mut usize) {
+        for prompt in prompts {
+            match self.inner.store.requeue_at(chat_id, *returned, prompt) {
+                Ok(event) => {
+                    self.inner.events.publish(event);
+                    *returned += 1;
+                }
                 Err(error) => eprintln!("xd: cannot requeue a steered message: {error}"),
             }
         }
+    }
+
+    /// Takes back a message the agent will not answer: it no longer belongs in
+    /// the transcript, and returns to the queue to be sent again.
+    fn return_steer(
+        &self,
+        chat_id: &str,
+        progress: &TurnProgress,
+        steered: &mut Vec<(String, i64)>,
+        prompt: &str,
+        returned: &mut usize,
+    ) {
+        if let Some(index) = steered.iter().position(|(sent, _)| sent == prompt) {
+            let (_, message_id) = steered.remove(index);
+            let _ = self.inner.store.delete_message(chat_id, message_id);
+            let row = format!("{STEER_ROW_PREFIX}{prompt}");
+            if let Ok(mut state) = progress.state.lock() {
+                state
+                    .items
+                    .retain(|item| item["text"].as_str() != Some(row.as_str()));
+            }
+        }
+        self.requeue_steers(chat_id, &[prompt.to_owned()], returned);
+        self.inner
+            .events
+            .publish(json!({"event": "changed", "chat": chat_id}));
     }
 
     fn write_rpc(&self, chat_id: &str, frame: &Value) -> Result<(), String> {
@@ -1313,6 +1343,7 @@ impl TurnRuntime {
         let mut keep_image = move |path: &str| store.keep_reply_image(&workdir, path);
         // Messages sent into this turn, with their stored rows.
         let mut steered: Vec<(String, i64)> = Vec::new();
+        let mut returned_steers = 0;
 
         let mut line = String::new();
         // Stores the reply streamed so far as its own message, which a tool
@@ -1360,11 +1391,17 @@ impl TurnRuntime {
                     // Whatever the agent was saying no longer stands, so a
                     // question in it is not the question this turn ends on.
                     assistant_text.clear();
-                    let written = parser
-                        .steer_frame(&prompt)
-                        .is_some_and(|frame| self.write_rpc(&turn.chat_id, &frame).is_ok());
-                    if !written {
-                        self.requeue_steers(&turn.chat_id, std::slice::from_ref(&prompt));
+                    let Some(frame) = parser.steer_frame(&prompt) else {
+                        self.requeue_steers(
+                            &turn.chat_id,
+                            std::slice::from_ref(&prompt),
+                            &mut returned_steers,
+                        );
+                        continue;
+                    };
+                    // A pipe that won't take it means the agent has died, and
+                    // the turn gives back what it did not read as it ends.
+                    if self.write_rpc(&turn.chat_id, &frame).is_err() {
                         continue;
                     }
                     match self
@@ -1646,22 +1683,13 @@ impl TurnRuntime {
                     }
                     AgentEvent::Resumable => cut_short = true,
                     AgentEvent::Error(error) => latest_error = Some(error),
-                    AgentEvent::SteerRejected(prompt) => {
-                        if let Some(index) = steered.iter().position(|(sent, _)| *sent == prompt) {
-                            let (_, message_id) = steered.remove(index);
-                            let _ = self.inner.store.delete_message(&turn.chat_id, message_id);
-                            let row = format!("{STEER_ROW_PREFIX}{prompt}");
-                            if let Ok(mut state) = progress.state.lock() {
-                                state
-                                    .items
-                                    .retain(|item| item["text"].as_str() != Some(row.as_str()));
-                            }
-                        }
-                        self.requeue_steers(&turn.chat_id, std::slice::from_ref(&prompt));
-                        self.inner
-                            .events
-                            .publish(json!({"event": "changed", "chat": turn.chat_id}));
-                    }
+                    AgentEvent::SteerRejected(prompt) => self.return_steer(
+                        &turn.chat_id,
+                        &progress,
+                        &mut steered,
+                        &prompt,
+                        &mut returned_steers,
+                    ),
                     AgentEvent::Usage {
                         input,
                         output,
@@ -1706,6 +1734,19 @@ impl TurnRuntime {
             }
         }
 
+        // Nothing will answer these now. The process may still read them later,
+        // so it can't stay if they are to be sent again.
+        let unread_steers = parser.take_unread_steers();
+        for prompt in &unread_steers {
+            self.return_steer(
+                &turn.chat_id,
+                &progress,
+                &mut steered,
+                prompt,
+                &mut returned_steers,
+            );
+        }
+
         let was_cancelled = cancelled.load(Ordering::Acquire);
         let success = if keeps_process {
             // Nothing to wait for: it is still up, ready for the next turn.
@@ -1715,13 +1756,13 @@ impl TurnRuntime {
                 .ok()
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_none();
-            let stranded = if alive && completed && !was_cancelled {
+            let stranded = if alive && completed && !was_cancelled && unread_steers.is_empty() {
                 self.detach_feed(&turn.chat_id, source)
             } else {
                 self.drop_session(&turn.chat_id);
                 source.stranded_steers()
             };
-            self.requeue_steers(&turn.chat_id, &stranded);
+            self.requeue_steers(&turn.chat_id, &stranded, &mut returned_steers);
             was_cancelled || completed
         } else {
             let status = child.lock().ok().and_then(|mut child| child.wait().ok());
@@ -2874,28 +2915,58 @@ read never
         });
     }
 
-    /// The turn ended just as the steer was written, and the agent never starts
-    /// on it. The turn must still end rather than wait forever.
+    /// The turn ended just as the steers were written, and the agent never
+    /// starts on them. The turn must end rather than wait forever, and they must
+    /// still get answered, in order and only once, by a process that can't also
+    /// read the first copy.
     #[cfg(unix)]
     #[test]
-    fn a_turn_finishing_as_a_steer_arrives_still_ends() {
+    fn steers_the_agent_never_read_are_sent_again_in_order() {
         let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
         let fixture = SteerFixture::start(
             r#"#!/bin/sh
+if [ -e "$HEARD" ]; then
+  while read again; do
+    echo '{"type":"system","subtype":"init","session_id":"s1"}'
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Answered again."}]}}'
+    echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Answered again."}'
+  done
+  exit 0
+fi
+: > "$HEARD"
 read first
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
-echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on it."}]}}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
 read steer
+read another
 echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Working on it."}'
 read next
 "#,
         );
         fixture.wait_for_streamed("Working on it.");
         assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
-        wait_for("the turn to end", || {
-            fixture.runtime.live_turn(&fixture.chat).is_none()
+        assert!(fixture.runtime.steer(&fixture.chat, "And this"));
+        wait_for("both to be answered", || {
+            fixture.store.chat(&fixture.chat).unwrap()["working"] == false
+                && fixture
+                    .transcript()
+                    .iter()
+                    .filter(|(_, content)| content == "Answered again.")
+                    .count()
+                    == 2
         });
-        assert_eq!(fixture.store.chat(&fixture.chat).unwrap()["working"], false);
+        assert_eq!(
+            fixture.transcript(),
+            [
+                ("user", "first"),
+                ("assistant", "Working on it."),
+                ("user", "Do this instead"),
+                ("assistant", "Answered again."),
+                ("user", "And this"),
+                ("assistant", "Answered again."),
+            ]
+            .map(|(role, text)| (role.to_owned(), text.to_owned()))
+        );
     }
 
     /// Before the agent has begun, a steer could be mistaken for the turn's own

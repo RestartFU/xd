@@ -4349,8 +4349,18 @@ impl StateStore {
 
     /// Puts a message at the front of the queue and returns the queue's event.
     pub fn requeue_front(&self, chat_id: &str, text: &str) -> Result<Value, StorageError> {
+        self.requeue_at(chat_id, 0, text)
+    }
+
+    /// Puts a message back at `index`, or last if the queue has since shrunk.
+    pub fn requeue_at(
+        &self,
+        chat_id: &str,
+        index: usize,
+        text: &str,
+    ) -> Result<Value, StorageError> {
         let (_, event) = self.mutate_queue(chat_id, |queue| {
-            queue.insert(0, text.to_owned());
+            queue.insert(index.min(queue.len()), text.to_owned());
             Ok(true)
         })?;
         Ok(event)
@@ -9712,6 +9722,16 @@ mod tests {
         );
         let event = store.requeue_front("chat-1", "edited").unwrap();
         assert_eq!(event["queue"], json!(["edited", "first"]));
+        let event = store.requeue_at("chat-1", 1, "second").unwrap();
+        assert_eq!(event["queue"], json!(["edited", "second", "first"]));
+        let event = store.requeue_at("chat-1", 9, "last").unwrap();
+        assert_eq!(event["queue"], json!(["edited", "second", "first", "last"]));
+        store
+            .take_queued(&json!({"chat": "chat-1", "index": 3, "text": "last"}))
+            .unwrap();
+        store
+            .take_queued(&json!({"chat": "chat-1", "index": 1, "text": "second"}))
+            .unwrap();
         let (_, event) = store
             .drop_queue(&json!({"chat": "chat-1", "index": 0}))
             .unwrap();

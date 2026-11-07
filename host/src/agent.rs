@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     path::PathBuf,
     process::Command,
@@ -140,7 +140,7 @@ impl AgentParser {
         match self {
             Self::AppServer(parser) => parser.steer_request(prompt),
             Self::Claude(parser) => parser
-                .begin_steer()
+                .begin_steer(prompt)
                 .then(|| AgentCommand::encode_steer(prompt)),
             Self::Codex(_) | Self::Jcode(_) => None,
         }
@@ -168,6 +168,16 @@ impl AgentParser {
                     Vec::new()
                 }
             }
+            Self::Codex(_) | Self::Jcode(_) => Vec::new(),
+        }
+    }
+
+    /// Steers the agent has not picked up, oldest first. Once the turn is over
+    /// nothing will answer them, so they go back to the user.
+    pub fn take_unread_steers(&mut self) -> Vec<String> {
+        match self {
+            Self::AppServer(parser) => parser.take_unread_steers(),
+            Self::Claude(parser) => parser.unread_steers.drain(..).collect(),
             Self::Codex(_) | Self::Jcode(_) => Vec::new(),
         }
     }
@@ -596,7 +606,7 @@ pub struct ClaudeParser {
     running: bool,
     /// Steers written that no run has picked up yet. Each one Claude picks up
     /// ends the run in progress and opens a new run for the same xd turn.
-    steers: u32,
+    unread_steers: VecDeque<String>,
     /// A run finished by itself while a steer was still unread. If that steer
     /// opens a new run the turn goes on; otherwise this was its end.
     settling: bool,
@@ -699,7 +709,7 @@ impl ClaudeParser {
             Some("system") if root.get("subtype").and_then(Value::as_str) == Some("init") => {
                 self.running = true;
                 self.settling = false;
-                self.steers = self.steers.saturating_sub(1);
+                self.unread_steers.pop_front();
                 let mut events = Vec::new();
                 if let Some(session) = root.get("session_id").and_then(Value::as_str) {
                     events.push(AgentEvent::Session(session.to_owned()));
@@ -732,7 +742,7 @@ impl ClaudeParser {
                 let limit_rejected = std::mem::take(&mut self.limit_rejected);
                 // A steer ends the run it interrupts with one of these, which
                 // is not the end of the turn however it is flagged.
-                if self.steers > 0
+                if !self.unread_steers.is_empty()
                     && root
                         .get("terminal_reason")
                         .and_then(Value::as_str)
@@ -747,7 +757,7 @@ impl ClaudeParser {
                     .unwrap_or(false);
                 if !failed
                     && !self.saw_text
-                    && self.steers == 0
+                    && self.unread_steers.is_empty()
                     && let Some(text) = root.get("result").and_then(Value::as_str)
                     && !text.is_empty()
                 {
@@ -793,7 +803,7 @@ impl ClaudeParser {
                             window: claude_context_window(&root),
                         });
                     }
-                    if self.steers > 0 {
+                    if !self.unread_steers.is_empty() {
                         self.settling = true;
                         self.begin_next_run();
                     } else {
@@ -809,15 +819,15 @@ impl ClaudeParser {
     /// While a steer is unread the reply in progress is being abandoned. Its
     /// last words must not land after the user's message as part of the answer.
     fn without_superseded_text(&self, mut events: Vec<AgentEvent>) -> Vec<AgentEvent> {
-        if self.steers > 0 {
+        if !self.unread_steers.is_empty() {
             events.retain(|event| !matches!(event, AgentEvent::Text(_) | AgentEvent::TextDelta(_)));
         }
         events
     }
 
-    fn begin_steer(&mut self) -> bool {
+    fn begin_steer(&mut self, prompt: &str) -> bool {
         if self.running {
-            self.steers += 1;
+            self.unread_steers.push_back(prompt.to_owned());
         }
         self.running
     }
@@ -2117,13 +2127,17 @@ mod tests {
         assert!(!parser.settling());
         assert!(parser.feed(done).contains(&AgentEvent::Completed));
 
-        // Or nothing ever comes, and the turn was over after all.
+        assert_eq!(parser.take_unread_steers(), [] as [String; 0]);
+
+        // Or nothing ever comes: the turn was over, and the agent never read it.
         let mut parser = AgentParser::Claude(ClaudeParser::default());
         parser.feed(init);
         parser.steer_frame("Instead").unwrap();
+        parser.steer_frame("And this").unwrap();
         parser.feed(done);
         assert_eq!(parser.take_settled(), [AgentEvent::Completed]);
         assert!(!parser.settling());
+        assert_eq!(parser.take_unread_steers(), ["Instead", "And this"]);
     }
 
     #[test]

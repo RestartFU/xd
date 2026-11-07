@@ -966,10 +966,12 @@ mod tests {
     fn a_pull_request_lookup_serves_several_sweeps() {
         // The merge came before the user's latest message, so the session
         // stays active and each sweep needs the answer again.
+        // The stand-in counts only this test's calls: a test elsewhere that asks
+        // for pull requests without the lock can reach it while it is installed.
         let merged_at = now_seconds() - DAY_SECONDS * 5;
         with_fake_gh(
             &format!(
-                "echo x >> \"$(dirname \"$0\")/calls\"; \
+                "case \"$PWD\" in \"$(dirname \"$0\")\"/*) echo x >> \"$(dirname \"$0\")/calls\";; esac; \
                  echo '{{\"state\":\"MERGED\",\"finished_at\":{merged_at}}}'"
             ),
             |fixture, _| {
