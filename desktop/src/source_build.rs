@@ -16,6 +16,11 @@ use std::os::unix::process::CommandExt;
 
 const REPOSITORY: &str = "RestartFU/xd";
 const READ_CHUNK_BYTES: usize = 1_024;
+/// Git names the problem in its first lines, so this much is always enough.
+const FAILURE_CAPTURE_BYTES: usize = 4_096;
+const FAILURE_DETAIL_CHARS: usize = 240;
+/// Locks a killed Git leaves behind, each of which fails every later run.
+const STALE_GIT_LOCKS: [&str; 3] = ["shallow.lock", "index.lock", "HEAD.lock"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceTarget {
@@ -324,24 +329,16 @@ fn build_and_install(
 ) -> Result<(), String> {
     prepare_checkout(checkout)?;
     output(sender, "Fetching source…\n");
-    run(
+    run_git(
         Command::new(git_executable())
-            .args([
-                "-C",
-                path_text(checkout)?,
-                "fetch",
-                "--depth",
-                "1",
-                "--force",
-            ])
-            .arg(&target.url)
-            .arg(&target.git_ref),
+            .args(fetch_arguments(path_text(checkout)?, target))
+            .env("GIT_TERMINAL_PROMPT", "0"),
         "fetch the source",
         sender,
         control,
     )?;
     output(sender, "Checking out source…\n");
-    run(
+    run_git(
         Command::new(git_executable()).args([
             "-C",
             path_text(checkout)?,
@@ -355,7 +352,7 @@ fn build_and_install(
         sender,
         control,
     )?;
-    run(
+    run_git(
         Command::new(git_executable()).args(["-C", path_text(checkout)?, "clean", "-qfdx"]),
         "clean the source checkout",
         sender,
@@ -403,6 +400,28 @@ fn build_and_install(
     run(&mut install, "install the source build", sender, control)
 }
 
+/// xd's own repository is public, so fetching it needs no credentials. A user's
+/// `insteadOf` rule that sends GitHub through SSH would otherwise make the update
+/// depend on a key a GUI process often cannot reach, so the longest-match rule
+/// here keeps this one URL on HTTPS. Other repositories may be private and keep
+/// the user's rules.
+fn fetch_arguments(checkout: &str, target: &SourceTarget) -> Vec<String> {
+    let mut arguments = vec!["-C".to_owned(), checkout.to_owned()];
+    if target.url == format!("https://github.com/{REPOSITORY}.git") {
+        arguments.extend([
+            "-c".to_owned(),
+            format!("url.{0}.insteadOf={0}", target.url),
+        ]);
+    }
+    arguments.extend(
+        ["fetch", "--depth", "1", "--force"]
+            .into_iter()
+            .map(str::to_owned),
+    );
+    arguments.extend([target.url.clone(), target.git_ref.clone()]);
+    arguments
+}
+
 fn install_arguments(platform: BuildPlatform, channel: BuildChannel) -> Vec<String> {
     let (script, bundle) = match platform {
         BuildPlatform::Linux => ("scripts/install.sh", "dist".to_owned()),
@@ -433,24 +452,61 @@ fn prepare_checkout(checkout: &Path) -> Result<(), String> {
     }
     let git_dir = checkout.join(".git");
     match fs::symlink_metadata(&git_dir) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
-        Ok(_) => Err("The source-build Git directory is unsafe.".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let status = Command::new(git_executable())
-                .args(["init", "-q"])
-                .arg(checkout)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .status()
-                .map_err(|error| format!("Cannot initialize the source checkout: {error}"))?;
-            status
-                .success()
-                .then_some(())
-                .ok_or_else(|| "Git could not initialize the source checkout.".into())
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            clear_stale_locks(&git_dir)?;
+            // An interrupted init leaves a directory Git does not recognize.
+            if git_dir.join("HEAD").is_file() {
+                Ok(())
+            } else {
+                init_checkout(checkout)
+            }
         }
+        Ok(_) => Err("The source-build Git directory is unsafe.".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => init_checkout(checkout),
         Err(error) => Err(format!("Cannot inspect the source checkout: {error}")),
     }
+}
+
+/// Stopping a build or quitting kills Git outright, which leaves its locks in
+/// place. The app runs one build at a time, so these are not its own live locks.
+/// A second running copy of this install is not excluded, but two builds would
+/// already overwrite each other in this shared checkout.
+fn clear_stale_locks(git_dir: &Path) -> Result<(), String> {
+    for lock in STALE_GIT_LOCKS {
+        match fs::remove_file(git_dir.join(lock)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Cannot clear the stale {lock}: {error}")),
+        }
+    }
+    Ok(())
+}
+
+fn init_checkout(checkout: &Path) -> Result<(), String> {
+    let status = Command::new(git_executable())
+        .args(["init", "-q"])
+        .arg(checkout)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("Cannot initialize the source checkout: {error}"))?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| "Git could not initialize the source checkout.".into())
+}
+
+/// Runs a Git step, whose first error line says why far better than its exit
+/// code. Build scripts stay on [`run`]: their stderr is progress, not a reason.
+fn run_git(
+    command: &mut Command,
+    action: &str,
+    sender: &async_channel::Sender<SourceBuildEvent>,
+    control: &Arc<RunControl>,
+) -> Result<(), String> {
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    run_capturing(command, action, sender, control, Some(&stderr))
 }
 
 fn run(
@@ -458,6 +514,16 @@ fn run(
     action: &str,
     sender: &async_channel::Sender<SourceBuildEvent>,
     control: &Arc<RunControl>,
+) -> Result<(), String> {
+    run_capturing(command, action, sender, control, None)
+}
+
+fn run_capturing(
+    command: &mut Command,
+    action: &str,
+    sender: &async_channel::Sender<SourceBuildEvent>,
+    control: &Arc<RunControl>,
+    captured_stderr: Option<&Arc<Mutex<Vec<u8>>>>,
 ) -> Result<(), String> {
     if control.cancelled.load(Ordering::Acquire) {
         return Err("Source build stopped.".into());
@@ -474,12 +540,12 @@ fn run(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let readers = [
-        stdout.map(OutputReader::Stdout),
-        stderr.map(OutputReader::Stderr),
+        stdout.map(|reader| (OutputReader::Stdout(reader), None)),
+        stderr.map(|reader| (OutputReader::Stderr(reader), captured_stderr.cloned())),
     ]
     .into_iter()
     .flatten()
-    .map(|reader| spawn_reader(reader, sender.clone()))
+    .map(|(reader, capture)| spawn_reader(reader, sender.clone(), capture))
     .collect::<Vec<_>>();
     *control
         .child
@@ -493,10 +559,28 @@ fn run(
     if control.cancelled.load(Ordering::Acquire) {
         return Err("Source build stopped.".into());
     }
-    status
-        .success()
-        .then_some(())
-        .ok_or_else(|| format!("Could not {action} ({}).", status_text(status)))
+    if status.success() {
+        return Ok(());
+    }
+    let detail = captured_stderr
+        .and_then(|stderr| stderr.lock().ok())
+        .and_then(|stderr| failure_detail(&String::from_utf8_lossy(&stderr)));
+    Err(match detail {
+        Some(detail) => format!("Could not {action}: {detail}"),
+        None => format!("Could not {action} ({}).", status_text(status)),
+    })
+}
+
+/// The first line of Git's stderr that states the failure, without the advice
+/// and notices that can come before it.
+fn failure_detail(stderr: &str) -> Option<String> {
+    let line = stderr.lines().map(str::trim).find(|line| {
+        let lower = line.to_ascii_lowercase();
+        !line.is_empty() && !lower.starts_with("warning:") && !lower.starts_with("hint:")
+    })?;
+    let line = line.strip_prefix("fatal: ").unwrap_or(line);
+    let line = line.strip_prefix("error: ").unwrap_or(line);
+    Some(line.chars().take(FAILURE_DETAIL_CHARS).collect())
 }
 
 fn git_executable() -> PathBuf {
@@ -520,6 +604,7 @@ impl Read for OutputReader {
 fn spawn_reader(
     mut reader: OutputReader,
     sender: async_channel::Sender<SourceBuildEvent>,
+    capture: Option<Arc<Mutex<Vec<u8>>>>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut buffer = [0_u8; READ_CHUNK_BYTES];
@@ -529,6 +614,10 @@ fn spawn_reader(
             };
             if count == 0 {
                 break;
+            }
+            if let Some(mut captured) = capture.as_ref().and_then(|capture| capture.lock().ok()) {
+                let room = FAILURE_CAPTURE_BYTES.saturating_sub(captured.len());
+                captured.extend_from_slice(&buffer[..count.min(room)]);
             }
             output(&sender, &String::from_utf8_lossy(&buffer[..count]));
         }
@@ -597,6 +686,110 @@ fn status_text(status: ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetching_xd_itself_ignores_rewrites_that_other_repositories_keep() {
+        let own = parse_target("abcdef0123456789").unwrap();
+        let arguments = fetch_arguments("/checkout", &own);
+        assert_eq!(
+            arguments[..4],
+            [
+                "-C",
+                "/checkout",
+                "-c",
+                "url.https://github.com/RestartFU/xd.git.insteadOf=https://github.com/RestartFU/xd.git",
+            ]
+        );
+        assert_eq!(
+            arguments[4..],
+            [
+                "fetch",
+                "--depth",
+                "1",
+                "--force",
+                "https://github.com/RestartFU/xd.git",
+                "abcdef0123456789",
+            ]
+        );
+
+        let other = parse_target("https://github.com/example/project/tree/main").unwrap();
+        assert!(
+            !fetch_arguments("/checkout", &other)
+                .iter()
+                .any(|argument| argument == "-c")
+        );
+    }
+
+    #[test]
+    fn failure_detail_names_the_reason_rather_than_the_preamble() {
+        assert_eq!(
+            failure_detail(
+                "Warning: Permanently added 'github.com' to known hosts.\n\
+                 git@github.com: Permission denied (publickey).\n\
+                 fatal: Could not read from remote repository.\n"
+            )
+            .as_deref(),
+            Some("git@github.com: Permission denied (publickey).")
+        );
+        assert_eq!(
+            failure_detail("hint: try again\nfatal: couldn't find remote ref abc\n").as_deref(),
+            Some("couldn't find remote ref abc")
+        );
+        assert_eq!(failure_detail("\n  \nwarning: noise\n"), None);
+        assert_eq!(
+            failure_detail(&"é".repeat(FAILURE_DETAIL_CHARS * 2))
+                .unwrap()
+                .chars()
+                .count(),
+            FAILURE_DETAIL_CHARS
+        );
+    }
+
+    #[test]
+    fn a_git_failure_reports_what_git_said_and_a_build_failure_keeps_its_exit_code() {
+        let (sender, _receiver) = async_channel::bounded(64);
+        let control = Arc::new(RunControl {
+            cancelled: AtomicBool::new(false),
+            child: Mutex::new(None),
+        });
+        let failing = || {
+            let mut command = Command::new("sh");
+            command.args(["-c", "echo 'fatal: no route' >&2; exit 128"]);
+            command
+        };
+        assert_eq!(
+            run_git(&mut failing(), "fetch the source", &sender, &control),
+            Err("Could not fetch the source: no route".to_owned())
+        );
+        assert_eq!(
+            run(&mut failing(), "build the source", &sender, &control),
+            Err("Could not build the source (exit 128).".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_checkout_wrecked_by_an_interrupted_git_recovers() {
+        let checkout = env::temp_dir().join(format!("xd-source-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&checkout);
+        let git_dir = checkout.join(".git");
+        fs::create_dir_all(&checkout).unwrap();
+
+        // An interrupted init left a directory that is not yet a repository.
+        fs::create_dir(&git_dir).unwrap();
+        prepare_checkout(&checkout).unwrap();
+        assert!(git_dir.join("HEAD").is_file());
+
+        // A killed fetch left its lock, which Git would refuse to get past.
+        for lock in STALE_GIT_LOCKS {
+            fs::write(git_dir.join(lock), "").unwrap();
+        }
+        prepare_checkout(&checkout).unwrap();
+        for lock in STALE_GIT_LOCKS {
+            assert!(!git_dir.join(lock).exists(), "kept {lock}");
+        }
+
+        fs::remove_dir_all(&checkout).unwrap();
+    }
 
     fn installed_nightly_root_for_executable(
         executable: &Path,
