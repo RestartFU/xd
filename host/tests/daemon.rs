@@ -122,6 +122,26 @@ for line in sys.stdin:
         }
         daemon
     }
+    /// Starts a new daemon on the same data after this one was stopped.
+    fn restart(&mut self) {
+        self.child = Command::new(env!("CARGO_BIN_EXE_xd-host"))
+            .env("XD_DISABLE_AUTO_UPDATE", "1")
+            .args(["daemon", "--data"])
+            .arg(&self.root)
+            .env("XD_CODEX_EXECUTABLE", self.root.join("codex"))
+            .env("HOME", &self.root)
+            .env("SHELL", "/bin/sh")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(&self.socket).is_err() {
+            assert!(Instant::now() < deadline, "daemon restart timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     fn client(&self) -> Client<UnixStream, UnixStream> {
         let socket = UnixStream::connect(&self.socket).unwrap();
         socket
@@ -297,6 +317,80 @@ fn reports_assistant_updates_and_refuses_unknown_requests() {
     assert_eq!(refused["ok"], false, "{refused}");
     let refused = client.call(json!({"op":"agent-cli-updates", "action":"nope"}));
     assert_eq!(refused["ok"], false, "{refused}");
+}
+
+#[test]
+fn a_restart_continues_cut_off_turns_only_when_asked() {
+    let continued = |client: &mut Client<UnixStream, UnixStream>, chat: &str| {
+        client.call(json!({"op":"messages", "chat":chat}))["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| {
+                message["role"] == "user"
+                    && message["content"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Continue where")
+            })
+    };
+    let mut daemon = Daemon::start();
+    let mut client = daemon.client();
+
+    // A crash leaves the turn looking as if it were still running.
+    let crashed = daemon.chat(&mut client);
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":crashed, "text":"forever"}))["ok"],
+        true
+    );
+    drop(client);
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
+    daemon.restart();
+    let mut client = daemon.client();
+    let reply = client.call(json!({"op":"resume-interrupted", "resume":true}));
+    assert_eq!(reply["resumed"], json!([crashed]), "{reply}");
+    assert!(continued(&mut client, &crashed));
+    let again = client.call(json!({"op":"resume-interrupted", "resume":true}));
+    assert_eq!(again["resumed"], json!([]), "{again}");
+
+    // A clean stop ends the turn first, but it still never finished.
+    client.wait_for(json!({"op":"chat", "chat":crashed}), |reply| {
+        reply["working"] == false
+    });
+    let stopped = daemon.chat(&mut client);
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":stopped, "text":"forever"}))["ok"],
+        true
+    );
+    assert_eq!(client.call(json!({"op":"daemon-stop"}))["ok"], true);
+    drop(client);
+    daemon.child.wait().unwrap();
+    daemon.restart();
+    let mut client = daemon.client();
+    let reply = client.call(json!({"op":"resume-interrupted", "resume":true}));
+    assert_eq!(reply["resumed"], json!([stopped]), "{reply}");
+    assert!(continued(&mut client, &stopped));
+
+    // With the setting off the interruption is dropped, and asking later does nothing.
+    client.wait_for(json!({"op":"chat", "chat":stopped}), |reply| {
+        reply["working"] == false
+    });
+    let declined = daemon.chat(&mut client);
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":declined, "text":"forever"}))["ok"],
+        true
+    );
+    drop(client);
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
+    daemon.restart();
+    let mut client = daemon.client();
+    let reply = client.call(json!({"op":"resume-interrupted", "resume":false}));
+    assert_eq!(reply["resumed"], json!([]), "{reply}");
+    let later = client.call(json!({"op":"resume-interrupted", "resume":true}));
+    assert_eq!(later["resumed"], json!([]), "{later}");
+    assert!(!continued(&mut client, &declined));
 }
 
 #[test]

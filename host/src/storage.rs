@@ -36,6 +36,9 @@ For an optional concise spoken response, wrap only the words that should be read
 
 Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all."#;
 const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
+/// Sent as a normal message, so the transcript shows why the agent carried on.
+pub(crate) const RESUME_PROMPT: &str =
+    "Continue where you left off. xd restarted before your last turn finished.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -1835,6 +1838,58 @@ impl StateStore {
         }
         transaction.commit()?;
         Ok(interrupted)
+    }
+
+    /// Notes a turn the host is about to stop for shutting down. Stopping it may
+    /// finish it cleanly before the process exits, which would otherwise leave
+    /// nothing to show that it never completed.
+    pub fn mark_resume_after_restart(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chats SET resume_after_restart = 1 WHERE id = ?",
+            [chat_id],
+        )?;
+        Ok(())
+    }
+
+    /// The chats a restart cut off: those just recovered and those marked at
+    /// shutdown, once each. A chat whose latest message is already the resume
+    /// prompt is left alone, so a turn that keeps taking the host down cannot
+    /// restart itself forever.
+    pub fn take_chats_to_resume(&self, recovered: &[String]) -> Result<Vec<String>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let mut chats = recovered.to_vec();
+        {
+            let mut statement =
+                transaction.prepare("SELECT id FROM chats WHERE resume_after_restart = 1")?;
+            for chat_id in statement.query_map([], |row| row.get::<_, String>(0))? {
+                let chat_id = chat_id?;
+                if !chats.contains(&chat_id) {
+                    chats.push(chat_id);
+                }
+            }
+            let mut latest = transaction.prepare(
+                "SELECT content FROM messages WHERE chat_id = ? AND role = 'user' \
+                 ORDER BY id DESC LIMIT 1",
+            )?;
+            let mut resumable = Vec::with_capacity(chats.len());
+            for chat_id in chats {
+                let prompt = latest
+                    .query_row([&chat_id], |row| row.get::<_, String>(0))
+                    .optional()?;
+                if prompt.as_deref() != Some(RESUME_PROMPT) {
+                    resumable.push(chat_id);
+                }
+            }
+            chats = resumable;
+        }
+        transaction.execute(
+            "UPDATE chats SET resume_after_restart = 0 WHERE resume_after_restart = 1",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(chats)
     }
 
     /// Same repair as [`StateStore::recover_interrupted_turns`], for the single
@@ -3986,6 +4041,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     if !columns.contains("partial_reply") {
         database.execute(
             "ALTER TABLE chats ADD COLUMN partial_reply TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !columns.contains("resume_after_restart") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN resume_after_restart INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -8764,6 +8825,60 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn a_restart_resumes_each_cut_off_chat_once_and_never_loops() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for chat in ["crashed", "stopped", "idle"] {
+            fixture.insert_chat(&database, chat, "folder");
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let (crashed, stopped, idle) = (
+            "crashed".to_owned(),
+            "stopped".to_owned(),
+            "idle".to_owned(),
+        );
+        let send = |chat: &str, text: &str| {
+            let SendDisposition::Start { .. } = store
+                .prepare_send(&json!({"chat": chat, "text": text}))
+                .unwrap()
+            else {
+                panic!("the send should start a turn");
+            };
+        };
+        send(&crashed, "first");
+        send(&stopped, "second");
+        send(&idle, "third");
+        store.clear_interrupted_turn(&idle).unwrap();
+        store.mark_resume_after_restart(&stopped).unwrap();
+        store.clear_interrupted_turn(&stopped).unwrap();
+
+        let recovered = store.recover_interrupted_turns().unwrap();
+        assert_eq!(recovered, vec![crashed.clone()]);
+        assert_eq!(
+            store.take_chats_to_resume(&recovered).unwrap(),
+            vec![crashed.clone(), stopped.clone()]
+        );
+        assert!(store.take_chats_to_resume(&[]).unwrap().is_empty());
+
+        // The resumed turn is cut off as well, so it is not tried again.
+        send(&crashed, RESUME_PROMPT);
+        let recovered = store.recover_interrupted_turns().unwrap();
+        assert_eq!(recovered, vec![crashed.clone()]);
+        assert!(store.take_chats_to_resume(&recovered).unwrap().is_empty());
+
+        // A message from the user makes it eligible again.
+        send(&crashed, "try again");
+        let recovered = store.recover_interrupted_turns().unwrap();
+        assert_eq!(
+            store.take_chats_to_resume(&recovered).unwrap(),
+            vec![crashed]
+        );
     }
 
     #[test]

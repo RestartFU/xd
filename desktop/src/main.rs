@@ -2523,6 +2523,7 @@ impl XdDesktop {
             kind,
             RequestKind::HostUpdate { .. }
                 | RequestKind::AgentCliUpdates
+                | RequestKind::ResumeInterrupted
                 | RequestKind::Devices
                 | RequestKind::PeerPairing
                 | RequestKind::PairRemote
@@ -3030,6 +3031,7 @@ impl XdDesktop {
                         let _ = host.agent_catalog();
                         let _ = host.host_update("status");
                         let _ = host.agent_cli_updates("status", None);
+                        let _ = host.resume_interrupted(self.settings.auto_resume_chats);
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
                             let _ = host.git_state(chat_id);
                         }
@@ -3259,6 +3261,7 @@ impl XdDesktop {
                     | RequestKind::AgentClis
                     | RequestKind::HostUpdate { .. }
                     | RequestKind::AgentCliUpdates
+                    | RequestKind::ResumeInterrupted
                     | RequestKind::Devices
                     | RequestKind::PeerPairing
                     | RequestKind::RenameDevice { .. }
@@ -3614,6 +3617,15 @@ impl XdDesktop {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
+                RequestKind::ResumeInterrupted => {
+                    self.inactive_model.connection_error = Some(
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Could not resume interrupted chats.")
+                            .to_owned(),
+                    );
+                }
                 RequestKind::AgentCliUpdates => {
                     if let Some(panel) = &mut self.self_update_panel {
                         panel.error = Some(
@@ -3862,6 +3874,7 @@ impl XdDesktop {
             RequestKind::AgentAuthMutation => {}
             RequestKind::AgentClis => self.apply_cli_versions(&value),
             RequestKind::AgentCliUpdates => self.apply_cli_updates(&value),
+            RequestKind::ResumeInterrupted => {}
             RequestKind::HostUpdate { action } => {
                 self.apply_self_update(&value);
                 if action == "restart" && !cfg!(test) {
@@ -18813,6 +18826,9 @@ mod tests {
         assert!(!XdDesktop::remote_read_event("agent-cli-update"));
         assert!(!XdDesktop::remote_read_event("host-update"));
         assert!(XdDesktop::local_admin_reply(&RequestKind::AgentCliUpdates));
+        assert!(XdDesktop::local_admin_reply(
+            &RequestKind::ResumeInterrupted
+        ));
         assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
         assert!(XdDesktop::remote_read_event("terminal-activity"));

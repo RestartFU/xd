@@ -75,6 +75,7 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
+    chats_to_resume: Mutex<Vec<String>>,
     cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
@@ -136,6 +137,7 @@ impl Engine {
             shutdown: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone()),
+            chats_to_resume: Mutex::new(Vec::new()),
             cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
@@ -181,6 +183,7 @@ impl Engine {
             )),
             store: Some(store),
             auth,
+            chats_to_resume: Mutex::new(Vec::new()),
             cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
@@ -224,6 +227,9 @@ impl Engine {
             Some("ping") => json!({"ok": true}),
             Some("daemon-info") => {
                 json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str)})
+            }
+            Some("resume-interrupted") if self.pairing.is_local(owner) => {
+                self.resume_interrupted(&request)
             }
             Some("daemon-stop") if self.pairing.is_local(owner) => {
                 self.shutdown.store(true, Ordering::Release);
@@ -421,6 +427,40 @@ impl Engine {
             reply.insert(REQUEST_ID.into(), request_id);
         }
         reply
+    }
+
+    /// Chats this daemon found cut off when it started. They wait here for the
+    /// desktop, which owns the setting that says whether to continue them.
+    pub fn remember_chats_to_resume(&self, chats: Vec<String>) {
+        if let Ok(mut remembered) = self.chats_to_resume.lock() {
+            *remembered = chats;
+        }
+    }
+
+    /// Answered once per daemon start, so a client reconnecting later, or turning
+    /// the setting on later, does not restart work from an old interruption.
+    fn resume_interrupted(&self, request: &Value) -> Value {
+        let chats = self
+            .chats_to_resume
+            .lock()
+            .map(|mut chats| std::mem::take(&mut *chats))
+            .unwrap_or_default();
+        let mut resumed = Vec::new();
+        if request.get("resume").and_then(Value::as_bool) == Some(true) {
+            for chat_id in chats {
+                let reply = self.send_message(
+                    &json!({"op": "send", "chat": chat_id, "text": storage::RESUME_PROMPT}),
+                );
+                if reply["ok"] == true {
+                    self.events
+                        .publish(json!({"event": "changed", "chat": chat_id}));
+                    resumed.push(chat_id);
+                } else {
+                    eprintln!("xd-host: cannot resume chat {chat_id}: {reply}");
+                }
+            }
+        }
+        json!({"ok": true, "resumed": resumed})
     }
 
     pub fn shutdown_requested(&self) -> bool {

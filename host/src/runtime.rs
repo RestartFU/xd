@@ -344,7 +344,8 @@ impl TurnRuntime {
 
     pub(crate) fn shutdown(&self) {
         if let Ok(active) = self.inner.active.lock() {
-            for process in active.values() {
+            for (chat_id, process) in active.iter() {
+                let _ = self.inner.store.mark_resume_after_restart(chat_id);
                 process.cancelled.store(true, Ordering::Release);
                 if let Ok(mut child) = process.child.lock() {
                     let _ = terminate_agent(&mut child);

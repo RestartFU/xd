@@ -49,6 +49,7 @@ pub enum RequestKind {
         action: String,
     },
     AgentCliUpdates,
+    ResumeInterrupted,
     AgentSecrets {
         folder_id: Option<String>,
     },
@@ -483,6 +484,14 @@ impl HostHandle {
             body["provider"] = json!(provider);
         }
         self.send(RequestKind::AgentCliUpdates, body)
+    }
+
+    /// Tells the host whether to continue the turns its last restart cut off.
+    pub fn resume_interrupted(&self, resume: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::ResumeInterrupted,
+            json!({"op": "resume-interrupted", "resume": resume}),
+        )
     }
 
     pub fn agent_auth_action(
