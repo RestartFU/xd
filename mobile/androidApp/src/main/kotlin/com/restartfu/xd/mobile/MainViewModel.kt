@@ -148,6 +148,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val accountsError: StateFlow<String?> = _accountsError.asStateFlow()
     val agentAuth = client.agentAuth
     val agentClis = client.agentClis
+    val agentAuthStale = client.agentAuthStale
+    val agentClisStale = client.agentClisStale
     private val _chatTitles = MutableStateFlow<ChatTitleSettingsReply?>(null)
     private val _chatTitlesError = MutableStateFlow<String?>(null)
     private val _catalog = MutableStateFlow<List<BackendReply>>(emptyList())

@@ -55,6 +55,8 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
     val auth by model.agentAuth.collectAsStateWithLifecycle()
     val clis by model.agentClis.collectAsStateWithLifecycle()
     val error by model.accountsError.collectAsStateWithLifecycle()
+    val authStale by model.agentAuthStale.collectAsStateWithLifecycle()
+    val clisStale by model.agentClisStale.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { model.loadAccounts() }
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -69,9 +71,22 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
+                // A failed read, now or after reconnecting, keeps Try again in
+                // reach and says the state shown may be old.
+                if (error != null || authStale || clisStale) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            error ?: "This may be out of date: the host could not be asked again.",
+                            modifier = Modifier.weight(1f),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        TextButton(onClick = model::loadAccounts) { Text("Try again") }
+                    }
+                }
                 val providers = auth?.values?.sortedBy { it.displayName }
                 if (providers == null) {
-                    CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
+                    if (error == null) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
                 } else {
                     providers.forEach { provider -> AccountRow(provider, model) }
                 }
@@ -81,7 +96,6 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                     TextButton(onClick = model::checkCliUpdates) { Text("Check for updates") }
                 }
                 clis?.values?.sortedBy { it.displayName }?.forEach { cli -> CliRow(cli, model) }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
@@ -90,7 +104,7 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
 
 @Composable
 private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
-    val uriHandler = LocalUriHandler.current
+    val openLink = rememberLinkOpener()
     val signingIn = provider.state == "signing-in"
     var input by rememberSaveable(provider.provider) { mutableStateOf("") }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -115,7 +129,8 @@ private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
                 Text(code, fontFamily = XdMonoFamily, style = MaterialTheme.typography.titleMedium)
             }
             provider.loginUrl?.let { url ->
-                TextButton(onClick = { uriHandler.openUri(url) }) { Text("Open sign-in page") }
+                // If no browser can open it, the address is copied for another device.
+                TextButton(onClick = { openLink(url) }) { Text("Open sign-in page") }
             }
             if (provider.needsInput) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

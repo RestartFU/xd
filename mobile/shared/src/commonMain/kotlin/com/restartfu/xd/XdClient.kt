@@ -90,6 +90,14 @@ public class XdClient(
     /** Asked for on this host, so a reconnect reads them again even if no answer landed. */
     private val agentAuthWanted = MutableStateFlow(false)
     private val agentClisWanted = MutableStateFlow(false)
+    private val _agentAuthStale = MutableStateFlow(false)
+    private val _agentClisStale = MutableStateFlow(false)
+
+    /** Sign-in state may be out of date: a refresh after reconnecting failed. */
+    public val agentAuthStale: StateFlow<Boolean> = _agentAuthStale.asStateFlow()
+
+    /** CLI state may be out of date: a refresh after reconnecting failed. */
+    public val agentClisStale: StateFlow<Boolean> = _agentClisStale.asStateFlow()
 
     /** Each assistant's sign-in on the host, kept current by its broadcasts. */
     public val agentAuth: StateFlow<Map<String, AgentAuthProviderReply>?> = agentAuthStates.items
@@ -242,11 +250,13 @@ public class XdClient(
                 if (value is Link.Up) {
                     // Broadcasts sent while disconnected were missed.
                     if (autoSettleWanted.value) rereadAutoSettle()
+                    // A failure is not dropped: what is shown may be out of
+                    // date, and the next read that lands clears the mark.
                     if (agentAuthWanted.value) {
-                        scope.launch { runCatching { loadAgentAuth() } }
+                        backgroundRead(_agentAuthStale) { loadAgentAuth() }
                     }
                     if (agentClisWanted.value) {
-                        scope.launch { runCatching { agentCliUpdates("status") } }
+                        backgroundRead(_agentClisStale) { agentCliUpdates("status") }
                     }
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
@@ -339,6 +349,8 @@ public class XdClient(
         agentCliStates.clear()
         agentAuthWanted.value = false
         agentClisWanted.value = false
+        _agentAuthStale.value = false
+        _agentClisStale.value = false
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -467,7 +479,23 @@ public class XdClient(
         val generation = _sessionGeneration.value
         val mark = agentAuthStates.mark()
         val reply = actor.decodeReply(actor.call(Ops.agentAuth())) { it.decodeReply<AgentAuthReply>() }
-        if (generation == _sessionGeneration.value) agentAuthStates.reply(reply.providers, mark)
+        if (generation == _sessionGeneration.value) {
+            agentAuthStates.reply(reply.providers, mark)
+            _agentAuthStale.value = false
+        }
+    }
+
+    private fun backgroundRead(stale: MutableStateFlow<Boolean>, read: suspend () -> Unit) {
+        val generation = _sessionGeneration.value
+        scope.launch {
+            try {
+                read()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (generation == _sessionGeneration.value) stale.value = true
+            }
+        }
     }
 
     /** Starts, feeds, or cancels a sign-in; progress arrives through [agentAuth]. */
@@ -483,7 +511,10 @@ public class XdClient(
         val reply = actor.decodeReply(actor.call(Ops.agentCliUpdates(action, provider))) {
             it.decodeReply<AgentCliUpdatesReply>()
         }
-        if (generation == _sessionGeneration.value) agentCliStates.reply(reply.providers, mark)
+        if (generation == _sessionGeneration.value) {
+            agentCliStates.reply(reply.providers, mark)
+            _agentClisStale.value = false
+        }
     }
 
     /** The host's assistants and their models. */
