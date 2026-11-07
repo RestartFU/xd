@@ -110,9 +110,15 @@ class DiffViewModel(
                 // commit box, and a checkout outside Git never had a status.
                 _state.value.git
             }
+            var shown = git
             val pullRequest = if (git?.mayHavePullRequest == true) {
                 try {
-                    session().pullRequestUrl()
+                    val url = session().pullRequestUrl()
+                    // The lookup asks about whatever is checked out when it runs;
+                    // if the branch moved meanwhile, the link is someone else's.
+                    val after = session().gitStatus()
+                    shown = after
+                    url.takeIf { after.branch == git.branch }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
@@ -122,7 +128,7 @@ class DiffViewModel(
                 null
             }
             // An older read finishing late must not replace a newer answer.
-            if (read == gitReads) _state.value = _state.value.copy(git = git, pullRequestUrl = pullRequest)
+            if (read == gitReads) _state.value = _state.value.copy(git = shown, pullRequestUrl = pullRequest)
         }
     }
 

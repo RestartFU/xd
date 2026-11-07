@@ -1406,7 +1406,9 @@ private fun NewSessionDialog(
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                // The host still picks the project's own checkout.
+                // The host still picks the project's own checkout, so a choice
+                // restored from before a rotation is dropped rather than sent unseen.
+                worktree = null
                 placesError = error.message ?: "Could not list where a session can work"
             }
         }
