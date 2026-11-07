@@ -140,6 +140,8 @@ internal fun ChatScreen(
     projectName: String = "",
     /** The session's checked-out branch, as the tree reports it. */
     branch: String? = null,
+    /** Any chat or shell in the session is busy; they share one checkout. */
+    sessionWorking: Boolean = false,
     workspaceId: String = model.state.value.chatId,
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
@@ -186,10 +188,12 @@ internal fun ChatScreen(
     val pullRequest by model.pullRequest.collectAsStateWithLifecycle()
     val uriHandler = LocalUriHandler.current
     // A finished turn may have pushed a branch or opened its pull request.
-    // So does a branch switched under an idle session.
-    LaunchedEffect(state.chatId, state.working, branch) {
+    // A sibling chat's turn shares the checkout, so the whole session counts,
+    // and so does a branch switched under an idle session.
+    val busy = state.working || sessionWorking
+    LaunchedEffect(state.chatId, busy, branch) {
         // While a turn runs the branch may still move, so only forget a stale link.
-        model.refreshPullRequest(branch, fetch = !state.working)
+        model.refreshPullRequest(branch, fetch = !busy)
     }
     val listState = rememberLazyListState()
     val items = state.visibleItems

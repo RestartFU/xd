@@ -315,6 +315,7 @@ internal fun MinimalMobileApp(
                                     model = chat, settings = settings, goBack = showProjects,
                                     sessionTitle = activeSession.title,
                                     branch = activeSession.branch,
+                                    sessionWorking = activeSession.working,
                                     projectName = activeProject?.name.orEmpty(),
                                     workspaceId = activeSession.id,
                                     terminalChatId = activeSession.terminalChatId,
