@@ -620,6 +620,99 @@ wrap_display_handler! {
     }
 }
 
+wrap_download_handler! {
+    struct ViewDownloads;
+
+    impl DownloadHandler {
+        fn can_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _url: Option<&CefString>,
+            _request_method: Option<&CefString>,
+        ) -> ::std::os::raw::c_int {
+            1
+        }
+
+        // Chromium's runtime here has no download UI and cancels unless told
+        // where to save, so save like WebKit did: into Downloads, never over
+        // an existing file.
+        fn on_before_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _download_item: Option<&mut DownloadItem>,
+            suggested_name: Option<&CefString>,
+            callback: Option<&mut BeforeDownloadCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(callback) = callback else {
+                return 0;
+            };
+            let name = suggested_name.map(ToString::to_string).unwrap_or_default();
+            let directory = downloads_directory();
+            let _ = std::fs::create_dir_all(&directory);
+            let path = unused_path(&directory, &name);
+            callback.cont(Some(&CefString::from(path.to_string_lossy().as_ref())), 0);
+            1
+        }
+    }
+}
+
+/// The user's Downloads directory, as the XDG user-dirs configuration names it.
+fn downloads_directory() -> PathBuf {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    std::fs::read_to_string(config.join("user-dirs.dirs"))
+        .ok()
+        .and_then(|dirs| xdg_download_dir(&dirs, &home))
+        .unwrap_or_else(|| home.join("Downloads"))
+}
+
+/// Read `XDG_DOWNLOAD_DIR="$HOME/..."` from a user-dirs file. A value of just
+/// `$HOME` disables the directory, which is when the default is used.
+fn xdg_download_dir(dirs: &str, home: &std::path::Path) -> Option<PathBuf> {
+    let value = dirs.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("XDG_DOWNLOAD_DIR=")
+            .map(|value| value.trim().trim_matches('"'))
+    })?;
+    let path = match value.strip_prefix("$HOME") {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None => PathBuf::from(value),
+    };
+    (path.is_absolute() && path != home).then_some(path)
+}
+
+/// `directory/name`, or `name (1)`, `name (2)`, ... before its extension if
+/// that is taken. Only the name's last component is kept, so a page cannot
+/// save outside the directory.
+fn unused_path(directory: &std::path::Path, name: &str) -> PathBuf {
+    let name = std::path::Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("download");
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    (0..)
+        .map(|index| {
+            let stem = if index == 0 {
+                stem.to_string()
+            } else {
+                format!("{stem} ({index})")
+            };
+            directory.join(match extension {
+                Some(extension) => format!("{stem}.{extension}"),
+                None => stem,
+            })
+        })
+        .find(|path| !path.exists())
+        .unwrap_or_else(|| directory.join(name))
+}
+
 wrap_request_handler! {
     struct ViewRequests {
         events: NativeEvents,
@@ -678,6 +771,10 @@ wrap_client! {
 
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(ViewRequests::new(self.events.clone()))
+        }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(ViewDownloads::new())
         }
     }
 }
@@ -994,4 +1091,56 @@ pub fn run_smoke_test_if_requested() {
         }
     }
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_download_directory_from_user_dirs() {
+        let home = std::path::Path::new("/home/user");
+        let dirs = "# comment\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_DOWNLOAD_DIR=\"$HOME/Téléchargements\"\n";
+        assert_eq!(
+            xdg_download_dir(dirs, home),
+            Some(PathBuf::from("/home/user/Téléchargements"))
+        );
+        assert_eq!(
+            xdg_download_dir("XDG_DOWNLOAD_DIR=\"/data/dl\"", home),
+            Some(PathBuf::from("/data/dl"))
+        );
+        // `$HOME` alone disables it, and a relative path is not allowed.
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"$HOME/\"", home), None);
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"dl\"", home), None);
+        assert_eq!(
+            xdg_download_dir("XDG_MUSIC_DIR=\"$HOME/Music\"", home),
+            None
+        );
+    }
+
+    #[test]
+    fn a_download_never_replaces_a_file_or_leaves_its_directory() {
+        let directory = std::env::temp_dir().join(format!("xd-downloads-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        assert_eq!(
+            unused_path(&directory, "report.csv"),
+            directory.join("report.csv")
+        );
+        std::fs::write(directory.join("report.csv"), "").unwrap();
+        std::fs::write(directory.join("report (1).csv"), "").unwrap();
+        assert_eq!(
+            unused_path(&directory, "report.csv"),
+            directory.join("report (2).csv")
+        );
+        assert_eq!(
+            unused_path(&directory, "../../etc/passwd"),
+            directory.join("passwd")
+        );
+        assert_eq!(unused_path(&directory, ""), directory.join("download"));
+        assert_eq!(
+            unused_path(&directory, ".bashrc"),
+            directory.join(".bashrc")
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }
