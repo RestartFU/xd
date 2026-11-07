@@ -47,7 +47,9 @@ To show the user an image file from this machine, such as a screenshot or chart 
 [image: /absolute/path/to/image.png]
 The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files."#;
 /// Long enough for any typed request; a pasted log does not need to repeat whole.
-const MAX_CUT_OFF_REQUEST_CHARS: usize = 8_000;
+const MAX_CUT_OFF_REQUEST_CHARS: usize = 4_000;
+/// Twice the above, so the newest request always survives older ones in full.
+const MAX_CUT_OFF_CHARS: usize = 2 * MAX_CUT_OFF_REQUEST_CHARS;
 const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
 /// Sent as a normal message, so the transcript shows why the agent carried on.
 /// What the composer's resume button says on the user's behalf.
@@ -190,6 +192,9 @@ pub struct TurnSpec {
     pub context_window: i64,
     pub session_backend: String,
     pub session_id: Option<String>,
+    /// What the user sent, without the note `prompt` may open with.
+    pub request: String,
+    pub carries_cut_off_note: bool,
     pub label: String,
     pub environment: Vec<(String, String)>,
 }
@@ -2177,17 +2182,44 @@ impl StateStore {
         })
     }
 
-    /// Remembers a request the agent never recorded, so the next turn can tell
+    /// Remembers a request the agent never recorded, so a later turn can tell
     /// it what happened. Resuming cannot: the request is not in its session.
+    /// Stopping several in a row keeps them all, newest last.
     pub fn mark_cut_off_turn(&self, chat_id: &str, request: &str) -> Result<(), StorageError> {
         let request = match request.char_indices().nth(MAX_CUT_OFF_REQUEST_CHARS) {
             Some((end, _)) => format!("{}...", &request[..end]),
             None => request.to_owned(),
         };
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let earlier = database
+            .query_row(
+                "SELECT cut_off_turn FROM chats WHERE id = ?",
+                [chat_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let requests = match earlier {
+            Some(earlier) => format!("{earlier}\n\n{request}"),
+            None => request,
+        };
+        let kept = match requests.char_indices().rev().nth(MAX_CUT_OFF_CHARS) {
+            Some((start, _)) => format!("...{}", &requests[start..]),
+            None => requests,
+        };
         database.execute(
             "UPDATE chats SET cut_off_turn = ? WHERE id = ?",
-            params![request, chat_id],
+            params![kept, chat_id],
+        )?;
+        Ok(())
+    }
+
+    /// The agent has the note now, so it is not repeated.
+    pub fn clear_cut_off_turn(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chats SET cut_off_turn = NULL WHERE id = ?",
+            [chat_id],
         )?;
         Ok(())
     }
@@ -6820,18 +6852,19 @@ fn write_browsable_file(
         })
 }
 
-/// Puts a cut-off request in front of the next message, where it stays in the
-/// agent's session from then on. A slash command only runs when it opens the
-/// message, so one leaves the request waiting for the message after it.
+/// Puts cut-off requests in front of the next message, where they stay in the
+/// agent's session from then on, and says whether it did. They stay stored until
+/// the turn ends in a way that shows the agent got them. A slash command only
+/// runs when it opens the message, so one leaves them for the message after it.
 fn with_cut_off_note(
     transaction: &rusqlite::Transaction<'_>,
     chat_id: &str,
     text: &str,
-) -> Result<String, StorageError> {
+) -> Result<(String, bool), StorageError> {
     if text.trim_start().starts_with('/') {
-        return Ok(text.to_owned());
+        return Ok((text.to_owned(), false));
     }
-    let request = transaction
+    let requests = transaction
         .query_row(
             "SELECT cut_off_turn FROM chats WHERE id = ?",
             [chat_id],
@@ -6839,18 +6872,17 @@ fn with_cut_off_note(
         )
         .optional()?
         .flatten();
-    let Some(request) = request else {
-        return Ok(text.to_owned());
+    let Some(requests) = requests else {
+        return Ok((text.to_owned(), false));
     };
-    transaction.execute(
-        "UPDATE chats SET cut_off_turn = NULL WHERE id = ?",
-        [chat_id],
-    )?;
-    Ok(format!(
-        "<xd-note>\nYour previous turn in this chat was cut off before it was recorded, so it \
-         is missing from your history and none of its work was saved. The request was:\n\n\
-         {request}\n\nIt produced no reply. Do not redo it unless asked, and if the user asks \
-         what happened, tell them this.\n</xd-note>\n\n{text}"
+    Ok((
+        format!(
+            "<xd-note>\nEarlier work in this chat was cut off before it was recorded, so it is \
+             missing from your history and none of it was saved. The user had asked:\n\n\
+             {requests}\n\nThat produced no reply. Do not redo it unless asked, and if the user \
+             asks what happened, tell them this.\n</xd-note>\n\n{text}"
+        ),
+        true,
     ))
 }
 
@@ -6958,11 +6990,13 @@ fn prepare_turn(
         params![now, now_microseconds(), chat_id],
     )?;
     clear_session_settlement(transaction, chat_id)?;
-    let prompt = with_cut_off_note(transaction, chat_id, text)?;
+    let (prompt, carries_cut_off_note) = with_cut_off_note(transaction, chat_id, text)?;
     Ok(TurnSpec {
         chat_id: chat_id.into(),
         backend: chat.1.clone(),
         prompt,
+        request: text.into(),
+        carries_cut_off_note,
         system_prompt,
         workdir,
         model: model.clone(),
@@ -11381,7 +11415,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_off_request_reaches_the_next_message_once() {
+    fn a_cut_off_request_stays_until_the_agent_has_it() {
         let fixture = Fixture::new();
         let database = Connection::open(&fixture.database).unwrap();
         fixture.schema(&database);
@@ -11403,15 +11437,29 @@ mod tests {
         // A slash command must still open its message, so the note waits.
         let command = start("/compact");
         assert_eq!(command.prompt, "/compact");
+        assert!(!command.carries_cut_off_note);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
 
-        let next = start("are you ok?");
-        assert!(next.prompt.contains("/code-review 1193"), "{}", next.prompt);
-        assert!(next.prompt.ends_with("\n\nare you ok?"), "{}", next.prompt);
-        let finish = store.finish_turn("chat-1", true, None, 1, false).unwrap();
-        assert!(finish.next.is_none());
+        // A turn that never started delivered nothing, so the next one tells it.
+        let failed = start("are you ok?");
+        assert!(failed.carries_cut_off_note);
+        assert_eq!(failed.request, "are you ok?");
+        store.abort_turn_start("chat-1", "no such file").unwrap();
 
-        assert_eq!(start("and now").prompt, "and now");
+        let next = start("are you there?");
+        assert!(next.carries_cut_off_note);
+        assert!(next.prompt.contains("/code-review 1193"), "{}", next.prompt);
+        assert!(
+            next.prompt.ends_with("\n\nare you there?"),
+            "{}",
+            next.prompt
+        );
+        store.clear_cut_off_turn("chat-1").unwrap();
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+
+        let plain = start("and now");
+        assert_eq!(plain.prompt, "and now");
+        assert!(!plain.carries_cut_off_note);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         let stored = store.messages(&json!({"chat": "chat-1"})).unwrap();
         let texts = stored["messages"]
@@ -11421,7 +11469,28 @@ mod tests {
             .filter(|message| message["role"] == "user")
             .map(|message| message["content"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(texts, ["/compact", "are you ok?", "and now"]);
+        assert_eq!(
+            texts,
+            ["/compact", "are you ok?", "are you there?", "and now"]
+        );
+    }
+
+    #[test]
+    fn repeated_cut_offs_keep_the_newest_request_whole() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let start = |text: &str| match store
+            .prepare_send(&json!({"chat": "chat-1", "text": text}))
+            .unwrap()
+        {
+            SendDisposition::Start { turn, .. } => turn,
+            SendDisposition::Queued { .. } => panic!("{text} was queued"),
+        };
 
         // Steering goes through the queue, and the turn it starts is told too.
         start("long job");
@@ -11429,14 +11498,18 @@ mod tests {
             .prepare_send(&json!({"chat": "chat-1", "text": "steered"}))
             .unwrap();
         let huge = "é".repeat(MAX_CUT_OFF_REQUEST_CHARS + 5);
-        store.mark_cut_off_turn("chat-1", &huge).unwrap();
+        for _ in 0..3 {
+            store.mark_cut_off_turn("chat-1", &huge).unwrap();
+        }
+        store.mark_cut_off_turn("chat-1", "the newest").unwrap();
         let finish = store.finish_turn("chat-1", true, None, 1, false).unwrap();
         let next = finish.next.expect("the queued message starts");
+        assert_eq!(next.request, "steered");
         assert!(next.prompt.ends_with("\n\nsteered"), "{}", next.prompt);
-        assert_eq!(
-            next.prompt.matches('é').count(),
-            MAX_CUT_OFF_REQUEST_CHARS,
-            "a long request is cut on a character boundary"
+        assert!(next.prompt.contains("the newest"), "{}", next.prompt);
+        assert!(
+            next.prompt.matches('é').count() <= MAX_CUT_OFF_CHARS,
+            "older requests give way, on a character boundary"
         );
     }
 }

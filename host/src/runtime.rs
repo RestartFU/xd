@@ -1578,7 +1578,9 @@ impl TurnRuntime {
             let _ = self
                 .inner
                 .store
-                .mark_cut_off_turn(&turn.chat_id, &turn.prompt);
+                .mark_cut_off_turn(&turn.chat_id, &turn.request);
+        } else if turn.carries_cut_off_note && !background && (completed || recorded) {
+            let _ = self.inner.store.clear_cut_off_turn(&turn.chat_id);
         }
         let error = if success {
             cut_off.then(|| CUT_OFF_TURN.to_owned())
@@ -2688,9 +2690,9 @@ read third
         fs::create_dir_all(&root).unwrap();
         let agent = root.join("claude");
         let log = root.join("calls");
-        // The first run behaves like a forked skill: a task starts, carrying
-        // the session id, but `init` never comes. The second answers, and the
-        // third is an ordinary turn, stopped after its `init`.
+        // The first two runs behave like a forked skill: a task starts, carrying
+        // the session id, but `init` never comes. The third answers, and the
+        // fourth is an ordinary turn, stopped after its `init`.
         fs::write(
             &agent,
             format!(
@@ -2699,10 +2701,10 @@ log='{}'
 read first
 printf 'args:%s\nprompt:%s\n' "$*" "$first" >> "$log"
 runs=$(grep -c '^args:' "$log")
-if [ "$runs" = 1 ]; then
+if [ "$runs" -le 2 ]; then
   echo '{{"type":"system","subtype":"task_started","task_id":"fork","skip_transcript":true,"session_id":"lost"}}'
   sleep 30
-elif [ "$runs" = 2 ]; then
+elif [ "$runs" = 3 ]; then
   echo '{{"type":"system","subtype":"init","session_id":"kept"}}'
   echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Answered."}}]}}}}'
   echo '{{"type":"result","subtype":"success","result":"Answered."}}'
@@ -2752,13 +2754,38 @@ fi
                 .count()
         };
 
+        let run = |number: usize| {
+            calls()
+                .split("args:")
+                .nth(number)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let stop = |what: &str| {
+            wait_for(what, || {
+                std::thread::sleep(Duration::from_millis(200));
+                runtime.cancel(&chat)
+            });
+            wait_for("the stop to finish", || {
+                runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
+            });
+        };
+
         send("/code-review the pull request");
-        wait_for("the fork to start", || calls().contains("prompt:"));
-        wait_for("the stop to land", || runtime.cancel(&chat));
-        wait_for("the stop to finish", || {
-            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
-        });
+        wait_for("the first fork", || calls().matches("args:").count() == 1);
+        stop("the first stop");
         assert_eq!(notices(), 1, "{:?}", contents(&store, &chat));
+
+        // Stopped again with the note in hand: nothing has reached the agent.
+        send("try something else");
+        wait_for("the second fork", || calls().matches("args:").count() == 2);
+        assert!(
+            run(2).contains("/code-review the pull request"),
+            "{}",
+            run(2)
+        );
+        stop("the second stop");
+        assert_eq!(notices(), 2, "{:?}", contents(&store, &chat));
 
         send("are you ok?");
         wait_for("the answer", || {
@@ -2767,15 +2794,12 @@ fi
                 .any(|(_, content)| content == "Answered.")
         });
         wait_for("the turn to end", || runtime.live_turn(&chat).is_none());
-        let second = calls();
-        let second = second.split("args:").nth(2).unwrap();
-        assert!(!second.contains("--resume"), "{second}");
-        assert!(second.contains("/code-review the pull request"), "{second}");
-        assert!(
-            second.contains("cut off before it was recorded"),
-            "{second}"
-        );
-        assert!(second.contains("are you ok?"), "{second}");
+        let third = run(3);
+        assert!(!third.contains("--resume"), "{third}");
+        assert!(third.contains("/code-review the pull request"), "{third}");
+        assert!(third.contains("try something else"), "{third}");
+        assert_eq!(third.matches("<xd-note>").count(), 1, "{third}");
+        assert!(third.contains("are you ok?"), "{third}");
         let shown = contents(&store, &chat);
         assert!(
             shown
@@ -2784,25 +2808,17 @@ fi
             "the user sees their own message, not the note: {shown:?}"
         );
 
-        // A stop after `init` has its request in the session already. Dropping
-        // the kept process makes this run the third, and it resumes.
+        // The agent has the note now. A stop after `init` has its request in
+        // the session already. Dropping the kept process makes this a new run,
+        // and it resumes.
         runtime.discard_chat(&chat);
         send("another");
-        wait_for("the third run", || calls().matches("args:").count() == 3);
-        let third = calls();
-        let third = third.split("args:").nth(3).unwrap();
-        assert!(third.contains("--resume kept"), "{third}");
-        assert!(!third.contains("cut off before"), "{third}");
-        // The third run writes nothing the turn could be read as finished by,
-        // so give it a moment to read `init` before stopping it.
-        wait_for("the third turn's session", || {
-            std::thread::sleep(Duration::from_millis(200));
-            runtime.cancel(&chat)
-        });
-        wait_for("the last stop to finish", || {
-            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
-        });
-        assert_eq!(notices(), 1, "{:?}", contents(&store, &chat));
+        wait_for("the fourth run", || calls().matches("args:").count() == 4);
+        let fourth = run(4);
+        assert!(fourth.contains("--resume kept"), "{fourth}");
+        assert!(!fourth.contains("<xd-note>"), "{fourth}");
+        stop("the last stop");
+        assert_eq!(notices(), 2, "{:?}", contents(&store, &chat));
 
         drop(runtime);
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
