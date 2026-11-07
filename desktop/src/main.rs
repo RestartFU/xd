@@ -18404,7 +18404,7 @@ Binary files /dev/null and b/image.png differ\n";
     #[cfg(target_os = "linux")]
     #[gpui::test]
     fn clicking_a_notification_opens_its_chat(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update_in(cx, |desktop, window, cx| {
             desktop.model = grouped_workspace_fixture();
             desktop.model.select_chat("implementation");
@@ -18434,7 +18434,7 @@ Binary files /dev/null and b/image.png differ\n";
     #[cfg(target_os = "linux")]
     #[gpui::test]
     fn clicking_a_notification_for_a_deleted_chat_stays_where_it_is(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update_in(cx, |desktop, window, cx| {
             desktop.model = grouped_workspace_fixture();
             desktop.model.select_chat("implementation");
@@ -18461,7 +18461,7 @@ Binary files /dev/null and b/image.png differ\n";
     #[cfg(target_os = "linux")]
     #[gpui::test]
     fn clicking_a_notification_returns_to_the_host_it_came_from(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update_in(cx, |desktop, window, cx| {
             desktop.active_endpoint = ChatEndpoint::Remote;
             desktop.inactive_model = grouped_workspace_fixture();
