@@ -534,7 +534,7 @@ mod tests {
         cx.update(|_, cx| {
             let desktop = desktop.read(cx);
             assert!(desktop.update_popup_open);
-            assert!(desktop.browser_occluded_by_popup());
+            assert!(desktop.minimal_popup_is_open());
         });
 
         // The popup covers the window, so the footer no longer takes clicks.

@@ -6022,12 +6022,11 @@ impl XdDesktop {
         }
     }
 
+    /// The native browser sits above GPUI's surface, so anything counted here
+    /// also hides the page; otherwise the page would paint over the popup.
     fn minimal_popup_is_open(&self) -> bool {
-        self.minimal_theme_open || self.browser_occluded_by_popup()
-    }
-
-    fn browser_occluded_by_popup(&self) -> bool {
-        self.image_viewer.is_some()
+        self.minimal_theme_open
+            || self.image_viewer.is_some()
             || self.auth_open
             || self.update_popup_open
             || self.usage_open
@@ -7272,7 +7271,7 @@ impl XdDesktop {
     ) -> Option<Entity<BrowserPane>> {
         let key = self.browser_scope_key();
         let open = self.browser_is_open();
-        let visible = open && !self.browser_occluded_by_popup();
+        let visible = open && !self.minimal_popup_is_open();
         for (scope, pane) in &self.browser_panes {
             pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
         }
@@ -20683,8 +20682,10 @@ Binary files /dev/null and b/image.png differ\n";
 
             desktop.minimal_theme_open = true;
             desktop.sync_browser_pane(window, cx);
-            assert!(a.read(cx).is_visible());
+            assert!(!a.read(cx).is_visible());
             desktop.minimal_theme_open = false;
+            desktop.sync_browser_pane(window, cx);
+            assert!(a.read(cx).is_visible());
             desktop.creating_workspace = true;
             desktop.sync_browser_pane(window, cx);
             assert!(!a.read(cx).is_visible());
@@ -20881,7 +20882,6 @@ Binary files /dev/null and b/image.png differ\n";
                 Some(ImageViewer::Message(path)) if path == "/kept/a.png"
             ));
             assert!(desktop.minimal_popup_is_open());
-            assert!(desktop.browser_occluded_by_popup());
         });
 
         cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
