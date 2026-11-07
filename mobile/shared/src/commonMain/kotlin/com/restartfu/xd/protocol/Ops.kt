@@ -144,12 +144,18 @@ public object Ops {
         put("text", text)
     }
 
-    public fun dropQueue(chatId: String, index: Int?): JsonObject = buildJsonObject {
+    /**
+     * Drops queued message [index], or the whole queue without one. [text] is
+     * what the client saw there; the host refuses if another message now holds
+     * that place. Hosts that predate the check ignore it.
+     */
+    public fun dropQueue(chatId: String, index: Int?, text: String? = null): JsonObject = buildJsonObject {
         put("op", "drop-queue")
         put("chat", chatId)
         if (index != null) {
             require(index >= 0) { "Queue index must not be negative" }
             put("index", index)
+            if (text != null) put("text", text)
         }
     }
 

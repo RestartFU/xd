@@ -1601,10 +1601,13 @@ private fun AutoSettleSettings(model: MainViewModel) {
             model.setAutoSettle(afterDays = if (on) Ops.AfterDays.Days(DEFAULT_SETTLE_DAYS) else Ops.AfterDays.Off)
         },
     )
-    // Taps add up before the host answers, rather than each starting from the shown value.
+    // Taps add up before the host answers, rather than each starting from the
+    // shown value. Once nothing is in flight the host's value is shown again,
+    // whatever it turned out to be.
+    val busy by model.autoSettleBusy.collectAsStateWithLifecycle()
     var wantedDays by remember { mutableStateOf<Int?>(null) }
-    LaunchedEffect(current.afterDays, error) {
-        if (error != null || current.afterDays == wantedDays) wantedDays = null
+    LaunchedEffect(busy) {
+        if (busy == 0) wantedDays = null
     }
     val setDays = { days: Int ->
         wantedDays = days

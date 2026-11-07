@@ -118,6 +118,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
     private val _autoSettleError = MutableStateFlow<String?>(null)
     private var autoSettleRequests = 0L
+    private val _autoSettleBusy = MutableStateFlow(0)
+    /** Auto-settle requests still waiting on the host. */
+    val autoSettleBusy: StateFlow<Int> = _autoSettleBusy.asStateFlow()
 
     /** The connected host's rules; the client keeps them current and clears them on forgetting. */
     val autoSettle: StateFlow<AutoSettleSettingsReply?> = client.autoSettleSettings
@@ -429,6 +432,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun autoSettleRequest(failure: String, request: suspend () -> Unit) {
         val serial = ++autoSettleRequests
         _autoSettleError.value = null
+        _autoSettleBusy.update { it + 1 }
         viewModelScope.launch {
             try {
                 request()
@@ -436,6 +440,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 throw error
             } catch (error: Throwable) {
                 if (serial == autoSettleRequests) _autoSettleError.value = error.message ?: failure
+            } finally {
+                _autoSettleBusy.update { it - 1 }
             }
         }
     }
@@ -910,7 +916,7 @@ class ChatViewModel(
         // Another device may have changed the queue since this message was opened.
         if (before.getOrNull(index) != text) return
         launchGuarded(_droppingQueued) {
-            session.dropQueued(index)
+            session.dropQueued(index, text)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }

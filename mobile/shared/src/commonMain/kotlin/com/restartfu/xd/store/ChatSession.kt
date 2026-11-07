@@ -93,8 +93,8 @@ public class ChatSession internal constructor(
         images: List<PngAttachment>? = null,
     ): Unit = core.call(Ops.setDraft(core.chatId, text, images))
 
-    public suspend fun dropQueued(index: Int? = null): Unit =
-        core.call(Ops.dropQueue(core.chatId, index))
+    public suspend fun dropQueued(index: Int? = null, text: String? = null): Unit =
+        core.call(Ops.dropQueue(core.chatId, index, text))
 
     public suspend fun editQueued(
         index: Int,

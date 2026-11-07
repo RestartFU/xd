@@ -96,6 +96,9 @@ class OpsTest {
     fun dropQueueDistinguishesOneFromAll() {
         assertFalse("index" in Ops.dropQueue("chat", null))
         assertEquals(2, Ops.dropQueue("chat", 2).getValue("index").jsonPrimitive.content.toInt())
+        assertFalse("text" in Ops.dropQueue("chat", 2))
+        assertEquals("second", Ops.dropQueue("chat", 2, "second").getValue("text").jsonPrimitive.content)
+        assertFalse("text" in Ops.dropQueue("chat", null, "ignored"))
     }
 
     @Test

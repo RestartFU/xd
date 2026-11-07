@@ -4551,7 +4551,19 @@ impl StateStore {
         } else {
             None
         };
+        // The text the client saw there, when it sends one, so a queue another
+        // device changed meanwhile loses nothing it did not mean to drop.
+        let expected = optional_string(request, "text")?.map(str::to_owned);
         self.mutate_queue(chat_id, move |queue| match index {
+            Some(index)
+                if expected.as_ref().is_some_and(|text| {
+                    usize::try_from(index).ok().and_then(|index| queue.get(index)) != Some(text)
+                }) =>
+            {
+                Err(StorageError::InvalidRequest(
+                    "That queued message changed; try again.".into(),
+                ))
+            }
             Some(index) if index >= 0 && (index as usize) < queue.len() => {
                 queue.remove(index as usize);
                 Ok(true)
@@ -10532,8 +10544,14 @@ mod tests {
         store
             .take_queued(&json!({"chat": "chat-1", "index": 1, "text": "second"}))
             .unwrap();
+        assert!(
+            store
+                .drop_queue(&json!({"chat": "chat-1", "index": 0, "text": "first"}))
+                .is_err(),
+            "a drop naming the text it saw refuses a different message"
+        );
         let (_, event) = store
-            .drop_queue(&json!({"chat": "chat-1", "index": 0}))
+            .drop_queue(&json!({"chat": "chat-1", "index": 0, "text": "edited"}))
             .unwrap();
         assert_eq!(event["queue"], json!(["first"]));
         let (_, event) = store.drop_queue(&json!({"chat": "chat-1"})).unwrap();
