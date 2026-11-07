@@ -30,18 +30,23 @@ cleanup()
 }
 trap cleanup EXIT
 
-# The test runs as an ordinary user who must be able to enter the bundle.
-# BuildKit exports it private to whoever built it (mode 0700), and that is
-# not always uid 1000: GitHub's runner is uid 1001. So run as the owner. A
-# root-owned bundle runs as uid 1000 from a copy that user owns.
-owner=$(stat -c %u "$bundle")
-group=$(stat -c %g "$bundle")
-if [ "$owner" = 0 ]; then
-  owner=1000
+# The browser runs as an ordinary user: whoever runs this script, or uid 1000
+# when that is root. BuildKit exports the bundle private to whoever built it
+# (mode 0700), and GitHub's runner is uid 1001, so that user may not be able to
+# enter it. Then test a copy the user owns instead.
+user=$(id -u)
+group=$(id -g)
+if [ "$user" = 0 ]; then
+  user=1000
   group=1000
+fi
+if [ "$(stat -c %u "$bundle")" != "$user" ] && [ $((0$(stat -c %a "$bundle") & 05)) != 5 ]; then
   staged=$(mktemp -d)
   cp -a "$bundle/." "$staged/"
-  chown -R "$owner:$group" "$staged"
+  # Already the user's own when they run this; root hands it over.
+  if [ "$(id -u)" = 0 ]; then
+    chown -R "$user:$group" "$staged"
+  fi
   bundle=$staged
 fi
 
@@ -56,7 +61,7 @@ run()
     sh -c 'mkdir -m 1777 -p /tmp/.X11-unix
       exec setpriv --reuid="$2" --regid="$3" --clear-groups \
         env PATH="$PATH" sh /scripts/test-browser-chromium.sh /bundle "$1"' \
-    sh "$1" "$owner" "$group"
+    sh "$1" "$user" "$group"
 }
 
 docker build -t xd-browser-sandbox - <<'DOCKERFILE'
