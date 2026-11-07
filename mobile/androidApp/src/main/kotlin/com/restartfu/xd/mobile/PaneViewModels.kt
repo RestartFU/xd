@@ -112,6 +112,9 @@ class DiffViewModel(
                 // commit box, and a checkout outside Git never had a status.
                 _state.value.git
             }
+            // The status is shown at once; the pull request lookup can take a
+            // while, or never answer, and must not hold it back.
+            if (read == gitReads) _state.value = _state.value.copy(git = git)
             val branch = git?.branch
             // The last link is kept only while it is this branch's and GitHub
             // could not say otherwise.

@@ -19,6 +19,7 @@ import com.restartfu.xd.protocol.DiffReply
 import com.restartfu.xd.protocol.FileEntryReply
 import com.restartfu.xd.protocol.GitStatusReply
 import com.restartfu.xd.protocol.PullRequestLookup
+import com.restartfu.xd.protocol.RemoteProtocolException
 import com.restartfu.xd.protocol.ImageReply
 import com.restartfu.xd.protocol.Limits
 import kotlin.io.encoding.Base64
@@ -51,7 +52,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
@@ -460,7 +461,10 @@ internal class ChatSessionCore(
         }
         try {
             actor.decodeReply(actor.call(Ops.gitState(chatId, token))) { it }
-            val event = withTimeout(GIT_STATE_TIMEOUT_MILLIS) { answer.await() }
+            // A timeout is an ordinary failure here, not a cancellation of the
+            // caller, so callers can keep what they already read.
+            val event = withTimeoutOrNull(GIT_STATE_TIMEOUT_MILLIS) { answer.await() }
+                ?: throw RemoteProtocolException("GitHub did not answer in time")
             (event["pull_request"] as? JsonObject)?.let {
                 WireJson.decodeFromJsonElement(PullRequestLookup.serializer(), it)
             }
