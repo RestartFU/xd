@@ -1422,6 +1422,40 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(names, ["sent.pdf", "since.txt"]);
             assert!(desktop.attachments_dirty);
+
+            // Nothing joins the draft while a send is out.
+            desktop.sending = true;
+            let extra = Attachment::from_file("extra.txt", vec![1]);
+            assert!(desktop.add_attachment(extra).unwrap_err().contains("Wait"));
+            desktop.sending = false;
+
+            // A restored draft keeps to the host's limits.
+            let big =
+                |name: &str, fill| Attachment::from_file(name, vec![fill; MAX_ATTACHMENT_BYTES]);
+            desktop.pending_send = Some(PendingSend {
+                chat_id: "implementation".into(),
+                text: String::new(),
+                attachments: vec![big("sent.bin", 1)],
+                restore: true,
+                optimistic: OptimisticSend::Queued,
+            });
+            desktop.model.draft_attachments = vec![big("fits.bin", 2), big("over.bin", 3)];
+            desktop.model.connection_error = None;
+            desktop.restore_pending_send(cx);
+            let names = desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["sent.bin", "fits.bin"]);
+            assert!(
+                desktop
+                    .model
+                    .connection_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("over.bin"))
+            );
         });
     }
 

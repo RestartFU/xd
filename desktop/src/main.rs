@@ -9767,12 +9767,25 @@ impl XdDesktop {
             (true, true) => String::new(),
         };
         self.set_composer_text(restored, cx);
-        // What was attached while the send was out stays, after what it sent.
+        // What reached the draft while the send was out, such as from another
+        // device, stays after what it sent, as far as the limits allow.
         let mut attachments = pending.attachments;
+        let mut refused = None;
         for attachment in std::mem::take(&mut self.model.draft_attachments) {
-            if !attachments.iter().any(|sent| sent.id == attachment.id) {
-                attachments.push(attachment);
+            if attachments.iter().any(|sent| sent.id == attachment.id) {
+                continue;
             }
+            match attachment_fits(&attachments, &attachment) {
+                Ok(()) => attachments.push(attachment),
+                Err(_) => {
+                    refused.get_or_insert(attachment.name);
+                }
+            }
+        }
+        if let Some(name) = refused {
+            self.model.connection_error = Some(format!(
+                "The unsent message's attachments are back, so {name} no longer fits and was removed."
+            ));
         }
         self.model.draft_attachments = attachments;
         self.draft_dirty = true;
@@ -10117,26 +10130,13 @@ impl XdDesktop {
     }
 
     /// Adds one attachment to the draft if the host would take the message.
+    /// While a send is out the draft may yet get its attachments back, so
+    /// nothing joins it until that settles.
     fn add_attachment(&mut self, attachment: Attachment) -> Result<(), String> {
-        let draft = &self.model.draft_attachments;
-        if draft.len() >= MAX_ATTACHMENTS {
-            return Err(format!(
-                "A message can contain at most {MAX_ATTACHMENTS} attachments."
-            ));
+        if self.sending {
+            return Err("Wait for the message to send before attaching more.".into());
         }
-        let images = draft.iter().filter(|added| added.preview.is_some()).count();
-        if attachment.preview.is_some() && images >= MAX_IMAGE_ATTACHMENTS {
-            return Err(format!(
-                "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
-            ));
-        }
-        if attachment.bytes > MAX_ATTACHMENT_BYTES {
-            return Err(format!("{} is larger than 10 MiB.", attachment.name));
-        }
-        let total = draft.iter().map(|added| added.bytes).sum::<usize>();
-        if total.saturating_add(attachment.bytes) > MAX_TOTAL_ATTACHMENT_BYTES {
-            return Err("Attachments can add up to at most 20 MiB.".into());
-        }
+        attachment_fits(&self.model.draft_attachments, &attachment)?;
         self.model.draft_attachments.push(attachment);
         self.attachments_dirty = true;
         self.attachment_generation = self.attachment_generation.saturating_add(1);
@@ -19040,6 +19040,29 @@ fn decode_git_path(value: &str) -> Result<String, String> {
         index += 1;
     }
     String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
+}
+
+/// Whether the host would take a message with `attachment` added to `draft`.
+fn attachment_fits(draft: &[Attachment], attachment: &Attachment) -> Result<(), String> {
+    if draft.len() >= MAX_ATTACHMENTS {
+        return Err(format!(
+            "A message can contain at most {MAX_ATTACHMENTS} attachments."
+        ));
+    }
+    let images = draft.iter().filter(|added| added.preview.is_some()).count();
+    if attachment.preview.is_some() && images >= MAX_IMAGE_ATTACHMENTS {
+        return Err(format!(
+            "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
+        ));
+    }
+    if attachment.bytes > MAX_ATTACHMENT_BYTES {
+        return Err(format!("{} is larger than 10 MiB.", attachment.name));
+    }
+    let total = draft.iter().map(|added| added.bytes).sum::<usize>();
+    if total.saturating_add(attachment.bytes) > MAX_TOTAL_ATTACHMENT_BYTES {
+        return Err("Attachments can add up to at most 20 MiB.".into());
+    }
+    Ok(())
 }
 
 /// What a draft still has room for.
