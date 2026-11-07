@@ -493,8 +493,11 @@ private fun MinimalProjectsHome(
 ) {
     val tree by model.client.tree.collectAsStateWithLifecycle()
     var shelfOpen by rememberSaveable { mutableStateOf(false) }
-    var contextFor by remember { mutableStateOf<MinimalProject?>(null) }
-    var secretsFor by remember { mutableStateOf<MinimalProject?>(null) }
+    // Saved by project id, so an open editor survives recreating the activity.
+    var contextForId by rememberSaveable { mutableStateOf<String?>(null) }
+    var secretsForId by rememberSaveable { mutableStateOf<String?>(null) }
+    val contextFor = projects.firstOrNull { it.id == contextForId }
+    val secretsFor = projects.firstOrNull { it.id == secretsForId }
     val settled = if (actions.settlement) tree.settledSessions() else emptyList()
     val operationError by model.error.collectAsStateWithLifecycle()
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -576,8 +579,8 @@ private fun MinimalProjectsHome(
                                         },
                                         onRename = { onRenameProject(project) },
                                         onDelete = { onDeleteProject(project) },
-                                        onContext = { contextFor = project },
-                                        onSecrets = { secretsFor = project },
+                                        onContext = { contextForId = project.id },
+                                        onSecrets = { secretsForId = project.id },
                                     )
                                 },
                             )
@@ -631,12 +634,12 @@ private fun MinimalProjectsHome(
     }
     contextFor?.let { project ->
         key(project.id) {
-            ProjectContextDialog(model, project.id, project.name, onDismiss = { contextFor = null })
+            ProjectContextDialog(model, project.id, project.name, onDismiss = { contextForId = null })
         }
     }
     secretsFor?.let { project ->
         key(project.id) {
-            AgentSecretsDialog(model, project.id, "${project.name} secrets", onDismiss = { secretsFor = null })
+            AgentSecretsDialog(model, project.id, "${project.name} secrets", onDismiss = { secretsForId = null })
         }
     }
     val creatingIn = projects.firstOrNull { it.id == createSessionIn }

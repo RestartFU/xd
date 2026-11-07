@@ -1,6 +1,7 @@
 package com.restartfu.xd.store
 
 import kotlin.test.Test
+import kotlinx.coroutines.test.runTest
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
@@ -8,7 +9,7 @@ class ProviderStatesTest {
     private data class Item(val name: String, val state: String)
 
     @Test
-    fun aReplyDoesNotUndoAnEventThatArrivedWhileItWasInFlight() {
+    fun aReplyDoesNotUndoAnEventThatArrivedWhileItWasInFlight() = runTest {
         val states = ProviderStates<Item> { it.name }
         assertNull(states.items.value)
         val mark = states.mark()
@@ -21,7 +22,7 @@ class ProviderStatesTest {
     }
 
     @Test
-    fun anOlderReplyArrivingLastDoesNotReplaceANewerOne() {
+    fun anOlderReplyArrivingLastDoesNotReplaceANewerOne() = runTest {
         val states = ProviderStates<Item> { it.name }
         val older = states.mark()
         val newer = states.mark()
@@ -31,7 +32,7 @@ class ProviderStatesTest {
     }
 
     @Test
-    fun aLaterReplyAppliesOnceNoEventIsPending() {
+    fun aLaterReplyAppliesOnceNoEventIsPending() = runTest {
         val states = ProviderStates<Item> { it.name }
         states.event(Item("codex", "signing-in"))
         states.reply(listOf(Item("codex", "signed-in")), states.mark())

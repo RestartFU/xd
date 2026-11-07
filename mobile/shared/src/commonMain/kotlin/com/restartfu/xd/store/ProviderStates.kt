@@ -3,7 +3,8 @@ package com.restartfu.xd.store
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Per-assistant state the host both answers for and broadcasts, such as
@@ -14,7 +15,9 @@ import kotlinx.coroutines.flow.update
  * So events always apply, and a reply updates only the assistants that had
  * no event while it was in flight: for those, the event already said more.
  * Replies can also arrive out of order among themselves, so one never
- * replaces an assistant's state from a request newer than its own.
+ * replaces an assistant's state from a request newer than its own. Every
+ * change and its publication happen under one lock, so what observers see
+ * is always the newest state.
  */
 public class ProviderStates<T>(private val key: (T) -> String) {
     private data class State<T>(
@@ -25,7 +28,8 @@ public class ProviderStates<T>(private val key: (T) -> String) {
         val requests: Long = 0,
     )
 
-    private val state = MutableStateFlow(State<T>(null, emptyMap()))
+    private val lock = Mutex()
+    private var state = State<T>(null, emptyMap())
     private val _items = MutableStateFlow<Map<String, T>?>(null)
 
     /** Null until something has been read or broadcast. */
@@ -34,43 +38,35 @@ public class ProviderStates<T>(private val key: (T) -> String) {
     /** Taken before a request, and handed back with its reply. */
     public class Mark internal constructor(internal val events: Map<String, Long>, internal val request: Long)
 
-    public fun mark(): Mark {
-        var taken: Mark? = null
-        state.update { current ->
-            val request = current.requests + 1
-            taken = Mark(current.events, request)
-            current.copy(requests = request)
-        }
-        return checkNotNull(taken)
+    public suspend fun mark(): Mark = lock.withLock {
+        val request = state.requests + 1
+        state = state.copy(requests = request)
+        Mark(state.events, request)
     }
 
-    public fun event(item: T) {
+    public suspend fun event(item: T): Unit = lock.withLock {
         val name = key(item)
-        state.update { current ->
-            current.copy(
-                items = (current.items ?: emptyMap()) + (name to item),
-                events = current.events + (name to (current.events[name] ?: 0) + 1),
-            )
-        }
-        _items.value = state.value.items
+        state = state.copy(
+            items = (state.items ?: emptyMap()) + (name to item),
+            events = state.events + (name to (state.events[name] ?: 0) + 1),
+        )
+        _items.value = state.items
     }
 
-    public fun reply(items: List<T>, mark: Mark) {
-        state.update { current ->
-            val fresh = items.filter {
-                current.events[key(it)] == mark.events[key(it)] &&
-                    mark.request > (current.applied[key(it)] ?: 0)
-            }
-            current.copy(
-                items = (current.items ?: emptyMap()) + fresh.associateBy(key),
-                applied = current.applied + fresh.associate { key(it) to mark.request },
-            )
+    public suspend fun reply(items: List<T>, mark: Mark): Unit = lock.withLock {
+        val fresh = items.filter {
+            state.events[key(it)] == mark.events[key(it)] &&
+                mark.request > (state.applied[key(it)] ?: 0)
         }
-        _items.value = state.value.items
+        state = state.copy(
+            items = (state.items ?: emptyMap()) + fresh.associateBy(key),
+            applied = state.applied + fresh.associate { key(it) to mark.request },
+        )
+        _items.value = state.items
     }
 
-    public fun clear() {
-        state.update { current -> State(null, emptyMap(), requests = current.requests) }
+    public suspend fun clear(): Unit = lock.withLock {
+        state = State(null, emptyMap(), requests = state.requests)
         _items.value = null
     }
 }

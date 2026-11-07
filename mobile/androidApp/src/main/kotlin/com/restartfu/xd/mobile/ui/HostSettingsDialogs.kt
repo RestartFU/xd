@@ -36,6 +36,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.protocol.AgentAuthProviderReply
 import com.restartfu.xd.protocol.AgentCliProviderReply
@@ -183,14 +184,25 @@ internal fun AgentSecretsDialog(
     onDismiss: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var names by remember { mutableStateOf<List<String>?>(null) }
-    var removed by remember { mutableStateOf(emptySet<String>()) }
-    var replaced by remember { mutableStateOf(emptyMap<String, String>()) }
-    var added by remember { mutableStateOf(emptyList<Pair<String, String>>()) }
+    // The draft outlives recreating the activity in a view model, not saved
+    // state: secret values never go into a bundle. Each opening has its own.
+    val opening = rememberSaveable { java.util.UUID.randomUUID().toString() }
+    val drafts: SecretDrafts = viewModel()
+    val draft = remember(opening) { drafts.open(opening) }
+    val close = {
+        drafts.close(opening)
+        onDismiss()
+    }
+    var names by draft.names
+    var removed by draft.removed
+    var replaced by draft.replaced
+    var added by draft.added
     var error by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var attempt by remember { mutableStateOf(0) }
     LaunchedEffect(attempt) {
+        // A draft restored after recreation already has its names.
+        if (names != null) return@LaunchedEffect
         error = null
         try {
             names = model.client.agentSecrets(folderId)
@@ -205,7 +217,7 @@ internal fun AgentSecretsDialog(
         added.all { it.second.isNotEmpty() } &&
         (names.orEmpty().filterNot { it in removed } + newNames).let { it.toSet().size == it.size }
     AlertDialog(
-        onDismissRequest = { if (!saving) onDismiss() },
+        onDismissRequest = { if (!saving) close() },
         title = { Text(title) },
         text = {
             Column(
@@ -280,7 +292,7 @@ internal fun AgentSecretsDialog(
                     scope.launch {
                         try {
                             model.client.setAgentSecrets(folderId, entries)
-                            onDismiss()
+                            close()
                         } catch (failure: CancellationException) {
                             throw failure
                         } catch (failure: Throwable) {
@@ -293,11 +305,28 @@ internal fun AgentSecretsDialog(
                 enabled = names != null && valid && !saving,
             ) { Text(if (saving) "Saving…" else "Save") }
         },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = close, enabled = !saving) { Text("Cancel") } },
     )
 }
 
 private val SECRET_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*")
+
+/** One secrets editor's unsaved changes, kept in memory only. */
+internal class SecretDraft {
+    val names = mutableStateOf<List<String>?>(null)
+    val removed = mutableStateOf(emptySet<String>())
+    val replaced = mutableStateOf(emptyMap<String, String>())
+    val added = mutableStateOf(emptyList<Pair<String, String>>())
+}
+
+/** Secrets drafts by opening, surviving activity recreation but not the process. */
+internal class SecretDrafts : androidx.lifecycle.ViewModel() {
+    private val drafts = mutableMapOf<String, SecretDraft>()
+    fun open(opening: String): SecretDraft = drafts.getOrPut(opening) { SecretDraft() }
+    fun close(opening: String) {
+        drafts.remove(opening)
+    }
+}
 
 /**
  * Notes the host gives every agent in a project, as the desktop's project
@@ -436,7 +465,7 @@ private fun TitleModelRow(
     label: String,
     selected: String?,
     choices: List<Pair<String, String>>,
-    onChoose: (String) -> Unit,
+    onChoose: (String?) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -450,6 +479,8 @@ private fun TitleModelRow(
                 )
             }
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                DropdownMenuItem(text = { Text("Host's choice") }, onClick = { open = false; onChoose(null) })
+                HorizontalDivider()
                 choices.forEach { (id, name) ->
                     DropdownMenuItem(text = { Text(name) }, onClick = { open = false; onChoose(id) })
                 }

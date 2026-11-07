@@ -283,7 +283,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setChatTitlesEnabled(enabled: Boolean) =
         chatTitleRequest("Could not change chat titles") { client.setChatTitlesEnabled(enabled) }
 
-    fun setChatTitleModel(backend: String, model: String) =
+    /** Null goes back to the host's built-in choice, which follows its default as that changes. */
+    fun setChatTitleModel(backend: String, model: String?) =
         chatTitleRequest("Could not change the title model") { client.setChatTitleModel(backend, model) }
 
     init {

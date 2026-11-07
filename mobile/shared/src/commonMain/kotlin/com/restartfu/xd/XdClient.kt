@@ -261,11 +261,11 @@ public class XdClient(
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
                 if (eventName == "agent-auth-changed") {
                     runCatching { event.value.decodeReply<AgentAuthProviderReply>() }
-                        .onSuccess(agentAuthStates::event)
+                        .onSuccess { agentAuthStates.event(it) }
                 }
                 if (eventName == "agent-cli-update") {
                     runCatching { event.value.decodeReply<AgentCliProviderReply>() }
-                        .onSuccess(agentCliStates::event)
+                        .onSuccess { agentCliStates.event(it) }
                 }
                 if (eventName == "auto-settle-settings") {
                     autoSettleLock.withLock { autoSettleBroadcasts.update { it + 1 } }
