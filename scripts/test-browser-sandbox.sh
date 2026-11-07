@@ -15,14 +15,34 @@ set -euo pipefail
 bundle=$(cd "${1:?bundle directory}" && pwd -P)
 repository=$(cd "$(dirname "$0")/.." && pwd -P)
 restriction=kernel.apparmor_restrict_unprivileged_userns
-# The ordinary user is the bundle's owner. Its export can be private to that
-# owner (GitHub's runner is uid 1001, not 1000), and a user who cannot enter
-# the bundle tests nothing. A root-owned bundle still runs as uid 1000.
+staged=
+original=
+cleanup()
+{
+  # Put the host's own setting back however the script ends, so running it
+  # locally cannot leave the restriction switched off.
+  if [ -n "$original" ]; then
+    sudo sysctl -w "$restriction=$original" >/dev/null
+  fi
+  if [ -n "$staged" ]; then
+    rm -rf "$staged"
+  fi
+}
+trap cleanup EXIT
+
+# The test runs as an ordinary user who must be able to enter the bundle.
+# BuildKit exports it private to whoever built it (mode 0700), and that is
+# not always uid 1000: GitHub's runner is uid 1001. So run as the owner. A
+# root-owned bundle runs as uid 1000 from a copy that user owns.
 owner=$(stat -c %u "$bundle")
 group=$(stat -c %g "$bundle")
 if [ "$owner" = 0 ]; then
   owner=1000
   group=1000
+  staged=$(mktemp -d)
+  cp -a "$bundle/." "$staged/"
+  chown -R "$owner:$group" "$staged"
+  bundle=$staged
 fi
 
 run()
@@ -47,10 +67,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 
-# Put the host's own setting back however the script ends, so running it
-# locally cannot leave the restriction switched off.
-if original=$(sudo sysctl -n "$restriction" 2>/dev/null); then
-  trap 'sudo sysctl -w "$restriction=$original" >/dev/null' EXIT
+if setting=$(sudo sysctl -n "$restriction" 2>/dev/null); then
+  original=$setting
   sudo sysctl -w "$restriction=1"
   run sandbox-unavailable
   sudo sysctl -w "$restriction=0"
