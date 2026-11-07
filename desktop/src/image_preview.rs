@@ -352,17 +352,22 @@ fn viewer_button(
 }
 
 impl XdDesktop {
-    /// Where an image is in the draft now. A tile's position is from the last
-    /// draw, and a synchronized draft or a paste may have moved it since.
-    fn draft_attachment_index(&self, image: u64) -> Option<usize> {
+    /// Where an attachment is in the draft now. A tile's position is from the
+    /// last draw, and a synchronized draft or a paste may have moved it since.
+    fn draft_attachment_index(&self, id: u64) -> Option<usize> {
         self.model
             .draft_attachments
             .iter()
-            .position(|attachment| attachment.preview.id() == image)
+            .position(|attachment| attachment.id == id)
     }
 
-    fn remove_draft_attachment(&mut self, image: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(index) = self.draft_attachment_index(image) {
+    pub(super) fn remove_draft_attachment(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(index) = self.draft_attachment_index(id) {
             self.model.draft_attachments.remove(index);
             self.attachments_dirty = true;
             self.attachment_generation = self.attachment_generation.saturating_add(1);
@@ -379,12 +384,16 @@ impl XdDesktop {
             .model
             .draft_attachments
             .iter()
-            .map(|attachment| (attachment.preview.id(), side))
+            .filter(|attachment| attachment.preview.is_some())
+            .map(|attachment| (attachment.id, side))
             .collect::<HashSet<_>>();
         self.composer_thumbnails
             .retain(|key, _| wanted.contains(key));
         for attachment in &self.model.draft_attachments {
-            let key = (attachment.preview.id(), side);
+            let Some(image) = attachment.preview.clone() else {
+                continue;
+            };
+            let key = (attachment.id, side);
             if self.composer_thumbnails.contains_key(&key) {
                 continue;
             }
@@ -395,7 +404,6 @@ impl XdDesktop {
             }
             self.composer_thumbnails
                 .insert(key, ThumbnailState::Loading);
-            let image = attachment.preview.clone();
             cx.spawn(async move |this, cx| {
                 let thumbnail = cx
                     .background_spawn(async move { cover_thumbnail(&image.bytes, side) })
@@ -418,7 +426,8 @@ impl XdDesktop {
         }
     }
 
-    /// The row of tiles above the composer's editor.
+    /// The row of tiles above the composer's editor: images as thumbnails,
+    /// then every other file as its name.
     pub(super) fn render_composer_attachments(
         &mut self,
         colors: ThemeColors,
@@ -434,12 +443,11 @@ impl XdDesktop {
             .model
             .draft_attachments
             .iter()
+            .filter(|attachment| attachment.preview.is_some())
             .enumerate()
             .map(|(index, attachment)| {
-                let image = attachment.preview.id();
-                let thumbnail = self
-                    .composer_thumbnails
-                    .get(&(attachment.preview.id(), side));
+                let image = attachment.id;
+                let thumbnail = self.composer_thumbnails.get(&(image, side));
                 let content = match thumbnail {
                     Some(ThumbnailState::Ready(thumbnail)) => img(thumbnail.clone())
                         .size_full()
@@ -512,35 +520,123 @@ impl XdDesktop {
                     )
             })
             .collect::<Vec<_>>();
+        let files = self
+            .model
+            .draft_attachments
+            .iter()
+            .filter(|attachment| attachment.preview.is_none())
+            .enumerate()
+            .map(|(index, attachment)| {
+                self.render_draft_file(colors, index, attachment, cx)
+                    .into_any_element()
+            });
         Some(
             div()
                 .flex()
                 .flex_wrap()
+                .items_center()
                 .gap_2()
                 .px(px(8.0))
                 .mb_2()
                 .children(tiles)
+                .children(files)
                 .into_any_element(),
         )
     }
 
-    fn open_image_preview(&mut self, image: u64, window: &mut Window, cx: &mut Context<Self>) {
+    /// A file waiting to be sent: its name and size, and a button to drop it.
+    fn render_draft_file(
+        &self,
+        colors: ThemeColors,
+        index: usize,
+        attachment: &Attachment,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let id = attachment.id;
+        div()
+            .id(("draft-file", index))
+            .debug_selector(move || format!("draft-file-{index}"))
+            .h(px(36.0))
+            .max_w(px(260.0))
+            .min_w_0()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .pl(px(10.0))
+            .pr(px(4.0))
+            .rounded(px(TILE_RADIUS))
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.background))
+            .child(icon(FILE_ICON, 15.0, colors.muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .line_height(px(15.0))
+                            .text_color(rgb(colors.text))
+                            .child(attachment.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .line_height(px(13.0))
+                            .text_color(rgb(colors.faint))
+                            .child(file_size_label(attachment.bytes)),
+                    ),
+            )
+            .child(
+                div()
+                    .id(("remove-draft-file", index))
+                    .debug_selector(move || format!("remove-draft-file-{index}"))
+                    .size(px(24.0))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.remove_draft_attachment(id, window, cx);
+                    }))
+                    .child(icon(CLOSE_ICON, 13.0, colors.muted)),
+            )
+    }
+
+    fn open_image_preview(&mut self, image_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(chat) = self.model.selected_chat.clone() else {
             return;
         };
-        let Some(index) = self.draft_attachment_index(image) else {
-            return;
-        };
-        let images = self
+        let shown = self
             .model
             .draft_attachments
             .iter()
-            .map(|attachment| PreviewImage {
+            .filter_map(|attachment| {
+                Some((attachment.id, attachment.preview.clone()?, attachment))
+            });
+        let mut index = None;
+        let mut images = Vec::new();
+        for (position, (id, image, attachment)) in shown.enumerate() {
+            if id == image_id {
+                index = Some(position);
+            }
+            images.push(PreviewImage {
                 name: attachment.name.clone(),
-                image: attachment.preview.clone(),
+                image,
                 size: attachment.size,
-            })
-            .collect::<Vec<_>>();
+            });
+        }
+        let Some(index) = index else {
+            return;
+        };
         let viewport = window.viewport_size();
         let window_size = (f32::from(viewport.width), f32::from(viewport.height));
         self.image_preview = Some(ImagePreview::new(chat, images, index, window_size));
@@ -799,6 +895,24 @@ impl XdDesktop {
                 .children(next)
                 .into_any_element(),
         )
+    }
+}
+
+/// A file's size as the composer shows it: "812 B", "14 KB", "3.2 MB".
+pub(super) fn file_size_label(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    let size = bytes as f64;
+    if size < KB {
+        format!("{bytes} B")
+    } else if size < KB * KB {
+        format!("{:.0} KB", (size / KB).max(1.0))
+    } else {
+        let megabytes = size / (KB * KB);
+        if megabytes < 10.0 {
+            format!("{megabytes:.1} MB")
+        } else {
+            format!("{megabytes:.0} MB")
+        }
     }
 }
 
@@ -1146,6 +1260,132 @@ mod tests {
                     .all(|state| matches!(state, ThumbnailState::Ready(_)))
             );
         });
+    }
+
+    #[gpui::test]
+    fn files_sit_beside_the_images_and_open_the_viewer_only_on_images(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = composer_with_images(cx, &[(800, 200)]);
+        desktop.update(cx, |desktop, cx| {
+            desktop
+                .model
+                .draft_attachments
+                .insert(0, Attachment::from_file("Report.pdf", vec![7; 3 * 1024]));
+            desktop
+                .model
+                .draft_attachments
+                .push(Attachment::from_file("notes.txt", b"hello".to_vec()));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        for selector in ["draft-file-0", "draft-file-1"] {
+            let chip = cx.debug_bounds(selector).unwrap();
+            assert!(chip.left() > composer.left() && chip.right() < composer.right());
+            assert!(chip.top() > composer.top() && chip.bottom() < composer.bottom());
+        }
+        // The only image is the first tile, wherever it sits in the draft.
+        click(cx, "draft-image-0");
+        cx.update(|_, cx| {
+            let preview = desktop
+                .read(cx)
+                .image_preview
+                .as_ref()
+                .expect("the viewer is open");
+            assert_eq!(preview.caption(), "image-0.png");
+        });
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| desktop.close_image_preview(window, cx));
+        });
+
+        click(cx, "remove-draft-file-0");
+        cx.update(|_, cx| {
+            let desktop = desktop.read(cx);
+            let names = desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["image-0.png", "notes.txt"]);
+            assert!(desktop.attachments_dirty);
+        });
+        assert!(composer_is_focused(&desktop, cx));
+    }
+
+    #[gpui::test]
+    fn added_attachments_keep_to_the_hosts_limits(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[(8, 8), (8, 8), (8, 8), (8, 8)]);
+        desktop.update(cx, |desktop, _| {
+            let image = desktop.model.draft_attachments[0].clone();
+            assert!(
+                desktop
+                    .add_attachment(image)
+                    .unwrap_err()
+                    .contains("4 images")
+            );
+            let large = || Attachment::from_file("large.bin", vec![0; MAX_ATTACHMENT_BYTES]);
+            desktop.add_attachment(large()).unwrap();
+            assert!(
+                desktop
+                    .add_attachment(large())
+                    .unwrap_err()
+                    .contains("20 MiB")
+            );
+            for index in 0..5 {
+                desktop
+                    .add_attachment(Attachment::from_file(format!("{index}.txt"), vec![1]))
+                    .unwrap();
+            }
+            assert_eq!(desktop.model.draft_attachments.len(), MAX_ATTACHMENTS);
+            let extra = Attachment::from_file("extra.txt", vec![1]);
+            assert!(
+                desktop
+                    .add_attachment(extra)
+                    .unwrap_err()
+                    .contains("10 attachments")
+            );
+        });
+    }
+
+    #[test]
+    fn file_sizes_read_the_way_people_write_them() {
+        assert_eq!(file_size_label(812), "812 B");
+        assert_eq!(file_size_label(14 * 1024 + 300), "14 KB");
+        assert_eq!(file_size_label(3 * 1024 * 1024 + 200 * 1024), "3.2 MB");
+        assert_eq!(file_size_label(12 * 1024 * 1024), "12 MB");
+    }
+
+    #[test]
+    fn reading_an_attachment_refuses_folders_and_oversized_files() {
+        let root = std::env::temp_dir().join(format!("xd-attach-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let report = root.join("Report.pdf");
+        fs::write(&report, b"%PDF-1.7").unwrap();
+        let read = read_attachment(&report).unwrap();
+        assert_eq!(
+            (read.name.as_str(), read.mime.as_str()),
+            ("Report.pdf", "application/pdf")
+        );
+        assert!(read_attachment(&root).unwrap_err().contains("is a folder"));
+        let large = root.join("large.bin");
+        fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_ATTACHMENT_BYTES as u64 + 1)
+            .unwrap();
+        assert!(
+            read_attachment(&large)
+                .unwrap_err()
+                .contains("larger than 10 MiB")
+        );
+        assert!(
+            read_attachment(&root.join("missing"))
+                .unwrap_err()
+                .contains("could not be read")
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[gpui::test]

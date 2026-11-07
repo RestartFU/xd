@@ -565,13 +565,22 @@ With `"steer":true`, a message that would have been queued is steered at once,
 as `steer-queue` describes, and the reply adds `steered`. With no turn running
 the member has no effect.
 
-Attachments are PNG only:
+Each attachment is a file with a `name`, a media type in `mime`, and base64
+`data`:
 
 ```json
-{"attachments":[{"mime":"image/png","data":"base64…"}]}
+{"attachments":[
+  {"name":"screen.png","mime":"image/png","data":"base64…"},
+  {"name":"Report.pdf","mime":"application/pdf","data":"base64…"}
+]}
 ```
 
-At most 4 images, each at most 10 MiB, 20 MiB in total.
+At most 10 attachments, of which at most 4 are images, each at most 10 MiB and
+20 MiB in total. An `image/png` attachment must be a PNG and is passed to the
+agent as an image, on a line `[image: <host path>]`. Any other media type is a
+file: the host writes it under its sent name, the last component of `name`, in
+a private directory of its own and appends `[file: <host path>]`, which the
+agent reads from disk. An unusable name becomes `file`.
 
 Desktop clients may provide `worktree_name`, `worktree_backend`, and
 `worktree_model` when the chat is configured to create a new worktree. The
@@ -589,9 +598,10 @@ a prompt slug.
 
 The host persists one composer draft per chat and broadcasts a `draft` event
 after every update. `text` is required but may be empty and is limited to 1
-MiB. Optional `attachments` replaces the synchronized PNG preview list; omit it
-for ordinary text edits so large image payloads are not resent on every
-keystroke. An empty array clears previews. The `chat` snapshot returns `draft`,
+MiB. Optional `attachments` replaces the synchronized attachment list, in the
+same form and limits as `send`; omit it for ordinary text edits so large payloads
+are not resent on every keystroke. An empty array clears them. A client that
+shows only images skips the other files. The `chat` snapshot returns `draft`,
 `draft_revision`, and `draft_attachments` so a newly connected device starts
 with the same composer.
 
@@ -928,8 +938,9 @@ client ever sees the original path:
 
 A client draws a marker line where it stands in the reply, and leaves one in a
 code fence, or with anything else on its line, as text. A user's message carries
-the same marker for each attachment, after any text, and there every such line is
-an image, because what a user types is not Markdown. Markers in subagent reports
+the same marker for each image it attached, after any text, and there every such
+line is an image, because what a user types is not Markdown. Each other file it
+attached is a line `[file: <host path>]`, which clients show by its name. Markers in subagent reports
 are not handled and stay text.
 
 ### Tagged questions

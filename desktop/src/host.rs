@@ -3320,7 +3320,10 @@ mod tests {
 
         let attachments = take_draft_attachments(&mut body).unwrap();
         assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].preview.bytes, b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            attachments[0].preview.as_ref().unwrap().bytes,
+            b"\x89PNG\r\n\x1a\n"
+        );
         assert!(!body.contains_key("draft_attachments"));
     }
 }

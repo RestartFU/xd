@@ -716,7 +716,8 @@ internal class ChatSessionCore(
                 val mime = (fields["mime"] as? JsonPrimitive)?.contentOrNull
                 val data = (fields["data"] as? JsonPrimitive)?.contentOrNull
                     ?: return null
-                if (mime != Limits.PNG_MIME) return null
+                // A file attached on a desktop has no image to show here.
+                if (mime != Limits.PNG_MIME) continue
                 decoded += PngAttachment(Base64.Default.decode(data))
             }
             Limits.validateImages(decoded)

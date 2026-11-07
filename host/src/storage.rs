@@ -46,7 +46,9 @@ Speech is played as each block closes, not at the end of the turn, so a <speak> 
 
 To show the user an image file from this machine, such as a screenshot or chart you made, put it on a line of its own in your reply, outside any code block, in exactly this form:
 [image: /absolute/path/to/image.png]
-The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files."#;
+The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files.
+
+A line of the form [file: /absolute/path] in the user's message is a file they attached; read it from that path when you need it."#;
 /// Long enough for any typed request; a pasted log does not need to repeat whole.
 const MAX_CUT_OFF_REQUEST_CHARS: usize = 4_000;
 /// Twice the above, so the newest request always survives older ones in full.
@@ -62,7 +64,12 @@ const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+/// Images and other files together. Each file has the image's size limit, and
+/// all of a message's attachments share one total.
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_MIME_BYTES: usize = 255;
+const PNG_MIME: &str = "image/png";
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPAT_REPOSITORY_FILES: usize = 5_000;
 const MAX_COMPAT_REPOSITORY_PREVIEW_BYTES: usize = 128 * 1024;
@@ -138,13 +145,23 @@ pub struct StateStore {
 
 struct ValidatedAttachment {
     name: String,
+    mime: String,
     encoded: String,
     data: Vec<u8>,
+}
+
+impl ValidatedAttachment {
+    /// A PNG goes to the agent as an image; anything else as a file it reads.
+    fn is_image(&self) -> bool {
+        self.mime == PNG_MIME
+    }
 }
 
 struct MaterializedMessage {
     prompt: String,
     paths: Vec<PathBuf>,
+    /// The directory each attached file sits alone in, removed after `paths`.
+    directories: Vec<PathBuf>,
     keep: bool,
 }
 
@@ -174,6 +191,9 @@ impl Drop for MaterializedMessage {
         if !self.keep {
             for path in &self.paths {
                 let _ = fs::remove_file(path);
+            }
+            for directory in &self.directories {
+                let _ = fs::remove_dir(directory);
             }
         }
     }
@@ -1959,37 +1979,48 @@ impl StateStore {
             return Ok(MaterializedMessage {
                 prompt: text.to_owned(),
                 paths: Vec::new(),
+                directories: Vec::new(),
                 keep: true,
             });
         };
         let attachments = validate_attachments(value, false)?;
         fs::create_dir_all(&self.paste_root).map_err(|source| StorageError::Filesystem {
-            context: "Cannot create the remote image cache".into(),
+            context: "Cannot create the remote attachment cache".into(),
             source,
         })?;
         secure_directory(&self.paste_root).map_err(|source| StorageError::Filesystem {
-            context: "Cannot secure the remote image cache".into(),
+            context: "Cannot secure the remote attachment cache".into(),
             source,
         })?;
 
         let mut materialized = MaterializedMessage {
             prompt: text.to_owned(),
             paths: Vec::with_capacity(attachments.len()),
+            directories: Vec::new(),
             keep: false,
         };
         for attachment in attachments {
-            let path = self
-                .paste_root
-                .join(format!("paste-{}.png", Uuid::new_v4()));
+            let (path, marker) = if attachment.is_image() {
+                let path = self
+                    .paste_root
+                    .join(format!("paste-{}.png", Uuid::new_v4()));
+                (path, "image")
+            } else {
+                // Alone in a directory of its own, a file keeps the name it was
+                // sent with, which is what the agent sees and refers to.
+                let directory = self.attached_file_directory()?;
+                materialized.directories.push(directory.clone());
+                (directory.join(&attachment.name), "file")
+            };
             let mut file =
                 create_private_file(&path).map_err(|source| StorageError::Filesystem {
-                    context: "Cannot create a remote image".into(),
+                    context: "Cannot create a remote attachment".into(),
                     source,
                 })?;
             materialized.paths.push(path.clone());
             file.write_all(&attachment.data)
                 .map_err(|source| StorageError::Filesystem {
-                    context: "Cannot write a remote image".into(),
+                    context: "Cannot write a remote attachment".into(),
                     source,
                 })?;
             if !materialized.prompt.is_empty() {
@@ -1997,9 +2028,28 @@ impl StateStore {
             }
             materialized
                 .prompt
-                .push_str(&format!("[image: {}]", path.display()));
+                .push_str(&format!("[{marker}: {}]", path.display()));
         }
         Ok(materialized)
+    }
+
+    /// A new private directory for one attached file. Image reads look only at
+    /// the paste root itself, so nothing in here can be served as an image.
+    fn attached_file_directory(&self) -> Result<PathBuf, StorageError> {
+        let files = self.paste_root.join("files");
+        let secured = fs::create_dir_all(&files).and_then(|()| secure_directory(&files));
+        secured.map_err(|source| StorageError::Filesystem {
+            context: "Cannot create the remote attachment cache".into(),
+            source,
+        })?;
+        let directory = files.join(Uuid::new_v4().to_string());
+        fs::create_dir(&directory)
+            .and_then(|()| secure_directory(&directory))
+            .map_err(|source| StorageError::Filesystem {
+                context: "Cannot create a remote attachment".into(),
+                source,
+            })?;
+        Ok(directory)
     }
 
     /// Copies an image a reply names into the store `image-read` serves, so the
@@ -2062,7 +2112,10 @@ impl StateStore {
         if request
             .get("attachments")
             .and_then(Value::as_array)
-            .is_none_or(|attachments| attachments.len() != 1)
+            .is_none_or(|attachments| {
+                attachments.len() != 1
+                    || attachments[0].get("mime").and_then(Value::as_str) != Some(PNG_MIME)
+            })
         {
             return Err(StorageError::InvalidRequest(
                 "Terminal image paste needs exactly one PNG image.".into(),
@@ -3138,7 +3191,7 @@ impl StateStore {
                     .map(|attachment| {
                         json!({
                             "name": attachment.name,
-                            "mime": "image/png",
+                            "mime": attachment.mime,
                             "data": attachment.encoded,
                         })
                     })
@@ -8431,63 +8484,102 @@ fn validate_attachments(
     let attachments = value.as_array().ok_or_else(|| {
         StorageError::InvalidRequest("Message attachments must be an array.".into())
     })?;
-    if attachments.len() > MAX_IMAGES || (!allow_empty && attachments.is_empty()) {
+    if attachments.len() > MAX_ATTACHMENTS || (!allow_empty && attachments.is_empty()) {
         return Err(StorageError::InvalidRequest(
             if allow_empty {
-                "A draft can contain at most 4 images."
+                "A draft can contain at most 10 attachments."
             } else {
-                "A message can contain between 1 and 4 images."
+                "A message can contain between 1 and 10 attachments."
             }
             .into(),
         ));
     }
+    let too_large =
+        || StorageError::InvalidRequest("Each attachment must be 10 MiB or less.".into());
+    let invalid =
+        || StorageError::InvalidRequest("The attached files are invalid or too large.".into());
     let mut total = 0_usize;
+    let mut images = 0_usize;
     attachments
         .iter()
         .map(|attachment| {
-            let object = attachment.as_object().ok_or_else(|| {
-                StorageError::InvalidRequest("Only PNG images up to 10 MiB can be sent.".into())
-            })?;
-            let mime = object.get("mime").and_then(Value::as_str);
-            let encoded = object.get("data").and_then(Value::as_str).ok_or_else(|| {
-                StorageError::InvalidRequest("Only PNG images up to 10 MiB can be sent.".into())
-            })?;
-            let encoded_limit = MAX_IMAGE_BYTES.div_ceil(3) * 4;
-            if mime != Some("image/png") || encoded.len() > encoded_limit {
+            let object = attachment.as_object().ok_or_else(invalid)?;
+            let mime = object
+                .get("mime")
+                .and_then(Value::as_str)
+                .filter(|mime| valid_attachment_mime(mime))
+                .ok_or_else(invalid)?;
+            let encoded = object
+                .get("data")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            if encoded.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+                return Err(too_large());
+            }
+            let data = STANDARD.decode(encoded).map_err(|_| invalid())?;
+            if data.len() > MAX_IMAGE_BYTES {
+                return Err(too_large());
+            }
+            if total > MAX_TOTAL_ATTACHMENT_BYTES.saturating_sub(data.len()) {
                 return Err(StorageError::InvalidRequest(
-                    "Only PNG images up to 10 MiB can be sent.".into(),
+                    "Attachments can add up to at most 20 MiB.".into(),
                 ));
             }
-            let data = STANDARD.decode(encoded).map_err(|_| {
-                StorageError::InvalidRequest("The attached images are invalid or too large.".into())
-            })?;
-            if data.len() > MAX_IMAGE_BYTES
-                || !data.starts_with(PNG_SIGNATURE)
-                || total > MAX_TOTAL_IMAGE_BYTES.saturating_sub(data.len())
-            {
-                return Err(StorageError::InvalidRequest(
-                    "The attached images are invalid or too large.".into(),
-                ));
+            let image = mime == PNG_MIME;
+            if image {
+                if !data.starts_with(PNG_SIGNATURE) {
+                    return Err(StorageError::InvalidRequest(
+                        "An attached image is not a valid PNG.".into(),
+                    ));
+                }
+                images += 1;
+                if images > MAX_IMAGES {
+                    return Err(StorageError::InvalidRequest(
+                        "A message can contain at most 4 images.".into(),
+                    ));
+                }
             }
             total += data.len();
-            let supplied = object
+            let fallback = if image { "image.png" } else { "file" };
+            let name = object
                 .get("name")
                 .and_then(Value::as_str)
-                .unwrap_or("image.png");
-            let mut name = Path::new(supplied)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("image.png");
-            if name.is_empty() || name.len() > 255 {
-                name = "image.png";
-            }
+                .map(attachment_file_name)
+                .unwrap_or(fallback);
             Ok(ValidatedAttachment {
-                name: name.to_owned(),
+                name: if name.is_empty() { fallback } else { name }.to_owned(),
+                mime: mime.to_owned(),
                 encoded: encoded.to_owned(),
                 data,
             })
         })
         .collect()
+}
+
+/// A media type such as `application/pdf`: printable ASCII with one slash.
+fn valid_attachment_mime(mime: &str) -> bool {
+    mime.len() <= MAX_ATTACHMENT_MIME_BYTES
+        && mime.split_once('/').is_some_and(|(kind, subtype)| {
+            !kind.is_empty() && !subtype.is_empty() && !subtype.contains('/')
+        })
+        && mime.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// The last component of a sent name, safe to create as a file of that name,
+/// or empty when nothing of it is. A client's own paths never reach the host's
+/// file system, and nothing in the name can break the marker's single line.
+fn attachment_file_name(supplied: &str) -> &str {
+    let name = supplied
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let usable = !name.is_empty()
+        && name != "."
+        && name != ".."
+        && name.len() <= 255
+        && !name.chars().any(char::is_control);
+    if usable { name } else { "" }
 }
 
 #[cfg(test)]
@@ -9707,7 +9799,7 @@ mod tests {
                 }]
             }))
             .unwrap_err();
-        assert!(error.to_string().contains("invalid or too large"));
+        assert!(error.to_string().contains("not a valid PNG"));
         assert_eq!(store.chat("chat-1").unwrap()["draft"], "");
     }
 
@@ -12524,6 +12616,111 @@ mod tests {
             .next
             .expect("queued image turn");
         assert_eq!(next.prompt, event["queue"][0]);
+    }
+
+    #[test]
+    fn materializes_attached_files_under_their_own_names() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({
+                "chat": "chat-1",
+                "text": "summarize these",
+                "attachments": [
+                    {
+                        "name": "C:\\Users\\me\\Quarterly Report.pdf",
+                        "mime": "application/pdf",
+                        "data": STANDARD.encode(b"%PDF-1.7"),
+                    },
+                    {"name": "screen.png", "mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)},
+                    {"name": "../..", "mime": "text/plain", "data": STANDARD.encode(b"notes")},
+                ],
+            }))
+            .unwrap()
+        else {
+            panic!("idle send should start");
+        };
+        let lines = turn.prompt.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "summarize these");
+        let marked = |line: &str, marker: &str| {
+            line.strip_prefix(marker)
+                .and_then(|line| line.strip_suffix(']'))
+                .map(PathBuf::from)
+                .expect("a materialized attachment")
+        };
+        let report = marked(lines[1], "[file: ");
+        assert_eq!(report.file_name().unwrap(), "Quarterly Report.pdf");
+        assert!(report.starts_with(fixture.root.join("remote-pasted").join("files")));
+        assert_eq!(fs::read(&report).unwrap(), b"%PDF-1.7");
+        assert_eq!(
+            fs::metadata(&report).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(report.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let image = marked(lines[2], "[image: ");
+        assert_eq!(image.parent().unwrap(), fixture.root.join("remote-pasted"));
+        let notes = marked(lines[3], "[file: ");
+        assert_eq!(notes.file_name().unwrap(), "file");
+        assert_eq!(fs::read(&notes).unwrap(), b"notes");
+        // A file is never served as an image, whatever it holds.
+        assert!(
+            store
+                .image_read(&json!({"path": report.to_string_lossy()}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_attachments_beyond_the_limits_and_cleans_up() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let send = |attachments: Value| {
+            store
+                .prepare_send(&json!({"chat": "chat-1", "attachments": attachments}))
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default()
+        };
+        let file = json!({"name": "a.txt", "mime": "text/plain", "data": STANDARD.encode(b"a")});
+        let png =
+            json!({"name": "a.png", "mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)});
+
+        assert!(send(Value::Array(vec![file.clone(); 11])).contains("between 1 and 10"));
+        assert!(send(Value::Array(vec![png.clone(); 5])).contains("at most 4 images"));
+        let large = STANDARD.encode(vec![0_u8; MAX_IMAGE_BYTES]);
+        let large = json!({"name": "big.bin", "mime": "application/octet-stream", "data": large});
+        assert!(send(json!([large.clone(), large.clone(), file.clone()])).contains("20 MiB"));
+        for mime in ["", "text", "text/", "a/b/c", "text/plain\n", "text/pl ain"] {
+            let bad = json!([{"name": "a.txt", "mime": mime, "data": "YQ=="}]);
+            assert!(send(bad).contains("invalid"), "{mime:?} was accepted");
+        }
+        assert!(
+            store
+                .materialize_terminal_image(&json!({"attachments": [file]}))
+                .is_err()
+        );
+        // Nothing a refused message would have written stays behind.
+        let files = fixture.root.join("remote-pasted").join("files");
+        assert!(fs::read_dir(&files).map_or(true, |mut entries| entries.next().is_none()));
     }
 
     #[test]
