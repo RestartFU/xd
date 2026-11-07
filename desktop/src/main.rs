@@ -587,6 +587,8 @@ struct CliVersion {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct SelfUpdateStatus {
     #[serde(default)]
+    channel: String,
+    #[serde(default)]
     state: String,
     #[serde(default)]
     version: String,
@@ -623,6 +625,10 @@ struct CliUpdateStatus {
 struct SelfUpdatePanel {
     status: Option<SelfUpdateStatus>,
     clis: Vec<CliUpdateStatus>,
+    /// A dev build updates by building master here rather than through the host.
+    source_building: bool,
+    source_installed: bool,
+    source_error: Option<String>,
     busy: bool,
     error: Option<String>,
 }
@@ -5468,6 +5474,13 @@ impl XdDesktop {
         };
         self.settings.build_source = self.source_build_panel.text.clone();
         let _ = self.settings.save();
+        self.run_source_build(target, cx);
+    }
+
+    fn run_source_build(&mut self, target: SourceTarget, cx: &mut Context<Self>) {
+        if self.source_build_panel.running {
+            return;
+        }
         self.source_build_panel.output.clear();
         self.source_build_panel.output_bytes = 0;
         self.source_build_panel.message = None;
@@ -5479,9 +5492,16 @@ impl XdDesktop {
                 self.source_build_panel.running = true;
                 self.source_build_generation = self.source_build_generation.saturating_add(1);
                 self.schedule_source_build_poll(self.source_build_generation, cx);
+                let panel = self.self_update_panel.get_or_insert_with(Default::default);
+                panel.source_building = true;
+                panel.source_installed = false;
+                panel.source_error = None;
             }
             Err(error) => {
-                self.source_build_panel.message = Some(error);
+                self.source_build_panel.message = Some(error.clone());
+                self.self_update_panel
+                    .get_or_insert_with(Default::default)
+                    .source_error = Some(error);
             }
         }
         cx.notify();
@@ -5510,14 +5530,18 @@ impl XdDesktop {
                             finished = true;
                             this.source_build_panel.running = false;
                             this.source_build_panel.stopping = false;
+                            let panel = this.self_update_panel.get_or_insert_with(Default::default);
+                            panel.source_building = false;
                             match result {
                                 Ok(()) => {
+                                    panel.source_installed = true;
                                     this.source_build_panel.installed = true;
                                     this.source_build_panel.message = Some(
                                         "Installed. Quit and reopen xd to run this build.".into(),
                                     );
                                 }
                                 Err(error) => {
+                                    panel.source_error = Some(error.clone());
                                     this.source_build_panel.message = Some(error);
                                 }
                             }

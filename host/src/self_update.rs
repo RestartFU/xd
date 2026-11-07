@@ -10,16 +10,22 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{EventBus, private_fs::executable_file};
+use crate::{
+    EventBus,
+    cli_updates::{collect_output, drain, wait_with_timeout},
+    private_fs::executable_file,
+};
 
 const NIGHTLY_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/nightly";
-const DEV_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/tags/dev";
+const REPOSITORY_URL: &str = "https://github.com/RestartFU/xd.git";
 const STABLE_RELEASE_URL: &str = "https://api.github.com/repos/RestartFU/xd/releases/latest";
 const MAX_RELEASE_BYTES: u64 = 256 * 1024;
 const INSTALL_OUTPUT_LIMIT: usize = 16 * 1024;
 // Match T3 Code's packaged-app polling cadence.
 const STARTUP_DELAY: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_secs(4 * 60);
+const DEV_POLL_INTERVAL: Duration = Duration::from_secs(60);
+const MASTER_CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub(crate) struct SelfUpdate {
@@ -52,17 +58,34 @@ impl UpdateChannel {
 
     fn feed_name(self) -> &'static str {
         match self {
-            Self::Dev => "development release feed",
+            Self::Dev => "master branch",
             Self::Nightly => "nightly release feed",
             Self::Release => "release feed",
         }
     }
 
-    fn release_url(self) -> &'static str {
+    /// Dev builds follow the master branch, which no release tracks.
+    fn release_url(self) -> Option<&'static str> {
         match self {
-            Self::Dev => DEV_RELEASE_URL,
-            Self::Nightly => NIGHTLY_RELEASE_URL,
-            Self::Release => STABLE_RELEASE_URL,
+            Self::Dev => None,
+            Self::Nightly => Some(NIGHTLY_RELEASE_URL),
+            Self::Release => Some(STABLE_RELEASE_URL),
+        }
+    }
+
+    fn poll_interval(self) -> Duration {
+        match self {
+            Self::Dev => DEV_POLL_INTERVAL,
+            Self::Nightly | Self::Release => POLL_INTERVAL,
+        }
+    }
+
+    /// Only published builds can be installed by the installer. Nothing is
+    /// published for master, so the desktop builds it from source instead.
+    fn check_installer(self) -> Result<(), String> {
+        match self {
+            Self::Dev => Err("Dev builds update by building master in the xd desktop app.".into()),
+            Self::Nightly | Self::Release => Ok(()),
         }
     }
 }
@@ -110,7 +133,7 @@ impl SelfUpdate {
                         let updater = Self { inner };
                         let _ = updater.check();
                         drop(updater);
-                        thread::sleep(POLL_INTERVAL);
+                        thread::sleep(channel.poll_interval());
                     }
                 });
         }
@@ -144,7 +167,7 @@ impl SelfUpdate {
         let channel = self.inner.channel;
         thread::Builder::new()
             .name("xd-update-check".into())
-            .spawn(move || match latest_release(channel) {
+            .spawn(move || match latest_build(channel) {
                 Ok(latest) => updater.finish("idle", Some(latest), None),
                 Err(error) => updater.finish("failed", None, Some(error)),
             })
@@ -162,6 +185,7 @@ impl SelfUpdate {
             .install
             .clone()
             .ok_or_else(|| "This host's installation cannot update itself.".to_owned())?;
+        self.inner.channel.check_installer()?;
         if !self.begin("installing") {
             return Ok(());
         }
@@ -327,13 +351,52 @@ fn current_version(channel: UpdateChannel) -> String {
     .to_owned()
 }
 
-fn latest_release(channel: UpdateChannel) -> Result<String, String> {
+fn latest_build(channel: UpdateChannel) -> Result<String, String> {
+    match channel.release_url() {
+        Some(url) => latest_release(channel, url),
+        None => latest_master_commit(),
+    }
+}
+
+/// Asks Git rather than the GitHub API, whose limit of sixty unauthenticated
+/// requests an hour would leave nothing for anything else at one check a minute.
+fn latest_master_commit() -> Result<String, String> {
+    use std::os::unix::process::CommandExt;
+
+    let unreachable = || format!("Could not reach the {}.", UpdateChannel::Dev.feed_name());
+    let mut child = crate::background_process::command("git")
+        .args(["ls-remote", REPOSITORY_URL, "refs/heads/master"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|_| unreachable())?;
+    let stdout = child.stdout.take().map(drain);
+    let status = wait_with_timeout(&mut child, MASTER_CHECK_TIMEOUT).map_err(|_| unreachable())?;
+    if !status.success() {
+        return Err(unreachable());
+    }
+    master_commit_in(&collect_output(stdout)).ok_or_else(unreachable)
+}
+
+fn master_commit_in(output: &str) -> Option<String> {
+    let mut fields = output.lines().next()?.split_whitespace();
+    let commit = fields.next()?;
+    (fields.next() == Some("refs/heads/master")
+        && commit.len() == 40
+        && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| commit.to_owned())
+}
+
+fn latest_release(channel: UpdateChannel, url: &str) -> Result<String, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(20)))
         .build()
         .into();
     let mut response = agent
-        .get(channel.release_url())
+        .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "xd")
         .call()
@@ -491,6 +554,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn each_channel_follows_its_own_builds() {
+        assert_eq!(UpdateChannel::Dev.poll_interval(), Duration::from_secs(60));
+        assert_eq!(
+            UpdateChannel::Nightly.release_url(),
+            Some("https://api.github.com/repos/RestartFU/xd/releases/tags/nightly")
+        );
+        assert_eq!(
+            UpdateChannel::Release.release_url(),
+            Some("https://api.github.com/repos/RestartFU/xd/releases/latest")
+        );
+        for channel in [UpdateChannel::Nightly, UpdateChannel::Release] {
+            assert_eq!(channel.poll_interval(), Duration::from_secs(4 * 60));
+            assert!(channel.check_installer().is_ok());
+        }
+        // The dev release is no longer published, so installing it would downgrade.
+        assert!(UpdateChannel::Dev.check_installer().is_err());
+    }
+
+    #[test]
+    fn reads_the_master_commit_from_git_output() {
+        let commit = "77af5848ea1eb3941752a3de6a31ee9da5ed8a2f";
+        assert_eq!(
+            master_commit_in(&format!("{commit}\trefs/heads/master\n")).as_deref(),
+            Some(commit)
+        );
+        assert_eq!(master_commit_in(""), None);
+        assert_eq!(master_commit_in("not-a-commit\trefs/heads/master\n"), None);
+        assert_eq!(
+            master_commit_in(&format!("{commit}\trefs/heads/other\n")),
+            None
+        );
+    }
+
+    #[test]
     fn update_snapshots_compare_exact_build_identity() {
         assert_eq!(
             snapshot_value(
@@ -564,17 +661,9 @@ mod tests {
     }
 
     #[test]
-    fn dev_releases_use_their_own_feed_and_commit_identity() {
-        let release = json!({"tag_name": "dev", "target_commitish": "dev-commit"});
+    fn dev_builds_compare_commits_and_have_no_release_feed() {
         assert_eq!(UpdateChannel::Dev.as_str(), "dev");
-        assert_eq!(
-            UpdateChannel::Dev.release_url(),
-            "https://api.github.com/repos/RestartFU/xd/releases/tags/dev"
-        );
-        assert_eq!(
-            release_identity(UpdateChannel::Dev, &release).unwrap(),
-            "dev-commit"
-        );
+        assert_eq!(UpdateChannel::Dev.release_url(), None);
         assert_eq!(update_channel_from(Some("dev")), UpdateChannel::Dev);
         assert_eq!(
             snapshot_value(

@@ -40,6 +40,30 @@ struct RunControl {
     child: Mutex<Option<Child>>,
 }
 
+/// The channels whose installs can replace themselves with a local build.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BuildChannel {
+    Nightly,
+    Dev,
+}
+
+impl BuildChannel {
+    fn current() -> Option<Self> {
+        match env::var("XD_UPDATE_CHANNEL").as_deref() {
+            Ok("nightly") => Some(Self::Nightly),
+            Ok("dev") => Some(Self::Dev),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Nightly => "nightly",
+            Self::Dev => "dev",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BuildPlatform {
     Linux,
@@ -49,8 +73,10 @@ enum BuildPlatform {
 impl SourceBuildRun {
     pub fn start(target: SourceTarget) -> Result<Self, String> {
         if !supported() {
-            return Err("Source builds require an installed nightly.".into());
+            return Err("Source builds require an installed nightly or dev build.".into());
         }
+        let channel = BuildChannel::current()
+            .ok_or_else(|| "Source builds require an installed nightly or dev build.".to_owned())?;
         let checkout = checkout_dir()?;
         // Backpressure keeps a noisy or hostile build from queuing unbounded
         // output while the GPUI thread is busy painting.
@@ -63,7 +89,8 @@ impl SourceBuildRun {
         thread::Builder::new()
             .name("xd-source-build".into())
             .spawn(move || {
-                let result = build_and_install(&target, &checkout, &sender, &worker_control);
+                let result =
+                    build_and_install(&target, channel, &checkout, &sender, &worker_control);
                 let _ = sender.send_blocking(SourceBuildEvent::Finished(result));
             })
             .map_err(|error| format!("Cannot start the source build: {error}"))?;
@@ -93,8 +120,12 @@ impl Drop for SourceBuildRun {
 
 pub fn supported() -> bool {
     build_platform().is_some()
-        && env::var("XD_UPDATE_CHANNEL").as_deref() == Ok("nightly")
-        && installed_nightly_root().is_some()
+        && BuildChannel::current().is_some_and(|channel| installed_root(channel).is_some())
+}
+
+/// Where a dev build's updates come from.
+pub fn master_target() -> Option<SourceTarget> {
+    parse_branch(REPOSITORY, "master")
 }
 
 fn build_platform() -> Option<BuildPlatform> {
@@ -246,11 +277,11 @@ fn checkout_dir() -> Result<PathBuf, String> {
     Ok(cache.join(data_name).join("source"))
 }
 
-fn installed_nightly_root() -> Option<PathBuf> {
+fn installed_root(channel: BuildChannel) -> Option<PathBuf> {
     let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
     let platform = build_platform()?;
     let base = PathBuf::from(env::var_os("HOME")?);
-    let root = installed_nightly_root_for_executable(&executable, &base, platform)?;
+    let root = installed_root_for_executable(&executable, &base, platform, channel)?;
     let marker = match platform {
         BuildPlatform::Linux => root.join("xd.sh"),
         BuildPlatform::Macos => root.join("Contents/MacOS/xd"),
@@ -258,14 +289,15 @@ fn installed_nightly_root() -> Option<PathBuf> {
     marker.is_file().then_some(root)
 }
 
-fn installed_nightly_root_for_executable(
+fn installed_root_for_executable(
     executable: &Path,
     base: &Path,
     platform: BuildPlatform,
+    channel: BuildChannel,
 ) -> Option<PathBuf> {
     let expected = match platform {
-        BuildPlatform::Linux => base.join(".local/opt/xd-nightly"),
-        BuildPlatform::Macos => base.join("Applications/xd-nightly.app"),
+        BuildPlatform::Linux => base.join(format!(".local/opt/xd-{}", channel.name())),
+        BuildPlatform::Macos => base.join(format!("Applications/xd-{}.app", channel.name())),
     };
     let root = match platform {
         BuildPlatform::Linux => {
@@ -290,6 +322,7 @@ fn installed_nightly_root_for_executable(
 
 fn build_and_install(
     target: &SourceTarget,
+    channel: BuildChannel,
     checkout: &Path,
     sender: &async_channel::Sender<SourceBuildEvent>,
     control: &Arc<RunControl>,
@@ -337,41 +370,58 @@ fn build_and_install(
         build_platform().ok_or_else(|| "Source builds are not supported here.".to_owned())?;
     let mut build = match platform {
         BuildPlatform::Linux => {
-            output(sender, "Building the nightly bundle through Docker…\n");
+            output(
+                sender,
+                &format!("Building the {} bundle through Docker…\n", channel.name()),
+            );
             let mut command = Command::new("./scripts/build.sh");
-            command.args(["--build-arg", "PROFILE=nightly"]);
+            match channel {
+                BuildChannel::Nightly => {
+                    command.args(["--build-arg", "PROFILE=nightly"]);
+                }
+                BuildChannel::Dev => {
+                    command.env("PROFILE", "dev");
+                }
+            }
             command
         }
         BuildPlatform::Macos => {
-            output(sender, "Building the native macOS nightly bundle…\n");
+            output(
+                sender,
+                &format!("Building the native macOS {} bundle…\n", channel.name()),
+            );
             let mut command = Command::new("./scripts/build-macos.sh");
-            command.env("PROFILE", "nightly");
+            command.env("PROFILE", channel.name());
             command
         }
     };
     build.current_dir(checkout);
     run(&mut build, "build the source", sender, control)?;
-    output(sender, "Installing the nightly bundle…\n");
-    let mut install = match platform {
-        BuildPlatform::Linux => {
-            let mut command = Command::new("sh");
-            command.current_dir(checkout);
-            command.args(["scripts/install.sh", "--from", "dist"]);
-            command
-        }
-        BuildPlatform::Macos => {
-            let mut command = Command::new("sh");
-            command.current_dir(checkout);
-            command.args([
-                "scripts/install-macos.sh",
-                "--from",
-                "dist/macos/xd-nightly.app",
-            ]);
-            command
-        }
-    };
+    output(
+        sender,
+        &format!("Installing the {} bundle…\n", channel.name()),
+    );
+    let mut install = Command::new("sh");
+    install.current_dir(checkout);
+    install.args(install_arguments(platform, channel));
     install.env("XD_ALLOW_RUNNING_INSTALL", "1");
     run(&mut install, "install the source build", sender, control)
+}
+
+fn install_arguments(platform: BuildPlatform, channel: BuildChannel) -> Vec<String> {
+    let (script, bundle) = match platform {
+        BuildPlatform::Linux => ("scripts/install.sh", "dist".to_owned()),
+        BuildPlatform::Macos => (
+            "scripts/install-macos.sh",
+            format!("dist/macos/xd-{}.app", channel.name()),
+        ),
+    };
+    let mut arguments = vec![script.to_owned()];
+    if channel == BuildChannel::Dev {
+        arguments.push("--dev".to_owned());
+    }
+    arguments.extend(["--from".to_owned(), bundle]);
+    arguments
 }
 
 fn prepare_checkout(checkout: &Path) -> Result<(), String> {
@@ -552,6 +602,56 @@ fn status_text(status: ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn installed_nightly_root_for_executable(
+        executable: &Path,
+        base: &Path,
+        platform: BuildPlatform,
+    ) -> Option<PathBuf> {
+        installed_root_for_executable(executable, base, platform, BuildChannel::Nightly)
+    }
+
+    #[test]
+    fn a_dev_install_builds_and_installs_as_dev() {
+        let home = Path::new("/home/person");
+        assert_eq!(
+            installed_root_for_executable(
+                Path::new("/home/person/.local/opt/xd-dev/bin/xd"),
+                home,
+                BuildPlatform::Linux,
+                BuildChannel::Dev,
+            ),
+            Some(PathBuf::from("/home/person/.local/opt/xd-dev"))
+        );
+        assert_eq!(
+            installed_root_for_executable(
+                Path::new("/home/person/.local/opt/xd-nightly/bin/xd"),
+                home,
+                BuildPlatform::Linux,
+                BuildChannel::Dev,
+            ),
+            None
+        );
+        assert_eq!(
+            install_arguments(BuildPlatform::Linux, BuildChannel::Dev),
+            ["scripts/install.sh", "--dev", "--from", "dist"]
+        );
+        assert_eq!(
+            install_arguments(BuildPlatform::Macos, BuildChannel::Dev),
+            [
+                "scripts/install-macos.sh",
+                "--dev",
+                "--from",
+                "dist/macos/xd-dev.app"
+            ]
+        );
+        assert_eq!(
+            install_arguments(BuildPlatform::Linux, BuildChannel::Nightly),
+            ["scripts/install.sh", "--from", "dist"]
+        );
+        let master = master_target().unwrap();
+        assert_eq!(master.git_ref, "refs/heads/master");
+    }
 
     #[test]
     fn parses_branches_pull_requests_commits_and_links() {

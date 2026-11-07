@@ -387,9 +387,9 @@ impl XdDesktop {
                         .when(!busy && !installed && available, |actions| {
                             actions.child(
                                 ui_button("install-app-update", ButtonKind::Primary, colors)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.request_app_update("install", cx)
-                                    }))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.install_app_update(cx)),
+                                    )
                                     .child("Install update"),
                             )
                         })
@@ -419,7 +419,7 @@ impl XdDesktop {
                             .child(if source_build::supported() {
                                 "Build and install a branch, pull request, or commit."
                             } else {
-                                "Source builds are available in an installed nightly."
+                                "Source builds are available in an installed nightly or dev build."
                             }),
                     )
                     .child(

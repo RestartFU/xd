@@ -522,14 +522,14 @@ fn run_update(executable: &Path, timeout: Duration) -> Result<String, String> {
 }
 
 /// Output being read from a process, available even if the stream never ends.
-struct Capture {
+pub(crate) struct Capture {
     bytes: Arc<Mutex<Vec<u8>>>,
     finished: Receiver<()>,
 }
 
 /// Waits only briefly: a helper left running can hold the pipes open for good,
 /// and what the process itself printed has already arrived by then.
-fn collect_output(capture: Option<Capture>) -> String {
+pub(crate) fn collect_output(capture: Option<Capture>) -> String {
     let Some(capture) = capture else {
         return String::new();
     };
@@ -541,7 +541,7 @@ fn collect_output(capture: Option<Capture>) -> String {
         .unwrap_or_default()
 }
 
-fn drain(stream: impl Read + Send + 'static) -> Capture {
+pub(crate) fn drain(stream: impl Read + Send + 'static) -> Capture {
     let bytes = Arc::new(Mutex::new(Vec::new()));
     let (done, finished) = mpsc::channel();
     let kept = bytes.clone();
@@ -571,7 +571,7 @@ fn read_tail(mut stream: impl Read, limit: usize, kept: &Mutex<Vec<u8>>) {
     }
 }
 
-fn wait_with_timeout(
+pub(crate) fn wait_with_timeout(
     child: &mut Child,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus, String> {

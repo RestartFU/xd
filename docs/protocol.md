@@ -597,7 +597,9 @@ bring a machine forward without a shell on it. `install` replaces the files,
 which is safe while turns run because the process keeps the binary it already
 mapped; `restart` drops every connection and loses any running turn, so the
 two are separate actions and neither happens on its own. Native Linux bundles
-and macOS apps support this flow. `supported` is false where the installation
+and macOS apps support this flow. A dev host checks the `master` branch every
+minute instead of a release and refuses `install`, because nothing is published
+for it; the desktop builds that commit from source. `supported` is false where the installation
 cannot replace itself, such as source builds, and both `install` and `restart`
 are refused there.
 

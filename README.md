@@ -65,7 +65,10 @@ machine. Settings → **Assistant accounts** refreshes the CLI's current status.
 Agent binaries and separate copies of their credentials are not included in xd.
 
 Installed Linux and macOS builds check their own release channel for app updates
-shortly after startup and every four minutes. xd also compares installed Codex and
+shortly after startup and every four minutes: nightly builds follow the nightly
+release and release builds follow tagged releases. Dev builds check the latest
+`master` commit every minute, and confirming an update builds that commit on your
+machine, which needs Docker on Linux. xd also compares installed Codex and
 Claude Code versions with their npm releases every 30 minutes; only the package
 names are sent. When something is out of date, an **Update** button appears beside
 the terminal and Settings buttons. It lists what will change, and nothing is

@@ -31,7 +31,21 @@ fn version_change(current: Option<&str>, latest: Option<&str>) -> Option<String>
 }
 
 impl SelfUpdatePanel {
+    fn builds_from_source(&self) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|status| status.channel == "dev")
+    }
+
     fn app_state(&self) -> &str {
+        if self.builds_from_source() {
+            if self.source_building {
+                return "installing";
+            }
+            if self.source_installed {
+                return "installed";
+            }
+        }
         self.status
             .as_ref()
             .filter(|status| status.supported)
@@ -90,8 +104,13 @@ impl SelfUpdatePanel {
                 self.app_pending() || matches!(self.app_state(), "installing" | "installed")
             })
         {
-            let (app, daemon) = match status.state.as_str() {
-                "installing" => (Some("Installing…"), Some("Installing…")),
+            let installing = if self.builds_from_source() {
+                "Building from source…"
+            } else {
+                "Installing…"
+            };
+            let (app, daemon) = match self.app_state() {
+                "installing" => (Some(installing), Some(installing)),
                 "installed" => (
                     Some("Installed. Restart to finish."),
                     Some("Installed. Restart to finish."),
@@ -146,6 +165,8 @@ impl SelfUpdatePanel {
     fn update_summary(&self) -> &'static str {
         if self.app_installed() {
             "Restart xd to run the new version. Close terminal tabs and wait for chats to finish first."
+        } else if self.builds_from_source() && self.app_pending() {
+            "Confirm to build the latest master commit on this machine. It can take a while, and nothing restarts until you choose to."
         } else if self.has_pending_update() || self.update_in_progress() {
             "Confirm to install these. Nothing restarts until you choose to."
         } else if self.has_manual_update() {
@@ -198,6 +219,20 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// Published channels install through the host. Nothing is published for
+    /// master, so a dev build compiles it here.
+    pub(super) fn install_app_update(&mut self, cx: &mut Context<Self>) {
+        let builds_from_source = self
+            .self_update_panel
+            .as_ref()
+            .is_some_and(SelfUpdatePanel::builds_from_source);
+        if !builds_from_source {
+            self.request_app_update("install", cx);
+        } else if let Some(target) = source_build::master_target() {
+            self.run_source_build(target, cx);
+        }
+    }
+
     /// Starts everything the popup listed. Each action is refused by the host
     /// if it is already running, so a repeated confirm cannot run one twice.
     fn confirm_updates(&mut self, cx: &mut Context<Self>) {
@@ -214,7 +249,7 @@ impl XdDesktop {
             .map(|cli| cli.provider.clone())
             .collect::<Vec<_>>();
         if install_app {
-            self.request_app_update("install", cx);
+            self.install_app_update(cx);
         }
         for provider in providers {
             let result = self
@@ -332,16 +367,19 @@ impl XdDesktop {
                             .max_h(px(300.0))
                             .overflow_y_scroll()
                             .children(rows)
-                            .when_some(panel.error.clone(), |body, error| {
-                                body.child(
-                                    div()
-                                        .mt_3()
-                                        .text_size(px(12.0))
-                                        .line_height(px(18.0))
-                                        .text_color(rgb(colors.danger))
-                                        .child(error),
-                                )
-                            }),
+                            .when_some(
+                                panel.error.clone().or_else(|| panel.source_error.clone()),
+                                |body, error| {
+                                    body.child(
+                                        div()
+                                            .mt_3()
+                                            .text_size(px(12.0))
+                                            .line_height(px(18.0))
+                                            .text_color(rgb(colors.danger))
+                                            .child(error),
+                                    )
+                                },
+                            ),
                     )
                     .child(
                         div()
@@ -404,6 +442,7 @@ mod tests {
 
     fn app(state: &str, available: bool) -> SelfUpdateStatus {
         SelfUpdateStatus {
+            channel: "nightly".into(),
             state: state.into(),
             version: OLD_COMMIT.into(),
             latest: Some(NEW_COMMIT.into()),
@@ -651,6 +690,40 @@ mod tests {
                 .unwrap()
                 .contains("cannot update itself")
         );
+    }
+
+    #[test]
+    fn a_dev_build_follows_its_source_build_instead_of_the_host() {
+        let mut status = app("idle", true);
+        status.channel = "dev".into();
+        let mut dev = panel(Some(status), Vec::new());
+        assert!(dev.app_pending());
+        assert!(
+            dev.update_summary()
+                .contains("build the latest master commit")
+        );
+
+        dev.source_building = true;
+        assert!(!dev.app_pending());
+        assert!(dev.update_in_progress());
+        assert_eq!(
+            dev.update_rows()[0].status.as_deref(),
+            Some("Building from source…")
+        );
+
+        dev.source_building = false;
+        dev.source_installed = true;
+        assert!(dev.app_installed());
+        assert!(dev.offers_update());
+        assert!(!dev.has_pending_update());
+    }
+
+    #[test]
+    fn other_channels_ignore_a_manual_source_build() {
+        let mut nightly = panel(Some(app("idle", true)), Vec::new());
+        nightly.source_building = true;
+        assert!(nightly.app_pending());
+        assert!(!nightly.update_in_progress());
     }
 
     #[test]
