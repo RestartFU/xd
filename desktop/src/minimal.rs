@@ -88,6 +88,84 @@ pub(crate) struct SessionCard {
     pub(crate) working: bool,
 }
 
+/// A session on the Settled shelf, which lists every project's together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SettledCard {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) agent: AgentCli,
+    pub(crate) project_id: String,
+    pub(crate) project: String,
+    pub(crate) branch: String,
+    pub(crate) settled_at: i64,
+}
+
+/// The shelf's rows, most recently settled first.
+pub(crate) fn settled_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<SettledCard> {
+    let mut cards = chats
+        .iter()
+        .filter_map(|chat| {
+            let settled_at = chat.settled_at?;
+            let folder = folders.iter().find(|folder| folder.id == chat.folder)?;
+            let session = project_sessions(&chat.folder, std::slice::from_ref(chat)).pop()?;
+            Some(SettledCard {
+                id: session.id,
+                title: session.title,
+                agent: session.agent,
+                project_id: folder.id.clone(),
+                project: folder.name.clone(),
+                branch: session.branch,
+                settled_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by(|left, right| {
+        right
+            .settled_at
+            .cmp(&left.settled_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    cards
+}
+
+/// Where to go after settling the open session: the next active row down the
+/// sidebar, wrapping to the top. `chats` holds the active rows and `current`
+/// the chats of the session being settled.
+pub(crate) fn next_active_session(
+    folders: &[Folder],
+    chats: &[ChatSummary],
+    current: &[String],
+) -> Option<(String, String, AgentCli)> {
+    let rows = folders
+        .iter()
+        .flat_map(|folder| {
+            project_sessions(&folder.id, chats)
+                .into_iter()
+                .map(|session| (folder.id.clone(), session.id, session.agent))
+        })
+        .collect::<Vec<_>>();
+    let index = rows
+        .iter()
+        .position(|(_, chat_id, _)| current.contains(chat_id))?;
+    rows[index + 1..]
+        .iter()
+        .chain(&rows[..index])
+        .find(|(_, chat_id, _)| !current.contains(chat_id))
+        .cloned()
+}
+
+/// How long ago something happened, as short as a sidebar row needs.
+pub(crate) fn age_label(at: i64, now: i64) -> String {
+    let seconds = now.saturating_sub(at).max(0);
+    match seconds {
+        0..60 => "now".into(),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..86_400 => format!("{}h", seconds / 3_600),
+        86_400..604_800 => format!("{}d", seconds / 86_400),
+        _ => format!("{}w", seconds / 604_800),
+    }
+}
+
 pub(crate) fn project_cards(folders: &[Folder], chats: &[ChatSummary]) -> Vec<ProjectCard> {
     folders
         .iter()
@@ -136,7 +214,9 @@ pub(crate) fn resumable_session(
     last_chat: Option<&str>,
     chats: &[ChatSummary],
 ) -> Option<(String, String, AgentCli)> {
-    let supported = |chat: &&ChatSummary| AgentCli::from_backend(&chat.backend).is_some();
+    let supported = |chat: &&ChatSummary| {
+        chat.settled_at.is_none() && AgentCli::from_backend(&chat.backend).is_some()
+    };
     let chat = last_chat
         .and_then(|chat_id| {
             chats
@@ -222,6 +302,96 @@ mod tests {
         }
     }
 
+    fn named_folder(id: &str) -> Folder {
+        Folder {
+            id: id.into(),
+            name: format!("{id}-name"),
+            parent: None,
+            owner: None,
+        }
+    }
+
+    #[test]
+    fn the_settled_shelf_lists_the_most_recently_settled_first() {
+        let mut older = session("older", "one", "Older", "codex", false);
+        older.settled_at = Some(100);
+        let mut newer = session("newer", "two", "Newer", "claude", false);
+        newer.settled_at = Some(200);
+        let mut tied = session("a-tied", "one", "Tied", "codex", false);
+        tied.settled_at = Some(100);
+        let active = session("active", "one", "Active", "codex", false);
+        let orphan = {
+            let mut orphan = session("orphan", "gone", "Orphan", "codex", false);
+            orphan.settled_at = Some(300);
+            orphan
+        };
+        let cards = settled_cards(
+            &[named_folder("one"), named_folder("two")],
+            &[older, active, newer, tied, orphan],
+        );
+        assert_eq!(
+            cards
+                .iter()
+                .map(|card| card.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer", "a-tied", "older"]
+        );
+        assert_eq!(cards[0].project, "two-name");
+        assert_eq!(cards[0].project_id, "two");
+        assert_eq!(cards[0].settled_at, 200);
+    }
+
+    #[test]
+    fn settling_the_open_session_moves_down_the_sidebar_and_wraps() {
+        let folders = [named_folder("one"), named_folder("two")];
+        let chats = [
+            session("a", "one", "A", "codex", false),
+            session("b", "one", "B", "codex", false),
+            session("c", "two", "C", "claude", false),
+        ];
+        let next = |current: &str| {
+            next_active_session(&folders, &chats, &[current.to_owned()])
+                .map(|(project, chat, _)| (project, chat))
+        };
+        assert_eq!(next("a"), Some(("one".into(), "b".into())));
+        assert_eq!(next("b"), Some(("two".into(), "c".into())));
+        assert_eq!(next("c"), Some(("one".into(), "a".into())));
+        assert_eq!(next("missing"), None);
+        assert_eq!(
+            next_active_session(&folders, &chats[..1], &["a".to_owned()]),
+            None,
+            "nothing else is active"
+        );
+    }
+
+    #[test]
+    fn a_settled_session_is_not_offered_to_continue() {
+        let mut settled = session("settled", "one", "Done", "codex", false);
+        settled.settled_at = Some(1);
+        let active = session("active", "one", "Open", "codex", false);
+        let resumed = resumable_session(Some("settled"), &[settled, active]);
+        assert_eq!(resumed.map(|(_, chat, _)| chat), Some("active".to_owned()));
+    }
+
+    #[test]
+    fn ages_read_short_enough_for_a_row() {
+        let now = 10_000_000;
+        for (ago, label) in [
+            (0, "now"),
+            (59, "now"),
+            (60, "1m"),
+            (3_599, "59m"),
+            (3_600, "1h"),
+            (86_399, "23h"),
+            (86_400, "1d"),
+            (604_799, "6d"),
+            (604_800, "1w"),
+            (-5, "now"),
+        ] {
+            assert_eq!(age_label(now - ago, now), label);
+        }
+    }
+
     fn session(id: &str, folder: &str, title: &str, backend: &str, working: bool) -> ChatSummary {
         ChatSummary {
             id: id.into(),
@@ -231,6 +401,8 @@ mod tests {
             branch: Some(format!("session/{id}")),
             working,
             terminal_working: false,
+            settled_at: None,
+            auto_settle_disabled: false,
         }
     }
 

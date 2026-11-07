@@ -114,7 +114,9 @@ stored hashed on the host. `devices`, `rename-device`, `revoke-device`,
 session for that device immediately. A revoked token or changed certificate
 requires explicit re-pairing.
 
-`daemon-info` returns protocol/build identity and PID. `daemon-stop` acknowledges
+`daemon-info` returns protocol/build identity, PID, and the installed host binary
+that an update restart re-executes (`executable`, null outside an installed
+bundle). `daemon-stop` acknowledges
 before shutting down the shared runtime. Remote listeners persist across daemon
 restarts, but unused codes and pending backend requests do not.
 
@@ -187,6 +189,15 @@ transcripts, drafts, options, or backend resume state. Existing clients may
 continue reading `folders` and `chats`; clients reading an older host without
 `sessions` may display one session per chat and retain its chat id as the
 terminal owner.
+
+A host that can settle sessions adds a top-level `"settlement":true`; hide
+settling on one that does not. A settled session has `settled_at`, in seconds,
+on its `sessions` entry and on each of its chats, and a session kept out of
+automatic settling has `auto_settle_disabled:true` there. Both are absent
+otherwise. Settling changes where a session is listed and nothing else: its
+chats still answer `chat` and `messages` and can still be opened. List settled
+sessions apart from active ones, most recently settled first. Clients that
+ignore these members keep listing settled sessions with the active ones.
 
 ### `chat`
 
@@ -308,11 +319,14 @@ boundary, not an event cursor.
 | `folder-settings` | `folder: string` | inherited folder settings |
 | `new-chat-sources` | `folder: string` | `branches:[{name,reference,oid}]`, `pull_requests:[{number,title,oid}]`, optional `pull_request_error`; branch discovery works without GitHub CLI |
 | `shortcuts` | optional `folder: string` | host-wide `global`, folder-owned `workspace`, and merged `effective` prompt arrays |
+| `chat-title-settings` | none | `enabled: boolean`, `models: {codex, claude}`, each the model that will title that assistant's chats, or `null` if its CLI offers none of the choices |
 | `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to host home, lists non-hidden directories |
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
 | `agent-clis` | none | detected assistant versions |
 | `host-update` | optional `action` of `status`, `check`, `install`, `restart` | `version`, `channel`, `state`, `supported`, `available`, optional `latest` and `error` |
+| `agent-cli-updates` | optional `action` of `status`, `check`, `install`; `install` requires `provider` | `providers:[{provider,display_name,state,available,updatable, optional version, latest, detail}]`; `state` is `idle`, `updating`, `updated`, or `failed`; each change is also sent as an `agent-cli-update` event holding one provider |
+| `resume-interrupted` | `resume: boolean` | `resumed: string[]`; local connections only. Answers for every chat cut off since the last answer, which wait in storage until then: `true` sends a visible continuation message to each, unless the chat has moved on, and `false` discards them |
 | `agent-catalog` | none | `backends: [{id, name, default_model, models:[{id,name,context_window}], efforts:[string]}]` |
 | `owner-icon` | `owner: string` GitHub login from a folder's `owner` | `owner`, and either `mime` of `image/png` or `image/jpeg` with base64 `data`, `pending: true` while the host fetches, `retry: true` when the last fetch failed, or none of these when the account has no avatar; an uncached avatar is answered as pending and sent to the asking connection as an `owner-icon` event |
 | `workflow-status` | `text: string` captured `workflow_run` marker | `name`, `state`, optional `conclusion`, `jobs:[{id,name,state, optional conclusion, optional log}]`; fetches GitHub Actions status on the host |
@@ -340,7 +354,13 @@ acting at once are therefore ordered by the host rather than racing.
 Without `session`, `folder` is required and the operation creates a new session
 containing the new chat. `title` defaults to `New Chat` and also supplies the
 initial session title. Optional `backend` selects the chat's assistant;
-otherwise the folder and host defaults apply. `worktree` may select `new`, an
+otherwise the folder and host defaults apply. Without `backend`, the chat starts
+on the folder's model if it has one; otherwise it takes the model last chosen
+with `set-option` for that assistant, else the assistant's own default. Its effort is
+the one last chosen for that assistant, else the default the assistant reports
+for the chat's model, else `high`. A chat's first `send` waits for model discovery if
+either value is unset, and moves a chat on a model the assistant no longer
+offers to its default. `worktree` may select `new`, an
 `existing` path, a full local or remote-tracking branch ref plus its listed
 commit, or a pull request number plus its listed head commit. Branch and pull
 request selections create an isolated managed `xd/*` worktree and are
@@ -380,6 +400,50 @@ worktrees. `delete-chat` with an actual chat id removes only that conversation;
 its reply includes `session` and `session_deleted`. Shared terminals close only
 when the final member is deleted. `rename-chat` changes only the conversation
 title. Hiding a client tab does not require either deletion operation.
+
+### Settling sessions
+
+```json
+{"op":"settle-session","session":"session-9"}
+{"op":"unsettle-session","session":"session-9"}
+{"op":"set-session-auto-settle","session":"session-9","enabled":false}
+```
+
+Each operation requires a session id, replies with `ok`, and broadcasts `tree`.
+
+`settle-session` moves finished work out of the active list without deleting it.
+It is refused while any member chat is running a turn, has a queued message, or
+is waiting on an approval or question. Settling a settled session keeps its
+original `settled_at`. No agent process stops and no terminal closes.
+
+`unsettle-session` returns a session to the active list and keeps the automatic
+rules away from it until new activity. `set-session-auto-settle` with
+`enabled:false` keeps a session out of the rules for good; settling by hand
+still works. A message sent to any member chat, or a turn the agent starts on its
+own, un-settles the session and hands it back to the rules.
+
+```json
+{"op":"auto-settle-settings"}
+{"ok":true,"after_days":3,"on_merge":true,"keep_pull_requests":false}
+{"op":"set-auto-settle-settings","after_days":null,"keep_pull_requests":true}
+```
+
+The daemon applies these rules about once a minute, whether or not a client is
+connected:
+
+- `after_days`, from 1 to 90, settles a session after that many days without
+  activity. Here `null` is meaningful: it turns this rule off.
+- `on_merge` settles a session when the pull request of its checked-out branch
+  merges. A closed pull request settles it whenever either of these two rules is
+  on; with both off the host settles nothing by itself.
+- `keep_pull_requests` stops inactivity from settling a session that has a pull
+  request. Merging and closing still do.
+
+A pull request that finished before the user's latest message in the session
+does not count. The rules skip sessions the operations above would refuse and
+sessions the user un-settled. `settled_at` is then when the session went quiet,
+not when the sweep ran. `set-auto-settle-settings` changes only the members it
+names, broadcasts `auto-settle-settings`, and applies at once.
 
 ### Shared session terminals
 
@@ -576,17 +640,33 @@ member's send; subsequent chats share it. Other agent options remain per chat.
 
 Selecting a model atomically requires sending `backend` alongside `value`;
 without `backend` only the model string is stored. The atomic form validates
-both, clears an unsupported effort, and appends a visible `Switched to …`
-transcript event.
+both and clears an unsupported effort. Changing the model adds nothing to the
+transcript.
+
+Each `model` or `effort` selection is also remembered for that chat's assistant,
+separately from every other assistant, and new chats on it start from there.
 
 `host-update` updates the host's own installation, so a paired device can
 bring a machine forward without a shell on it. `install` replaces the files,
 which is safe while turns run because the process keeps the binary it already
 mapped; `restart` drops every connection and loses any running turn, so the
 two are separate actions and neither happens on its own. Native Linux bundles
-and macOS apps support this flow. `supported` is false where the installation
+and macOS apps support this flow. A dev host checks the `master` branch every
+minute instead of a release and refuses `install`, because nothing is published
+for it; the desktop builds that commit from source. `supported` is false where the installation
 cannot replace itself, such as source builds, and both `install` and `restart`
 are refused there.
+
+`agent-cli-updates` covers the assistant CLIs a user installed themselves,
+currently Codex and Claude Code. `available` compares the installed version
+with the newest release of the CLI's npm package, and `install` runs the CLI's
+own `update` command so it can follow however the CLI was installed. `updatable`
+is false when the installed release's help lists no such command; `install` is
+then refused and the update has to be done by hand. An updater
+that exits cleanly without changing the version is reported as `failed` and that
+release is no longer offered. `check` runs in the background and answers with the
+last known state; changes arrive as events. Restarting the host is refused while
+an update runs.
 
 `agent-catalog` lists the assistants and models this host can run. The
 desktop reads its own compiled-in catalog because it ships with the host; a
@@ -630,6 +710,17 @@ checkout. A successful request replies with `ok` alone.
 `ok` and broadcast a `tree` event. `new-folder` also returns its id;
 `delete-chat` additionally returns the session deletion fields described above.
 
+`set-chat-title-settings` takes `enabled: boolean`, or `backend` of `codex` or
+`claude` with a `model` to choose or `null` to go back to the built-in choice, or
+both. It replies like `chat-title-settings`. The settings apply to the whole host.
+
+While titles are enabled, a chat's first message also names it. The host asks a
+low-cost model in the background, `gpt-6-luna` for Codex and `claude-haiku-5-5`
+for Claude unless another was chosen, and then publishes `tree` and `changed`. The
+title replaces only a placeholder name such as `New Chat`, on the chat and on its
+session; a name given in the meantime stays. A failed attempt leaves the name as it
+was. JCode chats are not titled.
+
 `set-shortcuts` replies with the resulting shortcut sets and broadcasts a
 `shortcuts-changed` event so open chats can refresh their buttons.
 
@@ -659,6 +750,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | Event | Members | Meaning |
 | --- | --- | --- |
 | `tree` | — | Workspace tree changed; refetch `tree`. |
+| `auto-settle-settings` | `after_days`, `on_merge`, `keep_pull_requests` | The host's automatic settling rules changed. |
 | `changed` | `chat` | Stored chat state changed; refetch when idle. |
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |

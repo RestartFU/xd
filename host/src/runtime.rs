@@ -345,7 +345,8 @@ impl TurnRuntime {
 
     pub(crate) fn shutdown(&self) {
         if let Ok(active) = self.inner.active.lock() {
-            for process in active.values() {
+            for (chat_id, process) in active.iter() {
+                let _ = self.inner.store.mark_resume_after_restart(chat_id);
                 process.cancelled.store(true, Ordering::Release);
                 if let Ok(mut child) = process.child.lock() {
                     let _ = terminate_agent(&mut child);
@@ -374,6 +375,35 @@ impl TurnRuntime {
         writeln!(session.stdin, "{frame}")
             .and_then(|()| session.stdin.flush())
             .map_err(|e| e.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_interaction_for_test(&self, chat_id: &str) {
+        let mut all = self.inner.interactions.lock().unwrap();
+        let pending = all
+            .entry(chat_id.to_owned())
+            .or_insert_with(|| PendingInteractions {
+                revision: 0,
+                requests: HashMap::new(),
+            });
+        pending.requests.insert(
+            "test-request".into(),
+            PendingInteraction {
+                id: json!("test-request"),
+                method: "item/commandExecution/requestApproval".into(),
+                params: json!({}),
+                turn_id: 0,
+                claude: false,
+            },
+        );
+    }
+
+    /// Whether the agent is waiting on an approval or question from the user.
+    pub(crate) fn has_interactions(&self, chat_id: &str) -> bool {
+        self.inner.interactions.lock().is_ok_and(|all| {
+            all.get(chat_id)
+                .is_some_and(|pending| !pending.requests.is_empty())
+        })
     }
 
     pub(crate) fn interactions(&self, chat_id: &str) -> Value {
@@ -730,6 +760,9 @@ impl TurnRuntime {
     fn start_background(&self, chat_id: &str, router: &mut Router, first: String) -> bool {
         if !matches!(self.inner.store.begin_background_turn(chat_id), Ok(true)) {
             return false;
+        }
+        if matches!(self.inner.store.clear_chat_settlement(chat_id), Ok(true)) {
+            self.inner.events.publish(json!({"event": "tree"}));
         }
         let (sink, lines) = mpsc::channel();
         let _ = sink.send(Feed::Line(first));

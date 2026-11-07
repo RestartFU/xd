@@ -449,6 +449,7 @@ impl BrowserPane {
             return;
         }
         let was_active = index == self.session.active_tab;
+        let closes_pane = self.tabs.len() == 1 && self.auxiliary_tabs.is_empty();
         self.tabs[index].display.shutdown();
         self.tabs.remove(index);
         self.session.tabs.remove(index);
@@ -460,12 +461,18 @@ impl BrowserPane {
         } else {
             self.session.active_tab = self.session.active_tab.min(self.tabs.len() - 1);
         }
+        if closes_pane {
+            self.set_visible(false);
+        }
         self.tab_scroll.scroll_to_item(self.active_tab_index());
         self.update_visibility();
         if was_active {
             self.focus_active_tab(window, cx);
         }
         cx.emit(BrowserEvent::SessionChanged(self.session()));
+        if closes_pane {
+            cx.emit(BrowserEvent::Close);
+        }
         cx.notify();
     }
 
@@ -2087,12 +2094,12 @@ mod tests {
         });
         cx.simulate_click(gpui::point(px(134.), px(16.)), gpui::Modifiers::default());
         cx.run_until_parked();
-        cx.update(|window, cx| {
+        // Closing the only tab collapses the pane and leaves a blank tab behind.
+        cx.update(|_, cx| {
             let pane = pane.read(cx);
             assert_eq!(pane.session(), BrowserSession::default());
-            let tab = pane.tabs[0].entity.read(cx);
-            assert!(tab.draft.is_empty());
-            assert!(tab.address.read(cx).focus_handle(cx).is_focused(window));
+            assert!(!pane.is_visible());
+            assert!(pane.tabs[0].entity.read(cx).draft.is_empty());
         });
     }
 
@@ -2174,6 +2181,63 @@ mod tests {
                 assert_eq!(pane.session().active_tab, 1);
                 assert_eq!(pane.current_url().as_deref(), Some("https://example.com/"));
             });
+        });
+    }
+
+    #[gpui::test]
+    fn closing_the_only_tab_closes_the_pane_and_leaves_a_blank_tab(cx: &mut gpui::TestAppContext) {
+        let (pane, cx) = cx.add_window_view(|window, cx| {
+            BrowserPane::new(
+                Some("example.com".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        let closed = Rc::new(Cell::new(0));
+        cx.update(|_, cx| {
+            let closed = closed.clone();
+            cx.subscribe(&pane, move |_, event: &BrowserEvent, _| {
+                if matches!(event, BrowserEvent::Close) {
+                    closed.set(closed.get() + 1);
+                }
+            })
+            .detach();
+        });
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.add_tab(None, window, cx);
+                pane.close_tab(1, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(closed.get(), 0, "another page is still open");
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.configure_side_tabs(Some(SideTab::Files), true, cx);
+                pane.close_tab(0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(closed.get(), 0, "the Files tab is still open");
+        cx.update(|_, cx| assert!(pane.read(cx).is_visible()));
+
+        cx.update(|window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.close_auxiliary(SideTab::Files, cx);
+                pane.navigate("example.com", cx);
+                pane.close_tab(0, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(closed.get(), 1);
+        cx.update(|_, cx| {
+            let pane = pane.read(cx);
+            assert!(!pane.is_visible());
+            assert_eq!(pane.session(), BrowserSession::default());
+            assert!(!pane.tabs[0].display.visible.get());
         });
     }
 

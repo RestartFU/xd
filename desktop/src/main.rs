@@ -40,8 +40,8 @@ use xd_desktop::{
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
     model::{
-        AppModel, Attachment, ChatSummary, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage,
-        MessagePageDirection, ToolView, Worktree,
+        AppModel, Attachment, AutoSettleRules, ChatSummary, MAX_MESSAGE_IMAGE_BYTES, Message,
+        MessageImage, MessagePageDirection, ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -62,6 +62,7 @@ mod settings;
 mod source_build;
 mod speech;
 mod terminal;
+mod update_popup;
 #[cfg(any(target_os = "windows", test))]
 mod windows;
 mod workspace_settings;
@@ -93,8 +94,8 @@ use input::{
     Suspend as TerminalSuspend, Tab, Up, WordLeft, WordRight, terminal_paste_bytes,
 };
 use minimal::{
-    AgentCli, MinimalRoute, SessionCard, project_cards, project_sessions, reconcile_route,
-    resumable_session,
+    AgentCli, MinimalRoute, SessionCard, SettledCard, age_label, next_active_session,
+    project_cards, project_sessions, reconcile_route, resumable_session, settled_cards,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -131,11 +132,13 @@ const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
 const CHECK_ICON: &str = "icons/check.svg";
+const UNDO_ICON: &str = "icons/undo.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
 const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
 const CHANGES_ICON: &str = "icons/changes.svg";
 const BROWSER_ICON: &str = "icons/browser.svg";
 const TERMINAL_ICON: &str = "icons/terminal.svg";
+const DOWNLOAD_ICON: &str = "icons/download.svg";
 const SEARCH_ICON: &str = "icons/search.svg";
 const MINIMIZE_ICON: &str = "icons/minimize.svg";
 const MAXIMIZE_ICON: &str = "icons/maximize.svg";
@@ -147,10 +150,23 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
 const ACTION_ERROR_LIFETIME: Duration = Duration::from_secs(8);
 const TERMINAL_OPEN_TIMEOUT: Duration = Duration::from_secs(15);
-/// Width of the catalog sidebar that holds project drawers and session cards.
-const CATALOG_WIDTH: f32 = 256.0;
+/// Narrowest the catalog sidebar, which holds project drawers and session
+/// cards, can be dragged.
+const CATALOG_MIN_WIDTH: f32 = 220.0;
+/// Widest the catalog sidebar can be dragged.
+const CATALOG_MAX_WIDTH: f32 = 480.0;
+/// Narrower than this, the catalog footer's Update button shows only its icon
+/// so Settings stays inside the catalog.
+const CATALOG_UPDATE_LABEL_MIN_WIDTH: f32 = 256.0;
+/// Width the catalog always leaves for the session beside it.
+const CATALOG_SESSION_MIN_WIDTH: f32 = 384.0;
 /// Every session row shares one height and baseline.
 const CARD_HEIGHT: f32 = 30.0;
+/// How long the sidebar offers to undo a settle.
+const SETTLE_UNDO_LIFETIME: Duration = Duration::from_secs(5);
+/// Rows of the Settled shelf shown at first, and how many Show more adds.
+const SETTLED_INITIAL_ROWS: usize = 10;
+const SETTLED_MORE_ROWS: usize = 25;
 const BROWSER_DIVIDER_WIDTH: f32 = 1.0;
 /// How often working dots, pulses, and running timers advance. They move a
 /// few times a second instead of on every frame: a repeating animation asks
@@ -174,6 +190,15 @@ fn browser_pane_width(requested: u16, window_width: f32) -> f32 {
     f32::from(requested).clamp(
         280.0,
         (window_width - BROWSER_DIVIDER_WIDTH - 460.0).clamp(280.0, 1000.0),
+    )
+}
+
+/// `room` is the window width left of the browser. The catalog hides once that
+/// drops below 640, so the session keeps its minimum wherever the catalog shows.
+fn catalog_pane_width(requested: u16, room: f32) -> f32 {
+    f32::from(requested).clamp(
+        CATALOG_MIN_WIDTH,
+        (room - CATALOG_SESSION_MIN_WIDTH).clamp(CATALOG_MIN_WIDTH, CATALOG_MAX_WIDTH),
     )
 }
 
@@ -332,6 +357,48 @@ fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyEle
         SessionSignal::Waiting => Some(pill("Waiting", color)),
         SessionSignal::Done => Some(dot(7.0).into_any_element()),
     }
+}
+
+/// The word and dot color for the row under a running turn. A turn held up on
+/// an approval or question is not doing anything, so it stops reading as work.
+fn turn_status(waiting: bool, colors: ThemeColors) -> (&'static str, u32) {
+    if waiting {
+        ("Waiting", colors.muted)
+    } else {
+        ("Working", colors.working)
+    }
+}
+
+/// The action a session row offers while the pointer is over it. It sits on top
+/// of the row's trailing label, so nothing on the row moves when it appears.
+fn session_row_action(
+    id: impl Into<gpui::ElementId>,
+    label: &'static str,
+    path: &'static str,
+    selected: bool,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .invisible()
+        .group_hover("catalog-session", |style| style.visible())
+        .absolute()
+        .right_0()
+        .top_0()
+        .bottom_0()
+        .w(px(30.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.0))
+        .bg(rgb(if selected {
+            colors.selected_surface
+        } else {
+            colors.surface_high
+        }))
+        .cursor_pointer()
+        .tooltip(move |_, cx| cx.new(|_| PaneTooltip { label, colors }).into())
+        .child(icon(path, 13.0, colors.muted))
 }
 
 /// The marks a collapsed project shows for its sessions that need a look.
@@ -590,6 +657,8 @@ struct CliVersion {
 #[derive(Clone, Debug, Default, Deserialize)]
 struct SelfUpdateStatus {
     #[serde(default)]
+    channel: String,
+    #[serde(default)]
     state: String,
     #[serde(default)]
     version: String,
@@ -603,9 +672,33 @@ struct SelfUpdateStatus {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CliUpdateStatus {
+    provider: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    latest: Option<String>,
+    #[serde(default)]
+    available: bool,
+    #[serde(default)]
+    updatable: bool,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
 #[derive(Clone, Default)]
 struct SelfUpdatePanel {
     status: Option<SelfUpdateStatus>,
+    clis: Vec<CliUpdateStatus>,
+    /// A dev build updates by building master here rather than through the host.
+    source_building: bool,
+    source_installed: bool,
+    source_error: Option<String>,
     busy: bool,
     error: Option<String>,
 }
@@ -777,6 +870,11 @@ impl TerminalPanel {
         }
         self.finish_opening();
         true
+    }
+
+    /// Whether closing this tab would leave the panel with nothing to show.
+    fn is_only_tab(&self, terminal_id: &str) -> bool {
+        !self.opening && matches!(self.sessions.as_slice(), [session] if session.id == terminal_id)
     }
 
     fn selected(&self) -> Option<&TerminalTab> {
@@ -1015,7 +1113,7 @@ struct PendingSend {
 #[derive(Clone, Copy)]
 enum OptimisticSend {
     Started { message_index: Option<usize> },
-    Queued { index: usize },
+    Queued,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1414,6 +1512,12 @@ struct SidebarEdit {
     submitting: bool,
 }
 
+/// Sessions just settled by hand, which the sidebar still offers to bring back.
+struct SettleUndo {
+    sessions: Vec<String>,
+    generation: u64,
+}
+
 #[derive(Clone)]
 struct SidebarContextMenu {
     target: SidebarTarget,
@@ -1570,6 +1674,7 @@ struct XdDesktop {
     active_endpoint: ChatEndpoint,
     minimal_route: MinimalRoute,
     minimal_theme_open: bool,
+    update_popup_open: bool,
     minimal_popup_focus: FocusHandle,
     minimal_popup_previous_focus: Option<WeakFocusHandle>,
     minimal_popup_focus_captured: bool,
@@ -1583,6 +1688,10 @@ struct XdDesktop {
     chat_column_width: f32,
     native_option_open: Option<&'static str>,
     settings_section: usize,
+    /// The host's chat title settings; `None` until it answers, or if it is too
+    /// old to have them, which hides the controls.
+    chat_title_settings: Option<workspace_settings::ChatTitleSettings>,
+    chat_title_model_menu: Option<&'static str>,
     expanded_activities: HashSet<i64>,
     expanded_work_logs: HashSet<i64>,
     /// Agents asked to stop or move to the background, until their record
@@ -1616,6 +1725,9 @@ struct XdDesktop {
     remote_state: RemoteState,
     remote_error: Option<String>,
     remote_generation: u64,
+    /// The generation of the saved-host connection attempt now running, so a
+    /// manual retry can skip a backoff sleep without racing a live attempt.
+    remote_attempt: Option<u64>,
     remote_reconnect_attempt: u32,
     transcript: ListState,
     transcript_scroll_handler_attached: bool,
@@ -1666,6 +1778,13 @@ struct XdDesktop {
     queue_edit: Option<QueueEdit>,
     sidebar_edit: Option<SidebarEdit>,
     sidebar_context_menu: Option<SidebarContextMenu>,
+    settle_undo: Option<SettleUndo>,
+    settle_undo_generation: u64,
+    /// Where to go once a settle of the open session succeeds, by session:
+    /// the next row chosen before the list changed, or the project page.
+    settle_advances: HashMap<String, Option<(String, String, AgentCli)>>,
+    settled_visible: usize,
+    auto_settle: Option<AutoSettleRules>,
     pending_sidebar_delete: Option<SidebarTarget>,
     sidebar_delete_submitting: bool,
     sidebar_move: Option<SidebarTarget>,
@@ -1706,6 +1825,8 @@ struct XdDesktop {
     terminal_panel: Option<TerminalPanel>,
     browser_panes: HashMap<String, Entity<BrowserPane>>,
     browser_drag: Option<(f32, u16)>,
+    /// Drag origin and starting width while resizing the catalog sidebar.
+    catalog_drag: Option<(f32, u16)>,
     browser_restore_focus: bool,
     terminal_runtime: SessionRuntime,
     terminal_panel_cache: HashMap<(ChatEndpoint, String), TerminalPanel>,
@@ -2107,7 +2228,7 @@ impl XdDesktop {
             settings.active_connection.as_deref() != Some(active_connection.as_str());
         settings.active_connection = Some(active_connection);
         let settings_load_error = settings.load_error().map(str::to_owned);
-        let remote_configured = settings.remote_ssh_command.is_some();
+        let remote_configured = settings.remote_credentials.is_some();
         let minimal_popup_focus = cx.focus_handle();
         let (terminal_runtime, terminal_updates) = SessionRuntime::new();
         let mut desktop = Self {
@@ -2123,6 +2244,7 @@ impl XdDesktop {
             active_endpoint,
             minimal_route: MinimalRoute::default(),
             minimal_theme_open: false,
+            update_popup_open: false,
             minimal_popup_focus,
             minimal_popup_previous_focus: None,
             minimal_popup_focus_captured: false,
@@ -2134,6 +2256,8 @@ impl XdDesktop {
             chat_column_width: 780.0,
             native_option_open: None,
             settings_section: 0,
+            chat_title_settings: None,
+            chat_title_model_menu: None,
             expanded_activities: HashSet::new(),
             expanded_work_logs: HashSet::new(),
             subagent_actions: HashMap::new(),
@@ -2169,6 +2293,7 @@ impl XdDesktop {
             },
             remote_error,
             remote_generation: 0,
+            remote_attempt: None,
             remote_reconnect_attempt: 0,
             transcript: ListState::new(0, ListAlignment::Bottom, px(700.0)),
             transcript_scroll_handler_attached: false,
@@ -2212,6 +2337,11 @@ impl XdDesktop {
             queue_edit: None,
             sidebar_edit: None,
             sidebar_context_menu: None,
+            settle_undo: None,
+            settle_undo_generation: 0,
+            settle_advances: HashMap::new(),
+            settled_visible: SETTLED_INITIAL_ROWS,
+            auto_settle: None,
             pending_sidebar_delete: None,
             sidebar_delete_submitting: false,
             sidebar_move: None,
@@ -2250,6 +2380,7 @@ impl XdDesktop {
             terminal_panel: None,
             browser_panes: HashMap::new(),
             browser_drag: None,
+            catalog_drag: None,
             browser_restore_focus: false,
             terminal_runtime,
             terminal_panel_cache: HashMap::new(),
@@ -2481,6 +2612,8 @@ impl XdDesktop {
                 | RequestKind::Cancel { .. }
                 | RequestKind::SetOption { .. }
                 | RequestKind::SetShortcuts { .. }
+                | RequestKind::ChatTitleSettings
+                | RequestKind::SetChatTitleSettings
                 | RequestKind::RemoveWorktree { .. }
                 | RequestKind::SetDraft { .. }
                 | RequestKind::DiffRead { .. }
@@ -2515,6 +2648,11 @@ impl XdDesktop {
                 | RequestKind::RenameSession { .. }
                 | RequestKind::MoveSession { .. }
                 | RequestKind::DeleteSession { .. }
+                | RequestKind::SettleSession { .. }
+                | RequestKind::UnsettleSession { .. }
+                | RequestKind::SetSessionAutoSettle { .. }
+                | RequestKind::AutoSettleSettings
+                | RequestKind::SetAutoSettleSettings
                 | RequestKind::RenameFolder { .. }
                 | RequestKind::MoveFolder { .. }
                 | RequestKind::TrashFolder { .. }
@@ -2542,6 +2680,7 @@ impl XdDesktop {
                 | "shortcuts-changed"
                 | "workflow-status"
                 | "owner-icon"
+                | "auto-settle-settings"
                 | "terminal-opened"
                 | "terminal-activity"
                 | "terminal-output"
@@ -2559,6 +2698,8 @@ impl XdDesktop {
         matches!(
             kind,
             RequestKind::HostUpdate { .. }
+                | RequestKind::AgentCliUpdates
+                | RequestKind::ResumeInterrupted
                 | RequestKind::Devices
                 | RequestKind::PeerPairing
                 | RequestKind::PairRemote
@@ -2568,7 +2709,7 @@ impl XdDesktop {
     }
 
     fn local_admin_event(name: &str) -> bool {
-        name == "host-update"
+        matches!(name, "host-update" | "agent-cli-update")
     }
 
     fn switch_active_endpoint(&mut self, endpoint: ChatEndpoint, cx: &mut Context<Self>) -> bool {
@@ -2583,6 +2724,12 @@ impl XdDesktop {
         self.active_endpoint = endpoint;
         self.remember_active_connection();
         self.restore_collapsed_folders();
+        self.settle_undo = None;
+        self.settle_advances.clear();
+        self.auto_settle = None;
+        if self.minimal_theme_open {
+            self.request_auto_settle_settings();
+        }
         self.model.selected_chat = None;
         self.invalidate_live_render();
         self.forget_message_images(cx);
@@ -2622,6 +2769,9 @@ impl XdDesktop {
         self.minimal_route = MinimalRoute::default();
         self.pending_minimal_session = None;
         self.request_agent_catalog();
+        self.chat_title_model_menu = None;
+        self.chat_title_settings = None;
+        self.request_chat_title_settings();
         true
     }
 
@@ -2741,6 +2891,7 @@ impl XdDesktop {
             self.remote_state = RemoteState::Unconfigured;
             return;
         };
+        self.remote_attempt = Some(generation);
         let connection = cx
             .background_executor()
             .spawn(async move { paired::resume(credentials) });
@@ -2750,6 +2901,7 @@ impl XdDesktop {
                 if this.remote_generation != generation {
                     return;
                 }
+                this.remote_attempt = None;
                 match result {
                     Ok(session) => this.install_remote_session(session, generation, cx),
                     Err(error) => this.remote_connection_failed(error, cx),
@@ -2985,9 +3137,39 @@ impl XdDesktop {
                 let _ = host.agent_catalog();
             }
         } else {
+            // `Connecting` also covers a retry sleeping out its backoff. Only
+            // an attempt that is really running should be left to finish.
+            if self.remote_attempt != Some(self.remote_generation) {
+                self.remote_state = RemoteState::Offline;
+            }
             self.schedule_remote_connect(Duration::ZERO, cx);
         }
         cx.notify();
+    }
+
+    /// The connection status control: go to the remembered host, and ask for a
+    /// pairing code only when there is no host or it has refused this device.
+    fn reconnect_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A retry now would abandon a pairing in flight and waste its code.
+        if self.remote_panel.is_some() {
+            return;
+        }
+        if self.settings.remote_credentials.is_none()
+            || self.remote_state == RemoteState::Unconfigured
+        {
+            self.open_remote(window, cx);
+        } else {
+            self.activate_remote_runtime(cx);
+        }
+    }
+
+    /// The state of a remote that has no connection or attempt under way.
+    fn idle_remote_state(&self) -> RemoteState {
+        if self.settings.remote_credentials.is_some() {
+            RemoteState::Offline
+        } else {
+            RemoteState::Unconfigured
+        }
     }
 
     fn disconnect_remote_runtime(&mut self, cx: &mut Context<Self>) {
@@ -2999,17 +3181,32 @@ impl XdDesktop {
             return;
         }
         self.remote_generation = self.remote_generation.saturating_add(1);
+        self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
         self.remote_host = None;
         self.remote_bridge = None;
-        self.remote_state = if self.settings.remote_credentials.is_some() {
-            RemoteState::Offline
-        } else {
-            RemoteState::Unconfigured
-        };
+        // A host that refused this device still needs a new pairing, and the
+        // reason stays available for the pairing dialog. Anything else is over.
+        let refused = self.remote_state == RemoteState::Unconfigured;
+        if !refused {
+            self.remote_state = self.idle_remote_state();
+            self.remote_error = None;
+        }
         self.remote_reconnect_attempt = 0;
-        self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
+        let remote_model = self.endpoint_model_mut(ChatEndpoint::Remote);
+        remote_model.connected = false;
+        if !refused {
+            remote_model.connection_error = None;
+        }
         self.schedule_connect(Duration::ZERO, cx);
         cx.notify();
+    }
+
+    /// What the local host owes the app on every connection, whichever endpoint
+    /// is being viewed.
+    fn request_local_host_state(&self, host: &HostHandle) {
+        let _ = host.host_update("status");
+        let _ = host.agent_cli_updates("status", None);
+        let _ = host.resume_interrupted(self.settings.auto_resume_chats);
     }
 
     fn handle_host_update(&mut self, update: HostUpdate, generation: u64, cx: &mut Context<Self>) {
@@ -3027,7 +3224,7 @@ impl XdDesktop {
                     if let Some(host) = &self.host {
                         let _ = host.tree();
                         let _ = host.agent_catalog();
-                        let _ = host.host_update("status");
+                        self.request_local_host_state(host);
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
                             let _ = host.git_state(chat_id);
                         }
@@ -3125,7 +3322,7 @@ impl XdDesktop {
                 self.request_tree();
                 self.request_agent_catalog();
                 if let Some(host) = &self.host {
-                    let _ = host.host_update("status");
+                    self.request_local_host_state(host);
                 }
                 self.refresh_selected_chat_after_connect(cx);
             }
@@ -3257,6 +3454,8 @@ impl XdDesktop {
                     | RequestKind::SetAgentSecrets { .. }
                     | RequestKind::AgentClis
                     | RequestKind::HostUpdate { .. }
+                    | RequestKind::AgentCliUpdates
+                    | RequestKind::ResumeInterrupted
                     | RequestKind::Devices
                     | RequestKind::PeerPairing
                     | RequestKind::RenameDevice { .. }
@@ -3266,6 +3465,8 @@ impl XdDesktop {
                     | RequestKind::ImageRead { .. }
                     | RequestKind::Shortcuts { .. }
                     | RequestKind::SetShortcuts { .. }
+                    | RequestKind::SetChatTitleSettings
+                    | RequestKind::AutoSettleSettings
             ) {
                 self.model.connection_error = Some(
                     value
@@ -3283,10 +3484,17 @@ impl XdDesktop {
                         self.pump_message_images();
                     }
                 }
+                RequestKind::SettleSession { session_id } => {
+                    self.settle_advances.remove(session_id);
+                }
+                RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::Send { .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
                 }
+                RequestKind::ChatTitleSettings => self.chat_title_settings = None,
+                // The switch moved ahead of the host, so take back its answer.
+                RequestKind::SetChatTitleSettings => self.request_chat_title_settings(),
                 RequestKind::QueueMutation { chat_id }
                 | RequestKind::Cancel { chat_id }
                 | RequestKind::SetOption { chat_id }
@@ -3619,6 +3827,26 @@ impl XdDesktop {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
+                RequestKind::ResumeInterrupted => {
+                    self.inactive_model.connection_error = Some(
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Could not resume interrupted chats.")
+                            .to_owned(),
+                    );
+                }
+                RequestKind::AgentCliUpdates => {
+                    if let Some(panel) = &mut self.self_update_panel {
+                        panel.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("The assistant update request failed.")
+                                .to_owned(),
+                        );
+                    }
+                }
                 RequestKind::HostUpdate { action: _ } => {
                     if let Some(panel) = &mut self.self_update_panel {
                         panel.busy = false;
@@ -3805,6 +4033,7 @@ impl XdDesktop {
                         .any(|folder| &folder.id == folder_id)
                 });
                 self.persist_collapsed_folders();
+                self.prune_settle_undo();
                 if self
                     .workspace_context_folder
                     .as_ref()
@@ -3863,9 +4092,15 @@ impl XdDesktop {
                         Some(format!("Invalid assistant catalog response: {error}"));
                 }
             }
+            RequestKind::ChatTitleSettings | RequestKind::SetChatTitleSettings => {
+                self.chat_title_settings =
+                    workspace_settings::ChatTitleSettings::from_reply(&value);
+            }
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
             RequestKind::AgentClis => self.apply_cli_versions(&value),
+            RequestKind::AgentCliUpdates => self.apply_cli_updates(&value),
+            RequestKind::ResumeInterrupted => {}
             RequestKind::HostUpdate { action } => {
                 self.apply_self_update(&value);
                 if action == "restart" && !cfg!(test) {
@@ -4467,7 +4702,16 @@ impl XdDesktop {
             }
             RequestKind::RenameSession { .. }
             | RequestKind::MoveSession { .. }
-            | RequestKind::DeleteSession { .. } => self.request_tree(),
+            | RequestKind::DeleteSession { .. }
+            | RequestKind::UnsettleSession { .. }
+            | RequestKind::SetSessionAutoSettle { .. } => self.request_tree(),
+            RequestKind::SettleSession { session_id } => {
+                self.session_settled(&session_id, cx);
+                self.request_tree();
+            }
+            RequestKind::AutoSettleSettings | RequestKind::SetAutoSettleSettings => {
+                self.auto_settle = AutoSettleRules::from_value(&value);
+            }
             RequestKind::RenameFolder { .. } => self.request_tree(),
             RequestKind::MoveFolder { .. } => self.request_tree(),
             RequestKind::TrashFolder { .. } => self.request_tree(),
@@ -4597,8 +4841,7 @@ impl XdDesktop {
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if let Some(pending) = self.pending_send.take() {
-                    let predicted_queued =
-                        matches!(pending.optimistic, OptimisticSend::Queued { .. });
+                    let predicted_queued = matches!(pending.optimistic, OptimisticSend::Queued);
                     if predicted_queued != queued {
                         self.rollback_optimistic_send(&pending);
                         if !queued {
@@ -5128,6 +5371,9 @@ impl XdDesktop {
                     self.schedule_workflow_refresh(marker, cx);
                 }
             }
+            "auto-settle-settings" => {
+                self.auto_settle = AutoSettleRules::from_value(&body);
+            }
             "owner-icon" => {
                 if let Some(owner) = body.get("owner").and_then(Value::as_str).map(str::to_owned) {
                     self.record_owner_icon(owner, &body);
@@ -5324,6 +5570,7 @@ impl XdDesktop {
             "agent-auth-changed" => self.apply_auth_provider(&body),
             "agent-cli-changed" => self.apply_cli_version(&body),
             "host-update" => self.apply_self_update(&body),
+            "agent-cli-update" => self.apply_cli_update(&body),
             _ => {}
         }
         cx.notify();
@@ -5434,6 +5681,11 @@ impl XdDesktop {
         let panel = self.self_update_panel.get_or_insert_with(Default::default);
         panel.busy = result.is_ok();
         panel.error = result.err();
+        if action == "check"
+            && let Some(host) = &self.host
+        {
+            let _ = host.agent_cli_updates("check", None);
+        }
         cx.notify();
     }
 
@@ -5448,6 +5700,15 @@ impl XdDesktop {
         };
         self.settings.build_source = self.source_build_panel.text.clone();
         let _ = self.settings.save();
+        self.run_source_build(target, false, cx);
+    }
+
+    /// `is_update` marks a build the update popup started. Only those count as
+    /// installing the update: a manual build may be any branch or commit.
+    fn run_source_build(&mut self, target: SourceTarget, is_update: bool, cx: &mut Context<Self>) {
+        if self.source_build_panel.running {
+            return;
+        }
         self.source_build_panel.output.clear();
         self.source_build_panel.output_bytes = 0;
         self.source_build_panel.message = None;
@@ -5459,9 +5720,18 @@ impl XdDesktop {
                 self.source_build_panel.running = true;
                 self.source_build_generation = self.source_build_generation.saturating_add(1);
                 self.schedule_source_build_poll(self.source_build_generation, cx);
+                let panel = self.self_update_panel.get_or_insert_with(Default::default);
+                panel.source_building = is_update;
+                panel.source_installed = false;
+                panel.source_error = None;
             }
             Err(error) => {
-                self.source_build_panel.message = Some(error);
+                self.source_build_panel.message = Some(error.clone());
+                if is_update {
+                    self.self_update_panel
+                        .get_or_insert_with(Default::default)
+                        .source_error = Some(error);
+                }
             }
         }
         cx.notify();
@@ -5490,6 +5760,9 @@ impl XdDesktop {
                             finished = true;
                             this.source_build_panel.running = false;
                             this.source_build_panel.stopping = false;
+                            this.self_update_panel
+                                .get_or_insert_with(Default::default)
+                                .finish_source_build(&result);
                             match result {
                                 Ok(()) => {
                                     this.source_build_panel.installed = true;
@@ -5555,6 +5828,7 @@ impl XdDesktop {
 
     fn browser_occluded_by_popup(&self) -> bool {
         self.auth_open
+            || self.update_popup_open
             || self.native_option_open.is_some()
             || self.share_panel.is_some()
             || self.devices_panel.is_some()
@@ -6222,14 +6496,12 @@ impl XdDesktop {
             .is_some_and(|panel| panel.submitting);
         if canceled_connection {
             self.remote_generation = self.remote_generation.saturating_add(1);
-            self.remote_state = if self.settings.remote_credentials.is_some() {
-                RemoteState::Offline
-            } else {
-                RemoteState::Unconfigured
-            };
+            self.remote_state = self.idle_remote_state();
         }
         self.remote_panel = None;
-        if canceled_connection && self.settings.remote_credentials.is_some() {
+        // Pairing drops the current connection, so giving up on it, whether by
+        // canceling or after a refused code, goes back to the remembered host.
+        if self.remote_state == RemoteState::Offline {
             self.schedule_remote_connect(Duration::ZERO, cx);
         }
         cx.notify();
@@ -6256,6 +6528,7 @@ impl XdDesktop {
         let generation = self.remote_generation;
         self.remote_host = None;
         self.remote_bridge = None;
+        self.endpoint_model_mut(ChatEndpoint::Remote).connected = false;
         self.remote_state = RemoteState::Connecting;
         self.remote_error = None;
         if let Some(panel) = &mut self.remote_panel {
@@ -6278,11 +6551,7 @@ impl XdDesktop {
                         this.remote_panel = None;
                     }
                     Err(error) => {
-                        this.remote_state = if this.settings.remote_ssh_command.is_some() {
-                            RemoteState::Offline
-                        } else {
-                            RemoteState::Unconfigured
-                        };
+                        this.remote_state = this.idle_remote_state();
                         this.remote_error = Some(error.to_string());
                         if let Some(panel) = &mut this.remote_panel {
                             panel.submitting = false;
@@ -6790,7 +7059,10 @@ impl XdDesktop {
     ) -> Option<Entity<BrowserPane>> {
         let key = self.browser_scope_key();
         let open = self.browser_is_open();
-        let visible = open && !self.browser_occluded_by_popup() && self.browser_drag.is_none();
+        let visible = open
+            && !self.browser_occluded_by_popup()
+            && self.browser_drag.is_none()
+            && self.catalog_drag.is_none();
         for (scope, pane) in &self.browser_panes {
             pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
         }
@@ -6873,13 +7145,27 @@ impl XdDesktop {
             - if self.browser_compacts_sidebar(window) {
                 0.0
             } else {
-                CATALOG_WIDTH
+                self.catalog_width(window)
             }
             - if self.browser_is_open() {
                 browser_pane_width(self.settings.browser_width, width) + BROWSER_DIVIDER_WIDTH
             } else {
                 0.0
             }
+    }
+
+    fn catalog_width(&self, window: &Window) -> f32 {
+        catalog_pane_width(self.settings.catalog_width, self.catalog_room(window))
+    }
+
+    /// Window width left of the browser, shared by the catalog and the session.
+    fn catalog_room(&self, window: &Window) -> f32 {
+        let width = f32::from(window.viewport_size().width);
+        if self.browser_is_open() {
+            width - browser_pane_width(self.settings.browser_width, width)
+        } else {
+            width
+        }
     }
 
     fn browser_compacts_sidebar(&self, window: &Window) -> bool {
@@ -6901,6 +7187,13 @@ impl XdDesktop {
 
     fn finish_browser_resize(&mut self, cx: &mut Context<Self>) {
         if self.browser_drag.take().is_some() {
+            let _ = self.settings.save();
+            cx.notify();
+        }
+    }
+
+    fn finish_catalog_resize(&mut self, cx: &mut Context<Self>) {
+        if self.catalog_drag.take().is_some() {
             let _ = self.settings.save();
             cx.notify();
         }
@@ -7163,20 +7456,54 @@ impl XdDesktop {
         });
     }
 
-    fn kill_terminal_id(&mut self, terminal_id: String, cx: &mut Context<Self>) {
-        if let Err(error) = self
+    fn kill_terminal_id(&mut self, terminal_id: &str, cx: &mut Context<Self>) -> bool {
+        let result = self
             .active_host()
             .ok_or_else(|| "Host disconnected.".to_owned())
-            .and_then(|host| host.terminal_kill(&terminal_id))
-            && let Some(panel) = &mut self.terminal_panel
-        {
-            panel.error = Some(error);
-        }
+            .and_then(|host| host.terminal_kill(terminal_id));
         cx.notify();
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                if let Some(panel) = &mut self.terminal_panel {
+                    panel.error = Some(error);
+                }
+                false
+            }
+        }
     }
 
-    fn close_terminal_tab(&mut self, tab_id: String, cx: &mut Context<Self>) {
-        self.kill_terminal_id(tab_id, cx);
+    fn close_terminal_tab(&mut self, tab_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let closes_panel = self.closing_tab_empties_bottom_terminal(&tab_id);
+        if self.kill_terminal_id(&tab_id, cx) && closes_panel {
+            self.collapse_bottom_terminal_without(&tab_id, window, cx);
+        }
+    }
+
+    fn closing_tab_empties_bottom_terminal(&self, tab_id: &str) -> bool {
+        self.native_session()
+            && self.bottom_terminal_open
+            && self
+                .terminal_panel
+                .as_ref()
+                .is_some_and(|panel| panel.is_only_tab(tab_id))
+    }
+
+    /// The tab goes now rather than on terminal-closed: reopening the panel
+    /// before that event arrives must start a new shell, not show a dying one.
+    fn collapse_bottom_terminal_without(
+        &mut self,
+        tab_id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(panel) = &mut self.terminal_panel {
+            panel.remove(tab_id);
+        }
+        self.sync_terminal_input_mode(cx);
+        self.bottom_terminal_open = false;
+        self.composer_input.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
     }
 
     fn start_terminal_session(&mut self, reuse: bool, cx: &mut Context<Self>) {
@@ -7981,7 +8308,7 @@ impl XdDesktop {
     ) {
         let viewport = window.bounds().size;
         let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 196.0).max(8.0));
-        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 112.0).max(8.0));
+        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 196.0).max(8.0));
         self.sidebar_context_menu = Some(SidebarContextMenu {
             target,
             title,
@@ -8623,9 +8950,8 @@ impl XdDesktop {
 
     fn apply_optimistic_send(&mut self, text: &str) -> OptimisticSend {
         if self.model.working {
-            let index = self.model.queue.len();
             self.model.queue.push(text.to_owned());
-            return OptimisticSend::Queued { index };
+            return OptimisticSend::Queued;
         }
 
         let message_index = (!text.is_empty()).then(|| {
@@ -8681,8 +9007,14 @@ impl XdDesktop {
                     summary.working = false;
                 }
             }
-            OptimisticSend::Queued { index } => {
-                if self.model.queue.get(index) == Some(&pending.text) {
+            // By text, because steering can move it before the reply arrives.
+            OptimisticSend::Queued => {
+                if let Some(index) = self
+                    .model
+                    .queue
+                    .iter()
+                    .rposition(|text| *text == pending.text)
+                {
                     self.model.queue.remove(index);
                 }
             }
@@ -8783,6 +9115,28 @@ impl XdDesktop {
                 self.model.queue.remove(index);
             }
             Ok(()) => {}
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    /// Sends a queued message ahead of the rest and stops the running turn, so
+    /// the agent takes it up now. The next turn starts as soon as this one
+    /// ends, so the chat stays working throughout.
+    fn steer_queued(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let Some(text) = self.model.queue.get(index).cloned() else {
+            return;
+        };
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        match host.steer_queue(&chat_id, index, &text) {
+            Ok(()) => self.model.promote_queued(index),
             Err(error) => self.model.connection_error = Some(error),
         }
         cx.notify();
@@ -9496,6 +9850,8 @@ impl XdDesktop {
     fn toggle_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.minimal_theme_open = !self.minimal_theme_open;
         if self.minimal_theme_open {
+            self.request_chat_title_settings();
+            self.request_auto_settle_settings();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.restore_minimal_popup_focus(window);
@@ -9694,9 +10050,9 @@ impl XdDesktop {
                                     .bg(rgb(colors.surface_high))
                                     .text_color(rgb(colors.text))
                             })
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.close_terminal_tab(close_id.clone(), cx);
+                                this.close_terminal_tab(close_id.clone(), window, cx);
                             }))
                             .child(icon(CLOSE_ICON, 12.0, colors.faint)),
                     )
@@ -10049,13 +10405,7 @@ impl XdDesktop {
                             .text_color(rgb(colors.text))
                     })
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if remote_active {
-                            this.disconnect_remote_runtime(cx);
-                        } else {
-                            this.open_remote(window, cx);
-                        }
-                    }))
+                    .on_click(cx.listener(|this, _, window, cx| this.reconnect_remote(window, cx)))
                     .child(div().size(px(7.0)).rounded_full().bg(rgb(if connected {
                         colors.working
                     } else {
@@ -10269,6 +10619,212 @@ impl XdDesktop {
         )
     }
 
+    /// `(settled, auto-settle disabled)`, when the host can settle at all.
+    fn session_settlement(&self, session_id: &str) -> Option<(bool, bool)> {
+        if !self.model.settlement_supported {
+            return None;
+        }
+        let session = self
+            .model
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)?;
+        let chat = self
+            .model
+            .chats
+            .iter()
+            .find(|chat| session.chats.contains(&chat.id))?;
+        Some((chat.settled_at.is_some(), chat.auto_settle_disabled))
+    }
+
+    fn settle_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        // Chosen now: the tree the reply brings no longer lists this session,
+        // so "the row below it" cannot be worked out afterwards.
+        let advance = self.plan_settle_advance(session_id);
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.settle_session(session_id));
+        match result {
+            Ok(()) => {
+                if let Some(advance) = advance {
+                    self.settle_advances.insert(session_id.to_owned(), advance);
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    /// `None` when this session is not what the window shows, so settling it
+    /// leaves the window alone.
+    #[allow(clippy::option_option)]
+    fn plan_settle_advance(&self, session_id: &str) -> Option<Option<(String, String, AgentCli)>> {
+        if !matches!(self.minimal_route, MinimalRoute::Cli { .. }) {
+            return None;
+        }
+        let selected = self.model.selected_chat.as_ref()?;
+        let session = self
+            .model
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)?;
+        if !session.chats.contains(selected) {
+            return None;
+        }
+        let active = self
+            .catalog_session_chats()
+            .into_iter()
+            .filter(|chat| chat.settled_at.is_none())
+            .collect::<Vec<_>>();
+        Some(next_active_session(
+            &self.model.folders,
+            &active,
+            &session.chats,
+        ))
+    }
+
+    fn session_settled(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.settle_undo_generation += 1;
+        let generation = self.settle_undo_generation;
+        let undo = self.settle_undo.get_or_insert_with(|| SettleUndo {
+            sessions: Vec::new(),
+            generation,
+        });
+        undo.generation = generation;
+        if !undo.sessions.iter().any(|session| session == session_id) {
+            undo.sessions.push(session_id.to_owned());
+        }
+        cx.spawn(async move |this, cx| {
+            Timer::after(SETTLE_UNDO_LIFETIME).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .settle_undo
+                    .as_ref()
+                    .is_some_and(|undo| undo.generation == generation)
+                {
+                    this.settle_undo = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+
+        let Some(advance) = self.settle_advances.remove(session_id) else {
+            return;
+        };
+        let still_open = self
+            .model
+            .selected_chat
+            .as_ref()
+            .zip(
+                self.model
+                    .sessions
+                    .iter()
+                    .find(|session| session.id == session_id),
+            )
+            .is_some_and(|(selected, session)| session.chats.contains(selected));
+        if !still_open {
+            return;
+        }
+        match advance {
+            Some((project_id, chat_id, agent)) => {
+                self.select_minimal_session(project_id, chat_id, agent, cx);
+            }
+            None => self.show_minimal_projects(cx),
+        }
+    }
+
+    fn unsettle_session(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.forget_settle_undo(session_id);
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.unsettle_session(session_id));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn undo_settle(&mut self, cx: &mut Context<Self>) {
+        let Some(undo) = self.settle_undo.take() else {
+            return;
+        };
+        for session_id in undo.sessions {
+            self.unsettle_session(&session_id, cx);
+        }
+    }
+
+    fn forget_settle_undo(&mut self, session_id: &str) {
+        if let Some(undo) = &mut self.settle_undo {
+            undo.sessions.retain(|session| session != session_id);
+            if undo.sessions.is_empty() {
+                self.settle_undo = None;
+            }
+        }
+    }
+
+    /// An undo has nothing left to do once its session is back or gone.
+    fn prune_settle_undo(&mut self) {
+        let Some(undo) = &self.settle_undo else {
+            return;
+        };
+        let stale = undo
+            .sessions
+            .iter()
+            .filter(|session| {
+                self.session_settlement(session)
+                    .is_none_or(|(settled, _)| !settled)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for session in stale {
+            self.forget_settle_undo(&session);
+        }
+    }
+
+    fn set_session_auto_settle(&mut self, session_id: &str, enabled: bool, cx: &mut Context<Self>) {
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.set_session_auto_settle(session_id, enabled));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn toggle_settled_shelf(&mut self, cx: &mut Context<Self>) {
+        self.settings.settled_shelf_expanded = !self.settings.settled_shelf_expanded;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn request_auto_settle_settings(&mut self) {
+        let result = self
+            .active_host()
+            .map(|host| host.auto_settle_settings())
+            .unwrap_or(Ok(()));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn change_auto_settle(&mut self, rules: AutoSettleRules, cx: &mut Context<Self>) {
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.set_auto_settle_settings(rules));
+        match result {
+            Ok(()) => self.auto_settle = Some(rules),
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
     fn toggle_drawer(&mut self, project_id: String, current: bool, cx: &mut Context<Self>) {
         if current {
             self.toggle_folder_collapsed(project_id, cx);
@@ -10311,9 +10867,16 @@ impl XdDesktop {
         let drop_project_id = project_id.to_owned();
         let drop_chat_id = session.id.clone();
         let agent = session.agent;
+        let settle_session = self
+            .model
+            .settlement_supported
+            .then(|| self.model.session_for_chat(&session.id))
+            .flatten()
+            .map(|group| group.id.clone());
 
         div()
             .id(("minimal-session-card", instance))
+            .group("catalog-session")
             .relative()
             .w_full()
             .h(px(CARD_HEIGHT))
@@ -10428,7 +10991,271 @@ impl XdDesktop {
                 },
             )
             .children(signal_tab(signal, colors))
+            .when_some(settle_session, |row, session_id| {
+                row.child(
+                    session_row_action(
+                        ("minimal-session-settle", instance),
+                        "Settle session",
+                        CHECK_ICON,
+                        emphasized,
+                        colors,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.settle_session(&session_id, cx);
+                    })),
+                )
+            })
             .into_any_element()
+    }
+
+    /// A row on the Settled shelf. It reads like a session card but says which
+    /// project it came from and when it settled, since the shelf mixes them.
+    fn render_settled_card(
+        &mut self,
+        colors: ThemeColors,
+        card: SettledCard,
+        instance: usize,
+        selected: bool,
+        now: i64,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let open_project_id = card.project_id.clone();
+        let chat_id = card.id.clone();
+        let agent = card.agent;
+        let session_id = self
+            .model
+            .session_for_chat(&card.id)
+            .map(|group| group.id.clone());
+        let unsettle_session = session_id.clone();
+        let context_title = card.title.clone();
+        div()
+            .id(("minimal-settled-card", instance))
+            .group("catalog-session")
+            .relative()
+            .w_full()
+            .h(px(CARD_HEIGHT))
+            .flex_none()
+            .pl(px(10.0))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(7.0))
+            .when(selected, |row| row.bg(rgb(colors.selected_surface)))
+            .cursor_pointer()
+            .hover(|style| {
+                if selected {
+                    style
+                } else {
+                    style.bg(rgb(colors.surface_high))
+                }
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_minimal_session(
+                    open_project_id.clone(),
+                    chat_id.clone(),
+                    agent,
+                    window,
+                    cx,
+                );
+            }))
+            .when_some(session_id, |row, session_id| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_sidebar_context_menu(
+                            SidebarTarget::Session(session_id.clone()),
+                            context_title.clone(),
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+            })
+            .child(
+                svg()
+                    .path(agent_icon(agent))
+                    .size(px(13.0))
+                    .flex_none()
+                    .text_color(rgb(if selected { colors.text } else { colors.faint })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .text_color(rgb(if selected { colors.text } else { colors.muted }))
+                    .when(selected, |title| title.font_weight(FontWeight::MEDIUM))
+                    .child(card.title),
+            )
+            .child(
+                div()
+                    .max_w(px(96.0))
+                    .flex_none()
+                    .truncate()
+                    .font_family(MONO)
+                    .text_size(px(10.5))
+                    .text_color(rgb(colors.faint))
+                    .child(format!(
+                        "{} \u{b7} {}",
+                        card.project,
+                        age_label(card.settled_at, now)
+                    )),
+            )
+            .when_some(unsettle_session, |row, session_id| {
+                row.child(
+                    session_row_action(
+                        ("minimal-session-unsettle", instance),
+                        "Un-settle session",
+                        UNDO_ICON,
+                        selected,
+                        colors,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.unsettle_session(&session_id, cx);
+                    })),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The Settled shelf below the projects: collapsed by default, with only
+    /// the open session still listed then, so the sidebar always shows where
+    /// you are. Finding opens it, so a match cannot hide inside it.
+    fn render_settled_shelf(
+        &mut self,
+        colors: ThemeColors,
+        cards: Vec<SettledCard>,
+        active_chat_id: Option<&str>,
+        finding: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if cards.is_empty() {
+            return None;
+        }
+        let count = cards.len();
+        let open = finding || self.settings.settled_shelf_expanded;
+        let hidden = if finding {
+            0
+        } else {
+            count.saturating_sub(self.settled_visible)
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let is_selected = |card: &SettledCard, model: &AppModel| {
+            active_chat_id.is_some_and(|active| {
+                card.id == active
+                    || model
+                        .session_for_chat(&card.id)
+                        .is_some_and(|group| group.chats.iter().any(|chat| chat == active))
+            })
+        };
+        let mut rows = Vec::new();
+        for (index, card) in cards.into_iter().enumerate() {
+            let selected = is_selected(&card, &self.model);
+            let listed = if open {
+                finding || index < self.settled_visible || selected
+            } else {
+                selected
+            };
+            if listed {
+                rows.push(self.render_settled_card(colors, card, index, selected, now, cx));
+            }
+        }
+        Some(
+            div()
+                .id("minimal-settled-shelf")
+                .w_full()
+                .mt(px(6.0))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .id("minimal-settled-header")
+                        .h(px(30.0))
+                        .w_full()
+                        .pl(px(4.0))
+                        .pr(px(2.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded(px(7.0))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_settled_shelf(cx)))
+                        .child(
+                            div()
+                                .size(px(20.0))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon(
+                                    if open {
+                                        CHEVRON_DOWN_ICON
+                                    } else {
+                                        CHEVRON_RIGHT_ICON
+                                    },
+                                    12.0,
+                                    colors.faint,
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(colors.muted))
+                                .child("Settled"),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(rgb(colors.faint))
+                                .child(count.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .mt(px(1.0))
+                        .mb(px(6.0))
+                        .pl(px(12.0))
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.0))
+                        .children(rows)
+                        .when(open && hidden > 0, |list| {
+                            list.child(
+                                div()
+                                    .id("minimal-settled-more")
+                                    .h(px(CARD_HEIGHT))
+                                    .pl(px(10.0))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(7.0))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(colors.faint))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.settled_visible += SETTLED_MORE_ROWS;
+                                        cx.notify();
+                                    }))
+                                    .child("Show more"),
+                            )
+                        }),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The catalog: one drawer per project, each holding its session cards.
@@ -10437,10 +11264,20 @@ impl XdDesktop {
     fn render_catalog(
         &mut self,
         colors: ThemeColors,
+        width: f32,
         active_chat_id: Option<&str>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let projects = project_cards(&self.model.folders, &self.catalog_session_chats());
+        let (settled_chats, active_chats): (Vec<_>, Vec<_>) = self
+            .catalog_session_chats()
+            .into_iter()
+            .partition(|chat| chat.settled_at.is_some());
+        let mut settled = settled_cards(&self.model.folders, &settled_chats);
+        let settled_projects = settled
+            .iter()
+            .map(|card| card.project_id.clone())
+            .collect::<HashSet<_>>();
+        let projects = project_cards(&self.model.folders, &active_chats);
         let current_project = self.selected_minimal_project_id();
         let mut drawers = Vec::with_capacity(projects.len());
         let mut session_instance = 0usize;
@@ -10450,7 +11287,7 @@ impl XdDesktop {
         for (project_index, project) in projects.iter().enumerate() {
             let current = current_project.as_deref() == Some(project.id.as_str())
                 && !matches!(self.minimal_route, MinimalRoute::Terminal);
-            let mut sessions = project_sessions(&project.id, &self.catalog_session_chats());
+            let mut sessions = project_sessions(&project.id, &active_chats);
             let finding = !query.is_empty();
             if finding && !project.name.to_lowercase().contains(&query) {
                 sessions.retain(|session| {
@@ -10618,7 +11455,11 @@ impl XdDesktop {
                                             .py_2()
                                             .text_size(px(12.0))
                                             .text_color(rgb(colors.muted))
-                                            .child("No sessions yet."),
+                                            .child(if settled_projects.contains(&project.id) {
+                                                "No active sessions."
+                                            } else {
+                                                "No sessions yet."
+                                            }),
                                     )
                                 }),
                         )
@@ -10626,19 +11467,44 @@ impl XdDesktop {
             );
         }
 
+        let finding = !query.is_empty();
+        if finding {
+            settled.retain(|card| {
+                card.title.to_lowercase().contains(&query)
+                    || card.branch.to_lowercase().contains(&query)
+                    || card.project.to_lowercase().contains(&query)
+            });
+            matches += settled.len();
+        }
+        let settled_shelf = self.render_settled_shelf(colors, settled, active_chat_id, finding, cx);
+        let settle_notice = self
+            .settle_undo
+            .as_ref()
+            .map(|undo| match undo.sessions.len() {
+                1 => "Settled".to_owned(),
+                count => format!("Settled {count}"),
+            });
         let terminal_active = matches!(self.minimal_route, MinimalRoute::Terminal);
         let settings_open = self.minimal_theme_open;
+        let offers_update = self
+            .self_update_panel
+            .as_ref()
+            .is_some_and(SelfUpdatePanel::offers_update);
 
         div()
             .id("minimal-session-board")
-            .w(px(CATALOG_WIDTH))
+            .w(px(width))
             .h_full()
             .min_h_0()
             .flex_none()
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(colors.border))
+            .border_color(rgb(if self.catalog_drag.is_some() {
+                colors.accent
+            } else {
+                colors.border
+            }))
             .bg(rgb(colors.sidebar))
             .child(
                 div()
@@ -10706,6 +11572,7 @@ impl XdDesktop {
                     .flex_col()
                     .gap(px(1.0))
                     .children(drawers)
+                    .children(settled_shelf)
                     .when(projects.is_empty(), |list| {
                         list.child(
                             div()
@@ -10741,7 +11608,47 @@ impl XdDesktop {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .overflow_hidden()
+                            .text_size(px(11.5))
+                            .text_color(rgb(colors.faint))
+                            .when_some(settle_notice, |notice, summary| {
+                                notice.child(div().flex_none().child(summary)).child(
+                                    div()
+                                        .id("minimal-settle-undo")
+                                        .flex_none()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .text_color(rgb(colors.muted))
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(rgb(colors.text)))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.undo_settle(cx);
+                                        }))
+                                        .child(icon(UNDO_ICON, 12.0, colors.muted))
+                                        .child("Undo"),
+                                )
+                            }),
+                    )
+                    .when(offers_update, |footer| {
+                        footer.child(
+                            ui_button("minimal-update", ButtonKind::Secondary, colors)
+                                .child(icon(DOWNLOAD_ICON, 15.0, colors.text))
+                                .when(width >= CATALOG_UPDATE_LABEL_MIN_WIDTH, |button| {
+                                    button.child("Update")
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_update_popup(window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         ui_button("minimal-terminal-tab", ButtonKind::Ghost, colors)
                             .when(terminal_active, |button| {
@@ -11248,6 +12155,24 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    /// What the tray says is at work. A backgrounded shell command shares the
+    /// agents' cards but is no agent, so it is counted as what it is.
+    fn agents_tray_label(agents: &[RunningAgent]) -> String {
+        let count = |count: usize, noun: &str| {
+            format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+        };
+        let commands = agents.iter().filter(|agent| agent.view.is_shell()).count();
+        match (agents.len() - commands, commands) {
+            (delegated, 0) => format!("{} working", count(delegated, "agent")),
+            (0, commands) => format!("{} running", count(commands, "command")),
+            (delegated, commands) => format!(
+                "{} and {} running",
+                count(delegated, "agent"),
+                count(commands, "command")
+            ),
+        }
+    }
+
     /// Every agent still at work, above the composer: background agents keep
     /// running after the turn and the reader may have scrolled far away from
     /// their cards. A pill jumps to its card and opens it.
@@ -11345,11 +12270,7 @@ impl XdDesktop {
                     div()
                         .text_size(px(11.5))
                         .text_color(rgb(colors.faint))
-                        .child(format!(
-                            "{} agent{} working",
-                            agents.len(),
-                            if agents.len() == 1 { "" } else { "s" }
-                        )),
+                        .child(Self::agents_tray_label(agents)),
                 )
                 .children(pills)
                 .when(agents.len() > SHOWN, |tray| {
@@ -11577,7 +12498,7 @@ impl XdDesktop {
             SubagentState::Failed => colors.danger,
             SubagentState::Stopped => colors.muted,
         };
-        let provider_icon = if view.agent == "Shell" {
+        let provider_icon = if view.is_shell() {
             Some(TERMINAL_ICON)
         } else {
             match view.provider.to_ascii_lowercase().as_str() {
@@ -12679,6 +13600,8 @@ impl XdDesktop {
             .max_h_full()
             .into_any_element()
         };
+        // Only a running turn can be steered away from.
+        let can_steer = self.model.working;
         let queued = self
             .model
             .queue
@@ -12723,6 +13646,25 @@ impl XdDesktop {
                             .text_color(rgb(colors.text))
                             .child(text),
                     )
+                    .when(can_steer, |row| {
+                        row.child(
+                            ui_button(("native-steer-queued", index), ButtonKind::Ghost, colors)
+                                .h(px(26.0))
+                                .px(px(8.0))
+                                .text_size(px(12.0))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| PaneTooltip {
+                                        label: "Stop the running turn and send this now",
+                                        colors,
+                                    })
+                                    .into()
+                                })
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.steer_queued(index, cx)),
+                                )
+                                .child("Steer"),
+                        )
+                    })
                     .child(
                         div()
                             .id(("native-drop-queued", index))
@@ -13062,6 +14004,7 @@ impl XdDesktop {
                 },
             )
             .when(working, |chat| {
+                let (status, dot) = turn_status(!self.model.interactions.is_empty(), colors);
                 chat.child(
                     div()
                         .w_full()
@@ -13077,10 +14020,10 @@ impl XdDesktop {
                             div()
                                 .size(px(7.0))
                                 .rounded_full()
-                                .bg(rgb(colors.working))
+                                .bg(rgb(dot))
                                 .opacity(pulse_opacity()),
                         )
-                        .child("Working")
+                        .child(status)
                         .child(working_dots(0, colors.muted)),
                 )
             })
@@ -13938,8 +14881,33 @@ impl XdDesktop {
             MinimalRoute::Cli { chat_id, .. } => Some(chat_id.clone()),
             _ => None,
         };
+        let catalog_width = self.catalog_width(window);
         let catalog = (!self.browser_compacts_sidebar(window))
-            .then(|| self.render_catalog(colors, active_chat.as_deref(), cx));
+            .then(|| self.render_catalog(colors, catalog_width, active_chat.as_deref(), cx));
+        // Drawn after the session so its whole strip stays grabbable and keeps
+        // the resize cursor over the session's edge as well as the catalog's.
+        let catalog_resize = catalog.is_some().then(|| {
+            div()
+                .id("catalog-resize")
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(catalog_width - 5.0))
+                .w(px(9.0))
+                .cursor(CursorStyle::ResizeLeftRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.catalog_drag =
+                            Some((f32::from(event.position.x), catalog_width as u16));
+                        for pane in this.browser_panes.values() {
+                            pane.update(cx, |pane, _| pane.set_visible(false));
+                        }
+                        cx.notify();
+                    }),
+                )
+        });
         let toolbar = matches!(&route, MinimalRoute::Cli { .. })
             .then(|| self.render_minimal_context_toolbar(colors, cx));
         let content = match route {
@@ -13960,6 +14928,12 @@ impl XdDesktop {
             let delete_target = menu.target.clone();
             let project = matches!(menu.target, SidebarTarget::Folder(_));
             let chat = matches!(menu.target, SidebarTarget::Chat(_));
+            let settlement = match &menu.target {
+                SidebarTarget::Session(session_id) => self
+                    .session_settlement(session_id)
+                    .map(|state| (session_id.clone(), state)),
+                _ => None,
+            };
             div()
                 .occlude()
                 .absolute()
@@ -14019,6 +14993,65 @@ impl XdDesktop {
                                     "Rename session"
                                 }),
                         )
+                        .when_some(
+                            settlement,
+                            |card, (session_id, (settled, auto_disabled))| {
+                                let settle_session = session_id.clone();
+                                let row = |id: &'static str, label: &'static str| {
+                                    div()
+                                        .id(id)
+                                        .w_full()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .text_sm()
+                                        .text_color(rgb(colors.text))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(colors.surface_high)))
+                                        .child(label)
+                                };
+                                card.child(
+                                    row(
+                                        "minimal-settle-session",
+                                        if settled {
+                                            "Un-settle session"
+                                        } else {
+                                            "Settle session"
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.close_sidebar_context_menu(window, cx);
+                                            if settled {
+                                                this.unsettle_session(&settle_session, cx);
+                                            } else {
+                                                this.settle_session(&settle_session, cx);
+                                            }
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    row(
+                                        "minimal-session-auto-settle",
+                                        if auto_disabled {
+                                            "Enable auto-settle"
+                                        } else {
+                                            "Disable auto-settle"
+                                        },
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.close_sidebar_context_menu(window, cx);
+                                            this.set_session_auto_settle(
+                                                &session_id,
+                                                auto_disabled,
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                                )
+                            },
+                        )
                         .child(
                             div()
                                 .id(if project {
@@ -14051,6 +15084,9 @@ impl XdDesktop {
         let theme_overlay = self
             .minimal_theme_open
             .then(|| self.render_workspace_settings(colors, window, cx));
+        let update_overlay = self
+            .update_popup_open
+            .then(|| self.render_update_popup(colors, cx));
         let share_overlay = self.share_panel.clone().map(|panel| {
             let pairing_code = xd_transport::PairingCode { code: panel.code.clone(), fingerprint: panel.fingerprint.clone() }.encode().ok().filter(|_| !panel.loading);
             let can_copy = pairing_code.is_some();
@@ -15591,12 +16627,27 @@ impl XdDesktop {
                             this.finish_browser_resize(cx);
                         }
                     }
+                    if let Some((start_x, start_width)) = this.catalog_drag {
+                        if event.dragging() {
+                            let requested = (f32::from(start_width) + f32::from(event.position.x)
+                                - start_x)
+                                .round()
+                                .clamp(0.0, u16::MAX as f32)
+                                as u16;
+                            this.settings.catalog_width =
+                                catalog_pane_width(requested, this.catalog_room(window)) as u16;
+                            cx.notify();
+                        } else {
+                            this.finish_catalog_resize(cx);
+                        }
+                    }
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_browser_resize(cx);
+                    this.finish_catalog_resize(cx);
                     this.finish_dock_resize(cx);
                 }),
             )
@@ -15604,6 +16655,7 @@ impl XdDesktop {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     this.finish_browser_resize(cx);
+                    this.finish_catalog_resize(cx);
                     this.finish_dock_resize(cx);
                 }),
             )
@@ -15670,6 +16722,10 @@ impl XdDesktop {
                     cx.notify();
                     return;
                 }
+                if this.update_popup_open {
+                    this.close_update_popup(window, cx);
+                    return;
+                }
                 if this.share_panel.take().is_some() || this.devices_panel.take().is_some() {
                     cx.notify();
                     return;
@@ -15699,6 +16755,7 @@ impl XdDesktop {
             .child(titlebar)
             .child(
                 div()
+                    .relative()
                     .w_full()
                     .flex_1()
                     .min_h_0()
@@ -15788,10 +16845,12 @@ impl XdDesktop {
                         )
                                     }),
                             ),
-                    ),
+                    )
+                    .when_some(catalog_resize, |row, handle| row.child(handle)),
             )
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
+            .when_some(update_overlay, |root, overlay| root.child(overlay))
             .when_some(remote_overlay, |root, overlay| root.child(overlay))
             .when_some(share_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
@@ -16129,6 +17188,12 @@ impl AssetSource for EmbeddedIcons {
             TERMINAL_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/terminal.svg").as_slice(),
             )),
+            DOWNLOAD_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/download.svg").as_slice(),
+            )),
+            UNDO_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/undo.svg").as_slice(),
+            )),
             SEARCH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/search.svg").as_slice(),
             )),
@@ -16163,6 +17228,7 @@ impl AssetSource for EmbeddedIcons {
             CHANGES_ICON.into(),
             BROWSER_ICON.into(),
             TERMINAL_ICON.into(),
+            DOWNLOAD_ICON.into(),
             SEARCH_ICON.into(),
             MINIMIZE_ICON.into(),
             MAXIMIZE_ICON.into(),
@@ -17217,6 +18283,36 @@ mod tests {
     }
 
     #[test]
+    fn the_agents_tray_counts_shell_commands_as_commands() {
+        let label = |agents: &[&str]| {
+            let mut model = AppModel::default();
+            model.messages = agents
+                .iter()
+                .enumerate()
+                .map(|(index, agent)| {
+                    Message::new(
+                        Some(index as i64),
+                        "tool",
+                        format!("subagent_run\n{{\"status\":\"running\",\"agent\":\"{agent}\"}}"),
+                        None,
+                    )
+                })
+                .collect();
+            let mut snapshot = TranscriptSnapshot::default();
+            snapshot.sync_messages(&model);
+            XdDesktop::agents_tray_label(&snapshot.running_agents)
+        };
+        assert_eq!(label(&["Explore"]), "1 agent working");
+        assert_eq!(label(&["Explore", "Plan"]), "2 agents working");
+        assert_eq!(label(&["Shell"]), "1 command running");
+        assert_eq!(label(&["Shell", "Shell"]), "2 commands running");
+        assert_eq!(
+            label(&["Explore", "Shell", "Plan"]),
+            "2 agents and 1 command running"
+        );
+    }
+
+    #[test]
     fn previews_read_as_plain_text() {
         assert_eq!(
             first_line("\n## Found **two** files in `src/`\n- more"),
@@ -17244,8 +18340,9 @@ mod tests {
 
         // The catalog footer holds Terminal and Settings.
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
+        let catalog_width = cx.update(|window, cx| desktop.read(cx).catalog_width(window));
         cx.simulate_click(
-            point(px(CATALOG_WIDTH - 50.0), footer_y),
+            point(px(catalog_width - 50.0), footer_y),
             gpui::Modifiers::default(),
         );
         cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
@@ -17667,6 +18764,51 @@ mod tests {
     }
 
     #[test]
+    fn chat_title_settings_read_the_hosts_reply() {
+        let settings = workspace_settings::ChatTitleSettings::from_reply(&serde_json::json!({
+            "ok": true,
+            "enabled": false,
+            "models": {"codex": "gpt-6-luna", "claude": null},
+        }))
+        .unwrap();
+        assert!(!settings.enabled);
+        assert_eq!(settings.model("codex"), Some("gpt-6-luna"));
+        assert_eq!(settings.model("claude"), None);
+        assert!(
+            workspace_settings::ChatTitleSettings::from_reply(&serde_json::json!({"ok": true}))
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn chat_title_controls_show_only_once_the_host_has_answered(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let agents_with = |settings: Option<workspace_settings::ChatTitleSettings>,
+                           cx: &mut gpui::VisualTestContext| {
+            desktop.update_in(cx, |desktop, window, cx| {
+                desktop.chat_title_settings = settings;
+                desktop.settings_section = 2;
+                desktop.minimal_theme_open = true;
+                desktop.render_workspace_settings(ThemePreset::Dark.colors(), window, cx);
+            });
+            cx.run_until_parked();
+        };
+        agents_with(None, cx);
+        let settings = workspace_settings::ChatTitleSettings::from_reply(&serde_json::json!({
+            "enabled": true,
+            "models": {"codex": "gpt-6-luna", "claude": "claude-haiku-5-5"},
+        }));
+        agents_with(settings, cx);
+        desktop.update_in(cx, |desktop, _, cx| {
+            desktop.toggle_chat_title_model_menu("codex", cx);
+            assert_eq!(desktop.chat_title_model_menu, Some("codex"));
+            desktop.toggle_chat_title_model_menu("codex", cx);
+            assert_eq!(desktop.chat_title_model_menu, None);
+        });
+    }
+
+    #[test]
     fn minimal_settings_exposes_the_all_permissions_toggle() {
         let settings = include_str!("workspace_settings.rs");
 
@@ -17704,6 +18846,7 @@ mod tests {
             "this.queue_composer(cx)",
             "this.cancel_turn(cx)",
             "this.drop_queued(index, cx)",
+            "this.steer_queued(index, cx)",
         ] {
             assert!(chat.contains(behavior), "missing {behavior}");
         }
@@ -17717,6 +18860,7 @@ mod tests {
             .0;
         assert!(actions.contains("host.queue_message(&chat_id, &text)"));
         assert!(actions.contains("host.drop_queue(&chat_id, index)"));
+        assert!(actions.contains("host.steer_queue(&chat_id, index, &text)"));
         assert!(actions.contains("host.cancel(&chat_id)"));
     }
 
@@ -17999,6 +19143,61 @@ mod tests {
     }
 
     #[gpui::test]
+    fn closing_the_last_bottom_terminal_tab_collapses_the_panel(cx: &mut gpui::TestAppContext) {
+        let shell = |id: &str| {
+            XdDesktop::terminal_tab_from_snapshot(&serde_json::json!({"id": id})).unwrap()
+        };
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.model.selected_chat = Some("dock-chat".into());
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.sessions = vec![shell("first"), shell("second")];
+            panel.selected = Some("first".into());
+            assert!(!desktop.closing_tab_empties_bottom_terminal("first"));
+
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.remove("second");
+            panel.opening = true;
+            assert!(
+                !desktop.closing_tab_empties_bottom_terminal("first"),
+                "a tab that is still opening keeps the panel in use"
+            );
+            desktop.terminal_panel.as_mut().unwrap().opening = false;
+            assert!(!desktop.closing_tab_empties_bottom_terminal("other"));
+            assert!(desktop.closing_tab_empties_bottom_terminal("first"));
+
+            desktop.close_terminal_tab("first".into(), window, cx);
+            assert!(
+                desktop.bottom_terminal_open,
+                "a failed close must stay visible with its error"
+            );
+            let panel = desktop.terminal_panel.as_ref().unwrap();
+            assert_eq!(panel.sessions.len(), 1);
+            assert!(panel.error.is_some());
+
+            desktop.collapse_bottom_terminal_without("first", window, cx);
+            assert!(!desktop.bottom_terminal_open);
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            assert!(panel.sessions.is_empty());
+            assert_eq!(panel.selected, None);
+            panel.auto_open = false;
+
+            desktop.show_native_pane(NativePane::Terminal, cx);
+            assert!(desktop.bottom_terminal_open);
+            assert!(desktop.terminal_panel.as_ref().unwrap().auto_open);
+
+            let panel = desktop.terminal_panel.as_mut().unwrap();
+            panel.sessions = vec![shell("first")];
+            desktop.model.selected_chat = None;
+            assert!(
+                !desktop.closing_tab_empties_bottom_terminal("first"),
+                "the global terminal is the page itself, not a collapsible panel"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn repository_updates_preserve_hidden_tools_and_file_edits(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
         desktop.update(cx, |desktop, _| {
@@ -18128,6 +19327,15 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_held_up_on_the_user_reads_as_waiting_in_grey() {
+        for preset in [ThemePreset::Dark, ThemePreset::Light] {
+            let colors = preset.colors();
+            assert_eq!(turn_status(false, colors), ("Working", colors.working));
+            assert_eq!(turn_status(true, colors), ("Waiting", colors.muted));
+        }
+    }
+
+    #[test]
     fn browser_width_keeps_room_for_the_session_at_minimum_window_size() {
         for requested in [0, 280, 460, u16::MAX] {
             let width = browser_pane_width(requested, 760.0);
@@ -18138,6 +19346,115 @@ mod tests {
         }
         assert_eq!(browser_pane_width(460, 1180.0), 460.0);
         assert_eq!(browser_pane_width(u16::MAX, 3000.0), 1000.0);
+    }
+
+    #[test]
+    fn catalog_width_keeps_room_for_the_session() {
+        for requested in [0, 200, 256, 480, u16::MAX] {
+            // The window's minimum width, and the least room left of a browser
+            // before the catalog hides.
+            for room in [760.0, 640.0] {
+                let width = catalog_pane_width(requested, room);
+                assert!((CATALOG_MIN_WIDTH..=CATALOG_MAX_WIDTH).contains(&width));
+                assert!(room - width >= CATALOG_SESSION_MIN_WIDTH);
+            }
+        }
+        assert_eq!(catalog_pane_width(256, 640.0), 256.0);
+        assert_eq!(catalog_pane_width(0, 1180.0), CATALOG_MIN_WIDTH);
+        assert_eq!(catalog_pane_width(u16::MAX, 3000.0), CATALOG_MAX_WIDTH);
+    }
+
+    #[gpui::test]
+    fn the_catalog_footer_fits_at_the_narrowest_width_with_an_update(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        desktop.update(cx, |desktop, cx| {
+            desktop.settings.catalog_width = CATALOG_MIN_WIDTH as u16;
+            desktop.handle_event(
+                "agent-cli-update",
+                serde_json::json!({"provider":"claude", "display_name":"Claude Code",
+                    "state":"idle", "version":"2.1.319", "latest":"2.1.330", "available":true}),
+                None,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        // The left of Settings, which an overflowing footer pushes aside.
+        let settings = cx.update(|window, _| {
+            point(
+                px(CATALOG_MIN_WIDTH - 80.0),
+                window.viewport_size().height - px(26.0),
+            )
+        });
+        cx.simulate_click(settings, gpui::Modifiers::default());
+        cx.update(|_, cx| assert!(desktop.read(cx).minimal_theme_open));
+    }
+
+    #[gpui::test]
+    fn dragging_the_catalog_edge_resizes_it_within_its_limits(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        cx.update(|_, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.settings.catalog_width = 256;
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+
+        let drag = |cx: &mut gpui::VisualTestContext, from: f32, to: f32| {
+            cx.simulate_mouse_down(
+                point(px(from), px(300.0)),
+                MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_move(
+                point(px(to), px(300.0)),
+                Some(MouseButton::Left),
+                gpui::Modifiers::default(),
+            );
+            cx.simulate_mouse_up(
+                point(px(to), px(300.0)),
+                MouseButton::Left,
+                gpui::Modifiers::default(),
+            );
+            cx.run_until_parked();
+        };
+
+        // The strip reaches over the session's edge as well as the catalog's.
+        drag(cx, 258.0, 322.0);
+        cx.update(|_, cx| {
+            let desktop = desktop.read(cx);
+            assert_eq!(desktop.settings.catalog_width, 320);
+            assert!(desktop.catalog_drag.is_none());
+        });
+        drag(cx, 319.0, 1300.0);
+        cx.update(|_, cx| {
+            assert_eq!(
+                desktop.read(cx).settings.catalog_width,
+                CATALOG_MAX_WIDTH as u16
+            )
+        });
+        drag(cx, 479.0, 0.0);
+        cx.update(|_, cx| {
+            assert_eq!(
+                desktop.read(cx).settings.catalog_width,
+                CATALOG_MIN_WIDTH as u16
+            )
+        });
+
+        // The strip moved with the edge, so the old position no longer grabs it.
+        drag(cx, 300.0, 400.0);
+        cx.update(|_, cx| {
+            assert_eq!(
+                desktop.read(cx).settings.catalog_width,
+                CATALOG_MIN_WIDTH as u16
+            )
+        });
     }
 
     #[gpui::test]
@@ -18234,6 +19551,10 @@ mod tests {
             desktop.sync_browser_pane(window, cx);
             assert!(!a.read(cx).is_visible());
             desktop.browser_drag = None;
+            desktop.catalog_drag = Some((100.0, 256));
+            desktop.sync_browser_pane(window, cx);
+            assert!(!a.read(cx).is_visible());
+            desktop.catalog_drag = None;
 
             desktop.settings.remote_ssh_command = Some("ssh remote.example".into());
             desktop.active_endpoint = ChatEndpoint::Remote;
@@ -18274,6 +19595,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
             for chat_id in ["kept", "removed"] {
                 desktop.minimal_route = MinimalRoute::Cli {
@@ -18352,6 +19675,8 @@ mod tests {
                     branch: None,
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
                 ChatSummary {
                     id: "chat-b".into(),
@@ -18361,6 +19686,8 @@ mod tests {
                     branch: None,
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
             ];
             desktop.model.selected_chat = Some("chat-a".into());
@@ -18520,6 +19847,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
 
             desktop.open_minimal_session(
@@ -18706,6 +20035,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
 
             // Tree loading primes an empty, non-loading panel before the chat
@@ -18856,6 +20187,162 @@ mod tests {
         });
     }
 
+    /// A refused loopback port, so a connection attempt the test does not wait
+    /// for fails at once without leaving the machine.
+    fn saved_remote_credentials() -> xd_transport::RemoteCredentials {
+        xd_transport::RemoteCredentials {
+            host: "127.0.0.1".into(),
+            port: 1,
+            fingerprint: "ab".repeat(32),
+            token: "test-token".into(),
+        }
+    }
+
+    #[gpui::test]
+    fn the_remote_status_keeps_a_live_connection(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            let generation = desktop.remote_generation;
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert_eq!(desktop.remote_state, RemoteState::Connected);
+            assert_eq!(desktop.remote_generation, generation);
+            assert!(desktop.remote_panel.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_returns_to_the_saved_host_after_disconnecting(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.remote_error = Some("Stale. Reconnecting…".into());
+            desktop.model.connected = true;
+            desktop.activate_remote_runtime(cx);
+            desktop.model.connected = true;
+            desktop.model.connection_error = Some("Stale. Reconnecting…".into());
+
+            desktop.disconnect_remote_runtime(cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert_eq!(desktop.remote_state, RemoteState::Offline);
+            assert_eq!(desktop.remote_error, None);
+            assert!(desktop.settings.remote_credentials.is_some());
+            assert!(!desktop.inactive_model.connected);
+            assert_eq!(desktop.inactive_model.connection_error, None);
+            assert!(
+                desktop
+                    .terminal_cache_refresh
+                    .contains(&ChatEndpoint::Remote)
+            );
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+            assert!(
+                desktop.remote_panel.is_none(),
+                "a remembered host must not ask for a new pairing code"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_retries_now_but_never_races_a_running_attempt(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            desktop.remote_state = RemoteState::Offline;
+            desktop.schedule_remote_connect(Duration::from_secs(60), cx);
+            let sleeping = desktop.remote_generation;
+
+            desktop.reconnect_remote(window, cx);
+
+            let retried = desktop.remote_generation;
+            assert!(retried > sleeping, "the backoff sleep must be abandoned");
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+
+            desktop.remote_attempt = Some(retried);
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.remote_generation, retried);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_asks_for_pairing_only_when_it_is_needed(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.reconnect_remote(window, cx);
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            assert!(desktop.remote_panel.is_some(), "no host has been paired");
+            desktop.close_remote(cx);
+
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.model.connected = true;
+            desktop.activate_remote_runtime(cx);
+            desktop.remote_connection_failed(RemoteError::Authentication("Revoked.".into()), cx);
+            assert_eq!(desktop.remote_state, RemoteState::Unconfigured);
+
+            desktop.disconnect_remote_runtime(cx);
+            assert_eq!(desktop.remote_state, RemoteState::Unconfigured);
+            assert_eq!(desktop.remote_error.as_deref(), Some("Revoked."));
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Local);
+            let panel = desktop.remote_panel.as_ref().expect("a refused device");
+            assert_eq!(panel.error.as_deref(), Some("Revoked."));
+        });
+    }
+
+    #[gpui::test]
+    fn the_status_leaves_a_pairing_in_flight_alone(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            desktop.open_remote(window, cx);
+            desktop.remote_panel.as_mut().unwrap().submitting = true;
+            desktop.remote_state = RemoteState::Connecting;
+            let pairing = desktop.remote_generation;
+
+            desktop.reconnect_remote(window, cx);
+
+            assert_eq!(desktop.remote_generation, pairing);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+            assert!(desktop.remote_panel.as_ref().unwrap().submitting);
+        });
+    }
+
+    #[gpui::test]
+    fn closing_a_failed_pairing_returns_to_the_saved_host(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.settings.remote_credentials = Some(saved_remote_credentials());
+            desktop.remote_state = RemoteState::Connected;
+            desktop.activate_remote_runtime(cx);
+            desktop.open_remote(window, cx);
+            desktop.remote_state = desktop.idle_remote_state();
+
+            desktop.close_remote(cx);
+
+            assert_eq!(desktop.active_endpoint, ChatEndpoint::Remote);
+            assert_eq!(desktop.remote_state, RemoteState::Connecting);
+        });
+    }
+
     #[test]
     fn startup_restores_exactly_one_persisted_runtime() {
         let remote = "remote/dev.example:4001";
@@ -18992,6 +20479,14 @@ mod tests {
         assert!(!XdDesktop::local_admin_reply(&RequestKind::AgentAuth));
         assert!(!XdDesktop::local_admin_event("agent-auth-changed"));
         assert!(XdDesktop::local_admin_event("host-update"));
+        assert!(XdDesktop::local_admin_event("agent-cli-update"));
+        assert!(!XdDesktop::local_admin_event("agent-cli-changed"));
+        assert!(!XdDesktop::remote_read_event("agent-cli-update"));
+        assert!(!XdDesktop::remote_read_event("host-update"));
+        assert!(XdDesktop::local_admin_reply(&RequestKind::AgentCliUpdates));
+        assert!(XdDesktop::local_admin_reply(
+            &RequestKind::ResumeInterrupted
+        ));
         assert!(!XdDesktop::local_admin_event("turn-finished"));
         assert!(XdDesktop::remote_read_event("queued"));
         assert!(XdDesktop::remote_read_event("terminal-activity"));
@@ -19074,6 +20569,8 @@ mod tests {
             branch: None,
             working: false,
             terminal_working: false,
+            settled_at: None,
+            auto_settle_disabled: false,
         };
         let mut chats = vec![
             chat("a", "workspace"),
@@ -19148,6 +20645,8 @@ mod tests {
                     branch: Some("main".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
                 ChatSummary {
                     id: "background".into(),
@@ -19157,6 +20656,8 @@ mod tests {
                     branch: Some("session/background".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
             ];
 
@@ -19194,6 +20695,8 @@ mod tests {
                     branch: Some("main".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
                 ChatSummary {
                     id: "background".into(),
@@ -19203,6 +20706,8 @@ mod tests {
                     branch: Some("session/background".into()),
                     working: false,
                     terminal_working: false,
+                    settled_at: None,
+                    auto_settle_disabled: false,
                 },
             ];
 
@@ -19291,6 +20796,8 @@ mod tests {
                 branch: Some("main".into()),
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
 
             desktop.handle_event(
@@ -19341,6 +20848,8 @@ mod tests {
                 branch: Some("main".into()),
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }];
             let generation = desktop.remote_generation;
             for (terminal, working, aggregate) in [("claude", true, true), ("jcode", false, true)] {
@@ -19399,6 +20908,8 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                settled_at: None,
+                auto_settle_disabled: false,
             }],
             ..Default::default()
         };
@@ -19987,7 +21498,9 @@ mod tests {
             .split_once("fn render_minimal(")
             .expect("minimal root renderer")
             .1;
-        assert!(root.contains("self.render_catalog(colors, active_chat.as_deref(), cx)"));
+        assert!(
+            root.contains("self.render_catalog(colors, catalog_width, active_chat.as_deref(), cx)")
+        );
         let cli = production
             .split_once("fn render_minimal_cli(")
             .expect("minimal CLI renderer")

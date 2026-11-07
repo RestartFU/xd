@@ -15,7 +15,7 @@ read init
 printf '%s\n' '{"id":1,"result":{}}'
 read initialized
 read list
-printf '%s\n' '{"id":2,"result":{"data":[{"model":"future-codex","displayName":"Future Codex","isDefault":true}]}}'
+printf '%s\n' '{"id":2,"result":{"data":[{"model":"future-codex","displayName":"Future Codex"},{"model":"future-everyday","displayName":"Future Everyday","isDefault":true}]}}'
 read unexpected
 "#).unwrap();
     fs::write(&claude, r#"#!/bin/sh
@@ -34,10 +34,7 @@ read unexpected
     let store = StateStore::open(root.join("state.sqlite"), &root).unwrap();
     let catalog = store.agent_catalog().unwrap();
     let backends = catalog["backends"].as_array().unwrap();
-    for (backend, model, label) in [
-        ("codex", "future-codex", "Future Codex"),
-        ("claude", "future-claude", "Future Claude"),
-    ] {
+    for (backend, model) in [("codex", "future-codex"), ("claude", "future-claude")] {
         let entry = backends
             .iter()
             .find(|entry| entry["id"] == backend)
@@ -54,11 +51,6 @@ read unexpected
                 &json!({"chat":chat["id"],"option":"model","backend":backend,"value":model}),
             )
             .unwrap();
-        let messages = store.messages(&json!({"chat":chat["id"]})).unwrap();
-        assert_eq!(
-            messages["messages"][0]["content"],
-            format!("Switched to {label}")
-        );
         assert_eq!(
             store.chat(chat["id"].as_str().unwrap()).unwrap()["model"],
             model

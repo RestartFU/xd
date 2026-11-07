@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::channel;
 #[cfg(all(test, unix))]
 use crate::local_socket::UnixStream;
-use crate::model::Attachment;
+use crate::model::{Attachment, AutoSettleRules};
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
@@ -48,6 +48,8 @@ pub enum RequestKind {
     HostUpdate {
         action: String,
     },
+    AgentCliUpdates,
+    ResumeInterrupted,
     AgentSecrets {
         folder_id: Option<String>,
     },
@@ -222,6 +224,17 @@ pub enum RequestKind {
     DeleteSession {
         session_id: String,
     },
+    SettleSession {
+        session_id: String,
+    },
+    UnsettleSession {
+        session_id: String,
+    },
+    SetSessionAutoSettle {
+        session_id: String,
+    },
+    AutoSettleSettings,
+    SetAutoSettleSettings,
     RenameChat {
         chat_id: String,
         title: String,
@@ -262,6 +275,8 @@ pub enum RequestKind {
     SetShortcuts {
         folder_id: Option<String>,
     },
+    ChatTitleSettings,
+    SetChatTitleSettings,
     RemoveWorktree {
         chat_id: String,
     },
@@ -476,6 +491,22 @@ impl HostHandle {
         )
     }
 
+    pub fn agent_cli_updates(&self, action: &str, provider: Option<&str>) -> Result<(), String> {
+        let mut body = json!({"op": "agent-cli-updates", "action": action});
+        if let Some(provider) = provider {
+            body["provider"] = json!(provider);
+        }
+        self.send(RequestKind::AgentCliUpdates, body)
+    }
+
+    /// Tells the host whether to continue the turns its last restart cut off.
+    pub fn resume_interrupted(&self, resume: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::ResumeInterrupted,
+            json!({"op": "resume-interrupted", "resume": resume}),
+        )
+    }
+
     pub fn agent_auth_action(
         &self,
         operation: &str,
@@ -681,6 +712,27 @@ impl HostHandle {
         )
     }
 
+    pub fn chat_title_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::ChatTitleSettings,
+            json!({"op": "chat-title-settings"}),
+        )
+    }
+
+    pub fn set_chat_titles_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::SetChatTitleSettings,
+            json!({"op": "set-chat-title-settings", "enabled": enabled}),
+        )
+    }
+
+    pub fn set_chat_title_model(&self, backend: &str, model: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetChatTitleSettings,
+            json!({"op": "set-chat-title-settings", "backend": backend, "model": model}),
+        )
+    }
+
     pub fn new_folder(
         &self,
         name: &str,
@@ -883,6 +935,52 @@ impl HostHandle {
                 session_id: session_id.to_owned(),
             },
             json!({"op": "delete-session", "session": session_id}),
+        )
+    }
+
+    pub fn settle_session(&self, session_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SettleSession {
+                session_id: session_id.to_owned(),
+            },
+            json!({"op": "settle-session", "session": session_id}),
+        )
+    }
+
+    pub fn unsettle_session(&self, session_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::UnsettleSession {
+                session_id: session_id.to_owned(),
+            },
+            json!({"op": "unsettle-session", "session": session_id}),
+        )
+    }
+
+    pub fn set_session_auto_settle(&self, session_id: &str, enabled: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::SetSessionAutoSettle {
+                session_id: session_id.to_owned(),
+            },
+            json!({"op": "set-session-auto-settle", "session": session_id, "enabled": enabled}),
+        )
+    }
+
+    pub fn auto_settle_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::AutoSettleSettings,
+            json!({"op": "auto-settle-settings"}),
+        )
+    }
+
+    pub fn set_auto_settle_settings(&self, rules: AutoSettleRules) -> Result<(), String> {
+        self.send(
+            RequestKind::SetAutoSettleSettings,
+            json!({
+                "op": "set-auto-settle-settings",
+                "after_days": rules.after_days,
+                "on_merge": rules.on_merge,
+                "keep_pull_requests": rules.keep_pull_requests,
+            }),
         )
     }
 
@@ -2460,6 +2558,11 @@ mod tests {
                 json!({"op":"move-session","session":"workspace-session","before":"anchor-session"}),
                 json!({"op":"move-session","session":"workspace-session","after":"anchor-session"}),
                 json!({"op":"delete-session","session":"workspace-session"}),
+                json!({"op":"settle-session","session":"workspace-session"}),
+                json!({"op":"unsettle-session","session":"workspace-session"}),
+                json!({"op":"set-session-auto-settle","session":"workspace-session","enabled":false}),
+                json!({"op":"auto-settle-settings"}),
+                json!({"op":"set-auto-settle-settings","after_days":null,"on_merge":false,"keep_pull_requests":true}),
             ] {
                 let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
@@ -2516,6 +2619,46 @@ mod tests {
             kind:RequestKind::DeleteSession {session_id}, ..
         } if session_id == "workspace-session")
         );
+        host.settle_session("workspace-session").unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::SettleSession {session_id}, ..
+        } if session_id == "workspace-session")
+        );
+        host.unsettle_session("workspace-session").unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::UnsettleSession {session_id}, ..
+        } if session_id == "workspace-session")
+        );
+        host.set_session_auto_settle("workspace-session", false)
+            .unwrap();
+        assert!(
+            matches!(updates.recv_blocking().unwrap(), HostUpdate::Reply {
+            kind:RequestKind::SetSessionAutoSettle {session_id}, ..
+        } if session_id == "workspace-session")
+        );
+        host.auto_settle_settings().unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::AutoSettleSettings,
+                ..
+            }
+        ));
+        host.set_auto_settle_settings(AutoSettleRules {
+            after_days: None,
+            on_merge: false,
+            keep_pull_requests: true,
+        })
+        .unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::SetAutoSettleSettings,
+                ..
+            }
+        ));
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
     }
@@ -2768,6 +2911,49 @@ mod tests {
                 ..
             } if folder_id.as_deref() == Some("folder-1")
         ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn asks_the_host_to_update_a_single_assistant() {
+        let directory = env::temp_dir().join(format!("xd-cli-updates-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for (action, provider) in [("status", Value::Null), ("install", json!("claude"))] {
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["op"], "agent-cli-updates");
+                assert_eq!(request["action"], action);
+                assert_eq!(request["provider"], provider);
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+            }
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        host.agent_cli_updates("status", None).unwrap();
+        host.agent_cli_updates("install", Some("claude")).unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                updates.recv_blocking().unwrap(),
+                HostUpdate::Reply {
+                    kind: RequestKind::AgentCliUpdates,
+                    ..
+                }
+            ));
+        }
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);

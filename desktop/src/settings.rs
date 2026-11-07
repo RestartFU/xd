@@ -59,6 +59,8 @@ pub struct AppSettings {
     pub notifications: bool,
     pub speech: bool,
     pub allow_all_permissions: bool,
+    /// Off by default: it starts agents working without anyone asking.
+    pub auto_resume_chats: bool,
     pub git_writer: GitWriter,
     pub git_writer_model: Option<String>,
     pub build_source: String,
@@ -76,9 +78,11 @@ pub struct AppSettings {
     /// list below remains the fallback for the local host.
     pub collapsed_folder_sets: HashMap<String, Vec<String>>,
     pub collapsed_folders: Vec<String>,
+    /// Whether the sidebar's Settled shelf is open on this device.
+    pub settled_shelf_expanded: bool,
     pub collapsed_diff_files: HashMap<String, Vec<String>>,
     pub expanded_file_directories: HashMap<String, Vec<String>>,
-    pub sidebar_width: u16,
+    pub catalog_width: u16,
     pub sidebar_files_height: u16,
     pub diff_width: u16,
     pub terminal_height: u16,
@@ -106,6 +110,7 @@ impl Default for AppSettings {
             notifications: true,
             speech: false,
             allow_all_permissions: false,
+            auto_resume_chats: false,
             git_writer: GitWriter::Chat,
             git_writer_model: None,
             build_source: String::new(),
@@ -117,9 +122,10 @@ impl Default for AppSettings {
             last_chat: None,
             collapsed_folder_sets: HashMap::new(),
             collapsed_folders: Vec::new(),
+            settled_shelf_expanded: false,
             collapsed_diff_files: HashMap::new(),
             expanded_file_directories: HashMap::new(),
-            sidebar_width: 272,
+            catalog_width: 256,
             sidebar_files_height: 280,
             diff_width: 460,
             terminal_height: 320,
@@ -297,6 +303,7 @@ mod tests {
             notifications: false,
             speech: true,
             allow_all_permissions: true,
+            auto_resume_chats: true,
             git_writer: GitWriter::Claude,
             git_writer_model: Some("claude-opus-5".into()),
             build_source: "#128".into(),
@@ -317,6 +324,7 @@ mod tests {
                 ),
             ]),
             collapsed_folders: vec!["folder-a".into(), "folder-b".into()],
+            settled_shelf_expanded: true,
             collapsed_diff_files: HashMap::from([(
                 "local/chat-restore/working".into(),
                 vec!["desktop/src/main.rs".into()],
@@ -325,7 +333,7 @@ mod tests {
                 "remote/dev.example:4001/chat-remote".into(),
                 vec!["desktop".into(), "desktop/src".into()],
             )]),
-            sidebar_width: 318,
+            catalog_width: 318,
             sidebar_files_height: 336,
             diff_width: 512,
             terminal_height: 280,
@@ -386,6 +394,19 @@ mod tests {
             serde_json::from_str(r#"{"accent":"green","notifications":true}"#).unwrap();
 
         assert_eq!(settings.theme, ThemePreset::Dark);
+    }
+
+    #[test]
+    fn auto_resume_is_off_unless_chosen_and_survives_serialization() {
+        let defaults = serde_json::to_value(AppSettings::default()).unwrap();
+        assert_eq!(defaults["auto_resume_chats"], false);
+        let older: AppSettings = serde_json::from_str(r#"{"speech":true}"#).unwrap();
+        assert!(!older.auto_resume_chats);
+        let enabled: AppSettings = serde_json::from_str(r#"{"auto_resume_chats":true}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["auto_resume_chats"],
+            true
+        );
     }
 
     #[test]

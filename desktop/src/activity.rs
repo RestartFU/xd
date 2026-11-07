@@ -98,6 +98,12 @@ impl SubagentState {
 }
 
 impl SubagentView {
+    /// A backgrounded shell command, which Claude reports the same way as a
+    /// delegated agent.
+    pub fn is_shell(&self) -> bool {
+        self.agent == "Shell"
+    }
+
     pub fn parse(content: &str) -> Option<Self> {
         let record: serde_json::Value =
             serde_json::from_str(content.strip_prefix(SUBAGENT_RUN_PREFIX)?).ok()?;

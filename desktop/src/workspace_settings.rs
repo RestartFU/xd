@@ -8,6 +8,49 @@ const SETTINGS_SECTIONS: [(&str, &str); 5] = [
     ("Shortcuts", "Keep your hands on the keyboard."),
 ];
 
+/// The assistants a title model can be chosen for, each with its row's element
+/// id, title, and description.
+const CHAT_TITLE_BACKENDS: [(&str, &str, &str, &str); 2] = [
+    (
+        "codex",
+        "workspace-settings-chat-title-codex",
+        "Codex title model",
+        "Used to name Codex chats.",
+    ),
+    (
+        "claude",
+        "workspace-settings-chat-title-claude",
+        "Claude title model",
+        "Used to name Claude chats.",
+    ),
+];
+
+/// The host's chat title settings. They live on the host because that is where
+/// titles are generated, for messages sent from any client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ChatTitleSettings {
+    pub(super) enabled: bool,
+    models: HashMap<String, String>,
+}
+
+impl ChatTitleSettings {
+    pub(super) fn from_reply(reply: &Value) -> Option<Self> {
+        Some(Self {
+            enabled: reply.get("enabled")?.as_bool()?,
+            models: reply
+                .get("models")?
+                .as_object()?
+                .iter()
+                .filter_map(|(backend, model)| Some((backend.clone(), model.as_str()?.to_owned())))
+                .collect(),
+        })
+    }
+
+    pub(super) fn model(&self, backend: &str) -> Option<&str> {
+        self.models.get(backend).map(String::as_str)
+    }
+}
+
 fn settings_heading(title: &'static str, colors: ThemeColors) -> gpui::Div {
     div()
         .mt(px(26.0))
@@ -58,6 +101,274 @@ fn settings_row(
 }
 
 impl XdDesktop {
+    pub(super) fn request_chat_title_settings(&mut self) {
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.chat_title_settings()
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn toggle_chat_titles(&mut self, cx: &mut Context<Self>) {
+        let Some(enabled) = self
+            .chat_title_settings
+            .as_ref()
+            .map(|settings| !settings.enabled)
+        else {
+            return;
+        };
+        let result = match self.active_host() {
+            Some(host) => host.set_chat_titles_enabled(enabled),
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                if let Some(settings) = &mut self.chat_title_settings {
+                    settings.enabled = enabled;
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_chat_title_model_menu(
+        &mut self,
+        backend: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_title_model_menu =
+            (self.chat_title_model_menu != Some(backend)).then_some(backend);
+        cx.notify();
+    }
+
+    fn choose_chat_title_model(&mut self, backend: &str, model: String, cx: &mut Context<Self>) {
+        self.chat_title_model_menu = None;
+        let result = match self.active_host() {
+            Some(host) => host.set_chat_title_model(backend, &model),
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                if let Some(settings) = &mut self.chat_title_settings {
+                    settings.models.insert(backend.to_owned(), model);
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn render_chat_title_settings(
+        &self,
+        settings: &ChatTitleSettings,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut section = div().child(settings_heading("Chat titles", colors)).child(
+            settings_row(
+                "workspace-settings-chat-titles",
+                "Generate chat titles",
+                "Name a new chat from its first message, using a low-cost model.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_titles(cx)))
+            .child(settings_switch(colors, settings.enabled)),
+        );
+        if !settings.enabled {
+            return section;
+        }
+        for (backend, row, title, description) in CHAT_TITLE_BACKENDS {
+            let catalog = self
+                .model
+                .agent_backends
+                .iter()
+                .find(|known| known.id == backend);
+            let selected = settings.model(backend);
+            let label = selected.map_or_else(
+                || "Choose a model".to_owned(),
+                |selected| {
+                    let name = catalog
+                        .and_then(|catalog| {
+                            catalog.models.iter().find(|model| model.id == selected)
+                        })
+                        .map(|model| model.name.as_str());
+                    presentation::model_name(selected, name)
+                },
+            );
+            section = section.child(
+                settings_row(row, title, description, colors).child(
+                    ui_button((row, 0_usize), ButtonKind::Secondary, colors)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_chat_title_model_menu(backend, cx)
+                        }))
+                        .child(label),
+                ),
+            );
+            if self.chat_title_model_menu != Some(backend) {
+                continue;
+            }
+            let models = catalog.map_or(&[][..], |catalog| catalog.models.as_slice());
+            section = section.child(
+                div()
+                    .py(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .children(models.iter().enumerate().map(|(index, model)| {
+                        let id = model.id.clone();
+                        div()
+                            .id((row, index + 1))
+                            .h(px(32.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.0))
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .when(selected == Some(model.id.as_str()), |choice| {
+                                choice.bg(rgb(colors.selected_surface))
+                            })
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.choose_chat_title_model(backend, id.clone(), cx)
+                            }))
+                            .child(presentation::model_name(&model.id, Some(&model.name)))
+                    })),
+            );
+        }
+        section
+    }
+
+    /// The connected host's settling rules, or nothing while it has not said
+    /// what they are: an older host does not have any.
+    fn auto_settle_rows(
+        &mut self,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let Some(rules) = self.auto_settle else {
+            return Vec::new();
+        };
+        let mut rows = vec![
+            settings_heading("Auto-settle", colors).into_any_element(),
+            settings_row(
+                "workspace-settings-settle-merged",
+                "Auto-settle merged sessions",
+                "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_auto_settle(
+                    AutoSettleRules {
+                        on_merge: !rules.on_merge,
+                        ..rules
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, rules.on_merge))
+            .into_any_element(),
+            settings_row(
+                "workspace-settings-settle-inactive",
+                "Auto-settle inactive sessions",
+                "Sessions with no activity for this long settle automatically.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_auto_settle(
+                    AutoSettleRules {
+                        after_days: match rules.after_days {
+                            Some(_) => None,
+                            None => Some(AutoSettleRules::DEFAULT_AFTER_DAYS),
+                        },
+                        ..rules
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, rules.after_days.is_some()))
+            .into_any_element(),
+        ];
+        let Some(days) = rules.after_days else {
+            return rows;
+        };
+        let step = |id: &'static str, label: &'static str, to: i64, cx: &mut Context<Self>| {
+            let allowed =
+                (AutoSettleRules::MIN_AFTER_DAYS..=AutoSettleRules::MAX_AFTER_DAYS).contains(&to);
+            ui_button(id, ButtonKind::Secondary, colors)
+                .w(px(30.0))
+                .px_0()
+                .when(!allowed, |button| button.opacity(0.4))
+                .when(allowed, |button| {
+                    button.on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_auto_settle(
+                            AutoSettleRules {
+                                after_days: Some(to),
+                                ..rules
+                            },
+                            cx,
+                        );
+                    }))
+                })
+                .child(label)
+        };
+        rows.push(
+            settings_row(
+                "workspace-settings-settle-days",
+                "Days before auto-settle",
+                "Any new activity un-settles a session automatically.",
+                colors,
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(step("settle-days-fewer", "\u{2212}", days - 1, cx))
+                    .child(
+                        div()
+                            .w(px(28.0))
+                            .flex()
+                            .justify_center()
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .child(days.to_string()),
+                    )
+                    .child(step("settle-days-more", "+", days + 1, cx)),
+            )
+            .into_any_element(),
+        );
+        rows.push(
+            settings_row(
+                "workspace-settings-settle-keep-pr",
+                "Keep sessions with a PR",
+                "Inactivity does not settle sessions with a pull request. Merge and close still do.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.change_auto_settle(
+                    AutoSettleRules {
+                        keep_pull_requests: !rules.keep_pull_requests,
+                        ..rules
+                    },
+                    cx,
+                );
+            }))
+            .child(settings_switch(colors, rules.keep_pull_requests))
+            .into_any_element(),
+        );
+        rows
+    }
+
     pub(super) fn render_workspace_settings(
         &mut self,
         colors: ThemeColors,
@@ -297,6 +608,24 @@ impl XdDesktop {
                         }))
                         .child(settings_switch(colors, self.settings.speech)),
                     )
+                    .child(
+                        settings_row(
+                            "workspace-settings-auto-resume",
+                            "Resume chats after a restart",
+                            "Continue turns a restart cut off. Agents start working without asking.",
+                            colors,
+                        )
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.auto_resume_chats = !this.settings.auto_resume_chats;
+                            if let Err(error) = this.settings.save() {
+                                this.model.connection_error = Some(error);
+                            }
+                            cx.notify();
+                        }))
+                        .child(settings_switch(colors, self.settings.auto_resume_chats)),
+                    )
+                    .children(self.auto_settle_rows(colors, cx))
                     .child(settings_heading("Updates", colors));
                 let status = self
                     .self_update_panel
@@ -370,9 +699,9 @@ impl XdDesktop {
                         .when(!busy && !installed && available, |actions| {
                             actions.child(
                                 ui_button("install-app-update", ButtonKind::Primary, colors)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.request_app_update("install", cx)
-                                    }))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.install_app_update(cx)),
+                                    )
                                     .child("Install update"),
                             )
                         })
@@ -402,7 +731,7 @@ impl XdDesktop {
                             .child(if source_build::supported() {
                                 "Build and install a branch, pull request, or commit."
                             } else {
-                                "Source builds are available in an installed nightly."
+                                "Source builds are available in an installed nightly or dev build."
                             }),
                     )
                     .child(
@@ -520,6 +849,9 @@ impl XdDesktop {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_minimal_all_permissions(cx)))
                             .child(settings_switch(colors, self.settings.allow_all_permissions)),
                     );
+                if let Some(settings) = self.chat_title_settings.clone() {
+                    content = content.child(self.render_chat_title_settings(&settings, colors, cx));
+                }
             }
             3 => {
                 content = content

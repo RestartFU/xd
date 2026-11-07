@@ -15,9 +15,12 @@ use std::{
 use serde_json::{Value, json};
 
 mod agent;
+mod agent_text;
 mod ask;
 mod auth;
 mod background_process;
+mod chat_title;
+mod cli_updates;
 mod cli_versions;
 mod codex_app;
 mod git_draft;
@@ -31,6 +34,7 @@ mod repository_monitor;
 mod runtime;
 mod secrets;
 mod self_update;
+mod settlement;
 mod storage;
 mod subagent;
 
@@ -48,6 +52,8 @@ mod workflow;
 mod worktree_name;
 
 use auth::AuthManager;
+use chat_title::ChatTitleService;
+use cli_updates::CliUpdates;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
 use local_socket::UnixStream;
@@ -57,6 +63,9 @@ use repository_monitor::RepositoryMonitor;
 use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
+pub use self_update::installed_host_executable;
+use settlement::AutoSettler;
+pub use storage::ChatToResume;
 use storage::SendDisposition;
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
@@ -73,6 +82,7 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
+    cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
     owner_icons: Arc<OwnerIcons>,
@@ -81,12 +91,14 @@ pub struct Engine {
     session_resources: Mutex<()>,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
+    chat_titles: ChatTitleService,
     git_actions: Arc<Mutex<()>>,
     repository_monitor: RepositoryMonitor,
     self_update: SelfUpdate,
     pairing: PairingService,
     peer_listener: Mutex<Option<PeerListener>>,
     _shared_event_monitor: Option<SharedEventMonitor>,
+    auto_settler: Mutex<Option<AutoSettler>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,6 +145,7 @@ impl Engine {
             shutdown: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone()),
+            cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
@@ -141,12 +154,14 @@ impl Engine {
             session_resources: Mutex::new(()),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
+            chat_titles: ChatTitleService::new(None, events.clone()),
             git_actions: Arc::new(Mutex::new(())),
             repository_monitor: RepositoryMonitor::disabled(),
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
             _shared_event_monitor: None,
+            auto_settler: Mutex::new(None),
             events,
             runtime: None,
         }
@@ -161,9 +176,14 @@ impl Engine {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::with_store(store.clone()));
         let auth = AuthManager::new(events.clone());
+        let cli_updates = CliUpdates::new(events.clone());
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
+        // Unit tests send messages on hosts with no fake assistant behind them, and
+        // must not reach a real CLI. The daemon tests cover titles end to end.
+        let chat_titles =
+            ChatTitleService::new(cfg!(not(test)).then(|| store.clone()), events.clone());
         let self_update = SelfUpdate::new(events.clone());
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
@@ -176,6 +196,7 @@ impl Engine {
             )),
             store: Some(store),
             auth,
+            cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
@@ -184,12 +205,14 @@ impl Engine {
             session_resources: Mutex::new(()),
             secrets,
             git_drafts,
+            chat_titles,
             git_actions: Arc::new(Mutex::new(())),
             repository_monitor,
             self_update,
             pairing: PairingService::default(),
             peer_listener: Mutex::new(None),
             _shared_event_monitor: shared_event_monitor,
+            auto_settler: Mutex::new(None),
             events,
         };
         engine.auth.refresh_all();
@@ -217,7 +240,10 @@ impl Engine {
         let mut reply = match operation {
             Some("ping") => json!({"ok": true}),
             Some("daemon-info") => {
-                json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok())})
+                json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str)})
+            }
+            Some("resume-interrupted") if self.pairing.is_local(owner) => {
+                self.resume_interrupted(&request)
             }
             Some("daemon-stop") if self.pairing.is_local(owner) => {
                 self.shutdown.store(true, Ordering::Release);
@@ -283,9 +309,18 @@ impl Engine {
                 self.auth.snapshots()
             }
             Some("agent-clis") => self.cli_versions.snapshots(),
+            Some("agent-cli-updates") => self
+                .cli_updates
+                .perform(
+                    request.get("action").and_then(Value::as_str),
+                    request.get("provider").and_then(Value::as_str),
+                )
+                .unwrap_or_else(error_reply),
             Some("host-update") => {
                 let action = request.get("action").and_then(Value::as_str);
-                if action == Some("restart")
+                if action == Some("restart") && self.cli_updates.is_updating() {
+                    error_reply("Wait for the assistant updates to finish before restarting.")
+                } else if action == Some("restart")
                     && (self
                         .runtime
                         .as_ref()
@@ -319,6 +354,10 @@ impl Engine {
                 self.auth_mutation(&request, |auth, provider, _| auth.logout(provider))
             }
             Some("shortcuts") => self.read(|store| store.shortcuts(&request)),
+            Some("chat-title-settings") => self.read(StateStore::chat_title_settings),
+            Some("set-chat-title-settings") => {
+                self.read(|store| store.set_chat_title_settings(&request))
+            }
             Some("folder-context") => self.read(|store| store.folder_context(&request)),
             Some("folder-settings") => self.read(|store| store.folder_settings(&request)),
             Some("new-chat-sources") => self.read(|store| store.new_chat_sources(&request)),
@@ -375,6 +414,19 @@ impl Engine {
             Some("rename-session") => self.tree_mutation(|store| store.rename_session(&request)),
             Some("move-session") => self.tree_mutation(|store| store.move_session(&request)),
             Some("delete-session") => self.delete_session(&request),
+            Some("settle-session") => self.settle_session(&request),
+            Some("unsettle-session") => {
+                self.tree_mutation(|store| store.unsettle_session(&request))
+            }
+            Some("set-session-auto-settle") => {
+                self.tree_mutation(|store| store.set_session_auto_settle(&request))
+            }
+            Some("auto-settle-settings") => self.read(|store| {
+                store
+                    .auto_settle_settings()
+                    .map(|settings| settings.reply())
+            }),
+            Some("set-auto-settle-settings") => self.set_auto_settle_settings(&request),
             Some("rename-chat") => self.tree_mutation(|store| store.rename_chat(&request)),
             Some("move-chat") => self.tree_mutation(|store| store.move_chat(&request)),
             Some("delete-chat") => self.delete_chat(&request),
@@ -406,6 +458,38 @@ impl Engine {
             reply.insert(REQUEST_ID.into(), request_id);
         }
         reply
+    }
+
+    /// Answers for every chat a restart has cut off since the last answer, so a
+    /// client reconnecting later, or turning the setting on later, does not
+    /// restart work from an old interruption.
+    fn resume_interrupted(&self, request: &Value) -> Value {
+        let chats = self
+            .store
+            .as_ref()
+            .and_then(|store| store.take_chats_to_resume().ok())
+            .unwrap_or_default();
+        let mut resumed = Vec::new();
+        if request.get("resume").and_then(Value::as_bool) == Some(true) {
+            for ChatToResume {
+                chat_id,
+                last_message,
+            } in chats
+            {
+                let reply = self.send_message_inner(
+                    &json!({"op": "send", "chat": chat_id, "text": storage::RESUME_PROMPT}),
+                    Some(last_message),
+                );
+                if reply["ok"] == true {
+                    self.events
+                        .publish(json!({"event": "changed", "chat": chat_id}));
+                    resumed.push(chat_id);
+                } else {
+                    eprintln!("xd-host: not resuming chat {chat_id}: {reply}");
+                }
+            }
+        }
+        json!({"ok": true, "resumed": resumed})
     }
 
     pub fn shutdown_requested(&self) -> bool {
@@ -1030,6 +1114,71 @@ impl Engine {
         }
     }
 
+    /// Settling waits for what the session still owes the user. The locks keep
+    /// a message from starting a turn between this check and the update.
+    fn settle_session(&self, request: &Value) -> Value {
+        let session =
+            match required_string(request, "session", "settle-session needs a session id.") {
+                Ok(session) => session,
+                Err(error) => return error_reply(error),
+            };
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        let _resources = match self.session_resources.lock() {
+            Ok(resources) => resources,
+            Err(_) => return error_reply("Session resources are unavailable."),
+        };
+        let chats = match store.session_chats(session) {
+            Ok(chats) => chats,
+            Err(error) => return error_reply(error),
+        };
+        if chats.iter().any(|chat| {
+            self.runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.has_interactions(chat))
+        }) {
+            return error_reply(
+                "This session is waiting on an approval or question. Answer it before settling.",
+            );
+        }
+        self.tree_mutation(|store| store.settle_session(request))
+    }
+
+    fn set_auto_settle_settings(&self, request: &Value) -> Value {
+        let Some(store) = self.store.as_ref() else {
+            return error_reply("Rust host state storage is not configured.");
+        };
+        match store.set_auto_settle_settings(request) {
+            Ok(settings) => {
+                let reply = settings.reply();
+                let mut event = reply.clone();
+                event["event"] = json!("auto-settle-settings");
+                self.events.publish(event);
+                if let Ok(settler) = self.auto_settler.lock()
+                    && let Some(settler) = settler.as_ref()
+                {
+                    settler.wake();
+                }
+                reply
+            }
+            Err(error) => error_reply(error),
+        }
+    }
+
+    /// Starts settling sessions on the host's own schedule. Only the daemon
+    /// does this, since it is what outlives the clients.
+    pub fn start_auto_settle(&self) {
+        let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
+            return;
+        };
+        if let Ok(mut settler) = self.auto_settler.lock() {
+            settler.get_or_insert_with(|| {
+                AutoSettler::start(store.clone(), runtime.clone(), self.events.clone())
+            });
+        }
+    }
+
     fn terminal_open(&self, request: &Value) -> Value {
         let chat_id = match required_string(request, "chat", "terminal-open needs a chat id") {
             Ok(chat_id) => chat_id,
@@ -1167,6 +1316,10 @@ impl Engine {
     }
 
     fn send_message(&self, request: &Value) -> Value {
+        self.send_message_inner(request, None)
+    }
+
+    fn send_message_inner(&self, request: &Value, continues: Option<i64>) -> Value {
         let chat_id = match required_string(request, "chat", "send needs a chat id") {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
@@ -1182,6 +1335,9 @@ impl Engine {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
             return error_reply("Rust host state storage is not configured.");
         };
+        if let Err(error) = store.await_chat_defaults(chat_id) {
+            return error_reply(error);
+        }
         let mut request = request.clone();
         if request.get("worktree_name").is_none() {
             match store.prepare_worktree_name(&request) {
@@ -1193,17 +1349,35 @@ impl Engine {
                 Err(error) => eprintln!("xd: cannot prepare AI worktree naming: {error}"),
             }
         }
+        // Asked before the message is stored, since it depends on there being none.
+        let chat_title = store.prepare_chat_title(&request).unwrap_or_else(|error| {
+            eprintln!("xd: cannot prepare a chat title: {error}");
+            None
+        });
         let _resources = match self.session_resources.lock() {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
-        match store.prepare_send(&request) {
+        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false);
+        let prepared = match continues {
+            Some(last_message) => store.prepare_continuation(&request, last_message),
+            None => store.prepare_send(&request),
+        };
+        if resumes && prepared.is_ok() {
+            self.events.publish(json!({"event": "tree"}));
+        }
+        match prepared {
             Ok(SendDisposition::Queued { reply, event }) => {
                 self.events.publish(event);
                 reply
             }
             Ok(SendDisposition::Start { reply, turn }) => match runtime.start(turn.clone()) {
-                Ok(()) => reply,
+                Ok(()) => {
+                    if let Some(spec) = chat_title {
+                        self.chat_titles.start(spec);
+                    }
+                    reply
+                }
                 Err(error) => {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
                     error_reply(error)
@@ -1837,6 +2011,84 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    #[cfg(unix)]
+    fn settling_over_the_protocol_updates_every_client_and_respects_a_pending_question() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("xd-engine-settle-{}-{id}", std::process::id()));
+        let workspaces = root.join("Workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        let store = StateStore::open(&root.join("chats.db"), &workspaces).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder, "title": "Task"}));
+        let session = chat["session"].clone();
+        let (sender, events) = sync_channel::<Value>(64);
+        let (connection, _peer) = UnixStream::pair().unwrap();
+        let _subscriber = engine.events.subscribe(sender, connection).unwrap();
+        let saw_tree = |events: &std::sync::mpsc::Receiver<Value>| {
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "tree")
+        };
+
+        engine
+            .runtime
+            .as_ref()
+            .unwrap()
+            .hold_interaction_for_test(chat["id"].as_str().unwrap());
+        let held = engine.dispatch(json!({"op": "settle-session", "session": session}));
+        assert_eq!(held["ok"], false);
+        assert!(
+            held["error"]
+                .as_str()
+                .unwrap()
+                .contains("approval or question")
+        );
+        assert!(!saw_tree(&events));
+        assert!(engine.dispatch(json!({"op": "tree"}))["chats"][0]["settled_at"].is_null());
+
+        engine
+            .runtime
+            .as_ref()
+            .unwrap()
+            .discard_chat(chat["id"].as_str().unwrap());
+        assert_eq!(
+            engine.dispatch(json!({"op": "settle-session", "session": session}))["ok"],
+            true
+        );
+        assert!(saw_tree(&events));
+        assert!(engine.dispatch(json!({"op": "tree"}))["chats"][0]["settled_at"].is_i64());
+
+        assert_eq!(
+            engine.dispatch(json!({"op": "unsettle-session", "session": session}))["ok"],
+            true
+        );
+        assert!(saw_tree(&events));
+        assert!(engine.dispatch(json!({"op": "tree"}))["chats"][0]["settled_at"].is_null());
+
+        assert_eq!(
+            engine.dispatch(json!({"op": "settle-session", "session": "missing"}))["ok"],
+            false
+        );
+
+        let rules = engine.dispatch(json!({"op": "auto-settle-settings"}));
+        assert_eq!(rules["after_days"], 3);
+        assert_eq!(rules["on_merge"], true);
+        assert_eq!(rules["keep_pull_requests"], false);
+        let changed =
+            engine.dispatch(json!({"op": "set-auto-settle-settings", "after_days": null}));
+        assert!(changed["after_days"].is_null());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| event["event"] == "auto-settle-settings"
+                    && event["after_days"].is_null())
+        );
+        assert_eq!(
+            engine.dispatch(json!({"op": "set-auto-settle-settings", "after_days": 91}))["ok"],
+            false
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn outgoing_json_frames_are_written_as_complete_lines() {

@@ -20,6 +20,9 @@ use uuid::Uuid;
 use crate::{
     private_fs::{create_private_file, open_without_waiting, secure_directory},
     reply_images,
+    settlement::{
+        self, AutoSettleSettings, PullRequestSnapshot, PullRequestState, SettlementCandidate,
+    },
 };
 
 const MAX_MESSAGE_PAGE: i64 = 1_600;
@@ -44,6 +47,9 @@ To show the user an image file from this machine, such as a screenshot or chart 
 [image: /absolute/path/to/image.png]
 The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files."#;
 const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
+/// Sent as a normal message, so the transcript shows why the agent carried on.
+pub(crate) const RESUME_PROMPT: &str =
+    "Continue where you left off. xd restarted before your last turn finished.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -77,6 +83,22 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
 ];
 const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const CHAT_TITLES_ENABLED_KEY: &str = "chat_titles_enabled";
+const MAX_CHAT_TITLE_MESSAGE_CHARS: usize = 2_000;
+/// The assistants that can title chats, each with its low-cost models, newest
+/// first. The older ones serve a CLI that does not offer the newest yet. JCode
+/// has no model choice to make, so its chats keep the name they were given.
+const CHAT_TITLE_MODELS: &[(&str, &[&str])] = &[
+    ("codex", &["gpt-6-luna", "gpt-5.6-luna"]),
+    (
+        "claude",
+        &[
+            "claude-haiku-5-5",
+            "claude-haiku-4-5-20251001",
+            "claude-haiku-4-5",
+        ],
+    ),
+];
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -104,6 +126,7 @@ pub struct StateStore {
     database: Mutex<Connection>,
     workspace_root: PathBuf,
     paste_root: PathBuf,
+    chat_title_root: PathBuf,
 }
 
 struct ValidatedAttachment {
@@ -187,6 +210,22 @@ pub(crate) struct WorktreeNameSpec {
     pub workdir: String,
     pub model: String,
     pub effort: String,
+}
+
+/// A chat a restart cut off, and the user message it was working on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatToResume {
+    pub chat_id: String,
+    pub last_message: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChatTitleSpec {
+    pub chat_id: String,
+    pub backend: String,
+    pub message: String,
+    pub workdir: String,
+    pub model: String,
 }
 
 pub enum SendDisposition {
@@ -365,6 +404,10 @@ impl StateStore {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join("remote-pasted"),
+            chat_title_root: database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("chat-titles"),
         })
     }
 
@@ -549,6 +592,22 @@ impl StateStore {
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
         drop(statement);
 
+        let mut statement = database.prepare(
+            "SELECT id, CASE WHEN settled_override = 'settled' \
+               THEN COALESCE(settled_at, updated_at) END, \
+             auto_settle_disabled_at IS NOT NULL FROM workspace_sessions \
+             WHERE settled_override = 'settled' OR auto_settle_disabled_at IS NOT NULL",
+        )?;
+        let settlement = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, Option<i64>>(1)?, row.get::<_, bool>(2)?),
+                ))
+            })?
+            .collect::<Result<HashMap<_, _>, rusqlite::Error>>()?;
+        drop(statement);
+
         let mut branches = HashMap::<String, Option<String>>::new();
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
@@ -609,6 +668,14 @@ impl StateStore {
             if let Some(branch) = branch {
                 chat["branch"] = Value::String(branch);
             }
+            let (settled_at, auto_settle_disabled) =
+                settlement.get(&session).copied().unwrap_or((None, false));
+            if let Some(settled_at) = settled_at {
+                chat["settled_at"] = json!(settled_at);
+            }
+            if auto_settle_disabled {
+                chat["auto_settle_disabled"] = json!(true);
+            }
             if let Some(group) = sessions.iter_mut().find(|group| group["id"] == session) {
                 group["chats"]
                     .as_array_mut()
@@ -628,11 +695,23 @@ impl StateStore {
                 if let Some(branch) = chat.get("branch") {
                     group["branch"] = branch.clone();
                 }
+                if let Some(settled_at) = settled_at {
+                    group["settled_at"] = json!(settled_at);
+                }
+                if auto_settle_disabled {
+                    group["auto_settle_disabled"] = json!(true);
+                }
                 sessions.push(group);
             }
             chats.push(chat);
         }
-        Ok(json!({"ok": true, "folders": folders, "chats": chats, "sessions": sessions}))
+        Ok(json!({
+            "ok": true,
+            "folders": folders,
+            "chats": chats,
+            "sessions": sessions,
+            "settlement": true,
+        }))
     }
 
     pub fn folder_lineage_for_chat(&self, chat_id: &str) -> Result<Vec<String>, StorageError> {
@@ -764,7 +843,7 @@ impl StateStore {
             "draft_revision": row.14,
             "shortcuts": shortcuts,
             "working": row.11,
-            "effort": row.5.unwrap_or_else(|| "high".into()),
+            "effort": row.5.unwrap_or_else(|| default_effort(&row.2, row.4.as_deref())),
             "new_worktree": row.10,
             "has_messages": has_messages,
         });
@@ -1205,14 +1284,8 @@ impl StateStore {
 
     pub fn agent_catalog(&self) -> Result<Value, StorageError> {
         let backends = [
-            catalog_backend(
-                "claude",
-                "Claude Code",
-                "claude-opus-5",
-                CLAUDE_MODELS,
-                "ultracode",
-            ),
-            catalog_backend("codex", "Codex", "gpt-5.6-sol", CODEX_MODELS, "ultra"),
+            catalog_backend("claude", "Claude Code", CLAUDE_MODELS, "ultracode"),
+            catalog_backend("codex", "Codex", CODEX_MODELS, "ultra"),
             json!({
                 "id": "jcode",
                 "name": "JCode",
@@ -1235,15 +1308,9 @@ impl StateStore {
         let transaction = database.transaction()?;
         let previous = transaction
             .query_row(
-                "SELECT backend, model, effort FROM chats WHERE id = ?",
+                "SELECT backend, effort FROM chats WHERE id = ?",
                 [chat_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
@@ -1274,24 +1341,14 @@ impl StateStore {
                 })?;
                 validate_model(backend, model)?;
                 let effort = previous
-                    .2
+                    .1
                     .as_deref()
                     .filter(|effort| effort_supported(backend, effort));
                 let changed = transaction.execute(
                     "UPDATE chats SET model = ?, effort = ?, updated_at = ? WHERE id = ?",
                     params![model, effort, now, chat_id],
                 )?;
-                if previous.1.as_deref() != Some(model) {
-                    transaction.execute(
-                        "INSERT INTO messages (chat_id, role, content, created_at) \
-                         VALUES (?, 'event', ?, ?)",
-                        params![
-                            chat_id,
-                            format!("Switched to {}", model_label(backend, model)),
-                            now
-                        ],
-                    )?;
-                }
+                remember_backend_choice(&transaction, backend, "model", Some(model))?;
                 changed
             }
             "effort" => {
@@ -1302,6 +1359,7 @@ impl StateStore {
                         ));
                     }
                 }
+                remember_backend_choice(&transaction, &previous.0, "effort", value)?;
                 transaction.execute(
                     "UPDATE chats SET effort = ?, updated_at = ? WHERE id = ?",
                     params![value, now, chat_id],
@@ -1405,7 +1463,72 @@ impl StateStore {
         Ok((json!({"ok": true}), event))
     }
 
+    /// Settles what a chat's first turn runs on, so that it does not run on a
+    /// built-in default or on a model the assistant no longer offers. A new chat
+    /// cannot check either when nothing has been discovered yet.
+    ///
+    /// Call this before taking any lock another chat needs, since discovery can
+    /// take seconds.
+    pub fn await_chat_defaults(&self, chat_id: &str) -> Result<(), StorageError> {
+        let chat = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            database
+                .query_row(
+                    "SELECT backend, model, effort, \
+                     EXISTS(SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
+                     FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                )
+                .optional()?
+        };
+        let Some((backend, model, effort, used)) = chat else {
+            return Ok(());
+        };
+        if used && model.is_some() && effort.is_some() {
+            return Ok(());
+        }
+        crate::model_catalog::awaited_default_model(&backend);
+        let discovered = crate::model_catalog::cached_models(&backend);
+        if let Some(model) =
+            model.filter(|model| !used && !choice_still_offered(&discovered, model))
+        {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            database.execute(
+                "UPDATE chats SET model = NULL WHERE id = ? AND model = ?",
+                params![chat_id, model],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn prepare_send(&self, request: &Value) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, None)
+    }
+
+    /// Sends the message that continues a cut-off turn, unless someone has
+    /// picked the chat up since. Unlike a typed message, it did not come from
+    /// the composer, so a draft the user was writing is left in place.
+    pub fn prepare_continuation(
+        &self,
+        request: &Value,
+        last_message: i64,
+    ) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, Some(last_message))
+    }
+
+    fn prepare_send_inner(
+        &self,
+        request: &Value,
+        continues: Option<i64>,
+    ) -> Result<SendDisposition, StorageError> {
         let chat_id = required_string(
             request,
             "chat",
@@ -1429,12 +1552,25 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        if let Some(last_message) = continues {
+            let latest = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
+                [chat_id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if working || latest != last_message {
+                return Err(StorageError::InvalidRequest(
+                    "This chat has already continued.".into(),
+                ));
+            }
+        }
         if working {
             let stored = transaction.query_row(
                 "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
                 [chat_id],
                 |row| row.get::<_, String>(0),
             )?;
+            clear_session_settlement(&transaction, chat_id)?;
             let mut queue = queue_from_column(Some(&stored));
             queue.push(message.prompt.clone());
             transaction.execute(
@@ -1453,6 +1589,18 @@ impl StateStore {
                 event,
             });
         }
+        // A continuation is the host's doing, not the user speaking again, so it
+        // keeps the time settling compares a finished pull request against.
+        let user_message_at = continues
+            .is_some()
+            .then(|| {
+                transaction.query_row(
+                    "SELECT last_user_message_at FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .transpose()?;
         let turn = prepare_turn(
             &transaction,
             &self.workspace_root,
@@ -1460,9 +1608,19 @@ impl StateStore {
             &message.prompt,
             worktree_name,
         )?;
+        if let Some(user_message_at) = user_message_at {
+            transaction.execute(
+                "UPDATE chats SET last_user_message_at = ? WHERE id = ?",
+                params![user_message_at, chat_id],
+            )?;
+        }
         transaction.execute(
-            "UPDATE chats SET host_working = 1, draft = '', draft_attachments = '[]', \
-             draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
+            if continues.is_some() {
+                "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?"
+            } else {
+                "UPDATE chats SET host_working = 1, draft = '', draft_attachments = '[]', \
+                 draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?"
+            },
             params![now_seconds(), chat_id],
         )?;
         transaction.commit()?;
@@ -1535,7 +1693,7 @@ impl StateStore {
                     .then(|| chat_model.clone())
                     .flatten()
             })
-            .unwrap_or_else(|| default_model(&backend).into());
+            .unwrap_or_else(|| awaited_default_model(&backend));
         validate_model(&backend, &model)?;
         let effort = (backend == chat_backend)
             .then_some(chat_effort)
@@ -1549,6 +1707,172 @@ impl StateStore {
             model,
             effort,
         }))
+    }
+
+    pub fn chat_title_settings(&self) -> Result<Value, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        chat_title_settings_reply(&database)
+    }
+
+    pub fn set_chat_title_settings(&self, request: &Value) -> Result<Value, StorageError> {
+        let enabled = match request.get("enabled") {
+            None => None,
+            Some(value) => Some(value.as_bool().ok_or_else(|| {
+                StorageError::InvalidRequest("enabled must be true or false.".into())
+            })?),
+        };
+        let backend = optional_string(request, "backend")?;
+        let model = optional_string(request, "model")?;
+        if enabled.is_none() && backend.is_none() {
+            return Err(StorageError::InvalidRequest(
+                "set-chat-title-settings needs enabled, or a backend and model.".into(),
+            ));
+        }
+        if let Some(backend) = backend {
+            if chat_title_models(backend).is_empty() {
+                return Err(StorageError::InvalidRequest(format!(
+                    "{backend} cannot title chats."
+                )));
+            }
+            if let Some(model) = model {
+                validate_model(backend, model)?;
+            }
+        } else if model.is_some() {
+            return Err(StorageError::InvalidRequest(
+                "A chat title model needs a backend.".into(),
+            ));
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        if let Some(enabled) = enabled {
+            set_meta(
+                &transaction,
+                CHAT_TITLES_ENABLED_KEY,
+                if enabled { "1" } else { "0" },
+            )?;
+        }
+        if let Some(backend) = backend {
+            let key = chat_title_model_key(backend);
+            match model {
+                Some(model) => set_meta(&transaction, &key, model)?,
+                // No model puts the assistant back on the built-in choice.
+                None => {
+                    transaction.execute("DELETE FROM meta WHERE key = ?", [&key])?;
+                }
+            }
+        }
+        let reply = chat_title_settings_reply(&transaction)?;
+        transaction.commit()?;
+        Ok(reply)
+    }
+
+    /// What to generate a title with, when this send is a chat's first message
+    /// and the chat still has the name it was created with.
+    pub(crate) fn prepare_chat_title(
+        &self,
+        request: &Value,
+    ) -> Result<Option<ChatTitleSpec>, StorageError> {
+        let chat_id = required_string(
+            request,
+            "chat",
+            "A message needs a chat and something to say.",
+        )?;
+        let message = optional_string(request, "text")?.unwrap_or("").trim();
+        if message.is_empty() {
+            return Ok(None);
+        }
+        let backend = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            if !chat_titles_enabled(&database)? {
+                return Ok(None);
+            }
+            let Some((backend, title, used)) = database
+                .query_row(
+                    "SELECT backend, title, host_working OR EXISTS \
+                     (SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
+                     FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            if used || !is_default_chat_title(title.as_deref()) {
+                return Ok(None);
+            }
+            backend
+        };
+        let Some(model) = chat_title_model(&self.database, &backend)? else {
+            return Ok(None);
+        };
+        // An empty directory, so the run loads no project instructions: they
+        // cost tokens and say nothing about what to call the chat.
+        fs::create_dir_all(&self.chat_title_root).map_err(|source| StorageError::Filesystem {
+            context: format!("cannot create {}", self.chat_title_root.display()),
+            source,
+        })?;
+        Ok(Some(ChatTitleSpec {
+            chat_id: chat_id.to_owned(),
+            backend,
+            message: message.chars().take(MAX_CHAT_TITLE_MESSAGE_CHARS).collect(),
+            workdir: self.chat_title_root.to_string_lossy().into_owned(),
+            model,
+        }))
+    }
+
+    /// Saves a generated title unless someone named the chat while it was being
+    /// generated. The session takes the title too if it is still unnamed; a chat
+    /// added to a named session leaves that name alone. Returns whether anything
+    /// changed.
+    pub(crate) fn apply_chat_title(
+        &self,
+        chat_id: &str,
+        title: &str,
+    ) -> Result<bool, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let Some((chat_title, session, session_title)) = transaction
+            .query_row(
+                "SELECT c.title, s.id, s.title FROM chats c LEFT JOIN workspace_sessions s \
+                 ON s.id = COALESCE(c.workspace_session_id, c.id) WHERE c.id = ?",
+                [chat_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        if !is_default_chat_title(chat_title.as_deref()) {
+            return Ok(false);
+        }
+        let now = now_seconds();
+        transaction.execute(
+            "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?",
+            params![title, now, chat_id],
+        )?;
+        if let Some(session) = session
+            && is_default_chat_title(session_title.as_deref())
+        {
+            transaction.execute(
+                "UPDATE workspace_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                params![title, now, session],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn materialize_message(
@@ -1850,10 +2174,52 @@ impl StateStore {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for chat_id in &interrupted {
+            mark_chat_to_resume(&transaction, chat_id)?;
             end_interrupted_turn(&transaction, chat_id)?;
         }
         transaction.commit()?;
         Ok(interrupted)
+    }
+
+    /// Notes a turn the host is about to stop for shutting down. Stopping it may
+    /// finish it cleanly before the process exits, which would otherwise leave
+    /// nothing to show that it never completed.
+    pub fn mark_resume_after_restart(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        mark_chat_to_resume(&database, chat_id)?;
+        Ok(())
+    }
+
+    /// The chats a restart cut off, once each. They stay in the database until
+    /// the desktop decides, so another restart first does not lose them. A chat
+    /// cut off while answering the resume prompt is left alone, so a turn that
+    /// keeps taking the host down cannot restart itself forever.
+    pub fn take_chats_to_resume(&self) -> Result<Vec<ChatToResume>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let resumable = {
+            let mut statement = transaction.prepare(
+                "SELECT chats.id, chats.resume_after_restart FROM chats \
+                 JOIN messages ON messages.id = chats.resume_after_restart \
+                   AND messages.chat_id = chats.id \
+                 WHERE chats.resume_after_restart != 0 AND messages.content != ? \
+                 ORDER BY chats.id",
+            )?;
+            statement
+                .query_map([RESUME_PROMPT], |row| {
+                    Ok(ChatToResume {
+                        chat_id: row.get(0)?,
+                        last_message: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        transaction.execute(
+            "UPDATE chats SET resume_after_restart = 0 WHERE resume_after_restart != 0",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(resumable)
     }
 
     /// Same repair as [`StateStore::recover_interrupted_turns`], for the single
@@ -2493,7 +2859,7 @@ impl StateStore {
                     .then(|| chat_model.clone())
                     .flatten()
             })
-            .unwrap_or_else(|| default_model(&backend).into());
+            .unwrap_or_else(|| awaited_default_model(&backend));
         validate_model(&backend, &model)?;
         let effort = (backend == chat_backend)
             .then_some(chat_effort)
@@ -3048,22 +3414,19 @@ impl StateStore {
         }
         let defaults = transaction
             .query_row(
-                "SELECT backend, model, effort, access, plan, fast \
-                 FROM agent_defaults WHERE singleton = 1",
+                "SELECT backend, access, plan, fast FROM agent_defaults WHERE singleton = 1",
                 [],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, bool>(4)?,
-                        row.get::<_, bool>(5)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
                     ))
                 },
             )
             .optional()?
-            .unwrap_or_else(|| ("claude".into(), None, None, None, false, false));
+            .unwrap_or_else(|| ("claude".into(), None, false, false));
         let folder_values = resolved_folder_values(&folder_setting_chain(
             &transaction,
             &self.workspace_root,
@@ -3074,15 +3437,13 @@ impl StateStore {
             .or(folder_values.backend)
             .unwrap_or(defaults.0);
         validate_backend(&backend)?;
-        let model = if backend_override.is_some() {
-            Some(default_model(&backend).to_owned())
-        } else {
-            match folder_values.model {
-                Some(model) if validate_model(&backend, &model).is_ok() => Some(model),
-                Some(_) => None,
-                None => defaults.1,
-            }
-        };
+        let (model, effort) = new_chat_model_and_effort(
+            &transaction,
+            &backend,
+            folder_values.model.filter(|model| {
+                backend_override.is_none() && validate_model(&backend, model).is_ok()
+            }),
+        )?;
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
         let (workdir, original_workdir) = if let Some(shared) = &shared {
@@ -3178,10 +3539,10 @@ impl StateStore {
                 title,
                 backend,
                 model,
+                effort,
+                defaults.1,
                 defaults.2,
                 defaults.3,
-                defaults.4,
-                defaults.5,
                 false,
                 workdir,
                 original_workdir,
@@ -3250,6 +3611,309 @@ impl StateStore {
             [session],
         )?;
         Ok(json!({"ok": true}))
+    }
+
+    /// Moves a finished session out of the active list. Work the session still
+    /// owes the user has to be dealt with first, so nothing is hidden mid-way.
+    pub fn settle_session(&self, request: &Value) -> Result<Value, StorageError> {
+        let session = required_string(request, "session", "settle-session needs a session id.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        let mut statement = database
+            .prepare("SELECT host_working, queued FROM chats WHERE workspace_session_id = ?")?;
+        let members = statement
+            .query_map([session], |row| {
+                Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        if members.iter().any(|(working, _)| *working) {
+            return Err(StorageError::InvalidRequest(
+                "This session is still running. Stop it before settling.".into(),
+            ));
+        }
+        if members
+            .iter()
+            .any(|(_, queued)| !queue_from_column(queued.as_deref()).is_empty())
+        {
+            return Err(StorageError::InvalidRequest(
+                "This session has a queued message. Send it or remove it from the queue before settling."
+                    .into(),
+            ));
+        }
+        let now = now_seconds();
+        database.execute(
+            "UPDATE workspace_sessions SET settled_at = CASE \
+               WHEN settled_override = 'settled' AND settled_at IS NOT NULL THEN settled_at \
+               ELSE ? END, settled_override = 'settled', updated_at = ? WHERE id = ?",
+            params![now, now, session],
+        )?;
+        Ok(json!({"ok": true}))
+    }
+
+    /// Returns a session to the active list and keeps the automatic rules away
+    /// from it until new activity hands it back to them.
+    pub fn unsettle_session(&self, request: &Value) -> Result<Value, StorageError> {
+        let session = required_string(request, "session", "unsettle-session needs a session id.")?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        database.execute(
+            "UPDATE workspace_sessions SET settled_override = 'active', settled_at = NULL, \
+             updated_at = ? WHERE id = ?",
+            params![now_seconds(), session],
+        )?;
+        Ok(json!({"ok": true}))
+    }
+
+    /// Keeps one session out of automatic settling, however long it sits idle.
+    /// Settling it by hand still works.
+    pub fn set_session_auto_settle(&self, request: &Value) -> Result<Value, StorageError> {
+        let message = "set-session-auto-settle needs a session id and enabled.";
+        let session = required_string(request, "session", message)?;
+        let enabled = request
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| StorageError::InvalidRequest(message.into()))?;
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        workspace_session_chat(&database, session)?;
+        let now = now_seconds();
+        database.execute(
+            "UPDATE workspace_sessions SET auto_settle_disabled_at = CASE WHEN ? THEN NULL \
+               ELSE COALESCE(auto_settle_disabled_at, ?) END, updated_at = ? WHERE id = ?",
+            params![enabled, now, now, session],
+        )?;
+        Ok(json!({"ok": true}))
+    }
+
+    /// Whether a message in this chat would change how its session is listed.
+    pub fn chat_has_settlement_override(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_sessions WHERE settled_override IS NOT NULL \
+             AND id = (SELECT workspace_session_id FROM chats WHERE id = ?))",
+            [chat_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// New activity un-settles a session and hands it back to the rules.
+    pub fn clear_chat_settlement(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        clear_session_settlement(&database, chat_id)
+    }
+
+    pub fn auto_settle_settings(&self) -> Result<AutoSettleSettings, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        read_auto_settle_settings(&database)
+    }
+
+    /// Changes the rules. Members left out of the request keep their value;
+    /// `after_days: null` turns inactivity settling off.
+    pub fn set_auto_settle_settings(
+        &self,
+        request: &Value,
+    ) -> Result<AutoSettleSettings, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut settings = read_auto_settle_settings(&database)?;
+        if let Some(days) = request.get("after_days") {
+            settings.after_days = match days {
+                Value::Null => None,
+                days => Some(
+                    days.as_i64()
+                        .filter(|days| {
+                            (settlement::MIN_AFTER_DAYS..=settlement::MAX_AFTER_DAYS).contains(days)
+                        })
+                        .ok_or_else(|| {
+                            StorageError::InvalidRequest(format!(
+                                "Auto-settle needs a whole number of days from {} to {}.",
+                                settlement::MIN_AFTER_DAYS,
+                                settlement::MAX_AFTER_DAYS
+                            ))
+                        })?,
+                ),
+            };
+        }
+        for (key, member) in [
+            ("on_merge", &mut settings.on_merge),
+            ("keep_pull_requests", &mut settings.keep_pull_requests),
+        ] {
+            if let Some(value) = request.get(key) {
+                *member = value.as_bool().ok_or_else(|| {
+                    StorageError::InvalidRequest(format!("{key} must be true or false."))
+                })?;
+            }
+        }
+        database.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![AUTO_SETTLE_META_KEY, settings.encoded()],
+        )?;
+        Ok(settings)
+    }
+
+    /// Sessions a sweep may settle: nothing runs or waits in the queue, and
+    /// neither the user nor the session's own opt-out has claimed them.
+    pub(crate) fn settlement_candidates(&self) -> Result<Vec<SettlementCandidate>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let root = self.workspace_root.to_string_lossy();
+        let mut statement = database.prepare(
+            "SELECT s.id, s.created_at, c.id, c.folder_id, c.workdir, c.original_workdir, \
+               c.host_working, c.queued, c.created_at, c.last_user_message_at, \
+               (SELECT created_at FROM messages WHERE chat_id = c.id ORDER BY id DESC LIMIT 1) \
+             FROM workspace_sessions s \
+             JOIN chats c ON c.workspace_session_id = s.id \
+             JOIN workspace_folders f ON f.id = c.folder_id AND f.root_path = ? \
+             WHERE s.settled_override IS NULL AND s.auto_settle_disabled_at IS NULL \
+             ORDER BY s.id, c.sort_order, c.id",
+        )?;
+        let rows = statement
+            .query_map([root.as_ref()], |row| {
+                Ok(SettlementRow {
+                    session: row.get(0)?,
+                    session_created_at: row.get(1)?,
+                    chat: row.get(2)?,
+                    folder: row.get(3)?,
+                    workdir: row.get(4)?,
+                    original_workdir: row.get(5)?,
+                    working: row.get(6)?,
+                    queued: row.get(7)?,
+                    chat_created_at: row.get(8)?,
+                    last_user_message_at: row.get(9)?,
+                    last_message_at: row.get(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut candidates = Vec::<SettlementCandidate>::new();
+        let mut busy = HashSet::new();
+        for row in rows {
+            if row.working || !queue_from_column(row.queued.as_deref()).is_empty() {
+                busy.insert(row.session.clone());
+            }
+            let user_at = row.last_user_message_at / 1_000_000;
+            let anchor = row.session_created_at.max(row.chat_created_at).max(user_at);
+            let activity = anchor.max(row.last_message_at.unwrap_or(0));
+            if let Some(candidate) = candidates
+                .last_mut()
+                .filter(|candidate| candidate.session == row.session)
+            {
+                candidate.chats.push(row.chat);
+                candidate.activity_at = candidate.activity_at.max(activity);
+                candidate.user_anchor_at = candidate.user_anchor_at.max(anchor);
+                continue;
+            }
+            let workdir = resolve_workdir(
+                &database,
+                &self.workspace_root,
+                &row.folder,
+                row.workdir.as_deref(),
+                row.original_workdir.as_deref(),
+            )
+            .ok()
+            .map(PathBuf::from)
+            .filter(|workdir| workdir.is_dir());
+            candidates.push(SettlementCandidate {
+                session: row.session,
+                chats: vec![row.chat],
+                activity_at: activity,
+                user_anchor_at: anchor,
+                workdir,
+            });
+        }
+        candidates.retain(|candidate| !busy.contains(&candidate.session));
+        Ok(candidates)
+    }
+
+    /// Settles a session a sweep picked, unless anything about it changed since
+    /// the sweep looked: what the user does always outranks the rules. One
+    /// statement both checks and updates, so no message can land between them,
+    /// and the rules the sweep decided under must still be the ones in force.
+    pub(crate) fn auto_settle_session(
+        &self,
+        candidate: &SettlementCandidate,
+        settled_at: i64,
+        decided_under: &AutoSettleSettings,
+    ) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        if read_auto_settle_settings(&database)? != *decided_under {
+            return Ok(false);
+        }
+        let changed = database.execute(
+            "UPDATE workspace_sessions SET settled_override = 'settled', settled_at = ?1, \
+             updated_at = ?2 WHERE id = ?3 AND settled_override IS NULL \
+             AND auto_settle_disabled_at IS NULL \
+             AND NOT EXISTS (SELECT 1 FROM chats c WHERE c.workspace_session_id = ?3 AND ( \
+               c.host_working != 0 OR COALESCE(c.queued, '') NOT IN ('', '[]') \
+               OR c.last_user_message_at / 1000000 > ?4 OR c.created_at > ?4 \
+               OR EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.id AND m.created_at > ?5)))",
+            params![
+                settled_at,
+                now_seconds(),
+                candidate.session,
+                candidate.user_anchor_at,
+                candidate.activity_at
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// The branch checked out in `workdir`, which may be anywhere inside the
+    /// repository. `None` outside a repository and on a detached HEAD, which
+    /// cannot have a pull request of their own.
+    pub(crate) fn checked_out_branch(&self, workdir: &Path) -> Option<String> {
+        let (status, stdout, _) =
+            run_git(workdir, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+        status
+            .success()
+            .then(|| String::from_utf8_lossy(&stdout).trim().to_owned())
+            .filter(|branch| !branch.is_empty())
+    }
+
+    /// The pull request of the branch checked out in `workdir`, if it has one.
+    /// An error means GitHub could not say, which is not the same as no.
+    pub(crate) fn pull_request_snapshot(
+        &self,
+        workdir: &Path,
+    ) -> Result<Option<PullRequestSnapshot>, StorageError> {
+        let (status, stdout, stderr) = run_gh(
+            workdir,
+            &[
+                "pr",
+                "view",
+                "--json",
+                "state,mergedAt,closedAt",
+                "--jq",
+                "{state, finished_at: ((.mergedAt // .closedAt) | if . then fromdate else null end)}",
+            ],
+        )?;
+        if !status.success() {
+            let complaint = String::from_utf8_lossy(&stderr);
+            if complaint.contains("no pull requests found") {
+                return Ok(None);
+            }
+            return Err(command_failure(
+                &stdout,
+                &stderr,
+                "The GitHub CLI could not read this pull request.",
+            ));
+        }
+        let parsed: Value = serde_json::from_slice(&stdout).map_err(|error| {
+            StorageError::InvalidRequest(format!("Unreadable pull request: {error}"))
+        })?;
+        let state = match parsed.get("state").and_then(Value::as_str) {
+            Some("OPEN") => PullRequestState::Open,
+            Some("CLOSED") => PullRequestState::Closed,
+            Some("MERGED") => PullRequestState::Merged,
+            other => {
+                return Err(StorageError::InvalidRequest(format!(
+                    "Unknown pull request state: {other:?}"
+                )));
+            }
+        };
+        Ok(Some(PullRequestSnapshot {
+            state,
+            finished_at: parsed.get("finished_at").and_then(Value::as_i64),
+        }))
     }
 
     pub fn rename_chat(&self, request: &Value) -> Result<Value, StorageError> {
@@ -3674,6 +4338,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             disable_claude_mode(database)?;
             remove_terminal_chats(database)?;
             ensure_workspace_sessions(database)?;
+            ensure_backend_choices(database)?;
             return Ok(());
         }
     }
@@ -3766,6 +4431,19 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     disable_claude_mode(database)?;
     remove_terminal_chats(database)?;
     ensure_workspace_sessions(database)?;
+    ensure_backend_choices(database)?;
+    Ok(())
+}
+
+/// The model and effort last picked for each assistant, which new chats on it
+/// start with. `agent_defaults` cannot serve this: it holds one row for every
+/// assistant and also records values nobody picked, so it starts empty here
+/// rather than carrying a retired built-in default forward as a choice.
+fn ensure_backend_choices(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_backend_choices (backend TEXT PRIMARY KEY, \
+         model TEXT, effort TEXT);",
+    )?;
     Ok(())
 }
 
@@ -3775,6 +4453,23 @@ fn ensure_workspace_sessions(database: &Connection) -> Result<(), StorageError> 
         "CREATE TABLE IF NOT EXISTS workspace_sessions (id TEXT PRIMARY KEY, title TEXT, \
          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
     )?;
+    let session_columns = transaction
+        .prepare("PRAGMA table_info(workspace_sessions)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<HashSet<_>, _>>()?;
+    // `settled_override` is 'settled', 'active' after the user un-settles, or
+    // NULL once new activity hands the session back to the automatic rules.
+    for (column, kind) in [
+        ("settled_override", "TEXT"),
+        ("settled_at", "INTEGER"),
+        ("auto_settle_disabled_at", "INTEGER"),
+    ] {
+        if !session_columns.contains(column) {
+            transaction.execute_batch(&format!(
+                "ALTER TABLE workspace_sessions ADD COLUMN {column} {kind};"
+            ))?;
+        }
+    }
     let columns = transaction
         .prepare("PRAGMA table_info(chats)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -3997,6 +4692,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
     if !columns.contains("partial_reply") {
         database.execute(
             "ALTER TABLE chats ADD COLUMN partial_reply TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !columns.contains("resume_after_restart") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN resume_after_restart INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
     }
@@ -4242,6 +4943,47 @@ fn reorder_chat(
     }
     transaction.commit()?;
     Ok(())
+}
+
+const AUTO_SETTLE_META_KEY: &str = "auto_settle";
+
+struct SettlementRow {
+    session: String,
+    session_created_at: i64,
+    chat: String,
+    folder: String,
+    workdir: Option<String>,
+    original_workdir: Option<String>,
+    working: bool,
+    queued: Option<String>,
+    chat_created_at: i64,
+    last_user_message_at: i64,
+    last_message_at: Option<i64>,
+}
+
+fn read_auto_settle_settings(database: &Connection) -> Result<AutoSettleSettings, StorageError> {
+    let stored = database
+        .query_row(
+            "SELECT value FROM meta WHERE key = ?",
+            [AUTO_SETTLE_META_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(stored
+        .map(|stored| AutoSettleSettings::decode(&stored))
+        .unwrap_or_default())
+}
+
+/// Un-settles the session this chat belongs to. Returns whether anything
+/// changed, including an override the session no longer needs.
+fn clear_session_settlement(database: &Connection, chat_id: &str) -> Result<bool, StorageError> {
+    let changed = database.execute(
+        "UPDATE workspace_sessions SET settled_override = NULL, settled_at = NULL, updated_at = ? \
+         WHERE settled_override IS NOT NULL \
+         AND id = (SELECT workspace_session_id FROM chats WHERE id = ?)",
+        params![now_seconds(), chat_id],
+    )?;
+    Ok(changed > 0)
 }
 
 fn queue_from_column(stored: Option<&str>) -> Vec<String> {
@@ -4515,7 +5257,6 @@ fn clean_shortcuts(value: &Value) -> Result<Vec<String>, StorageError> {
 fn catalog_backend(
     id: &str,
     name: &str,
-    default_model: &str,
     models: &[(&str, &str, i64)],
     extra_effort: &str,
 ) -> Value {
@@ -4524,7 +5265,7 @@ fn catalog_backend(
         .iter()
         .find(|model| model.is_default)
         .map(|model| model.id.as_str())
-        .unwrap_or(default_model);
+        .unwrap_or_else(|| fallback_model(id));
     let models = if discovered.is_empty() {
         models
         .iter()
@@ -4554,12 +5295,184 @@ fn validate_backend(backend: &str) -> Result<(), StorageError> {
     }
 }
 
-fn default_model(backend: &str) -> &'static str {
+/// The model a chat runs on before one is picked for it: the assistant's own
+/// default, or a built-in one when the assistant has not been reachable.
+fn default_model(backend: &str) -> String {
+    crate::model_catalog::cached_default_model(backend)
+        .map(|model| model.id)
+        .unwrap_or_else(|| fallback_model(backend).into())
+}
+
+/// [`default_model`] for callers that hold no database lock and can wait.
+fn awaited_default_model(backend: &str) -> String {
+    crate::model_catalog::awaited_default_model(backend)
+        .map(|model| model.id)
+        .unwrap_or_else(|| fallback_model(backend).into())
+}
+
+fn fallback_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
         "jcode" => "default",
         _ => "gpt-5.6-sol",
     }
+}
+
+/// The effort a chat runs on before one is picked for it. Codex reports one per
+/// model; Claude Code does not report any, so it runs on the built-in choice.
+fn default_effort(backend: &str, model: Option<&str>) -> String {
+    let discovered = crate::model_catalog::cached_models(backend);
+    discovered
+        .iter()
+        .find(|known| match model {
+            Some(model) => known.id == model,
+            None => known.is_default,
+        })
+        .and_then(|known| known.default_effort.clone())
+        .filter(|effort| effort_supported(backend, effort))
+        .unwrap_or_else(|| "high".into())
+}
+
+/// A new chat starts on its workspace's model, else the last one picked for this
+/// assistant, else the assistant's own default. Effort stays unset until one has
+/// been picked, so that it follows whichever model the chat is on.
+///
+/// This runs with the database locked, so it only reads the discovery cache. A
+/// model stays unset if nothing is cached yet: clients then show the default from
+/// the catalog, and sending waits for discovery in `await_chat_defaults`.
+fn new_chat_model_and_effort(
+    transaction: &rusqlite::Transaction<'_>,
+    backend: &str,
+    workspace_model: Option<String>,
+) -> Result<(Option<String>, Option<String>), StorageError> {
+    let (picked_model, picked_effort) = transaction
+        .query_row(
+            "SELECT model, effort FROM agent_backend_choices WHERE backend = ?",
+            [backend],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?
+        .unwrap_or_default();
+    let discovered = crate::model_catalog::cached_models(backend);
+    let picked_model = picked_model.filter(|picked| choice_still_offered(&discovered, picked));
+    let model = workspace_model
+        .or(picked_model)
+        .or_else(|| crate::model_catalog::cached_default_model(backend).map(|model| model.id));
+    if discovered.is_empty() {
+        crate::model_catalog::refresh_in_background(backend);
+    }
+    let effort = picked_effort.filter(|effort| effort_supported(backend, effort));
+    Ok((model, effort))
+}
+
+fn set_meta(database: &Connection, key: &str, value: &str) -> Result<(), StorageError> {
+    database.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn meta(database: &Connection, key: &str) -> Result<Option<String>, StorageError> {
+    Ok(database
+        .query_row("SELECT value FROM meta WHERE key = ?", [key], |row| {
+            row.get(0)
+        })
+        .optional()?)
+}
+
+fn chat_titles_enabled(database: &Connection) -> Result<bool, StorageError> {
+    Ok(meta(database, CHAT_TITLES_ENABLED_KEY)?.as_deref() != Some("0"))
+}
+
+fn chat_title_model_key(backend: &str) -> String {
+    format!("chat_title_model_{backend}")
+}
+
+fn chat_title_models(backend: &str) -> &'static [&'static str] {
+    CHAT_TITLE_MODELS
+        .iter()
+        .find(|(known, _)| *known == backend)
+        .map_or(&[], |(_, models)| models)
+}
+
+/// The chosen model while the CLI still offers it, otherwise the newest low-cost
+/// one it does. This never falls back to the chat's own model, which could cost
+/// far more than a title is worth.
+fn resolve_chat_title_model(backend: &str, chosen: Option<&str>) -> Option<String> {
+    let discovered = crate::model_catalog::cached_models(backend);
+    chosen
+        .into_iter()
+        .chain(chat_title_models(backend).iter().copied())
+        .find(|model| choice_still_offered(&discovered, model))
+        .map(str::to_owned)
+}
+
+fn chat_title_model(
+    database: &Mutex<Connection>,
+    backend: &str,
+) -> Result<Option<String>, StorageError> {
+    if chat_title_models(backend).is_empty() {
+        return Ok(None);
+    }
+    let chosen = {
+        let database = database.lock().map_err(|_| StorageError::Poisoned)?;
+        meta(&database, &chat_title_model_key(backend))?
+    };
+    Ok(resolve_chat_title_model(backend, chosen.as_deref()))
+}
+
+fn chat_title_settings_reply(database: &Connection) -> Result<Value, StorageError> {
+    let mut models = serde_json::Map::new();
+    for (backend, _) in CHAT_TITLE_MODELS {
+        let chosen = meta(database, &chat_title_model_key(backend))?;
+        models.insert(
+            (*backend).to_owned(),
+            json!(resolve_chat_title_model(backend, chosen.as_deref())),
+        );
+    }
+    Ok(json!({
+        "ok": true,
+        "enabled": chat_titles_enabled(database)?,
+        "models": models,
+    }))
+}
+
+/// Whether a chat or session still has a placeholder name, which clients create
+/// with different capitalization.
+fn is_default_chat_title(title: Option<&str>) -> bool {
+    let title = title.unwrap_or("").trim();
+    title.is_empty()
+        || title.eq_ignore_ascii_case("new chat")
+        || title.eq_ignore_ascii_case("new session")
+}
+
+/// An undiscovered catalog says nothing about whether a choice still exists.
+fn choice_still_offered(discovered: &[crate::model_catalog::Model], choice: &str) -> bool {
+    discovered.is_empty() || discovered.iter().any(|known| known.id == choice)
+}
+
+fn remember_backend_choice(
+    transaction: &rusqlite::Transaction<'_>,
+    backend: &str,
+    column: &str,
+    value: Option<&str>,
+) -> Result<(), StorageError> {
+    // The column is chosen only by the closed match in set_option.
+    transaction.execute(
+        &format!(
+            "INSERT INTO agent_backend_choices (backend, {column}) VALUES (?, ?) \
+             ON CONFLICT(backend) DO UPDATE SET {column} = excluded.{column}"
+        ),
+        params![backend, value],
+    )?;
+    Ok(())
 }
 
 fn validate_model(backend: &str, model: &str) -> Result<(), StorageError> {
@@ -5892,12 +6805,15 @@ fn prepare_turn(
             ));
         }
     }
-    let model = chat.3.unwrap_or_else(|| match chat.1.as_str() {
-        "claude" => "claude-opus-5".into(),
-        "jcode" => "default".into(),
-        _ => "gpt-5.6-sol".into(),
-    });
-    let effort = chat.4.unwrap_or_else(|| "high".into());
+    // Keep the conversation on this model if the assistant's default later moves.
+    let model = chat.3.unwrap_or_else(|| default_model(&chat.1));
+    transaction.execute(
+        "UPDATE chats SET model = ? WHERE id = ? AND model IS NULL",
+        params![model, chat_id],
+    )?;
+    let effort = chat
+        .4
+        .unwrap_or_else(|| default_effort(&chat.1, Some(&model)));
     let access = if chat.6 {
         "plan".into()
     } else {
@@ -5924,6 +6840,7 @@ fn prepare_turn(
         "UPDATE chats SET updated_at = ?, last_user_message_at = ? WHERE id = ?",
         params![now, now_microseconds(), chat_id],
     )?;
+    clear_session_settlement(transaction, chat_id)?;
     Ok(TurnSpec {
         chat_id: chat_id.into(),
         backend: chat.1.clone(),
@@ -5964,6 +6881,17 @@ fn effort_label(effort: &str) -> &str {
         "ultra" => "Ultra",
         _ => "High",
     }
+}
+
+/// Remembers the user message a cut-off turn was answering, which is also how a
+/// later resume can tell that nobody has moved on from it.
+fn mark_chat_to_resume(database: &Connection, chat_id: &str) -> Result<(), rusqlite::Error> {
+    database.execute(
+        "UPDATE chats SET resume_after_restart = (SELECT COALESCE(MAX(id), 0) FROM messages \
+         WHERE chat_id = chats.id AND role = 'user') WHERE id = ?",
+        [chat_id],
+    )?;
+    Ok(())
 }
 
 fn end_interrupted_turn(
@@ -7863,7 +8791,6 @@ mod tests {
             .unwrap()
             .to_owned();
         assert_eq!(store.chat(&chat_id).unwrap()["backend"], "codex");
-        assert_eq!(store.chat(&chat_id).unwrap()["model"], "gpt-5");
         store
             .rename_chat(&json!({"chat": chat_id, "title": "Renamed"}))
             .unwrap();
@@ -7912,6 +8839,488 @@ mod tests {
                 .to_string()
                 .contains("No such assistant")
         );
+    }
+
+    fn discovered(id: &str, is_default: bool, effort: Option<&str>) -> crate::model_catalog::Model {
+        crate::model_catalog::Model {
+            id: id.into(),
+            name: id.into(),
+            context_window: 0,
+            is_default,
+            default_effort: effort.map(str::to_owned),
+        }
+    }
+
+    fn new_chat_on(store: &StateStore, folder: &str, backend: &str) -> Value {
+        let id = store
+            .new_chat(&json!({"folder": folder, "backend": backend}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut chat = store.chat(&id).unwrap();
+        chat["id"] = json!(id);
+        chat
+    }
+
+    fn workspace(store: &StateStore) -> String {
+        store.new_folder(&json!({"name": "Workspace"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn pick(store: &StateStore, chat: &Value, option: &str, value: &str) {
+        store
+            .set_option(&json!({"chat": chat["id"], "option": option, "value": value}))
+            .unwrap();
+    }
+
+    #[test]
+    fn new_chats_start_on_the_defaults_the_assistant_reports() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-frontier", false, Some("medium")),
+                discovered("cli-everyday", true, Some("low")),
+            ],
+        );
+        crate::model_catalog::set_test_models("claude", vec![discovered("cli-claude", true, None)]);
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        assert_eq!(codex["model"], "cli-everyday");
+        assert_eq!(codex["effort"], "low");
+        let claude = new_chat_on(&store, &folder, "claude");
+        assert_eq!(claude["model"], "cli-claude");
+        assert_eq!(claude["effort"], "high");
+
+        // Effort is still unset, so it follows the model the chat moves to.
+        pick(&store, &codex, "model", "cli-frontier");
+        let codex = store.chat(codex["id"].as_str().unwrap()).unwrap();
+        assert_eq!(codex["effort"], "medium");
+    }
+
+    fn first_message(chat: &Value) -> Value {
+        json!({"chat": chat["id"], "text": "  fix the sidebar scroll  "})
+    }
+
+    #[test]
+    fn a_first_message_is_titled_with_the_low_cost_model_of_its_assistant() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-6-sol", true, None),
+                discovered("gpt-6-luna", false, None),
+            ],
+        );
+        crate::model_catalog::set_test_models(
+            "claude",
+            vec![
+                discovered("claude-opus-5-5", true, None),
+                discovered("claude-haiku-5-5", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        let spec = store
+            .prepare_chat_title(&first_message(&codex))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.backend, "codex");
+        assert_eq!(spec.model, "gpt-6-luna");
+        assert_eq!(spec.message, "fix the sidebar scroll");
+        assert!(
+            fs::read_dir(&spec.workdir).unwrap().next().is_none(),
+            "the run must not load any project's instructions"
+        );
+
+        let claude = new_chat_on(&store, &folder, "claude");
+        let spec = store
+            .prepare_chat_title(&first_message(&claude))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.backend, "claude");
+        assert_eq!(spec.model, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn only_a_first_message_to_an_unnamed_chat_is_titled() {
+        crate::model_catalog::set_test_models("codex", vec![]);
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let named = store
+            .new_chat(&json!({"folder": folder, "title": "My task", "backend": "codex"}))
+            .unwrap();
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&named))
+                .unwrap()
+                .is_none()
+        );
+
+        let jcode = new_chat_on(&store, &folder, "jcode");
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&jcode))
+                .unwrap()
+                .is_none()
+        );
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        let blank = json!({"chat": chat["id"], "text": "   "});
+        assert!(store.prepare_chat_title(&blank).unwrap().is_none());
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_some()
+        );
+        store.prepare_send(&first_message(&chat)).unwrap();
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_none(),
+            "the chat already has its first message"
+        );
+    }
+
+    #[test]
+    fn chat_titles_can_be_turned_off_and_given_another_model() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-6-luna", true, None),
+                discovered("gpt-6-terra", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+
+        let settings = store.chat_title_settings().unwrap();
+        assert_eq!(settings["enabled"], true, "titles are on until turned off");
+        assert_eq!(settings["models"]["codex"], "gpt-6-luna");
+
+        let settings = store
+            .set_chat_title_settings(&json!({"backend": "codex", "model": "gpt-6-terra"}))
+            .unwrap();
+        assert_eq!(settings["models"]["codex"], "gpt-6-terra");
+        let spec = store
+            .prepare_chat_title(&first_message(&chat))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.model, "gpt-6-terra");
+
+        let settings = store
+            .set_chat_title_settings(&json!({"enabled": false}))
+            .unwrap();
+        assert_eq!(settings["enabled"], false);
+        assert_eq!(settings["models"]["codex"], "gpt-6-terra");
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_none()
+        );
+
+        let settings = store
+            .set_chat_title_settings(&json!({"enabled": true, "backend": "codex", "model": null}))
+            .unwrap();
+        assert_eq!(settings["enabled"], true);
+        assert_eq!(settings["models"]["codex"], "gpt-6-luna");
+
+        for invalid in [
+            json!({}),
+            json!({"enabled": "yes"}),
+            json!({"model": "gpt-6-luna"}),
+            json!({"backend": "jcode", "model": "default"}),
+            json!({"backend": "codex", "model": 5}),
+        ] {
+            assert!(
+                store.set_chat_title_settings(&invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_title_model_falls_back_but_never_to_an_expensive_one() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-6-terra", true, None),
+                discovered("gpt-5.6-luna", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        store
+            .set_chat_title_settings(&json!({"backend": "codex", "model": "gpt-6-terra"}))
+            .unwrap();
+        let chat = new_chat_on(&store, &folder, "codex");
+
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("gpt-5.6-luna", true, None)],
+        );
+        let spec = store
+            .prepare_chat_title(&first_message(&chat))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.model, "gpt-5.6-luna", "the chosen model is gone");
+
+        crate::model_catalog::set_test_models("codex", vec![discovered("gpt-6-sol", true, None)]);
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.chat_title_settings().unwrap()["models"]["codex"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn a_generated_title_replaces_only_placeholder_names() {
+        crate::model_catalog::set_test_models("codex", vec![]);
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        let id = chat["id"].as_str().unwrap();
+        assert!(store.apply_chat_title(id, "Fix scroll").unwrap());
+        let saved = store.chat(id).unwrap();
+        assert_eq!(saved["title"], "Fix scroll");
+        assert_eq!(saved["session_title"], "Fix scroll");
+        assert!(!store.apply_chat_title(id, "Second try").unwrap());
+
+        // Named while the title was being generated: the person wins.
+        let renamed = new_chat_on(&store, &folder, "codex");
+        let renamed_id = renamed["id"].as_str().unwrap();
+        store
+            .rename_chat(&json!({"chat": renamed_id, "title": "Mine"}))
+            .unwrap();
+        assert!(!store.apply_chat_title(renamed_id, "Generated").unwrap());
+        assert_eq!(store.chat(renamed_id).unwrap()["title"], "Mine");
+
+        // A new tab keeps the name of the session it joined.
+        let session = saved["session"].clone();
+        let tab = store
+            .new_chat(&json!({"folder": folder, "session": session, "title": "new chat", "backend": "codex"}))
+            .unwrap();
+        let tab_id = tab["id"].as_str().unwrap();
+        store
+            .rename_session(&json!({"session": session, "title": "Shared task"}))
+            .unwrap();
+        assert!(store.apply_chat_title(tab_id, "Second tab").unwrap());
+        let saved = store.chat(tab_id).unwrap();
+        assert_eq!(saved["title"], "Second tab");
+        assert_eq!(saved["session_title"], "Shared task");
+
+        assert!(!store.apply_chat_title("no-such-chat", "Nothing").unwrap());
+    }
+
+    #[test]
+    fn new_chats_start_on_the_last_choice_made_for_their_assistant() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        crate::model_catalog::set_test_models(
+            "claude",
+            vec![
+                discovered("cli-claude", true, None),
+                discovered("cli-claude-big", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        pick(&store, &codex, "model", "cli-frontier");
+        pick(&store, &codex, "effort", "high");
+        let claude = new_chat_on(&store, &folder, "claude");
+        assert_eq!(claude["model"], "cli-claude", "Codex's pick stays on Codex");
+        pick(&store, &claude, "model", "cli-claude-big");
+        pick(&store, &claude, "effort", "ultracode");
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        assert_eq!(codex["model"], "cli-frontier");
+        assert_eq!(codex["effort"], "high");
+        let claude = new_chat_on(&store, &folder, "claude");
+        assert_eq!(claude["model"], "cli-claude-big");
+        assert_eq!(claude["effort"], "ultracode");
+
+        // Choices survive a restart.
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let codex = new_chat_on(&store, &folder, "codex");
+        assert_eq!(codex["model"], "cli-frontier");
+        assert_eq!(codex["effort"], "high");
+    }
+
+    fn first_turn(store: &StateStore, chat: &Value) -> TurnSpec {
+        match store
+            .prepare_send(&json!({"chat": chat["id"], "text": "hello"}))
+            .unwrap()
+        {
+            SendDisposition::Start { turn, .. } => turn,
+            SendDisposition::Queued { .. } => panic!("a first message starts a turn"),
+        }
+    }
+
+    #[test]
+    fn turns_run_on_the_defaults_and_choices_the_chat_shows() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("Workspace")).unwrap();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let turn = first_turn(&store, &new_chat_on(&store, &folder, "codex"));
+        assert_eq!(
+            (turn.model.as_str(), turn.effort.as_str()),
+            ("cli-everyday", "low")
+        );
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        pick(&store, &chat, "model", "cli-frontier");
+        pick(&store, &chat, "effort", "high");
+        let turn = first_turn(&store, &new_chat_on(&store, &folder, "codex"));
+        assert_eq!(
+            (turn.model.as_str(), turn.effort.as_str()),
+            ("cli-frontier", "high")
+        );
+    }
+
+    #[test]
+    fn only_an_explicit_choice_is_remembered() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let old = new_chat_on(&store, &folder, "codex");
+        pick(&store, &old, "access", "edit");
+        pick(&store, &old, "plan", "true");
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        assert_eq!(chat["model"], "cli-everyday");
+        assert_eq!(chat["effort"], "low");
+    }
+
+    #[test]
+    fn a_choice_the_assistant_no_longer_offers_falls_back_to_its_default() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+        // Nothing has been discovered yet, so a built-in model can be picked.
+        pick(&store, &chat, "model", "gpt-5.5");
+        pick(&store, &chat, "effort", "ultra");
+        assert_eq!(new_chat_on(&store, &folder, "codex")["model"], "gpt-5.5");
+
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("cli-everyday", true, Some("low"))],
+        );
+        let chat = new_chat_on(&store, &folder, "codex");
+        assert_eq!(chat["model"], "cli-everyday");
+        assert_eq!(chat["effort"], "ultra");
+    }
+
+    #[test]
+    fn a_workspace_model_outranks_the_last_choice() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("cli-everyday", true, Some("low")),
+                discovered("cli-frontier", false, Some("medium")),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+        pick(&store, &chat, "model", "cli-frontier");
+        store
+            .set_folder_settings(&json!({
+                "folder": folder,
+                "backend": "codex",
+                "model": "cli-everyday",
+                "workdir": null,
+                "repo": null,
+            }))
+            .unwrap();
+
+        let id = store.new_chat(&json!({"folder": folder})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(store.chat(&id).unwrap()["model"], "cli-everyday");
+        // Asking for an assistant by name skips the workspace's choice, as before.
+        assert_eq!(
+            new_chat_on(&store, &folder, "codex")["model"],
+            "cli-frontier"
+        );
+    }
+
+    #[test]
+    fn an_undiscovered_assistant_leaves_the_model_for_the_turn_to_resolve() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        fs::create_dir_all(fixture.workspaces.join("Workspace")).unwrap();
+        let chat = new_chat_on(&store, &folder, "codex");
+        assert!(chat.get("model").is_none());
+        assert_eq!(chat["effort"], "high");
+        assert_eq!(default_model("codex"), fallback_model("codex"));
+
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("cli-everyday", true, Some("low"))],
+        );
+        assert_eq!(default_model("codex"), "cli-everyday");
+        assert_eq!(default_effort("codex", None), "low");
+
+        // The first turn keeps the chat on that model when the default moves on.
+        assert_eq!(first_turn(&store, &chat).model, "cli-everyday");
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("cli-next", true, Some("low"))],
+        );
+        let chat = store.chat(chat["id"].as_str().unwrap()).unwrap();
+        assert_eq!(chat["model"], "cli-everyday");
     }
 
     #[test]
@@ -8247,12 +9656,28 @@ mod tests {
         assert_eq!(chat["backend"], "codex");
         assert_eq!(chat["model"], "gpt-5.6-sol");
         assert_eq!(chat["effort"], "ultra");
-        let events = store.messages(&json!({"chat": "chat-1"})).unwrap()["messages"]
-            .as_array()
-            .unwrap()
-            .clone();
-        assert_eq!(events[0]["role"], "event");
-        assert_eq!(events[0]["content"], "Switched to GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn changing_the_model_adds_nothing_to_the_transcript() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        for model in ["gpt-5.6-sol", "gpt-5.5"] {
+            store
+                .set_option(&json!({
+                    "chat": "chat-1", "option": "model", "backend": "codex", "value": model
+                }))
+                .unwrap();
+            assert_eq!(store.chat("chat-1").unwrap()["model"], model);
+        }
+
+        let messages = store.messages(&json!({"chat": "chat-1"})).unwrap();
+        assert_eq!(messages["messages"], json!([]));
     }
 
     #[test]
@@ -8286,7 +9711,7 @@ mod tests {
     }
 
     #[test]
-    fn model_switch_event_does_not_lock_worktree_selection() {
+    fn model_switch_does_not_lock_worktree_selection() {
         let fixture = Fixture::new();
         let database = Connection::open(&fixture.database).unwrap();
         fixture.schema(&database);
@@ -8505,6 +9930,122 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn a_restart_resumes_each_cut_off_chat_once_and_never_loops() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for chat in ["crashed", "stopped", "idle"] {
+            fixture.insert_chat(&database, chat, "folder");
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let (crashed, stopped, idle) = (
+            "crashed".to_owned(),
+            "stopped".to_owned(),
+            "idle".to_owned(),
+        );
+        let send = |chat: &str, text: &str| {
+            let SendDisposition::Start { .. } = store
+                .prepare_send(&json!({"chat": chat, "text": text}))
+                .unwrap()
+            else {
+                panic!("the send should start a turn");
+            };
+        };
+        send(&crashed, "first");
+        send(&stopped, "second");
+        send(&idle, "third");
+        store.clear_interrupted_turn(&idle).unwrap();
+        store.mark_resume_after_restart(&stopped).unwrap();
+        store.clear_interrupted_turn(&stopped).unwrap();
+
+        let recovered = store.recover_interrupted_turns().unwrap();
+        assert_eq!(recovered, vec![crashed.clone()]);
+        let ids = |chats: Vec<ChatToResume>| {
+            chats
+                .into_iter()
+                .map(|chat| chat.chat_id)
+                .collect::<Vec<_>>()
+        };
+        // Another restart before the desktop decides does not lose them.
+        let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(reopened.recover_interrupted_turns().unwrap().is_empty());
+        assert_eq!(
+            ids(reopened.take_chats_to_resume().unwrap()),
+            vec![crashed.clone(), stopped.clone()]
+        );
+        assert!(store.take_chats_to_resume().unwrap().is_empty());
+
+        // The resumed turn is cut off as well, so it is not tried again.
+        send(&crashed, RESUME_PROMPT);
+        let recovered = store.recover_interrupted_turns().unwrap();
+        assert_eq!(recovered, vec![crashed.clone()]);
+        assert!(store.take_chats_to_resume().unwrap().is_empty());
+
+        // A message from the user makes it eligible again.
+        send(&crashed, "try again");
+        store.recover_interrupted_turns().unwrap();
+        assert_eq!(
+            ids(store.take_chats_to_resume().unwrap()),
+            vec![crashed.clone()]
+        );
+    }
+
+    #[test]
+    fn a_continuation_keeps_the_draft_and_yields_to_newer_work() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "kept", "folder");
+        fixture.insert_chat(&database, "picked-up", "folder");
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        for chat in ["kept", "picked-up"] {
+            store
+                .prepare_send(&json!({"chat": chat, "text": "first"}))
+                .unwrap();
+        }
+        store.recover_interrupted_turns().unwrap();
+        let chats = store.take_chats_to_resume().unwrap();
+        let last_message = |id: &str| {
+            chats
+                .iter()
+                .find(|chat| chat.chat_id == id)
+                .unwrap()
+                .last_message
+        };
+        let continuation = |chat: &str| json!({"chat": chat, "text": RESUME_PROMPT});
+        database
+            .execute("UPDATE chats SET draft = 'unsent' WHERE id = 'kept'", [])
+            .unwrap();
+
+        store
+            .prepare_continuation(&continuation("kept"), last_message("kept"))
+            .unwrap();
+        assert_eq!(store.chat("kept").unwrap()["working"], true);
+        assert_eq!(store.chat("kept").unwrap()["draft"], "unsent");
+        // Running again, so another attempt must not queue behind it.
+        assert!(
+            store
+                .prepare_continuation(&continuation("kept"), last_message("kept"))
+                .is_err()
+        );
+        assert_eq!(store.chat("kept").unwrap()["queue"], json!([]));
+
+        store
+            .prepare_send(&json!({"chat": "picked-up", "text": "I'll take it from here"}))
+            .unwrap();
+        store.clear_interrupted_turn("picked-up").unwrap();
+        assert!(
+            store
+                .prepare_continuation(&continuation("picked-up"), last_message("picked-up"))
+                .is_err()
+        );
+        assert_eq!(store.chat("picked-up").unwrap()["working"], false);
     }
 
     #[test]

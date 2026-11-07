@@ -21,6 +21,7 @@ A local-first desktop workspace for user-installed Codex, Claude Code, and JCode
 - One persistent daemon owns local and remote sessions; work continues when clients disconnect.
 - Direct remote connections over pinned TLS, with expiring pairing codes and revocable devices.
 - Projects, Git worktrees, branches, and pull requests in one workspace.
+- Settle finished sessions with one click: they move to a Settled shelf and come back when you message them. Idle and merged sessions settle by themselves, even while the app is closed.
 - An integrated browser with separate tabs for each chat and shared site data.
 - Uses your installed CLI tools, authentication, and configuration.
 - Dark and light themes, chosen in Settings.
@@ -31,6 +32,23 @@ pane starts with a browser page; use its `+` menu to add another page, Files, or
 Changes. The bottom control opens a shell terminal below the chat. Both panes
 can stay open together, and hiding them keeps their content. Hover over either
 layout icon to see its label.
+
+Hover over a session in the sidebar and press its check mark to settle it, or use
+its right-click menu. The session moves to the **Settled** shelf below your
+projects without being deleted, and **Undo** appears beside the sidebar's Settings
+button for five seconds. If it was the open session, the next one down opens. A
+session can't be settled while it is running, has a queued message, or is waiting
+on an approval or question.
+
+Press a settled session's undo arrow to bring it back. Sending it a message does
+the same, and hands it back to the automatic rules. By default the host settles
+sessions after three days without activity and when their pull request merges or
+closes; change this in **Settings → General → Auto-settle**. Those rules belong to
+the host, so they keep running while the app is closed, and each host keeps its
+own. To keep one session out of them, choose **Disable auto-settle** from its
+right-click menu. Settling only changes where a session is listed: its agent and
+terminals keep running. The Android app still lists settled sessions with the
+active ones.
 
 ## Install
 
@@ -66,12 +84,22 @@ machine. Settings → **Assistant accounts** refreshes the CLI's current status.
 Agent binaries and separate copies of their credentials are not included in xd.
 
 Installed Linux and macOS builds check their own release channel for app updates
-shortly after startup and every four minutes. Open **Settings → Updates** to check
-manually, install an available update, and restart xd. Restart is blocked while
-chats are running or terminal tabs are open; close the terminal tabs first.
-Stored conversations can resume afterward. Updates always target
-the local app, including while you are viewing a remote workspace. Source builds
-and Windows installations require a manual update. Set `XD_DISABLE_AUTO_UPDATE=1`
+shortly after startup and every four minutes: nightly builds follow the nightly
+release and release builds follow tagged releases. Dev builds check the latest
+`master` commit every minute, and confirming an update builds that commit on your
+machine, which needs Docker on Linux. xd also compares installed Codex and
+Claude Code versions with their npm releases every 30 minutes; only the package
+names are sent. When something is out of date, an **Update** button appears beside
+the terminal and Settings buttons. It lists what will change, and nothing is
+installed until you confirm. **Settings → Updates** checks manually. Restart is
+blocked while chats are running or terminal tabs are open; close the terminal tabs
+first. Stored conversations can resume afterward. Turn on **Settings → General →
+Resume chats after a restart** to have xd continue any turn that a crash, reboot, or
+daemon stop cut off, the next time the app connects to the local daemon. It posts a
+visible message in the chat and the agent continues with no prompt from you, so it
+is off by default. A resumed turn that is cut off again waits for you. Updates always target the local
+machine, including while you are viewing a remote workspace. Source builds and
+Windows installations require a manual app update. Set `XD_DISABLE_AUTO_UPDATE=1`
 to disable background checks.
 
 The CLI discovery and update behavior adapt portions of
