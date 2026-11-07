@@ -15,6 +15,15 @@ set -euo pipefail
 bundle=$(cd "${1:?bundle directory}" && pwd -P)
 repository=$(cd "$(dirname "$0")/.." && pwd -P)
 restriction=kernel.apparmor_restrict_unprivileged_userns
+# The ordinary user is the bundle's owner. Its export can be private to that
+# owner (GitHub's runner is uid 1001, not 1000), and a user who cannot enter
+# the bundle tests nothing. A root-owned bundle still runs as uid 1000.
+owner=$(stat -c %u "$bundle")
+group=$(stat -c %g "$bundle")
+if [ "$owner" = 0 ]; then
+  owner=1000
+  group=1000
+fi
 
 run()
 {
@@ -25,9 +34,9 @@ run()
     -v "$repository/scripts:/scripts:ro" \
     xd-browser-sandbox \
     sh -c 'mkdir -m 1777 -p /tmp/.X11-unix
-      exec setpriv --reuid=1000 --regid=1000 --clear-groups \
+      exec setpriv --reuid="$2" --regid="$3" --clear-groups \
         env PATH="$PATH" sh /scripts/test-browser-chromium.sh /bundle "$1"' \
-    sh "$1"
+    sh "$1" "$owner" "$group"
 }
 
 docker build -t xd-browser-sandbox - <<'DOCKERFILE'
