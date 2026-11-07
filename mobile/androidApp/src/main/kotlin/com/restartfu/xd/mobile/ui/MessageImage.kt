@@ -32,8 +32,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Larger than a phone can show, and small enough for it to draw. */
-private const val MAX_BITMAP_SIDE = 2048
+/**
+ * About what a phone can show, and small enough to draw. A message composes all
+ * of its images at once, and a reply can name dozens of them.
+ */
+private const val MAX_BITMAP_SIDE = 1280
 
 /**
  * Decodes at a size that fits. A small file can still describe an enormous

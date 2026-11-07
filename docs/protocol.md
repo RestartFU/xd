@@ -692,7 +692,8 @@ client ever sees the original path:
 
 - A PNG, JPEG, GIF, or WebP file of at most 10 MiB is copied into the host's
   private image store and the marker is rewritten to point at the copy, which is
-  the path to pass to `image-read`. The copy remains after the original is gone.
+  the path to pass to `image-read`. The copy remains after the original is gone,
+  and an identical image shares it. Clients show the first frame of a GIF.
 - Anything else becomes the text
   `Image unavailable: <path> (<reason>)`, as does every image past the 32nd in a
   turn.

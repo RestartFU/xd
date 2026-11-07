@@ -6,7 +6,8 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use gpui::{Image, ImageFormat};
+use gpui::{Image, ImageFormat, RenderImage};
+use image::Frame;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -32,29 +33,63 @@ pub fn owner_icon(mime: &str, data: &str) -> Option<Arc<Image>> {
 /// The most pixels a chat will decode for one image. A small file can still
 /// describe an enormous picture, and decoding it would allocate all of it.
 const MAX_MESSAGE_IMAGE_PIXELS: u64 = 64_000_000;
+/// Decoded images are scaled to this, which is more than a transcript column can
+/// show even on a dense display, so each one holds a bounded amount of memory.
+const MAX_MESSAGE_IMAGE_SIDE: u32 = 2048;
 
-/// An image a message shows, with the size it needs to be laid out at.
-#[derive(Debug, Clone, PartialEq, Eq)]
+fn worth_decoding(width: u32, height: u32) -> bool {
+    let pixels = u64::from(width) * u64::from(height);
+    pixels > 0 && pixels <= MAX_MESSAGE_IMAGE_PIXELS
+}
+
+/// An image a message shows, ready to draw. The size is the original's, which is
+/// what it is laid out by.
+#[derive(Clone)]
 pub struct MessageImage {
-    pub image: Arc<Image>,
+    pub image: Arc<RenderImage>,
     pub width: u32,
     pub height: u32,
 }
 
 impl MessageImage {
-    /// Reads only the image's header; the pixels are decoded when it is drawn.
-    pub fn new(image: Arc<Image>) -> Option<Self> {
-        let (width, height) = image::ImageReader::new(Cursor::new(&image.bytes))
-            .with_guessed_format()
-            .ok()?
-            .into_dimensions()
-            .ok()?;
-        let pixels = u64::from(width) * u64::from(height);
-        (pixels > 0 && pixels <= MAX_MESSAGE_IMAGE_PIXELS).then_some(Self {
-            image,
+    /// Decodes an `image-read` reply. This is the slow part of showing an image,
+    /// so it does not belong on the UI thread.
+    pub fn decode(mime: &str, data: &str) -> Option<Self> {
+        if !matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
+            return None;
+        }
+        let bytes = STANDARD.decode(data).ok()?;
+        let reader = || {
+            image::ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .ok()
+        };
+        let (width, height) = reader()?.into_dimensions().ok()?;
+        if !worth_decoding(width, height) {
+            return None;
+        }
+        let mut decoded = reader()?.decode().ok()?;
+        if width.max(height) > MAX_MESSAGE_IMAGE_SIDE {
+            decoded = decoded.thumbnail(MAX_MESSAGE_IMAGE_SIDE, MAX_MESSAGE_IMAGE_SIDE);
+        }
+        let mut frame = decoded.into_rgba8();
+        // The renderer takes BGRA.
+        for pixel in frame.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Some(Self {
+            image: Arc::new(RenderImage::new(vec![Frame::new(frame)])),
             width,
             height,
         })
+    }
+
+    /// The memory its pixels hold.
+    pub fn bytes(&self) -> usize {
+        self.image.as_bytes(0).map_or(0, <[u8]>::len)
     }
 
     /// The size to draw at: shrunk to fit the bounds, and never enlarged.
@@ -85,26 +120,6 @@ impl Attachment {
             mime: "image/png".into(),
             data: STANDARD.encode(&bytes),
             preview: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
-        })
-    }
-
-    /// An image the host served for a message. Unlike a draft, which is sent
-    /// on to an assistant, this one is only drawn, so any format the host
-    /// serves will do.
-    pub(crate) fn from_image_reply(name: &str, mime: &str, data: &str) -> Option<Self> {
-        let format = match mime {
-            "image/png" => ImageFormat::Png,
-            "image/jpeg" => ImageFormat::Jpeg,
-            "image/gif" => ImageFormat::Gif,
-            "image/webp" => ImageFormat::Webp,
-            _ => return None,
-        };
-        let bytes = STANDARD.decode(data).ok()?;
-        Some(Self {
-            name: name.to_owned(),
-            mime: mime.to_owned(),
-            data: String::new(),
-            preview: Arc::new(Image::from_bytes(format, bytes)),
         })
     }
 
@@ -2706,10 +2721,23 @@ mod tests {
         );
     }
 
+    /// A PNG of one color, as base64.
+    fn encoded_png(width: u32, height: u32, color: [u8; 4]) -> String {
+        use image::ImageEncoder;
+        let pixels = color.repeat(width as usize * height as usize);
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&pixels, width, height, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        STANDARD.encode(png)
+    }
+
     #[test]
     fn a_message_image_keeps_its_shape_and_is_never_enlarged() {
         let image = |width, height| MessageImage {
-            image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
+            image: Arc::new(RenderImage::new(vec![Frame::new(image::RgbaImage::new(
+                1, 1,
+            ))])),
             width,
             height,
         };
@@ -2721,24 +2749,53 @@ mod tests {
     }
 
     #[test]
-    fn a_message_image_reads_its_size_and_refuses_an_enormous_one() {
-        use base64::Engine as _;
-        // A real 1x1 PNG.
-        const ONE_PIXEL: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/AAAMBAQA0L2W5AAAAAElFTkSuQmCC";
-        let png = Attachment::from_image_reply("a.png", "image/png", ONE_PIXEL).unwrap();
-        let shown = MessageImage::new(png.preview).unwrap();
-        assert_eq!((shown.width, shown.height), (1, 1));
+    fn a_message_image_is_decoded_ready_for_the_renderer() {
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(2, 1, [255, 10, 20, 255])).unwrap();
+        assert_eq!((shown.width, shown.height), (2, 1));
+        assert_eq!(shown.bytes(), 8);
+        // The renderer takes BGRA.
+        assert_eq!(&shown.image.as_bytes(0).unwrap()[..4], &[20, 10, 255, 255]);
+    }
 
-        // Only the header is read, so an IHDR claiming 20000x20000 is enough.
-        let mut bytes = STANDARD.decode(ONE_PIXEL).unwrap();
-        bytes[16..20].copy_from_slice(&20_000u32.to_be_bytes());
-        bytes[20..24].copy_from_slice(&20_000u32.to_be_bytes());
-        let enormous = Arc::new(Image::from_bytes(ImageFormat::Png, bytes));
-        assert_eq!(MessageImage::new(enormous), None);
+    #[test]
+    fn a_large_image_keeps_its_size_for_layout_but_not_its_pixels() {
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(4096, 8, [9, 9, 9, 255])).unwrap();
+        assert_eq!((shown.width, shown.height), (4096, 8));
+        assert_eq!(shown.bytes(), 2048 * 4 * 4);
+    }
 
-        let junk = Arc::new(Image::from_bytes(ImageFormat::Png, b"junk".to_vec()));
-        assert_eq!(MessageImage::new(junk), None);
-        assert!(Attachment::from_image_reply("a.svg", "image/svg+xml", ONE_PIXEL).is_none());
+    #[test]
+    fn only_the_first_frame_of_a_gif_is_decoded() {
+        // Every frame held in memory would make one small file very expensive.
+        let frame = |shade| {
+            image::Frame::new(image::RgbaImage::from_pixel(
+                4,
+                4,
+                image::Rgba([shade, shade, shade, 255]),
+            ))
+        };
+        let mut gif = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut gif)
+            .encode_frames([frame(10), frame(200)])
+            .unwrap();
+        let shown = MessageImage::decode("image/gif", &STANDARD.encode(gif)).unwrap();
+        assert_eq!(shown.image.frame_count(), 1);
+        assert_eq!(shown.bytes(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn a_message_image_refuses_what_it_should_not_decode() {
+        assert!(worth_decoding(8000, 8000));
+        assert!(!worth_decoding(8001, 8000));
+        assert!(!worth_decoding(0, 8000));
+        // Multiplying these as 32 bits would wrap around to something small.
+        assert!(!worth_decoding(u32::MAX, u32::MAX));
+        assert!(MessageImage::decode("image/png", &STANDARD.encode(b"junk")).is_none());
+        assert!(MessageImage::decode("image/png", "not base64 ~~").is_none());
+        let png = encoded_png(1, 1, [0, 0, 0, 255]);
+        assert!(MessageImage::decode("image/svg+xml", &png).is_none());
     }
 
     #[test]

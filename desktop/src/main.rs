@@ -6,11 +6,13 @@
 
 use std::{
     borrow::Cow,
+    cell::Cell,
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
     env,
     hash::{Hash, Hasher},
     ops::Range,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -1169,11 +1171,18 @@ struct RunningAgent {
 }
 
 /// Where an image in the transcript has got to.
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 enum MessageImageState {
     Loading,
-    Ready(MessageImage),
+    Ready(ReadyImage),
     Unavailable,
+}
+
+#[derive(Clone)]
+struct ReadyImage {
+    image: MessageImage,
+    /// The frame that last drew it, so the images kept are the ones in use.
+    drawn: Rc<Cell<u64>>,
 }
 
 type MessageImages = HashMap<String, MessageImageState>;
@@ -1181,6 +1190,31 @@ type MessageImages = HashMap<String, MessageImageState>;
 /// The tallest an image is drawn in a transcript, so a long screenshot cannot
 /// push the rest of the turn out of view.
 const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
+
+/// How much memory images in a chat may hold. Scrolling through a long chat
+/// should not keep every image it passes.
+const MESSAGE_IMAGE_BUDGET: usize = 256 * 1024 * 1024;
+
+/// Which images to let go of to get back under budget: the longest undrawn first,
+/// and never one the latest frame drew, which would only be asked for again. Each
+/// image is `(path, bytes, last drawn frame)`.
+fn images_over_budget(
+    mut images: Vec<(String, usize, u64)>,
+    budget: usize,
+    frame: u64,
+) -> Vec<String> {
+    let mut total = images.iter().map(|(_, bytes, _)| bytes).sum::<usize>();
+    images.sort_by_key(|(_, _, drawn)| *drawn);
+    let mut evicted = Vec::new();
+    for (path, bytes, drawn) in images {
+        if total <= budget || drawn >= frame {
+            break;
+        }
+        total -= bytes;
+        evicted.push(path);
+    }
+    evicted
+}
 
 #[derive(Clone, Default)]
 struct TranscriptSnapshot {
@@ -1703,6 +1737,7 @@ struct XdDesktop {
     owner_icons: HashMap<String, Option<Arc<Image>>>,
     /// The images of the open chat, kept for its rows to draw.
     message_images: Arc<MessageImages>,
+    message_image_frame: u64,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
@@ -2232,6 +2267,7 @@ impl XdDesktop {
             workflow_pending: Arc::new(HashSet::new()),
             owner_icons: HashMap::new(),
             message_images: Arc::default(),
+            message_image_frame: 0,
             owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
@@ -2535,7 +2571,7 @@ impl XdDesktop {
         self.restore_collapsed_folders();
         self.model.selected_chat = None;
         self.invalidate_live_render();
-        self.message_images = Arc::default();
+        self.forget_message_images(cx);
         self.transcript_snapshot = TranscriptSnapshot::default();
         self.transcript_loaded = false;
         self.transcript.reset(0);
@@ -3226,7 +3262,9 @@ impl XdDesktop {
                 );
             }
             match &kind {
-                RequestKind::ImageRead { path } => self.record_message_image(path.clone(), None),
+                RequestKind::ImageRead { path } => {
+                    self.record_message_image(path.clone(), None, cx)
+                }
                 RequestKind::Send { .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -3694,7 +3732,7 @@ impl XdDesktop {
                 }
                 if selected_before.is_some() && self.model.selected_chat.is_none() {
                     self.invalidate_live_render();
-                    self.message_images = Arc::default();
+                    self.forget_message_images(cx);
                     self.transcript_snapshot = TranscriptSnapshot::default();
                     self.transcript_loaded = false;
                     self.transcript.reset(0);
@@ -3793,12 +3831,19 @@ impl XdDesktop {
             }
             RequestKind::ImageRead { path } => {
                 let path = path.clone();
-                let image = attachments
-                    .into_iter()
-                    .flatten()
-                    .next()
-                    .and_then(|attachment| MessageImage::new(attachment.preview));
-                self.record_message_image(path, image);
+                let field = |name| value.get(name).and_then(Value::as_str).map(str::to_owned);
+                let mime = field("mime").unwrap_or_default();
+                let data = field("data").unwrap_or_default();
+                cx.spawn(async move |this, cx| {
+                    let image = cx
+                        .background_spawn(async move { MessageImage::decode(&mime, &data) })
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.record_message_image(path, image, cx);
+                        cx.notify();
+                    });
+                })
+                .detach();
             }
             RequestKind::AgentCatalog => {
                 if let Err(error) = self.model.apply_agent_catalog(&value) {
@@ -8206,9 +8251,71 @@ impl XdDesktop {
         }
     }
 
-    fn record_message_image(&mut self, path: String, image: Option<MessageImage>) {
-        let state = image.map_or(MessageImageState::Unavailable, MessageImageState::Ready);
-        Arc::make_mut(&mut self.message_images).insert(path, state);
+    fn record_message_image(
+        &mut self,
+        path: String,
+        image: Option<MessageImage>,
+        cx: &mut Context<Self>,
+    ) {
+        let frame = self.message_image_frame;
+        let state = image.map_or(MessageImageState::Unavailable, |image| {
+            MessageImageState::Ready(ReadyImage {
+                image,
+                // It has not been drawn yet, but it is about to be.
+                drawn: Rc::new(Cell::new(frame)),
+            })
+        });
+        let images = Arc::make_mut(&mut self.message_images);
+        let mut released = Vec::new();
+        if let Some(MessageImageState::Ready(old)) = images.insert(path, state) {
+            released.push(old.image.image);
+        }
+        let held = images
+            .iter()
+            .filter_map(|(path, state)| match state {
+                MessageImageState::Ready(ready) => {
+                    Some((path.clone(), ready.image.bytes(), ready.drawn.get()))
+                }
+                _ => None,
+            })
+            .collect();
+        for path in images_over_budget(held, MESSAGE_IMAGE_BUDGET, frame) {
+            if let Some(MessageImageState::Ready(ready)) = images.remove(&path) {
+                released.push(ready.image.image);
+            }
+        }
+        Self::release_message_images(released, cx);
+    }
+
+    /// Lets go of the open chat's images, as it closes.
+    fn forget_message_images(&mut self, cx: &mut Context<Self>) {
+        let images = std::mem::take(&mut self.message_images);
+        let released = images
+            .values()
+            .filter_map(|state| match state {
+                MessageImageState::Ready(ready) => Some(ready.image.image.clone()),
+                _ => None,
+            })
+            .collect();
+        Self::release_message_images(released, cx);
+    }
+
+    /// Dropping our handle is not enough: each window keeps its own copy of an
+    /// image it drew. The frame on screen may still use that copy and can be
+    /// presented again without being rebuilt, so it goes after the next one.
+    fn release_message_images(images: Vec<Arc<gpui::RenderImage>>, cx: &mut Context<Self>) {
+        if images.is_empty() {
+            return;
+        }
+        cx.spawn(async move |_, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = cx.update(|cx| {
+                for image in images {
+                    cx.drop_image(image, None);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Answers in flight are lost with the connection, so the rows waiting on
@@ -9168,7 +9275,7 @@ impl XdDesktop {
             self.attachments_dirty = false;
             self.remember_last_chat(&chat_id);
             self.invalidate_live_render();
-            self.message_images = Arc::default();
+            self.forget_message_images(cx);
             self.transcript_snapshot = TranscriptSnapshot::default();
             self.transcript_loaded = false;
             self.transcript_loading = false;
@@ -10749,9 +10856,8 @@ impl XdDesktop {
                 .into_any_element()
         }
         match images.get(path) {
-            Some(MessageImageState::Ready(image)) => {
-                let (width, height) = image.fitted(max_width, MESSAGE_IMAGE_MAX_HEIGHT);
-                let fallback = format!("Image unavailable: {path}");
+            Some(MessageImageState::Ready(ready)) => {
+                let (width, height) = ready.image.fitted(max_width, MESSAGE_IMAGE_MAX_HEIGHT);
                 // Out of flow, so the image gives its row no intrinsic width. When
                 // a card's narrowest possible width equals its real width, layout
                 // reuses the measurement made at the narrowest, where every line
@@ -10762,15 +10868,13 @@ impl XdDesktop {
                     .w_full()
                     .h(px(height))
                     .child(
-                        img(image.image.clone())
+                        img(ready.image.image.clone())
                             .absolute()
                             .top_0()
                             .left_0()
                             .w(px(width))
                             .h(px(height))
-                            .rounded(px(8.0))
-                            // The header can be sound while the pixels are not.
-                            .with_fallback(move || note(colors, fallback.clone())),
+                            .rounded(px(8.0)),
                     )
                     .into_any_element()
             }
@@ -12319,6 +12423,8 @@ impl XdDesktop {
         let workflow_pending = self.workflow_pending.clone();
         let column = self.chat_column_width;
         let message_images = self.message_images.clone();
+        self.message_image_frame += 1;
+        let image_frame = self.message_image_frame;
         let desktop = cx.entity().downgrade();
         let empty_ready = transcript_empty && !transcript_loading && self.transcript_loaded;
         let transcript = if transcript_loading {
@@ -12428,12 +12534,14 @@ impl XdDesktop {
                 }
                 // Images load as their rows come into view, so a long chat
                 // does not hold every image it ever showed.
-                let unknown_images = message
-                    .image_paths()
-                    .iter()
-                    .filter(|path| !message_images.contains_key(*path))
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let mut unknown_images = Vec::new();
+                for path in message.image_paths() {
+                    match message_images.get(path) {
+                        Some(MessageImageState::Ready(ready)) => ready.drawn.set(image_frame),
+                        Some(_) => {}
+                        None => unknown_images.push(path.clone()),
+                    }
+                }
                 if message.tool_view().is_none() && !unknown_images.is_empty() {
                     let desktop = desktop.clone();
                     cx.defer(move |cx| {
@@ -17109,6 +17217,25 @@ mod tests {
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
     }
 
+    #[test]
+    fn the_images_let_go_are_the_longest_undrawn() {
+        let held = |sizes: &[(&str, usize, u64)]| {
+            sizes
+                .iter()
+                .map(|(path, bytes, drawn)| ((*path).to_owned(), *bytes, *drawn))
+                .collect::<Vec<_>>()
+        };
+        let chat = held(&[("new", 40, 8), ("old", 40, 2), ("mid", 40, 5)]);
+        assert!(images_over_budget(chat.clone(), 120, 9).is_empty());
+        assert_eq!(images_over_budget(chat.clone(), 80, 9), ["old"]);
+        assert_eq!(images_over_budget(chat, 40, 9), ["old", "mid"]);
+
+        // What is on screen stays, over budget or not: it would only be asked
+        // for again, and again.
+        let on_screen = held(&[("a", 100, 9), ("b", 100, 9)]);
+        assert!(images_over_budget(on_screen, 10, 9).is_empty());
+    }
+
     /// In flow, an image exactly as wide as the column, or wider than a user's
     /// text, made its row claim thousands of pixels of empty space, and the whole
     /// chat looked blank.
@@ -17165,10 +17292,15 @@ mod tests {
             ),
         ];
         let image = |width, height| {
-            MessageImageState::Ready(MessageImage {
-                image: Arc::new(Image::from_bytes(gpui::ImageFormat::Png, Vec::new())),
-                width,
-                height,
+            MessageImageState::Ready(ReadyImage {
+                image: MessageImage {
+                    image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                        image::RgbaImage::new(1, 1),
+                    )])),
+                    width,
+                    height,
+                },
+                drawn: Rc::default(),
             })
         };
         let images = Arc::new(MessageImages::from([

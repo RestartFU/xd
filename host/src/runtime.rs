@@ -2318,7 +2318,8 @@ mod tests {
                 .to_owned()
         };
         let (first, second) = (kept(lines[1]), kept(lines[3]));
-        assert_ne!(first, second);
+        // Named twice, stored once.
+        assert_eq!(first, second);
 
         fs::remove_file(&original).unwrap();
         let read = store.image_read(&json!({"path": first})).unwrap();

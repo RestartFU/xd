@@ -13,11 +13,12 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    private_fs::{create_private_file, secure_directory},
+    private_fs::{create_private_file, open_without_waiting, secure_directory},
     reply_images,
 };
 
@@ -1607,8 +1608,12 @@ impl StateStore {
     pub(crate) fn keep_reply_image(&self, workdir: &str, path: &str) -> Result<PathBuf, String> {
         let source = fs::canonicalize(reply_images::source_path(workdir, path))
             .map_err(|_| "the file was not found".to_owned())?;
-        // Checked before opening: reading a FIFO would stall the whole turn.
-        let metadata = fs::metadata(&source).map_err(|_| "the file was not found".to_owned())?;
+        // A FIFO would stall the whole turn, so nothing waits on what this is.
+        let file =
+            open_without_waiting(&source).map_err(|_| "the file could not be read".to_owned())?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| "the file could not be read".to_owned())?;
         if !metadata.is_file() {
             return Err("it is not a file".to_owned());
         }
@@ -1616,8 +1621,8 @@ impl StateStore {
             return Err("it is larger than 10 MiB".to_owned());
         }
         let mut data = Vec::new();
-        fs::File::open(&source)
-            .and_then(|file| file.take(MAX_IMAGE_BYTES as u64 + 1).read_to_end(&mut data))
+        file.take(MAX_IMAGE_BYTES as u64 + 1)
+            .read_to_end(&mut data)
             .map_err(|_| "the file could not be read".to_owned())?;
         if data.len() > MAX_IMAGE_BYTES {
             return Err("it is larger than 10 MiB".to_owned());
@@ -1628,15 +1633,24 @@ impl StateStore {
             .map_err(|_| "the host could not store it".to_owned())
     }
 
+    /// Named for its content, so an image shown again takes no more disk. It
+    /// appears under that name only once whole, so one found there is complete.
     fn store_reply_image(&self, data: &[u8], extension: &str) -> std::io::Result<PathBuf> {
         fs::create_dir_all(&self.paste_root)?;
         secure_directory(&self.paste_root)?;
+        let digest = Sha256::digest(data);
         let path = self
             .paste_root
-            .join(format!("paste-{}.{extension}", Uuid::new_v4()));
-        let written = create_private_file(&path).and_then(|mut file| file.write_all(data));
+            .join(format!("paste-{digest:x}.{extension}"));
+        if path.is_file() {
+            return Ok(path);
+        }
+        let partial = self.paste_root.join(format!(".partial-{}", Uuid::new_v4()));
+        let written = create_private_file(&partial)
+            .and_then(|mut file| file.write_all(data))
+            .and_then(|()| fs::rename(&partial, &path));
         if let Err(error) = written {
-            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(&partial);
             return Err(error);
         }
         Ok(path)
@@ -7414,6 +7428,17 @@ mod tests {
             fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        // The same image again takes no more disk.
+        assert_eq!(store.keep_reply_image(&workdir, "shot.jpg").unwrap(), kept);
+        fs::write(work.join("again.jpg"), JPEG).unwrap();
+        assert_eq!(store.keep_reply_image(&workdir, "again.jpg").unwrap(), kept);
+        assert_eq!(
+            fs::read_dir(fixture.root.join("remote-pasted"))
+                .unwrap()
+                .count(),
+            1,
+            "nothing but the one image is left in the store"
+        );
         // The copy is what is served, so the original can go away.
         fs::remove_file(work.join("shot.jpg")).unwrap();
         let read = store
@@ -7434,6 +7459,11 @@ mod tests {
         };
         refused("missing.png", "the file was not found");
         refused(".", "it is not a file");
+        // Waiting on this would hang the test, as it would the turn.
+        let fifo =
+            std::ffi::CString::new(work.join("fifo.png").to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        refused("fifo.png", "it is not a file");
         fs::write(work.join("secret.png"), b"not really an image").unwrap();
         refused("secret.png", "it is not a PNG, JPEG, GIF or WebP image");
         let large = fs::File::create(work.join("large.png")).unwrap();
