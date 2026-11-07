@@ -125,6 +125,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** The connected host's rules; the client keeps them current and clears them on forgetting. */
     val autoSettle: StateFlow<AutoSettleSettingsReply?> = client.autoSettleSettings
     val autoSettleError: StateFlow<String?> = _autoSettleError.asStateFlow()
+    val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
 
     init {
         // A failure belongs to the host it came from.

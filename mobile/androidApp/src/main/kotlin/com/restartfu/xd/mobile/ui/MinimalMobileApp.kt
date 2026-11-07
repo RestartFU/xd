@@ -1635,6 +1635,18 @@ private fun AutoSettleSettings(model: MainViewModel) {
         }
     }
     error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+    val stale by model.autoSettleStale.collectAsStateWithLifecycle()
+    if (stale && error == null) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "These rules changed on the host and could not be read again.",
+                modifier = Modifier.weight(1f),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            TextButton(onClick = model::loadAutoSettle) { Text("Try again") }
+        }
+    }
 }
 
 /** The host's own default for the inactivity rule. */

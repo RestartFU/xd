@@ -22,6 +22,7 @@ import com.restartfu.xd.store.TreeStore
 import com.restartfu.xd.time.currentEpochMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -73,6 +74,13 @@ public class XdClient(
     private val autoSettleBroadcasts = MutableStateFlow(0L)
     /** Something has asked for the rules on this host, so a reconnect should read them again. */
     private val autoSettleWanted = MutableStateFlow(false)
+    private val _autoSettleStale = MutableStateFlow(false)
+
+    /**
+     * The rules shown may be out of date: the host said they changed and the
+     * read that followed failed. Cleared by the next read that lands.
+     */
+    public val autoSettleStale: StateFlow<Boolean> = _autoSettleStale.asStateFlow()
 
     /**
      * The host's auto-settle rules. Null until read, and again after
@@ -89,7 +97,16 @@ public class XdClient(
     public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> = _autoSettleSettings.asStateFlow()
 
     private fun rereadAutoSettle() {
-        scope.launch { runCatching { autoSettleCall(Ops.autoSettleSettings()) } }
+        val generation = _sessionGeneration.value
+        scope.launch {
+            try {
+                autoSettleCall(Ops.autoSettleSettings())
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (generation == _sessionGeneration.value) _autoSettleStale.value = true
+            }
+        }
     }
 
     /** Chats with an approval or question waiting on the user, across every chat. */
@@ -236,6 +253,7 @@ public class XdClient(
         _sessionGeneration.update { it + 1 }
         _autoSettleSettings.value = null
         autoSettleWanted.value = false
+        _autoSettleStale.value = false
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -381,6 +399,7 @@ public class XdClient(
         // Otherwise the read that broadcast started decides the value.
         if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
             _autoSettleSettings.value = rules
+            _autoSettleStale.value = false
         }
     }
 
