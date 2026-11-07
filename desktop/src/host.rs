@@ -20,6 +20,8 @@ use crate::model::{Attachment, AutoSettleRules};
 use crate::protocol::{AUTHENTICATED_FRAME_LIMIT, Frame, ProtocolCodec};
 
 const MESSAGE_PAGE_SIZE: usize = 120;
+/// What the host sends for `resume-turn`, shown until the transcript refetches.
+pub const RESUME_TEXT: &str = "Continue where you left off.";
 const PROCESS_STDERR_LIMIT: usize = 8 * 1024;
 const COMMAND_QUEUE_LIMIT: usize = 256;
 
@@ -1532,6 +1534,18 @@ impl HostHandle {
         )
     }
 
+    /// Continues the chat's cut-short turn. The host sends `RESUME_TEXT` for it,
+    /// or refuses if the chat has moved on, and answers like any other send.
+    pub fn resume_turn(&self, chat_id: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::Send {
+                chat_id: chat_id.to_owned(),
+                text: RESUME_TEXT.to_owned(),
+            },
+            json!({"op": "resume-turn", "chat": chat_id}),
+        )
+    }
+
     pub fn drop_queue(&self, chat_id: &str, index: usize) -> Result<(), String> {
         self.send(
             RequestKind::QueueMutation {
@@ -2530,6 +2544,43 @@ mod tests {
             } if chat_id == "chat-1" && text == "fix the queue"
         ));
 
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn resuming_a_turn_answers_like_a_send() {
+        let directory = env::temp_dir().join(format!("xd-resume-turn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["op"], "resume-turn");
+            assert_eq!(request["chat"], "chat-1");
+            let request_id = request["_xd_request"].as_u64().unwrap();
+            writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        host.resume_turn("chat-1").unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Reply {
+                kind: RequestKind::Send { chat_id, text },
+                ..
+            } if chat_id == "chat-1" && text == RESUME_TEXT
+        ));
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);
     }

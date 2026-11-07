@@ -1151,6 +1151,7 @@ impl TurnRuntime {
         };
         let mut completed = false;
         let mut latest_error = None;
+        let mut cut_short = false;
         let mut had_activity = false;
         let mut streamed_text = String::new();
         let mut assistant_text = String::new();
@@ -1442,6 +1443,7 @@ impl TurnRuntime {
                         completed = true;
                         latest_error = None;
                     }
+                    AgentEvent::Resumable => cut_short = true,
                     AgentEvent::Error(error) => latest_error = Some(error),
                     AgentEvent::Usage {
                         input,
@@ -1537,6 +1539,9 @@ impl TurnRuntime {
         }
         let asked = ask::parse(&assistant_text);
         let chat_id = turn.chat_id.clone();
+        if was_cancelled || cut_short {
+            let _ = self.inner.store.mark_turn_resumable(&chat_id);
+        }
         self.finish(
             turn,
             turn_id,

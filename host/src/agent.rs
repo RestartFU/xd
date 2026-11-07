@@ -38,6 +38,9 @@ pub enum AgentEvent {
         text: String,
     },
     Todos(TodoUpdate),
+    /// The error that follows left work unfinished rather than failing it: a
+    /// usage limit or an interruption. Offered to the user as something to resume.
+    Resumable,
     Usage {
         input: u64,
         output: u64,
@@ -529,11 +532,39 @@ pub struct ClaudeParser {
     agent_tools: HashSet<String>,
     saw_streamed_text: bool,
     saw_text: bool,
+    /// The account's limit turned this turn away, as far as Claude has said.
+    limit_rejected: bool,
     /// Newlines the text so far already ends with, so a new block is separated
     /// by a blank line rather than running into the previous one.
     trailing_newlines: usize,
     pending_tools: HashMap<u64, PendingClaudeTool>,
     completed_task_tools: HashMap<String, PendingClaudeTool>,
+}
+
+/// Whether a rate limit report turns work away, or `None` when it says neither.
+/// An account with overage to spend keeps going past a rejected limit.
+fn claude_limit_rejected(root: &Value) -> Option<bool> {
+    let info = root.get("rate_limit_info")?;
+    let status = info.get("status").and_then(Value::as_str)?;
+    let overage = matches!(
+        info.get("overageStatus").and_then(Value::as_str),
+        Some("allowed" | "allowed_warning")
+    ) || info.get("isUsingOverage").and_then(Value::as_bool) == Some(true)
+        || info.get("overageInUse").and_then(Value::as_bool) == Some(true);
+    Some(status == "rejected" && !overage)
+}
+
+/// Whether a failed result was the usage limit. A rejected limit only explains
+/// the failure when the result does not report some other cause.
+fn claude_usage_limited(result: &Value, limit_rejected: bool) -> bool {
+    let status = result.get("api_error_status").and_then(Value::as_u64);
+    status == Some(429)
+        || (limit_rejected
+            && status.is_none()
+            && matches!(
+                result.get("terminal_reason").and_then(Value::as_str),
+                None | Some("api_error" | "blocking_limit")
+            ))
 }
 
 struct PendingClaudeTool {
@@ -594,7 +625,16 @@ impl ClaudeParser {
     }
 
     fn feed_main(&mut self, root: Value) -> Vec<AgentEvent> {
+        if root.get("type").and_then(Value::as_str) == Some("assistant") {
+            self.limit_rejected = root.get("error").and_then(Value::as_str) == Some("rate_limit");
+        }
         match root.get("type").and_then(Value::as_str) {
+            Some("rate_limit_event") => {
+                if let Some(rejected) = claude_limit_rejected(&root) {
+                    self.limit_rejected = rejected;
+                }
+                Vec::new()
+            }
             Some("system") if root.get("subtype").and_then(Value::as_str) == Some("init") => {
                 let mut events = Vec::new();
                 if let Some(session) = root.get("session_id").and_then(Value::as_str) {
@@ -619,6 +659,7 @@ impl ClaudeParser {
             Some("assistant") if !self.saw_streamed_text => self.assistant_event(&root),
             Some("result") => {
                 let mut events = Vec::new();
+                let limit_rejected = std::mem::take(&mut self.limit_rejected);
                 let failed = root
                     .get("is_error")
                     .and_then(Value::as_bool)
@@ -632,6 +673,9 @@ impl ClaudeParser {
                     events.push(AgentEvent::TextDelta(text.to_owned()));
                 }
                 if failed {
+                    if claude_usage_limited(&root, limit_rejected) {
+                        events.push(AgentEvent::Resumable);
+                    }
                     events.push(AgentEvent::Error(
                         root.get("result")
                             .and_then(Value::as_str)
@@ -2069,6 +2113,52 @@ mod tests {
                 TodoItem::new("1", "Trace the payload", TodoStatus::Completed),
                 TodoItem::new("2", "Render the pane", TodoStatus::Pending),
             ]))]
+        );
+    }
+
+    #[test]
+    fn a_claude_failure_is_resumable_only_when_a_usage_limit_caused_it() {
+        let resumable = |lines: &[&str]| {
+            let mut parser = ClaudeParser::default();
+            lines
+                .iter()
+                .flat_map(|line| parser.feed(line))
+                .any(|event| matches!(event, AgentEvent::Resumable))
+        };
+        let failed = r#"{"type":"result","is_error":true,"result":"Failed"}"#;
+        let rejected = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}"#;
+        assert!(!resumable(&[failed]));
+        assert!(resumable(&[
+            r#"{"type":"result","is_error":true,"api_error_status":429,"result":"Limit"}"#
+        ]));
+        assert!(resumable(&[rejected, failed]));
+        assert!(resumable(&[
+            r#"{"type":"assistant","error":"rate_limit","message":{"content":[]}}"#,
+            failed,
+        ]));
+        // Overage keeps the account working, and a later allowance lifts the limit.
+        assert!(!resumable(&[
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","overageStatus":"allowed"}}"#,
+            failed,
+        ]));
+        assert!(!resumable(&[
+            rejected,
+            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}"#,
+            failed,
+        ]));
+        // Some other cause, or the next turn on a process that stayed up.
+        assert!(!resumable(&[
+            rejected,
+            r#"{"type":"result","is_error":true,"api_error_status":500,"result":"Down"}"#,
+        ]));
+        let mut parser = ClaudeParser::default();
+        parser.feed(rejected);
+        parser.feed(r#"{"type":"result","is_error":false,"result":"Fine"}"#);
+        assert!(
+            !parser
+                .feed(failed)
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Resumable))
         );
     }
 

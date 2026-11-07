@@ -196,20 +196,17 @@ impl CodexAppParser {
                 .unwrap_or_default(),
             "turn/completed" => match params["turn"]["status"].as_str() {
                 Some("completed") => vec![AgentEvent::Completed],
-                Some("interrupted") => vec![AgentEvent::Error("Turn interrupted.".into())],
-                _ => vec![AgentEvent::Error(
-                    params["turn"]["error"]["message"]
-                        .as_str()
-                        .unwrap_or("Codex turn failed.")
-                        .into(),
-                )],
+                Some("interrupted") => {
+                    vec![
+                        AgentEvent::Resumable,
+                        AgentEvent::Error("Turn interrupted.".into()),
+                    ]
+                }
+                _ => codex_failure(&params["turn"]["error"], "Codex turn failed."),
             },
-            "error" if params["willRetry"] != true => vec![AgentEvent::Error(
-                params["error"]["message"]
-                    .as_str()
-                    .unwrap_or("Codex error.")
-                    .into(),
-            )],
+            "error" if params["willRetry"] != true => {
+                codex_failure(&params["error"], "Codex error.")
+            }
             _ => Vec::new(),
         }
     }
@@ -269,6 +266,24 @@ impl CodexAppParser {
 }
 
 /// A notification from a spawned agent's own thread.
+/// A failed turn's error, marked resumable when it failed on a usage limit.
+fn codex_failure(error: &Value, fallback: &str) -> Vec<AgentEvent> {
+    let failure = AgentEvent::Error(error["message"].as_str().unwrap_or(fallback).into());
+    if codex_usage_limited(&error["codexErrorInfo"]) {
+        vec![AgentEvent::Resumable, failure]
+    } else {
+        vec![failure]
+    }
+}
+
+/// `codexErrorInfo` is either a bare code or an object keyed by its code.
+fn codex_usage_limited(info: &Value) -> bool {
+    ["usageLimitExceeded", "rateLimitExceeded"]
+        .iter()
+        .any(|code| info.as_str() == Some(code) || info.get(code).is_some())
+        || info["responseTooManyFailedAttempts"]["httpStatusCode"] == 429
+}
+
 fn child_event(thread: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
     let item = &params["item"];
     let step = |tool: &str, text: String| {
@@ -337,6 +352,39 @@ mod tests {
         assert!(parser.feed(r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"type":"agentMessage","id":"message-1","text":"hello"}}}"#).is_empty());
         assert!(matches!(parser.feed(r#"{"id":44,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-1","command":"cargo test"}}"#)[0], AgentEvent::Interaction { .. }));
         assert_eq!(parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}"#), vec![AgentEvent::Completed]);
+    }
+
+    #[test]
+    fn a_codex_failure_is_resumable_only_when_interrupted_or_limited() {
+        let resumable = |line: &str| {
+            parser_on("thread")
+                .feed(line)
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Resumable))
+        };
+        let failed = |info: &str| {
+            format!(
+                r#"{{"method":"error","params":{{"threadId":"thread","willRetry":false,"error":{{"message":"No","codexErrorInfo":{info}}}}}}}"#
+            )
+        };
+        assert!(resumable(&failed(r#""usageLimitExceeded""#)));
+        assert!(resumable(&failed(r#""rateLimitExceeded""#)));
+        assert!(resumable(&failed(
+            r#"{"responseTooManyFailedAttempts":{"httpStatusCode":429}}"#
+        )));
+        assert!(!resumable(&failed(
+            r#"{"responseTooManyFailedAttempts":{"httpStatusCode":500}}"#
+        )));
+        assert!(!resumable(&failed(r#""badRequest""#)));
+        assert!(resumable(
+            r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"status":"interrupted"}}}"#
+        ));
+        assert!(resumable(
+            r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"status":"failed","error":{"message":"No","codexErrorInfo":"usageLimitExceeded"}}}}"#
+        ));
+        assert!(!resumable(
+            r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"status":"failed","error":{"message":"No"}}}}"#
+        ));
     }
 
     fn parser_on(thread: &str) -> CodexAppParser {
