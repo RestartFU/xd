@@ -1581,6 +1581,18 @@ impl StateStore {
                 event,
             });
         }
+        // A continuation is the host's doing, not the user speaking again, so it
+        // keeps the time settling compares a finished pull request against.
+        let user_message_at = continues
+            .is_some()
+            .then(|| {
+                transaction.query_row(
+                    "SELECT last_user_message_at FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .transpose()?;
         let turn = prepare_turn(
             &transaction,
             &self.workspace_root,
@@ -1588,6 +1600,12 @@ impl StateStore {
             &message.prompt,
             worktree_name,
         )?;
+        if let Some(user_message_at) = user_message_at {
+            transaction.execute(
+                "UPDATE chats SET last_user_message_at = ? WHERE id = ?",
+                params![user_message_at, chat_id],
+            )?;
+        }
         transaction.execute(
             if continues.is_some() {
                 "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?"
@@ -3772,21 +3790,23 @@ impl StateStore {
         Ok(changed == 1)
     }
 
+    /// The branch checked out in `workdir`. `None` outside a repository and on
+    /// a detached HEAD, which cannot have a pull request of their own.
+    pub(crate) fn checked_out_branch(&self, workdir: &Path) -> Option<String> {
+        let current = normalize_existing_path(workdir);
+        list_git_worktrees(workdir)
+            .ok()?
+            .into_iter()
+            .find(|worktree| normalize_existing_path(&worktree.path) == current)?
+            .branch
+    }
+
     /// The pull request of the branch checked out in `workdir`, if it has one.
     /// An error means GitHub could not say, which is not the same as no.
     pub(crate) fn pull_request_snapshot(
         &self,
         workdir: &Path,
     ) -> Result<Option<PullRequestSnapshot>, StorageError> {
-        let Ok(worktrees) = list_git_worktrees(workdir) else {
-            return Ok(None);
-        };
-        let current = normalize_existing_path(workdir);
-        if !worktrees.iter().any(|worktree| {
-            normalize_existing_path(&worktree.path) == current && worktree.branch.is_some()
-        }) {
-            return Ok(None);
-        }
         let (status, stdout, stderr) = run_gh(
             workdir,
             &[

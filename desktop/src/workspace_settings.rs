@@ -259,7 +259,7 @@ impl XdDesktop {
             settings_row(
                 "workspace-settings-settle-merged",
                 "Auto-settle merged sessions",
-                "Settle a session when its pull request merges. Closed pull requests still settle automatically.",
+                "Settle a session when its pull request merges. A closed pull request settles it while either rule here is on.",
                 colors,
             )
             .cursor_pointer()

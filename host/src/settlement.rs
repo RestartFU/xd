@@ -35,7 +35,7 @@ pub struct AutoSettleSettings {
     /// Settle after this many days without activity; `None` turns that off.
     pub after_days: Option<i64>,
     /// Settle when the session's pull request merges. A closed pull request
-    /// settles the session either way.
+    /// settles the session either way, as long as any rule is on.
     pub on_merge: bool,
     /// Do not let inactivity settle a session that has a pull request.
     pub keep_pull_requests: bool,
@@ -221,7 +221,9 @@ impl AutoSettler {
     }
 }
 
-type PullRequestCache = HashMap<PathBuf, (Instant, Option<PullRequestSnapshot>)>;
+/// Answers by directory and branch: switching branches in a directory must not
+/// settle a session on the strength of the branch it left.
+type PullRequestCache = HashMap<(PathBuf, String), (Instant, Option<PullRequestSnapshot>)>;
 
 /// One pass of the rules. Returns how many sessions it settled.
 fn sweep(
@@ -274,12 +276,16 @@ fn pull_request_for(
     let Some(workdir) = &candidate.workdir else {
         return Some(None);
     };
-    if let Some((_, known)) = cache.get(workdir) {
+    let Some(branch) = store.checked_out_branch(workdir) else {
+        return Some(None);
+    };
+    let key = (workdir.clone(), branch);
+    if let Some((_, known)) = cache.get(&key) {
         return Some(*known);
     }
     match store.pull_request_snapshot(workdir) {
         Ok(pull_request) => {
-            cache.insert(workdir.clone(), (Instant::now(), pull_request));
+            cache.insert(key, (Instant::now(), pull_request));
             Some(pull_request)
         }
         Err(error) => {
@@ -860,9 +866,61 @@ mod tests {
                         0
                     );
                 }
-                let calls = std::fs::read_to_string(fixture.root.join("calls")).unwrap();
-                assert_eq!(calls.lines().count(), 1);
+                let calls = || {
+                    std::fs::read_to_string(fixture.root.join("calls"))
+                        .unwrap()
+                        .lines()
+                        .count()
+                };
+                assert_eq!(calls(), 1);
+
+                // Another branch in the same directory is another pull request.
+                let switched = std::process::Command::new("git")
+                    .args(["checkout", "-q", "-b", "other"])
+                    .current_dir(fixture.root.join("Workspaces/Project"))
+                    .status()
+                    .unwrap();
+                assert!(switched.success());
+                sweep(&fixture.store, &|_| false, &mut cache, now).unwrap();
+                assert_eq!(calls(), 2);
             },
+        );
+    }
+
+    #[test]
+    fn a_turn_the_host_resumes_is_not_the_user_coming_back() {
+        let fixture = Fixture::new();
+        fixture
+            .store
+            .prepare_send(&json!({"chat": fixture.chat, "text": "work"}))
+            .unwrap();
+        fixture.age(1);
+        fixture.sql("UPDATE chats SET host_working = 0");
+        let anchor = fixture.store.settlement_candidates().unwrap()[0].user_anchor_at;
+        let last_user_message: i64 = rusqlite::Connection::open(fixture.root.join("chats.db"))
+            .unwrap()
+            .query_row(
+                "SELECT MAX(id) FROM messages WHERE role = 'user'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        fixture
+            .store
+            .prepare_continuation(
+                &json!({"chat": fixture.chat, "text": "continue"}),
+                last_user_message,
+            )
+            .unwrap();
+        fixture.sql("UPDATE chats SET host_working = 0");
+        let candidate = fixture.store.settlement_candidates().unwrap().remove(0);
+        assert_eq!(
+            candidate.user_anchor_at, anchor,
+            "a pull request that finished meanwhile still counts"
+        );
+        assert!(
+            candidate.activity_at > anchor,
+            "but the turn is still activity, so inactivity counts from it"
         );
     }
 

@@ -434,7 +434,8 @@ connected:
 - `after_days`, from 1 to 90, settles a session after that many days without
   activity. Here `null` is meaningful: it turns this rule off.
 - `on_merge` settles a session when the pull request of its checked-out branch
-  merges. A closed pull request settles it regardless.
+  merges. A closed pull request settles it whenever either of these two rules is
+  on; with both off the host settles nothing by itself.
 - `keep_pull_requests` stops inactivity from settling a session that has a pull
   request. Merging and closing still do.
 
