@@ -614,6 +614,15 @@ struct OpenBrowserUrl {
     window: gpui::AnyWindowHandle,
 }
 
+/// A transcript image was clicked. Routed by window, like a link click, for the
+/// same reason: it can arrive with nothing focused.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct OpenMessageImage {
+    path: String,
+    window: gpui::AnyWindowHandle,
+}
+
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = xd, no_json)]
 struct ToggleActivity {
@@ -1295,9 +1304,20 @@ struct ReadyImage {
 
 type MessageImages = HashMap<String, MessageImageState>;
 
+/// The image open over the window.
+#[derive(Clone)]
+enum ImageViewer {
+    /// One of the open chat's, which stays in `message_images` while it is open.
+    Message(String),
+    /// One attached to the draft.
+    Draft(Arc<Image>),
+}
+
 /// The tallest an image is drawn in a transcript, so a long screenshot cannot
 /// push the rest of the turn out of view.
 const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
+/// What the image viewer leaves around an image, showing the window it is over.
+const IMAGE_VIEWER_MARGIN: f32 = 32.0;
 
 /// How much memory images in a chat may hold. Scrolling through a long chat
 /// should not keep every image it passes.
@@ -1885,6 +1905,7 @@ struct XdDesktop {
     /// Pixels of closed chats' images that have not been let go of yet, which
     /// count against the budget until they are.
     message_images_closing: usize,
+    image_viewer: Option<ImageViewer>,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
@@ -1915,6 +1936,24 @@ impl XdDesktop {
                 let _ = browser_window.update(cx, |_, window, cx| {
                     let _ = desktop.update(cx, |desktop, cx| {
                         desktop.open_browser_url(&url, window, cx);
+                    });
+                });
+            });
+        });
+        let desktop = cx.weak_entity();
+        let app: &mut App = cx;
+        app.on_action(move |action: &OpenMessageImage, cx| {
+            if action.window != browser_window || desktop.upgrade().is_none() {
+                cx.propagate();
+                return;
+            }
+            let desktop = desktop.clone();
+            let path = action.path.clone();
+            // Action dispatch already borrows the window; update after it ends.
+            cx.defer(move |cx| {
+                let _ = browser_window.update(cx, |_, window, cx| {
+                    let _ = desktop.update(cx, |desktop, cx| {
+                        desktop.open_image_viewer(ImageViewer::Message(path), window, cx);
                     });
                 });
             });
@@ -2432,6 +2471,7 @@ impl XdDesktop {
             message_image_fetching: None,
             message_image_decoding: false,
             message_images_closing: 0,
+            image_viewer: None,
             owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
@@ -5862,7 +5902,8 @@ impl XdDesktop {
     }
 
     fn browser_occluded_by_popup(&self) -> bool {
-        self.auth_open
+        self.image_viewer.is_some()
+            || self.auth_open
             || self.update_popup_open
             || self.usage_open
             || self.native_option_open.is_some()
@@ -5906,6 +5947,26 @@ impl XdDesktop {
         } else {
             window.blur();
         }
+    }
+
+    fn open_image_viewer(
+        &mut self,
+        viewer: ImageViewer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // It may have gone in the moment since the click.
+        if let ImageViewer::Message(path) = &viewer
+            && !matches!(
+                self.message_images.get(path),
+                Some(MessageImageState::Ready(_))
+            )
+        {
+            return;
+        }
+        self.image_viewer = Some(viewer);
+        self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
+        cx.notify();
     }
 
     fn begin_workspace_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -8724,12 +8785,22 @@ impl XdDesktop {
     /// Lets go of images past the budget. Scrolling away from images is what
     /// makes them eligible, so this runs after frames as well as new arrivals.
     fn evict_message_images(&mut self, cx: &mut Context<Self>) {
+        let viewed = match &self.image_viewer {
+            Some(ImageViewer::Message(path)) => Some(path),
+            _ => None,
+        };
         let held = self
             .message_images
             .iter()
             .filter_map(|(path, state)| match state {
                 MessageImageState::Ready(ready) => {
-                    Some((path.clone(), ready.image.bytes(), ready.drawn.get()))
+                    // The viewer draws it wherever the transcript has scrolled to.
+                    let drawn = if viewed == Some(path) {
+                        u64::MAX
+                    } else {
+                        ready.drawn.get()
+                    };
+                    Some((path.clone(), ready.image.bytes(), drawn))
                 }
                 _ => None,
             })
@@ -8765,6 +8836,7 @@ impl XdDesktop {
     /// Until then they count against the budget, and a chat opened meanwhile
     /// loads only what fits alongside them.
     fn forget_message_images(&mut self, cx: &mut Context<Self>) {
+        self.image_viewer = None;
         self.message_image_queue.clear();
         self.message_image_fetching = None;
         let images = std::mem::take(&mut self.message_images);
@@ -11988,6 +12060,7 @@ impl XdDesktop {
     fn render_message_image(
         colors: ThemeColors,
         path: &str,
+        index: usize,
         images: &MessageImages,
         max_width: f32,
     ) -> gpui::AnyElement {
@@ -12008,6 +12081,7 @@ impl XdDesktop {
         match images.get(path) {
             Some(MessageImageState::Ready(ready)) => {
                 let (width, height) = ready.image.fitted(max_width, MESSAGE_IMAGE_MAX_HEIGHT);
+                let path = path.to_owned();
                 // Out of flow, so the image gives its row no intrinsic width. When
                 // a card's narrowest possible width equals its real width, layout
                 // reuses the measurement made at the narrowest, where every line
@@ -12019,12 +12093,23 @@ impl XdDesktop {
                     .h(px(height))
                     .child(
                         img(ready.image.image.clone())
+                            .id(("message-image", index))
                             .absolute()
                             .top_0()
                             .left_0()
                             .w(px(width))
                             .h(px(height))
-                            .rounded(px(8.0)),
+                            .rounded(px(8.0))
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| {
+                                window.dispatch_action(
+                                    Box::new(OpenMessageImage {
+                                        path: path.clone(),
+                                        window: window.window_handle(),
+                                    }),
+                                    cx,
+                                );
+                            }),
                     )
                     .into_any_element()
             }
@@ -12044,7 +12129,7 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         match block {
             markdown::Block::Image(path) => {
-                Self::render_message_image(colors, path, images, image_width)
+                Self::render_message_image(colors, path, index, images, image_width)
             }
             markdown::Block::Heading { level, content } => div()
                 .id(("native-heading", index))
@@ -13135,7 +13220,17 @@ impl XdDesktop {
             .children(
                 attached
                     .iter()
-                    .map(|path| Self::render_message_image(colors, path, images, image_width))
+                    .enumerate()
+                    .map(|(attached_index, path)| {
+                        Self::render_message_image(
+                            colors,
+                            path,
+                            scoped_element_id(&block_scope, markdown.blocks.len() + attached_index)
+                                as usize,
+                            images,
+                            image_width,
+                        )
+                    })
                     .collect::<Vec<_>>(),
             );
         // Prose sits on the page; only what the user wrote and host errors are
@@ -13909,6 +14004,7 @@ impl XdDesktop {
             .enumerate()
             .map(|(index, attachment)| {
                 let name = attachment.name.clone();
+                let preview = attachment.preview.clone();
                 div()
                     .id(("draft-image", index))
                     .flex()
@@ -13916,9 +14012,18 @@ impl XdDesktop {
                     .gap_1()
                     .child(
                         gpui::img(attachment.preview)
+                            .id(("open-draft-image", index))
                             .w(px(96.0))
                             .h(px(72.0))
-                            .object_fit(gpui::ObjectFit::Contain),
+                            .object_fit(gpui::ObjectFit::Contain)
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_image_viewer(
+                                    ImageViewer::Draft(preview.clone()),
+                                    window,
+                                    cx,
+                                );
+                            })),
                     )
                     .child(div().text_xs().text_color(rgb(colors.muted)).child(name))
                     .child(
@@ -16721,6 +16826,45 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
+        let viewport = window.viewport_size();
+        let image_viewer_overlay = self.image_viewer.as_ref().and_then(|viewer| {
+            let image = match viewer {
+                ImageViewer::Message(path) => match self.message_images.get(path) {
+                    Some(MessageImageState::Ready(ready)) => img(ready.image.image.clone()),
+                    _ => return None,
+                },
+                ImageViewer::Draft(preview) => img(preview.clone()),
+            };
+            Some(
+                div()
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .track_focus(&minimal_popup_focus)
+                    .bg(rgba(colors.backdrop))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.image_viewer = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        // In exact pixels: an image lays itself out by its own
+                        // proportions, which outvote a percentage and overflow.
+                        image
+                            .debug_selector(|| "image-viewer-image".into())
+                            .w(viewport.width - px(IMAGE_VIEWER_MARGIN * 2.0))
+                            .h(viewport.height - px(IMAGE_VIEWER_MARGIN * 2.0))
+                            .object_fit(gpui::ObjectFit::Contain),
+                    )
+                    .into_any_element(),
+            )
+        });
         let error_banner = self.model.connection_error.clone().map(|error| {
             div()
                 .absolute()
@@ -16866,6 +17010,10 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if this.image_viewer.take().is_some() {
+                    cx.notify();
+                    return;
+                }
                 if this.dismiss_usage_layer(window, cx) {
                     return;
                 }
@@ -17032,6 +17180,7 @@ impl XdDesktop {
             })
             .when_some(chat_delete_overlay, |root, overlay| root.child(overlay))
             .when_some(chat_overlay, |root, overlay| root.child(overlay))
+            .when_some(image_viewer_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
             .when(!minimal_popup_open, |root| {
                 root.child(
@@ -19256,7 +19405,8 @@ mod tests {
                 "let chat_delete_overlay =",
             ),
             ("let chat_delete_overlay =", "let chat_overlay ="),
-            ("let chat_overlay =", "let error_banner ="),
+            ("let chat_overlay =", "let image_viewer_overlay ="),
+            ("let image_viewer_overlay =", "let error_banner ="),
         ];
 
         for (start, end) in overlays {
@@ -20026,6 +20176,210 @@ mod tests {
             );
             assert!(desktop.browser_panes.contains_key(&remote_key));
             assert!(desktop.settings.browser_sessions.contains_key(&remote_key));
+        });
+    }
+
+    fn ready_message_image(drawn: u64) -> MessageImageState {
+        MessageImageState::Ready(ReadyImage {
+            image: MessageImage {
+                image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                    image::RgbaImage::new(1, 1),
+                )])),
+                width: 1,
+                height: 1,
+            },
+            drawn: Rc::new(Cell::new(drawn)),
+        })
+    }
+
+    #[gpui::test]
+    fn clicking_a_drawn_image_asks_for_it_by_path(cx: &mut gpui::TestAppContext) {
+        struct Reply {
+            message: Message,
+            images: MessageImages,
+            opened: Option<String>,
+        }
+        impl Render for Reply {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(720.0)).child(XdDesktop::render_native_message(
+                    ThemePreset::default().colors(),
+                    &self.message,
+                    None,
+                    None,
+                    0,
+                    false,
+                    &self.images,
+                    720.0,
+                ))
+            }
+        }
+
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.weak_entity();
+            let target = window.window_handle();
+            let app: &mut App = cx;
+            app.on_action(move |action: &OpenMessageImage, cx| {
+                if action.window != target {
+                    cx.propagate();
+                    return;
+                }
+                let _ = view.update(cx, |view: &mut Reply, cx| {
+                    view.opened = Some(action.path.clone());
+                    cx.notify();
+                });
+            });
+            Reply {
+                message: Message::new(Some(1), "assistant", "[image: /kept/a.png]", None),
+                images: MessageImages::from([(
+                    "/kept/a.png".to_owned(),
+                    MessageImageState::Ready(ReadyImage {
+                        image: MessageImage {
+                            image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                                image::RgbaImage::new(1, 1),
+                            )])),
+                            width: 200,
+                            height: 200,
+                        },
+                        drawn: Rc::default(),
+                    }),
+                )]),
+                opened: None,
+            }
+        });
+        cx.run_until_parked();
+
+        // Past the picture, its row is empty, and clicking there opens nothing.
+        cx.simulate_click(point(px(600.0), px(100.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_, cx| view.read(cx).opened.clone()), None);
+
+        cx.simulate_click(point(px(100.0), px(100.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| view.read(cx).opened.clone()).as_deref(),
+            Some("/kept/a.png")
+        );
+    }
+
+    #[gpui::test]
+    fn clicking_a_transcript_image_opens_it_and_a_click_closes_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let target = cx.update(|window, _| window.window_handle());
+        desktop.update(cx, |desktop, _| {
+            Arc::make_mut(&mut desktop.message_images)
+                .insert("/kept/a.png".to_owned(), ready_message_image(0));
+        });
+
+        cx.dispatch_action(OpenMessageImage {
+            path: "/kept/a.png".into(),
+            window: target,
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(matches!(
+                &desktop.image_viewer,
+                Some(ImageViewer::Message(path)) if path == "/kept/a.png"
+            ));
+            assert!(desktop.minimal_popup_is_open());
+            assert!(desktop.browser_occluded_by_popup());
+        });
+
+        cx.simulate_click(point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.image_viewer.is_none());
+            assert!(!desktop.minimal_popup_is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn the_image_viewer_fits_an_image_inside_the_window(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        // Proportioned differently from the window, so either side could overflow.
+        for (width, height) in [(1200, 800), (800, 1200), (4000, 100)] {
+            cx.update_window_entity(&desktop, |desktop, window, cx| {
+                Arc::make_mut(&mut desktop.message_images).insert(
+                    "/kept/a.png".to_owned(),
+                    MessageImageState::Ready(ReadyImage {
+                        image: MessageImage {
+                            image: Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                                image::RgbaImage::new(width, height),
+                            )])),
+                            width,
+                            height,
+                        },
+                        drawn: Rc::default(),
+                    }),
+                );
+                desktop.open_image_viewer(ImageViewer::Message("/kept/a.png".into()), window, cx);
+            });
+            cx.run_until_parked();
+            let viewport = cx.update(|window, _| window.viewport_size());
+            let bounds = cx
+                .debug_bounds("image-viewer-image")
+                .expect("the open image");
+            assert_eq!(
+                bounds.size,
+                size(
+                    viewport.width - px(IMAGE_VIEWER_MARGIN * 2.0),
+                    viewport.height - px(IMAGE_VIEWER_MARGIN * 2.0),
+                ),
+                "{width}x{height}"
+            );
+            assert_eq!(
+                bounds.origin,
+                point(px(IMAGE_VIEWER_MARGIN), px(IMAGE_VIEWER_MARGIN))
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_image_viewer_before_anything_under_it(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.auth_open = true;
+            Arc::make_mut(&mut desktop.message_images)
+                .insert("/kept/a.png".to_owned(), ready_message_image(0));
+            desktop.open_image_viewer(ImageViewer::Message("/kept/a.png".into()), window, cx);
+            assert!(desktop.minimal_popup_focus.is_focused(window));
+        });
+        cx.run_until_parked();
+
+        cx.dispatch_action(CloseSearch);
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.image_viewer.is_none());
+            assert!(desktop.auth_open, "only the viewer closes");
+        });
+    }
+
+    #[gpui::test]
+    fn an_image_that_is_not_ready_does_not_open(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_image_viewer(ImageViewer::Message("/gone.png".into()), window, cx);
+            assert!(desktop.image_viewer.is_none());
+            assert!(!desktop.minimal_popup_is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn the_viewed_image_outlives_eviction_and_leaves_with_its_chat(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.message_image_frame = 5;
+            desktop.message_images_closing = MESSAGE_IMAGE_BUDGET;
+            Arc::make_mut(&mut desktop.message_images).extend([
+                ("/viewed".to_owned(), ready_message_image(1)),
+                ("/scrolled-away".to_owned(), ready_message_image(4)),
+            ]);
+            desktop.open_image_viewer(ImageViewer::Message("/viewed".into()), window, cx);
+
+            desktop.evict_message_images(cx);
+            assert!(desktop.message_images.contains_key("/viewed"));
+            assert!(!desktop.message_images.contains_key("/scrolled-away"));
+
+            desktop.forget_message_images(cx);
+            assert!(desktop.image_viewer.is_none());
         });
     }
 
