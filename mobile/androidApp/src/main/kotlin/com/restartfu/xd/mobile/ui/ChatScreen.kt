@@ -481,9 +481,12 @@ private fun Composer(
         }
     }
 
+    // Another queue action still out would make these do nothing, so they wait.
+    val queueBusy by model.queueBusy.collectAsStateWithLifecycle()
     editing?.let { (index, original, opened) ->
         QueuedMessageDialog(
             original = original,
+            busy = queueBusy || steering,
             working = state.working,
             canMoveUp = index > 0,
             canMoveDown = index < state.queue.lastIndex,
@@ -788,6 +791,8 @@ private fun Composer(
 @Composable
 private fun QueuedMessageDialog(
     original: String,
+    /** A queue action is still out; actions wait for it rather than being dropped. */
+    busy: Boolean,
     working: Boolean,
     canMoveUp: Boolean,
     canMoveDown: Boolean,
@@ -816,10 +821,10 @@ private fun QueuedMessageDialog(
                     // Reordering moves the message as it was queued; an edit
                     // still in the field above is not sent with it.
                     Row {
-                        TextButton(onClick = { onMove(true) }, enabled = canMoveUp && text == original) {
+                        TextButton(onClick = { onMove(true) }, enabled = !busy && canMoveUp && text == original) {
                             Text("Move earlier")
                         }
-                        TextButton(onClick = { onMove(false) }, enabled = canMoveDown && text == original) {
+                        TextButton(onClick = { onMove(false) }, enabled = !busy && canMoveDown && text == original) {
                             Text("Move later")
                         }
                     }
@@ -839,18 +844,18 @@ private fun QueuedMessageDialog(
                 if (working) {
                     TextButton(
                         onClick = { onSteer(text) },
-                        enabled = text.isNotBlank(),
+                        enabled = !busy && text.isNotBlank(),
                     ) { Text("Steer") }
                 }
                 TextButton(
                     onClick = { onSave(text) },
-                    enabled = text.isNotBlank(),
+                    enabled = !busy && text.isNotBlank(),
                 ) { Text("Save") }
             }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = onDrop) { Text("Drop") }
+                TextButton(onClick = onDrop, enabled = !busy) { Text("Drop") }
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
         },
