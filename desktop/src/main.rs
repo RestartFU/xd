@@ -2129,6 +2129,9 @@ struct XdDesktop {
     draft_dirty: bool,
     attachments_dirty: bool,
     attachment_generation: u64,
+    /// Batches of chosen files still being read. Sending waits for them, so a
+    /// message never leaves without a file the user saw themselves choose.
+    attachments_reading: usize,
     composer_thumbnails: image_preview::ComposerThumbnails,
     image_preview: Option<image_preview::ImagePreview>,
     sending: bool,
@@ -2724,6 +2727,7 @@ impl XdDesktop {
             draft_dirty: false,
             attachments_dirty: false,
             attachment_generation: 0,
+            attachments_reading: 0,
             composer_thumbnails: HashMap::new(),
             image_preview: None,
             sending: false,
@@ -9629,7 +9633,7 @@ impl XdDesktop {
     }
 
     fn submit_composer(&mut self, steer: bool, cx: &mut Context<Self>) {
-        if self.sending {
+        if self.sending || self.attachments_reading > 0 {
             return;
         }
         let text = self.composer.trim().to_owned();
@@ -10158,7 +10162,9 @@ impl XdDesktop {
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.model.connection_error =
-                            Some(format!("The file picker could not open: {error}"));
+                            Some(format!(
+                            "The file picker could not open ({error}). Drop the files on the chat instead."
+                        ));
                         cx.notify();
                     });
                     return;
@@ -10182,13 +10188,25 @@ impl XdDesktop {
             return;
         }
         let draft = &self.model.draft_attachments;
-        let slots = MAX_ATTACHMENTS.saturating_sub(draft.len());
-        let room = MAX_TOTAL_ATTACHMENT_BYTES
-            .saturating_sub(draft.iter().map(|attachment| attachment.bytes).sum());
-        let read = cx.background_spawn(async move { read_attachments(paths, slots, room) });
+        let room = DraftRoom {
+            slots: MAX_ATTACHMENTS.saturating_sub(draft.len()),
+            images: MAX_IMAGE_ATTACHMENTS.saturating_sub(
+                draft
+                    .iter()
+                    .filter(|attachment| attachment.preview.is_some())
+                    .count(),
+            ),
+            bytes: MAX_TOTAL_ATTACHMENT_BYTES
+                .saturating_sub(draft.iter().map(|attachment| attachment.bytes).sum()),
+        };
+        let read = cx.background_spawn(async move { read_attachments(paths, room) });
+        self.attachments_reading += 1;
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let read = read.await;
             let _ = this.update(cx, |this, cx| {
+                this.attachments_reading = this.attachments_reading.saturating_sub(1);
+                cx.notify();
                 // The files belong to the draft they were chosen for.
                 if this.model.selected_chat.as_deref() != Some(chat.as_str()) {
                     return;
@@ -15264,6 +15282,7 @@ impl XdDesktop {
         let can_send = self.model.connected
             && metadata_ready
             && !self.sending
+            && self.attachments_reading == 0
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
         let can_queue = self.model.connected
             && !self.composer.trim().is_empty()
@@ -18990,28 +19009,38 @@ fn decode_git_path(value: &str) -> Result<String, String> {
     String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
 }
 
-/// The files the user chose, read in order until the draft would be full:
-/// `slots` more attachments and `room` more bytes. What is left unread is
-/// refused, so a thousand chosen files cost no more than ten.
-fn read_attachments(
-    paths: Vec<PathBuf>,
+/// What a draft still has room for.
+#[derive(Clone, Copy)]
+struct DraftRoom {
     slots: usize,
-    mut room: usize,
-) -> Vec<Result<Attachment, String>> {
+    images: usize,
+    bytes: usize,
+}
+
+/// The files the user chose, read in order until the draft would be full.
+/// What is left unread is refused, so a thousand chosen files cost no more
+/// than ten, and a file refused takes none of the room.
+fn read_attachments(paths: Vec<PathBuf>, mut room: DraftRoom) -> Vec<Result<Attachment, String>> {
     let mut read = Vec::new();
-    let mut added = 0;
     for path in paths {
-        if added >= slots {
+        if room.slots == 0 {
             read.push(Err(format!(
                 "A message can contain at most {MAX_ATTACHMENTS} attachments."
             )));
             break;
         }
-        let attachment = read_attachment(&path, room);
-        if let Ok(attachment) = &attachment {
-            added += 1;
-            room = room.saturating_sub(attachment.bytes);
-        }
+        let attachment = read_attachment(&path, room.bytes).and_then(|attachment| {
+            let image = attachment.preview.is_some();
+            if image && room.images == 0 {
+                return Err(format!(
+                    "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
+                ));
+            }
+            room.slots -= 1;
+            room.images -= usize::from(image);
+            room.bytes = room.bytes.saturating_sub(attachment.bytes);
+            Ok(attachment)
+        });
         read.push(attachment);
     }
     read

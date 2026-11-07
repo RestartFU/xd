@@ -582,6 +582,10 @@ file: the host writes it under its sent name, the last component of `name`, in
 a private directory of its own and appends `[file: <host path>]`, which the
 agent reads from disk. An unusable name becomes `file`.
 
+A client that shows files as well as images sends `"files":true`. Without it,
+the host takes the client to show only images, as the Android app and earlier
+desktops do: a message it sends leaves the draft's files in the draft.
+
 Desktop clients may provide `worktree_name`, `worktree_backend`, and
 `worktree_model` when the chat is configured to create a new worktree. The
 name is used directly as the hint when supplied; otherwise the host uses that
@@ -600,8 +604,10 @@ The host persists one composer draft per chat and broadcasts a `draft` event
 after every update. `text` is required but may be empty and is limited to 1
 MiB. Optional `attachments` replaces the synchronized attachment list, in the
 same form and limits as `send`; omit it for ordinary text edits so large payloads
-are not resent on every keystroke. An empty array clears them. A client that
-shows only images skips the other files. The `chat` snapshot returns `draft`,
+are not resent on every keystroke. An empty array clears them. Without
+`"files":true`, as for `send`, the list replaces only the draft's images: the
+files the client cannot see are kept after them, within the same limits. A
+client that shows only images skips the other files. The `chat` snapshot returns `draft`,
 `draft_revision`, and `draft_attachments` so a newly connected device starts
 with the same composer.
 

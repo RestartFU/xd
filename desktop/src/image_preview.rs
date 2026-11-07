@@ -1360,12 +1360,20 @@ mod tests {
 
         desktop.update(cx, |desktop, cx| {
             desktop.attach_paths("implementation".into(), vec![notes.clone()], cx);
+            // Nothing is sent while a chosen file is still being read.
+            assert_eq!(desktop.attachments_reading, 1);
+            desktop.composer = "with the notes".into();
+            desktop.model.connection_error = None;
+            desktop.send_composer(cx);
+            // With no host, a send that went ahead would have said so.
+            assert_eq!(desktop.model.connection_error, None);
             // The user moves on before the read finishes.
             desktop.model.selected_chat = Some("elsewhere".into());
         });
         cx.run_until_parked();
         desktop.read_with(cx, |desktop, _| {
             assert!(desktop.model.draft_attachments.is_empty());
+            assert_eq!(desktop.attachments_reading, 0);
         });
 
         desktop.update(cx, |desktop, cx| {
@@ -1427,24 +1435,36 @@ mod tests {
                 .contains("could not be read")
         );
 
+        let room = |slots, images, bytes| DraftRoom {
+            slots,
+            images,
+            bytes,
+        };
         // Two slots: the third file is never opened, and nothing after it.
         let chosen = vec![
             report.clone(),
             root.join("missing"),
             report.clone(),
-            report,
+            report.clone(),
             large,
         ];
-        let read = read_attachments(chosen, 2, MAX_TOTAL_ATTACHMENT_BYTES);
+        let read = read_attachments(chosen, room(2, 4, MAX_TOTAL_ATTACHMENT_BYTES));
         assert_eq!(read.len(), 4);
         assert!(read[0].is_ok() && read[1].is_err() && read[2].is_ok());
         assert!(read[3].as_ref().unwrap_err().contains("10 attachments"));
         // The byte budget shrinks with each file read.
         let small = root.join("small.txt");
         fs::write(&small, [1; 6]).unwrap();
-        let read = read_attachments(vec![small.clone(), small], 10, 10);
+        let read = read_attachments(vec![small.clone(), small], room(10, 4, 10));
         assert!(read[0].is_ok());
         assert!(read[1].as_ref().unwrap_err().contains("20 MiB"));
+        // An image with no image slot left is refused without taking the slot
+        // a file after it can still use.
+        let shot = root.join("shot.png");
+        fs::write(&shot, png(4, 4, |_, _| [0, 0, 0, 255])).unwrap();
+        let read = read_attachments(vec![shot, report], room(1, 0, MAX_TOTAL_ATTACHMENT_BYTES));
+        assert!(read[0].as_ref().unwrap_err().contains("4 images"));
+        assert_eq!(read[1].as_ref().unwrap().name, "Report.pdf");
         fs::remove_dir_all(&root).unwrap();
     }
 

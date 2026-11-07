@@ -1613,11 +1613,14 @@ impl HostHandle {
                 })
             })
             .collect::<Vec<_>>();
+        // `files`: this client shows every attachment, so the host may clear
+        // files from the draft along with the images.
         let mut body = json!({
             "op": "send",
             "chat": chat_id,
             "text": text,
             "generate_worktree_name": true,
+            "files": true,
         });
         if !attachments.is_empty() {
             body["attachments"] = Value::Array(attachments);
@@ -1745,7 +1748,8 @@ impl HostHandle {
         attachments: Option<&[Attachment]>,
         attachment_generation: Option<u64>,
     ) -> Result<(), String> {
-        let mut body = json!({"op": "set-draft", "chat": chat_id, "text": text});
+        // `files`: the list sent replaces the files in the draft too.
+        let mut body = json!({"op": "set-draft", "chat": chat_id, "text": text, "files": true});
         if let Some(attachments) = attachments {
             body["attachments"] = Value::Array(
                 attachments

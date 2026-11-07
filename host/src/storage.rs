@@ -1709,15 +1709,25 @@ impl StateStore {
                 params![user_message_at, chat_id],
             )?;
         }
-        transaction.execute(
-            if continues.is_some() {
-                "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?"
+        if continues.is_some() {
+            transaction.execute(
+                "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?",
+                params![now_seconds(), chat_id],
+            )?;
+        } else {
+            // A client that shows only images sent only those; the files it
+            // never saw stay in the draft for a client that shows them.
+            let kept = if shows_files(request) {
+                Vec::new()
             } else {
-                "UPDATE chats SET host_working = 1, draft = '', draft_attachments = '[]', \
-                 draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?"
-            },
-            params![now_seconds(), chat_id],
-        )?;
+                kept_draft_files(&stored_draft_attachments(&transaction, chat_id)?)
+            };
+            transaction.execute(
+                "UPDATE chats SET host_working = 1, draft = '', draft_attachments = ?, \
+                 draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
+                params![Value::Array(kept).to_string(), now_seconds(), chat_id],
+            )?;
+        }
         transaction.commit()?;
         message.keep();
         Ok(SendDisposition::Start {
@@ -3179,8 +3189,16 @@ impl StateStore {
                 "A message draft is too large.".into(),
             ));
         }
-        let attachments = request
-            .get("attachments")
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let supplied = match request.get("attachments") {
+            Some(value) if !shows_files(request) => {
+                let stored = stored_draft_attachments(&database, chat_id)?;
+                Some(with_kept_files(value, &stored))
+            }
+            supplied => supplied.cloned(),
+        };
+        let attachments = supplied
+            .as_ref()
             .map(|value| validate_attachments(value, true))
             .transpose()?;
         let attachments_json = attachments
@@ -3200,7 +3218,6 @@ impl StateStore {
             })
             .transpose()
             .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let state = database
             .query_row(
                 "UPDATE chats SET draft = ?, draft_attachments = COALESCE(?, draft_attachments), \
@@ -8556,6 +8573,46 @@ fn validate_attachments(
         .collect()
 }
 
+/// Whether the client shows files as well as images, and so means its list of
+/// attachments to replace the files in a draft too. Clients from before files
+/// could be attached, and the Android app, show only images.
+fn shows_files(request: &Value) -> bool {
+    request.get("files").and_then(Value::as_bool) == Some(true)
+}
+
+fn stored_draft_attachments(database: &Connection, chat_id: &str) -> Result<Value, StorageError> {
+    let stored = database
+        .query_row(
+            "SELECT draft_attachments FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    Ok(serde_json::from_str(&stored).unwrap_or_else(|_| json!([])))
+}
+
+/// The files, not images, in a stored draft.
+fn kept_draft_files(stored: &Value) -> Vec<Value> {
+    stored
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|attachment| attachment.get("mime").and_then(Value::as_str) != Some(PNG_MIME))
+        .cloned()
+        .collect()
+}
+
+/// An image-only client's new images, followed by the files it cannot see.
+fn with_kept_files(supplied: &Value, stored: &Value) -> Value {
+    let Some(images) = supplied.as_array() else {
+        return supplied.clone();
+    };
+    let mut merged = images.clone();
+    merged.extend(kept_draft_files(stored));
+    Value::Array(merged)
+}
+
 /// A media type such as `application/pdf`: printable ASCII with one slash.
 fn valid_attachment_mime(mime: &str) -> bool {
     mime.len() <= MAX_ATTACHMENT_MIME_BYTES
@@ -12729,6 +12786,77 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(left, ["files"]);
+    }
+
+    #[test]
+    fn a_client_that_shows_only_images_leaves_the_drafts_files_alone() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let png = |name: &str| json!({"name": name, "mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)});
+        let pdf = json!({"name": "Report.pdf", "mime": "application/pdf", "data": STANDARD.encode(b"%PDF")});
+        let names = |attachments: &Value| {
+            attachments
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|attachment| attachment["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [png("a.png"), pdf.clone()],
+            }))
+            .unwrap();
+        // An image-only client replaces the images it shows, and only those.
+        let (reply, event) = store
+            .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": [png("b.png")]}))
+            .unwrap();
+        assert_eq!(names(&reply["draft_attachments"]), ["b.png", "Report.pdf"]);
+        assert_eq!(event["draft_attachments"], reply["draft_attachments"]);
+        let (reply, _) = store
+            .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": []}))
+            .unwrap();
+        assert_eq!(names(&reply["draft_attachments"]), ["Report.pdf"]);
+
+        // Its send leaves them in the draft; a client that shows files clears it.
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "hi", "attachments": [png("c.png")]}))
+            .unwrap()
+        else {
+            panic!("idle send should start");
+        };
+        assert!(!turn.prompt.contains("[file: "));
+        assert_eq!(
+            names(&store.chat("chat-1").unwrap()["draft_attachments"]),
+            ["Report.pdf"]
+        );
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "hi", "files": true}))
+            .unwrap();
+        assert_eq!(
+            store.chat("chat-1").unwrap()["draft_attachments"],
+            json!([])
+        );
+
+        // A full draft refuses images it has no room left for.
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": vec![pdf; MAX_ATTACHMENTS],
+            }))
+            .unwrap();
+        let refused = store
+            .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": [png("d.png")]}))
+            .unwrap_err();
+        assert!(refused.to_string().contains("10 attachments"));
     }
 
     #[test]
