@@ -1716,6 +1716,33 @@ mod tests {
             );
             assert_eq!(desktop.model.draft_attachments.len(), 1);
             assert!(desktop.awaiting_sent_clear.is_none());
+
+            // A clear overtaken by a newer draft does not apply its older
+            // list; the newer one is fetched instead.
+            desktop.model.draft_attachments.clear();
+            desktop.awaiting_sent_clear = Some(3);
+            desktop.handle_event(
+                "draft",
+                serde_json::json!({"chat": "implementation", "draft": "", "draft_revision": 72}),
+                Some(vec![Attachment::from_file("newer.txt", b"n".to_vec())]),
+                cx,
+            );
+            let mut reply = serde_json::Map::new();
+            reply.insert("ok".into(), true.into());
+            reply.insert("draft".into(), "".into());
+            reply.insert("draft_revision".into(), 71.into());
+            desktop.handle_reply(
+                RequestKind::SetDraft {
+                    chat_id: "implementation".into(),
+                    text: String::new(),
+                    attachment_generation: Some(3),
+                },
+                reply,
+                Some(vec![Attachment::from_file("older.txt", b"o".to_vec())]),
+                cx,
+            );
+            assert!(desktop.model.draft_attachments.is_empty());
+            assert!(desktop.awaiting_sent_clear.is_none() && desktop.draft_reload_pending);
         });
     }
 

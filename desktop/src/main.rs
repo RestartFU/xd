@@ -5151,6 +5151,7 @@ impl XdDesktop {
                             }
                         }
                         self.model.draft_attachments = local;
+                        self.schedule_draft_sync(cx);
                     }
                     (Some(local), _) => self.model.draft_attachments = local,
                     (None, Some(host)) => self.model.draft_attachments = host,
@@ -5334,20 +5335,33 @@ impl XdDesktop {
                 self.model.apply_draft_snapshot(&value);
                 // An older draft than the one shown brings older attachments.
                 let accepted = self.model.draft_revision != revision;
+                let reply_revision = value.get("draft_revision").and_then(Value::as_i64);
+                // The awaited clear fills in the revision an event showed while
+                // the list was held back, but never a newer one.
+                let fills_shown =
+                    awaited_clear && reply_revision == Some(self.model.draft_revision);
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
                 } else if attachment_reply_is_current
-                    && (accepted || awaited_clear)
+                    && (accepted || fills_shown)
                     && let Some(attachments) = attachments
                 {
                     self.model.draft_attachments = attachments;
                 }
+                // The draft moved on past the clear while its list was held
+                // back, so that newer list is fetched before anything replaces it.
+                let overtaken = awaited_clear
+                    && reply_revision.is_some_and(|reply| reply < self.model.draft_revision);
                 if self.composer == text {
                     self.draft_dirty = false;
                 }
                 if attachment_reply_is_current {
                     self.attachments_dirty = false;
                     self.awaiting_sent_clear = None;
+                }
+                if overtaken {
+                    self.awaiting_sent_clear = None;
+                    self.reload_draft_after_failed_clear();
                 }
                 // The clear has answered, whether or not the list moved on since.
                 if attachment_generation.is_some()
@@ -10371,8 +10385,9 @@ impl XdDesktop {
                 Some("The draft is still local because xd is disconnected.".into());
             return false;
         };
-        let attachments = self
-            .attachments_dirty
+        // While a reload is out the list may lack files only the host has, so
+        // only the text goes; the list follows once the reload merged it.
+        let attachments = (self.attachments_dirty && !self.draft_reload_pending)
             .then_some(self.model.draft_attachments.as_slice());
         let attachment_generation = attachments.map(|_| self.attachment_generation);
         if let Err(error) =
