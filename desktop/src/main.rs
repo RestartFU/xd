@@ -692,6 +692,9 @@ struct OpenBrowserUrl {
 #[action(namespace = xd, no_json)]
 struct OpenMessageImage {
     path: String,
+    /// Every image of the message it is in. The same path can be in several
+    /// messages, since the host keeps one copy of an identical image.
+    gallery: Arc<[String]>,
     window: gpui::AnyWindowHandle,
 }
 
@@ -2060,11 +2063,12 @@ impl XdDesktop {
             }
             let desktop = desktop.clone();
             let path = action.path.clone();
+            let gallery = action.gallery.clone();
             // Action dispatch already borrows the window; update after it ends.
             cx.defer(move |cx| {
                 let _ = browser_window.update(cx, |_, window, cx| {
                     let _ = desktop.update(cx, |desktop, cx| {
-                        desktop.open_message_image_preview(path, window, cx);
+                        desktop.open_message_image_preview(path, &gallery, window, cx);
                     });
                 });
             });
@@ -12242,6 +12246,7 @@ impl XdDesktop {
     fn render_message_image(
         colors: ThemeColors,
         path: &str,
+        gallery: &Arc<[String]>,
         index: usize,
         images: &MessageImages,
         max_width: f32,
@@ -12264,6 +12269,7 @@ impl XdDesktop {
             Some(MessageImageState::Ready(ready)) => {
                 let (width, height) = ready.image.fitted(max_width, MESSAGE_IMAGE_MAX_HEIGHT);
                 let path = path.to_owned();
+                let gallery = gallery.clone();
                 // Out of flow, so the image gives its row no intrinsic width. When
                 // a card's narrowest possible width equals its real width, layout
                 // reuses the measurement made at the narrowest, where every line
@@ -12287,6 +12293,7 @@ impl XdDesktop {
                                 window.dispatch_action(
                                     Box::new(OpenMessageImage {
                                         path: path.clone(),
+                                        gallery: gallery.clone(),
                                         window: window.window_handle(),
                                     }),
                                     cx,
@@ -12307,11 +12314,12 @@ impl XdDesktop {
         block: &markdown::Block,
         index: usize,
         images: &MessageImages,
+        gallery: &Arc<[String]>,
         image_width: f32,
     ) -> gpui::AnyElement {
         match block {
             markdown::Block::Image(path) => {
-                Self::render_message_image(colors, path, index, images, image_width)
+                Self::render_message_image(colors, path, gallery, index, images, image_width)
             }
             markdown::Block::Heading { level, content } => div()
                 .id(("native-heading", index))
@@ -12480,6 +12488,7 @@ impl XdDesktop {
                                 block,
                                 child_index,
                                 images,
+                                gallery,
                                 image_width,
                             )
                         })
@@ -13282,6 +13291,7 @@ impl XdDesktop {
                                         block,
                                         scoped_element_id(&scope, block_index) as usize,
                                         &MessageImages::default(),
+                                        &Arc::default(),
                                         0.0,
                                     )
                                 }),
@@ -13433,6 +13443,7 @@ impl XdDesktop {
         } else {
             Default::default()
         };
+        let gallery: Arc<[String]> = message.image_paths().into();
         let body = div()
             .w_full()
             .flex()
@@ -13449,6 +13460,7 @@ impl XdDesktop {
                             block,
                             scoped_element_id(&block_scope, block_index) as usize,
                             images,
+                            &gallery,
                             image_width,
                         )
                     })
@@ -13462,6 +13474,7 @@ impl XdDesktop {
                         Self::render_message_image(
                             colors,
                             path,
+                            &gallery,
                             scoped_element_id(&block_scope, markdown.blocks.len() + attached_index)
                                 as usize,
                             images,
@@ -20681,7 +20694,7 @@ Binary files /dev/null and b/image.png differ\n";
         struct Reply {
             message: Message,
             images: MessageImages,
-            opened: Option<String>,
+            opened: Option<(String, Vec<String>)>,
         }
         impl Render for Reply {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -20708,12 +20721,17 @@ Binary files /dev/null and b/image.png differ\n";
                     return;
                 }
                 let _ = view.update(cx, |view: &mut Reply, cx| {
-                    view.opened = Some(action.path.clone());
+                    view.opened = Some((action.path.clone(), action.gallery.to_vec()));
                     cx.notify();
                 });
             });
             Reply {
-                message: Message::new(Some(1), "assistant", "[image: /kept/a.png]", None),
+                message: Message::new(
+                    Some(1),
+                    "assistant",
+                    "[image: /kept/a.png]\n\n[image: /kept/b.png]",
+                    None,
+                ),
                 images: MessageImages::from([(
                     "/kept/a.png".to_owned(),
                     MessageImageState::Ready(ReadyImage {
@@ -20740,8 +20758,11 @@ Binary files /dev/null and b/image.png differ\n";
         cx.simulate_click(point(px(100.0), px(100.0)), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(
-            cx.update(|_, cx| view.read(cx).opened.clone()).as_deref(),
-            Some("/kept/a.png")
+            cx.update(|_, cx| view.read(cx).opened.clone()),
+            Some((
+                "/kept/a.png".to_owned(),
+                vec!["/kept/a.png".to_owned(), "/kept/b.png".to_owned()],
+            ))
         );
     }
 
