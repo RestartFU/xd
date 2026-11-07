@@ -311,6 +311,23 @@ private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled
 /** A price row being edited; text so a half-typed number is kept. */
 private data class PriceRow(val model: String, val input: String, val output: String, val cacheRead: String, val cacheWrite: String)
 
+/** Null (not loaded yet) is saved as an empty list with no marker, so it reads back as null. */
+private val PriceRowsSaver = androidx.compose.runtime.saveable.listSaver<List<PriceRow>?, String>(
+    save = { rows ->
+        rows?.let { listOf("loaded") + it.flatMap { row -> listOf(row.model, row.input, row.output, row.cacheRead, row.cacheWrite) } }
+            ?: emptyList()
+    },
+    restore = { saved ->
+        if (saved.firstOrNull() != "loaded") null
+        else saved.drop(1).chunked(5).filter { it.size == 5 }.map { PriceRow(it[0], it[1], it[2], it[3], it[4]) }
+    },
+)
+
+private val AliasesSaver = androidx.compose.runtime.saveable.listSaver<Map<String, String>, String>(
+    save = { aliases -> aliases.flatMap { (model, target) -> listOf(model, target) } },
+    restore = { saved -> saved.chunked(2).filter { it.size == 2 }.associate { it[0] to it[1] } },
+)
+
 /**
  * The host's custom model prices, in USD per million tokens. Mappings from
  * one model to another are kept as they are.
@@ -318,12 +335,15 @@ private data class PriceRow(val model: String, val input: String, val output: St
 @Composable
 private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var rows by remember { mutableStateOf<List<PriceRow>?>(null) }
-    var aliases by remember { mutableStateOf(emptyMap<String, String>()) }
+    // Saved, so rotating keeps unsaved edits; prices are not secret.
+    var rows by rememberSaveable(stateSaver = PriceRowsSaver) { mutableStateOf<List<PriceRow>?>(null) }
+    var aliases by rememberSaveable(stateSaver = AliasesSaver) { mutableStateOf(emptyMap<String, String>()) }
     var error by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
     var attempt by remember { mutableStateOf(0) }
     LaunchedEffect(attempt) {
+        // A draft restored after recreation is kept, not replaced by the host's list.
+        if (rows != null) return@LaunchedEffect
         error = null
         try {
             val prices = model.prices()

@@ -2613,8 +2613,10 @@ impl UsageService {
                 Ok(outcome) => {
                     json!({"event":"usage-reset-credit", "provider":"codex", "outcome":outcome, "idempotency_key":key})
                 }
+                // The key names the attempt even on failure, so a client
+                // waiting on a newer attempt cannot take this answer for its own.
                 Err(error) => {
-                    json!({"event":"usage-reset-credit", "provider":"codex", "error":error})
+                    json!({"event":"usage-reset-credit", "provider":"codex", "error":error, "idempotency_key":key})
                 }
             };
             events.publish_to(owner, event);

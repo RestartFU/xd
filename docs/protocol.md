@@ -771,7 +771,7 @@ Spends one banked reset credit on the host's signed-in account. Takes `provider`
 it, and the `account_key` from `usage-limits`; the host refuses if that is missing
 or no longer the signed-in account. Answers `pending: true`, then sends the asking connection a `usage-reset-credit`
 event with `outcome` of `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed`
-and the `idempotency_key` it settles, or `error`. This cannot be undone, so clients must confirm first.
+or `error`, and in both cases the `idempotency_key` of the attempt it answers. This cannot be undone, so clients must confirm first.
 
 ### `workflow-status`
 

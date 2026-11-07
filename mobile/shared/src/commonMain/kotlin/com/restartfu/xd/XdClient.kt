@@ -658,8 +658,11 @@ public class XdClient(
      */
     public suspend fun consumeResetCredit(accountKey: String, idempotencyKey: String): String {
         val event = awaitAnswer(Ops.usageConsumeResetCredit(accountKey, idempotencyKey)) {
+            // Only this attempt's answer: an older attempt's late error must not
+            // end this wait. Hosts that sent errors without the key time out
+            // instead, and the attempt stays to be checked again.
             (it["event"] as? JsonPrimitive)?.contentOrNull == "usage-reset-credit" &&
-                ((it["idempotency_key"] as? JsonPrimitive)?.contentOrNull == idempotencyKey || "error" in it)
+                (it["idempotency_key"] as? JsonPrimitive)?.contentOrNull == idempotencyKey
         }
         failure(event)?.let { throw RemoteProtocolException(it) }
         return (event["outcome"] as? JsonPrimitive)?.contentOrNull
