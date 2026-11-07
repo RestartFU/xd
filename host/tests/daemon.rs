@@ -24,6 +24,15 @@ struct Daemon {
     socket: PathBuf,
     child: Child,
 }
+/// Where a daemon's stderr goes, so a failing test can show why it died.
+fn daemon_log(root: &Path) -> Stdio {
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("daemon-stderr.log"))
+        .unwrap()
+        .into()
+}
 impl Daemon {
     fn start() -> Self {
         Self::start_with_discovery(false)
@@ -104,7 +113,7 @@ for line in sys.stdin:
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(daemon_log(&root))
             .spawn()
             .unwrap();
         let database = fs::canonicalize(&root).unwrap().join("chats.db");
@@ -140,7 +149,7 @@ for line in sys.stdin:
             .env("SHELL", "/bin/sh")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(daemon_log(&self.root))
             .spawn()
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -191,6 +200,13 @@ for line in sys.stdin:
 }
 impl Drop for Daemon {
     fn drop(&mut self) {
+        if thread::panicking() {
+            eprintln!("daemon exit status: {:?}", self.child.try_wait());
+            eprintln!(
+                "daemon stderr:\n{}",
+                fs::read_to_string(self.root.join("daemon-stderr.log")).unwrap_or_default()
+            );
+        }
         if let Ok(mut stream) = UnixStream::connect(&self.socket) {
             let _ = stream.write_all(b"{\"op\":\"daemon-stop\"}\n");
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -210,6 +226,7 @@ struct Client<R, W> {
     next: u64,
 }
 impl<R: Read, W: Write> Client<R, W> {
+    #[track_caller]
     fn call(&mut self, mut request: Value) -> Value {
         let id = self.next;
         self.next += 1;
@@ -224,6 +241,7 @@ impl<R: Read, W: Write> Client<R, W> {
         }
     }
     /// Wait for observable host state instead of assuming a process scheduling delay.
+    #[track_caller]
     fn wait_for(&mut self, request: Value, ready: impl Fn(&Value) -> bool) -> Value {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -238,6 +256,7 @@ impl<R: Read, W: Write> Client<R, W> {
             thread::sleep(Duration::from_millis(10));
         }
     }
+    #[track_caller]
     fn frame(&mut self) -> Value {
         let mut line = String::new();
         assert!(
@@ -246,6 +265,7 @@ impl<R: Read, W: Write> Client<R, W> {
         );
         serde_json::from_str(&line).unwrap()
     }
+    #[track_caller]
     fn event(&mut self, name: &str) -> Value {
         loop {
             let frame = self.frame();
