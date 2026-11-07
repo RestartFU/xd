@@ -297,6 +297,23 @@ impl XdDesktop {
                         }))
                         .child(settings_switch(colors, self.settings.speech)),
                     )
+                    .child(
+                        settings_row(
+                            "workspace-settings-auto-resume",
+                            "Resume chats after a restart",
+                            "Continue turns a restart cut off. Agents start working without asking.",
+                            colors,
+                        )
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings.auto_resume_chats = !this.settings.auto_resume_chats;
+                            if let Err(error) = this.settings.save() {
+                                this.model.connection_error = Some(error);
+                            }
+                            cx.notify();
+                        }))
+                        .child(settings_switch(colors, self.settings.auto_resume_chats)),
+                    )
                     .child(settings_heading("Updates", colors));
                 let status = self
                     .self_update_panel
@@ -370,9 +387,9 @@ impl XdDesktop {
                         .when(!busy && !installed && available, |actions| {
                             actions.child(
                                 ui_button("install-app-update", ButtonKind::Primary, colors)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.request_app_update("install", cx)
-                                    }))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.install_app_update(cx)),
+                                    )
                                     .child("Install update"),
                             )
                         })
@@ -402,7 +419,7 @@ impl XdDesktop {
                             .child(if source_build::supported() {
                                 "Build and install a branch, pull request, or commit."
                             } else {
-                                "Source builds are available in an installed nightly."
+                                "Source builds are available in an installed nightly or dev build."
                             }),
                     )
                     .child(

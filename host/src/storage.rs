@@ -36,6 +36,9 @@ For an optional concise spoken response, wrap only the words that should be read
 
 Speech is played as each block closes, not at the end of the turn, so a <speak> block written before a long piece of work is heard before that work starts. When a request will take more than a moment -- anything you are about to read files or run commands for -- open with one short spoken line saying what you are about to do, then get on with it. One sentence, in your own words, about this particular request: "Let me look at why the recorder never stops" tells the listener something, "Working on it" does not. Someone who asked out loud and heard nothing back cannot tell whether the machine understood them or whether it is doing anything at all."#;
 const INTERRUPTED_TURN: &str = "The host stopped before this turn finished.";
+/// Sent as a normal message, so the transcript shows why the agent carried on.
+pub(crate) const RESUME_PROMPT: &str =
+    "Continue where you left off. xd restarted before your last turn finished.";
 const MAX_DRAFT_BYTES: usize = 1024 * 1024;
 const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
@@ -179,6 +182,13 @@ pub(crate) struct WorktreeNameSpec {
     pub workdir: String,
     pub model: String,
     pub effort: String,
+}
+
+/// A chat a restart cut off, and the user message it was working on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatToResume {
+    pub chat_id: String,
+    pub last_message: i64,
 }
 
 pub enum SendDisposition {
@@ -1440,6 +1450,25 @@ impl StateStore {
     }
 
     pub fn prepare_send(&self, request: &Value) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, None)
+    }
+
+    /// Sends the message that continues a cut-off turn, unless someone has
+    /// picked the chat up since. Unlike a typed message, it did not come from
+    /// the composer, so a draft the user was writing is left in place.
+    pub fn prepare_continuation(
+        &self,
+        request: &Value,
+        last_message: i64,
+    ) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, Some(last_message))
+    }
+
+    fn prepare_send_inner(
+        &self,
+        request: &Value,
+        continues: Option<i64>,
+    ) -> Result<SendDisposition, StorageError> {
         let chat_id = required_string(
             request,
             "chat",
@@ -1463,6 +1492,18 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        if let Some(last_message) = continues {
+            let latest = transaction.query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
+                [chat_id],
+                |row| row.get::<_, i64>(0),
+            )?;
+            if working || latest != last_message {
+                return Err(StorageError::InvalidRequest(
+                    "This chat has already continued.".into(),
+                ));
+            }
+        }
         if working {
             let stored = transaction.query_row(
                 "SELECT COALESCE(queued, '') FROM chats WHERE id = ?",
@@ -1495,8 +1536,12 @@ impl StateStore {
             worktree_name,
         )?;
         transaction.execute(
-            "UPDATE chats SET host_working = 1, draft = '', draft_attachments = '[]', \
-             draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
+            if continues.is_some() {
+                "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?"
+            } else {
+                "UPDATE chats SET host_working = 1, draft = '', draft_attachments = '[]', \
+                 draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?"
+            },
             params![now_seconds(), chat_id],
         )?;
         transaction.commit()?;
@@ -1831,10 +1876,52 @@ impl StateStore {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for chat_id in &interrupted {
+            mark_chat_to_resume(&transaction, chat_id)?;
             end_interrupted_turn(&transaction, chat_id)?;
         }
         transaction.commit()?;
         Ok(interrupted)
+    }
+
+    /// Notes a turn the host is about to stop for shutting down. Stopping it may
+    /// finish it cleanly before the process exits, which would otherwise leave
+    /// nothing to show that it never completed.
+    pub fn mark_resume_after_restart(&self, chat_id: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        mark_chat_to_resume(&database, chat_id)?;
+        Ok(())
+    }
+
+    /// The chats a restart cut off, once each. They stay in the database until
+    /// the desktop decides, so another restart first does not lose them. A chat
+    /// cut off while answering the resume prompt is left alone, so a turn that
+    /// keeps taking the host down cannot restart itself forever.
+    pub fn take_chats_to_resume(&self) -> Result<Vec<ChatToResume>, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let resumable = {
+            let mut statement = transaction.prepare(
+                "SELECT chats.id, chats.resume_after_restart FROM chats \
+                 JOIN messages ON messages.id = chats.resume_after_restart \
+                   AND messages.chat_id = chats.id \
+                 WHERE chats.resume_after_restart != 0 AND messages.content != ? \
+                 ORDER BY chats.id",
+            )?;
+            statement
+                .query_map([RESUME_PROMPT], |row| {
+                    Ok(ChatToResume {
+                        chat_id: row.get(0)?,
+                        last_message: row.get(1)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        transaction.execute(
+            "UPDATE chats SET resume_after_restart = 0 WHERE resume_after_restart != 0",
+            [],
+        )?;
+        transaction.commit()?;
+        Ok(resumable)
     }
 
     /// Same repair as [`StateStore::recover_interrupted_turns`], for the single
@@ -3989,6 +4076,12 @@ fn ensure_chat_partial_reply_columns(database: &Connection) -> Result<(), Storag
             [],
         )?;
     }
+    if !columns.contains("resume_after_restart") {
+        database.execute(
+            "ALTER TABLE chats ADD COLUMN resume_after_restart INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     if !columns.contains("partial_reply_label") {
         database.execute("ALTER TABLE chats ADD COLUMN partial_reply_label TEXT", [])?;
     }
@@ -6044,6 +6137,17 @@ fn effort_label(effort: &str) -> &str {
         "ultra" => "Ultra",
         _ => "High",
     }
+}
+
+/// Remembers the user message a cut-off turn was answering, which is also how a
+/// later resume can tell that nobody has moved on from it.
+fn mark_chat_to_resume(database: &Connection, chat_id: &str) -> Result<(), rusqlite::Error> {
+    database.execute(
+        "UPDATE chats SET resume_after_restart = (SELECT COALESCE(MAX(id), 0) FROM messages \
+         WHERE chat_id = chats.id AND role = 'user') WHERE id = ?",
+        [chat_id],
+    )?;
+    Ok(())
 }
 
 fn end_interrupted_turn(
@@ -8764,6 +8868,122 @@ mod tests {
         assert_eq!(store.chat("chat-1").unwrap()["working"], true);
         store.finish_turn("chat-1", true, None, 1, false).unwrap();
         assert_eq!(store.chat("chat-1").unwrap()["working"], false);
+    }
+
+    #[test]
+    fn a_restart_resumes_each_cut_off_chat_once_and_never_loops() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        for chat in ["crashed", "stopped", "idle"] {
+            fixture.insert_chat(&database, chat, "folder");
+        }
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let (crashed, stopped, idle) = (
+            "crashed".to_owned(),
+            "stopped".to_owned(),
+            "idle".to_owned(),
+        );
+        let send = |chat: &str, text: &str| {
+            let SendDisposition::Start { .. } = store
+                .prepare_send(&json!({"chat": chat, "text": text}))
+                .unwrap()
+            else {
+                panic!("the send should start a turn");
+            };
+        };
+        send(&crashed, "first");
+        send(&stopped, "second");
+        send(&idle, "third");
+        store.clear_interrupted_turn(&idle).unwrap();
+        store.mark_resume_after_restart(&stopped).unwrap();
+        store.clear_interrupted_turn(&stopped).unwrap();
+
+        let recovered = store.recover_interrupted_turns().unwrap();
+        assert_eq!(recovered, vec![crashed.clone()]);
+        let ids = |chats: Vec<ChatToResume>| {
+            chats
+                .into_iter()
+                .map(|chat| chat.chat_id)
+                .collect::<Vec<_>>()
+        };
+        // Another restart before the desktop decides does not lose them.
+        let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(reopened.recover_interrupted_turns().unwrap().is_empty());
+        assert_eq!(
+            ids(reopened.take_chats_to_resume().unwrap()),
+            vec![crashed.clone(), stopped.clone()]
+        );
+        assert!(store.take_chats_to_resume().unwrap().is_empty());
+
+        // The resumed turn is cut off as well, so it is not tried again.
+        send(&crashed, RESUME_PROMPT);
+        let recovered = store.recover_interrupted_turns().unwrap();
+        assert_eq!(recovered, vec![crashed.clone()]);
+        assert!(store.take_chats_to_resume().unwrap().is_empty());
+
+        // A message from the user makes it eligible again.
+        send(&crashed, "try again");
+        store.recover_interrupted_turns().unwrap();
+        assert_eq!(
+            ids(store.take_chats_to_resume().unwrap()),
+            vec![crashed.clone()]
+        );
+    }
+
+    #[test]
+    fn a_continuation_keeps_the_draft_and_yields_to_newer_work() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "kept", "folder");
+        fixture.insert_chat(&database, "picked-up", "folder");
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        for chat in ["kept", "picked-up"] {
+            store
+                .prepare_send(&json!({"chat": chat, "text": "first"}))
+                .unwrap();
+        }
+        store.recover_interrupted_turns().unwrap();
+        let chats = store.take_chats_to_resume().unwrap();
+        let last_message = |id: &str| {
+            chats
+                .iter()
+                .find(|chat| chat.chat_id == id)
+                .unwrap()
+                .last_message
+        };
+        let continuation = |chat: &str| json!({"chat": chat, "text": RESUME_PROMPT});
+        database
+            .execute("UPDATE chats SET draft = 'unsent' WHERE id = 'kept'", [])
+            .unwrap();
+
+        store
+            .prepare_continuation(&continuation("kept"), last_message("kept"))
+            .unwrap();
+        assert_eq!(store.chat("kept").unwrap()["working"], true);
+        assert_eq!(store.chat("kept").unwrap()["draft"], "unsent");
+        // Running again, so another attempt must not queue behind it.
+        assert!(
+            store
+                .prepare_continuation(&continuation("kept"), last_message("kept"))
+                .is_err()
+        );
+        assert_eq!(store.chat("kept").unwrap()["queue"], json!([]));
+
+        store
+            .prepare_send(&json!({"chat": "picked-up", "text": "I'll take it from here"}))
+            .unwrap();
+        store.clear_interrupted_turn("picked-up").unwrap();
+        assert!(
+            store
+                .prepare_continuation(&continuation("picked-up"), last_message("picked-up"))
+                .is_err()
+        );
+        assert_eq!(store.chat("picked-up").unwrap()["working"], false);
     }
 
     #[test]

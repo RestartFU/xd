@@ -266,7 +266,7 @@ fn parse_version_output(
     }
 }
 
-fn clean_output(output: &[u8]) -> String {
+pub(crate) fn clean_output(output: &[u8]) -> String {
     let mut without_ansi = Vec::with_capacity(output.len());
     let mut bytes = output.iter().copied().peekable();
     while let Some(byte) = bytes.next() {

@@ -18,6 +18,7 @@ mod agent;
 mod ask;
 mod auth;
 mod background_process;
+mod cli_updates;
 mod cli_versions;
 mod codex_app;
 mod git_draft;
@@ -47,6 +48,7 @@ mod workflow;
 mod worktree_name;
 
 use auth::AuthManager;
+use cli_updates::CliUpdates;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
 use local_socket::UnixStream;
@@ -57,6 +59,7 @@ use runtime::{LiveTurn, TurnRuntime};
 use secrets::SecretsStore;
 use self_update::SelfUpdate;
 pub use self_update::installed_host_executable;
+pub use storage::ChatToResume;
 use storage::SendDisposition;
 pub use storage::{StateStore, StorageError};
 use storage::{clone_repository, normalize_device_name};
@@ -73,6 +76,7 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
+    cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
     owner_icons: Arc<OwnerIcons>,
@@ -133,6 +137,7 @@ impl Engine {
             shutdown: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone()),
+            cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
@@ -161,6 +166,7 @@ impl Engine {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::with_store(store.clone()));
         let auth = AuthManager::new(events.clone());
+        let cli_updates = CliUpdates::new(events.clone());
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
@@ -176,6 +182,7 @@ impl Engine {
             )),
             store: Some(store),
             auth,
+            cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
@@ -218,6 +225,9 @@ impl Engine {
             Some("ping") => json!({"ok": true}),
             Some("daemon-info") => {
                 json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 2, "build": option_env!("XD_COMMIT").unwrap_or("development"), "pid": std::process::id(), "workspaces": self.store.as_ref().and_then(|store| fs::canonicalize(store.workspace_path()).ok()), "executable": self.self_update.host_executable().and_then(std::path::Path::to_str)})
+            }
+            Some("resume-interrupted") if self.pairing.is_local(owner) => {
+                self.resume_interrupted(&request)
             }
             Some("daemon-stop") if self.pairing.is_local(owner) => {
                 self.shutdown.store(true, Ordering::Release);
@@ -283,9 +293,18 @@ impl Engine {
                 self.auth.snapshots()
             }
             Some("agent-clis") => self.cli_versions.snapshots(),
+            Some("agent-cli-updates") => self
+                .cli_updates
+                .perform(
+                    request.get("action").and_then(Value::as_str),
+                    request.get("provider").and_then(Value::as_str),
+                )
+                .unwrap_or_else(error_reply),
             Some("host-update") => {
                 let action = request.get("action").and_then(Value::as_str);
-                if action == Some("restart")
+                if action == Some("restart") && self.cli_updates.is_updating() {
+                    error_reply("Wait for the assistant updates to finish before restarting.")
+                } else if action == Some("restart")
                     && (self
                         .runtime
                         .as_ref()
@@ -406,6 +425,38 @@ impl Engine {
             reply.insert(REQUEST_ID.into(), request_id);
         }
         reply
+    }
+
+    /// Answers for every chat a restart has cut off since the last answer, so a
+    /// client reconnecting later, or turning the setting on later, does not
+    /// restart work from an old interruption.
+    fn resume_interrupted(&self, request: &Value) -> Value {
+        let chats = self
+            .store
+            .as_ref()
+            .and_then(|store| store.take_chats_to_resume().ok())
+            .unwrap_or_default();
+        let mut resumed = Vec::new();
+        if request.get("resume").and_then(Value::as_bool) == Some(true) {
+            for ChatToResume {
+                chat_id,
+                last_message,
+            } in chats
+            {
+                let reply = self.send_message_inner(
+                    &json!({"op": "send", "chat": chat_id, "text": storage::RESUME_PROMPT}),
+                    Some(last_message),
+                );
+                if reply["ok"] == true {
+                    self.events
+                        .publish(json!({"event": "changed", "chat": chat_id}));
+                    resumed.push(chat_id);
+                } else {
+                    eprintln!("xd-host: not resuming chat {chat_id}: {reply}");
+                }
+            }
+        }
+        json!({"ok": true, "resumed": resumed})
     }
 
     pub fn shutdown_requested(&self) -> bool {
@@ -1167,6 +1218,10 @@ impl Engine {
     }
 
     fn send_message(&self, request: &Value) -> Value {
+        self.send_message_inner(request, None)
+    }
+
+    fn send_message_inner(&self, request: &Value, continues: Option<i64>) -> Value {
         let chat_id = match required_string(request, "chat", "send needs a chat id") {
             Ok(chat_id) => chat_id,
             Err(error) => return error_reply(error),
@@ -1200,7 +1255,11 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
-        match store.prepare_send(&request) {
+        let prepared = match continues {
+            Some(last_message) => store.prepare_continuation(&request, last_message),
+            None => store.prepare_send(&request),
+        };
+        match prepared {
             Ok(SendDisposition::Queued { reply, event }) => {
                 self.events.publish(event);
                 reply
