@@ -140,14 +140,10 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
     };
     let store =
         StateStore::open(&options.database, &options.workspaces).map_err(io::Error::other)?;
-    let recovered = store
+    store
         .recover_interrupted_turns()
         .map_err(io::Error::other)?;
-    let chats_to_resume = store
-        .take_chats_to_resume(&recovered)
-        .map_err(io::Error::other)?;
     let engine = Arc::new(Engine::with_store_and_data(store, Some(paths.data.clone())));
-    engine.remember_chats_to_resume(chats_to_resume);
     let listener = UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;

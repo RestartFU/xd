@@ -1876,6 +1876,7 @@ impl StateStore {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for chat_id in &interrupted {
+            mark_chat_to_resume(&transaction, chat_id)?;
             end_interrupted_turn(&transaction, chat_id)?;
         }
         transaction.commit()?;
@@ -1887,57 +1888,36 @@ impl StateStore {
     /// nothing to show that it never completed.
     pub fn mark_resume_after_restart(&self, chat_id: &str) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        database.execute(
-            "UPDATE chats SET resume_after_restart = 1 WHERE id = ?",
-            [chat_id],
-        )?;
+        mark_chat_to_resume(&database, chat_id)?;
         Ok(())
     }
 
-    /// The chats a restart cut off: those just recovered and those marked at
-    /// shutdown, once each. A chat whose latest message is already the resume
-    /// prompt is left alone, so a turn that keeps taking the host down cannot
-    /// restart itself forever.
-    pub fn take_chats_to_resume(
-        &self,
-        recovered: &[String],
-    ) -> Result<Vec<ChatToResume>, StorageError> {
+    /// The chats a restart cut off, once each. They stay in the database until
+    /// the desktop decides, so another restart first does not lose them. A chat
+    /// cut off while answering the resume prompt is left alone, so a turn that
+    /// keeps taking the host down cannot restart itself forever.
+    pub fn take_chats_to_resume(&self) -> Result<Vec<ChatToResume>, StorageError> {
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let mut chats = recovered.to_vec();
         let resumable = {
-            let mut statement =
-                transaction.prepare("SELECT id FROM chats WHERE resume_after_restart = 1")?;
-            for chat_id in statement.query_map([], |row| row.get::<_, String>(0))? {
-                let chat_id = chat_id?;
-                if !chats.contains(&chat_id) {
-                    chats.push(chat_id);
-                }
-            }
-            let mut latest = transaction.prepare(
-                "SELECT id, content FROM messages WHERE chat_id = ? AND role = 'user' \
-                 ORDER BY id DESC LIMIT 1",
+            let mut statement = transaction.prepare(
+                "SELECT chats.id, chats.resume_after_restart FROM chats \
+                 JOIN messages ON messages.id = chats.resume_after_restart \
+                   AND messages.chat_id = chats.id \
+                 WHERE chats.resume_after_restart != 0 AND messages.content != ? \
+                 ORDER BY chats.id",
             )?;
-            let mut resumable = Vec::with_capacity(chats.len());
-            for chat_id in chats {
-                let prompt = latest
-                    .query_row([&chat_id], |row| {
-                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            statement
+                .query_map([RESUME_PROMPT], |row| {
+                    Ok(ChatToResume {
+                        chat_id: row.get(0)?,
+                        last_message: row.get(1)?,
                     })
-                    .optional()?;
-                if let Some((last_message, content)) = prompt
-                    && content != RESUME_PROMPT
-                {
-                    resumable.push(ChatToResume {
-                        chat_id,
-                        last_message,
-                    });
-                }
-            }
-            resumable
+                })?
+                .collect::<Result<Vec<_>, _>>()?
         };
         transaction.execute(
-            "UPDATE chats SET resume_after_restart = 0 WHERE resume_after_restart = 1",
+            "UPDATE chats SET resume_after_restart = 0 WHERE resume_after_restart != 0",
             [],
         )?;
         transaction.commit()?;
@@ -6159,6 +6139,17 @@ fn effort_label(effort: &str) -> &str {
     }
 }
 
+/// Remembers the user message a cut-off turn was answering, which is also how a
+/// later resume can tell that nobody has moved on from it.
+fn mark_chat_to_resume(database: &Connection, chat_id: &str) -> Result<(), rusqlite::Error> {
+    database.execute(
+        "UPDATE chats SET resume_after_restart = (SELECT COALESCE(MAX(id), 0) FROM messages \
+         WHERE chat_id = chats.id AND role = 'user') WHERE id = ?",
+        [chat_id],
+    )?;
+    Ok(())
+}
+
 fn end_interrupted_turn(
     transaction: &rusqlite::Transaction<'_>,
     chat_id: &str,
@@ -8918,23 +8909,26 @@ mod tests {
                 .map(|chat| chat.chat_id)
                 .collect::<Vec<_>>()
         };
+        // Another restart before the desktop decides does not lose them.
+        let reopened = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert!(reopened.recover_interrupted_turns().unwrap().is_empty());
         assert_eq!(
-            ids(store.take_chats_to_resume(&recovered).unwrap()),
+            ids(reopened.take_chats_to_resume().unwrap()),
             vec![crashed.clone(), stopped.clone()]
         );
-        assert!(store.take_chats_to_resume(&[]).unwrap().is_empty());
+        assert!(store.take_chats_to_resume().unwrap().is_empty());
 
         // The resumed turn is cut off as well, so it is not tried again.
         send(&crashed, RESUME_PROMPT);
         let recovered = store.recover_interrupted_turns().unwrap();
         assert_eq!(recovered, vec![crashed.clone()]);
-        assert!(store.take_chats_to_resume(&recovered).unwrap().is_empty());
+        assert!(store.take_chats_to_resume().unwrap().is_empty());
 
         // A message from the user makes it eligible again.
         send(&crashed, "try again");
-        let recovered = store.recover_interrupted_turns().unwrap();
+        store.recover_interrupted_turns().unwrap();
         assert_eq!(
-            ids(store.take_chats_to_resume(&recovered).unwrap()),
+            ids(store.take_chats_to_resume().unwrap()),
             vec![crashed.clone()]
         );
     }
@@ -8953,8 +8947,8 @@ mod tests {
                 .prepare_send(&json!({"chat": chat, "text": "first"}))
                 .unwrap();
         }
-        let recovered = store.recover_interrupted_turns().unwrap();
-        let chats = store.take_chats_to_resume(&recovered).unwrap();
+        store.recover_interrupted_turns().unwrap();
+        let chats = store.take_chats_to_resume().unwrap();
         let last_message = |id: &str| {
             chats
                 .iter()

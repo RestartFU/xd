@@ -349,6 +349,10 @@ fn a_restart_continues_cut_off_turns_only_when_asked() {
     drop(client);
     daemon.child.kill().unwrap();
     daemon.child.wait().unwrap();
+    // A second restart before the desktop answers keeps them waiting.
+    daemon.restart();
+    daemon.child.kill().unwrap();
+    daemon.child.wait().unwrap();
     daemon.restart();
     let mut client = daemon.client();
     // Picked up by another client first, so it is not continued a second time.

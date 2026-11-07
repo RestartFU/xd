@@ -76,7 +76,6 @@ pub struct Engine {
     events: Arc<EventBus>,
     runtime: Option<TurnRuntime>,
     auth: AuthManager,
-    chats_to_resume: Mutex<Vec<ChatToResume>>,
     cli_updates: CliUpdates,
     cli_versions: CliVersions,
     workflows: WorkflowStatuses,
@@ -138,7 +137,6 @@ impl Engine {
             shutdown: AtomicBool::new(false),
             store: None,
             auth: AuthManager::new(events.clone()),
-            chats_to_resume: Mutex::new(Vec::new()),
             cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
@@ -184,7 +182,6 @@ impl Engine {
             )),
             store: Some(store),
             auth,
-            chats_to_resume: Mutex::new(Vec::new()),
             cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
@@ -430,21 +427,14 @@ impl Engine {
         reply
     }
 
-    /// Chats this daemon found cut off when it started. They wait here for the
-    /// desktop, which owns the setting that says whether to continue them.
-    pub fn remember_chats_to_resume(&self, chats: Vec<ChatToResume>) {
-        if let Ok(mut remembered) = self.chats_to_resume.lock() {
-            *remembered = chats;
-        }
-    }
-
-    /// Answered once per daemon start, so a client reconnecting later, or turning
-    /// the setting on later, does not restart work from an old interruption.
+    /// Answers for every chat a restart has cut off since the last answer, so a
+    /// client reconnecting later, or turning the setting on later, does not
+    /// restart work from an old interruption.
     fn resume_interrupted(&self, request: &Value) -> Value {
         let chats = self
-            .chats_to_resume
-            .lock()
-            .map(|mut chats| std::mem::take(&mut *chats))
+            .store
+            .as_ref()
+            .and_then(|store| store.take_chats_to_resume().ok())
             .unwrap_or_default();
         let mut resumed = Vec::new();
         if request.get("resume").and_then(Value::as_bool) == Some(true) {
