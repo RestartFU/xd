@@ -309,6 +309,17 @@ mod tests {
 
     const INTERFACE: &str = SERVICE;
 
+    type NotifyArguments<'a> = (
+        String,
+        u32,
+        String,
+        String,
+        String,
+        Vec<String>,
+        HashMap<String, Value<'a>>,
+        i32,
+    );
+
     fn signal<B>(member: &str, body: &B) -> Message
     where
         B: serde::Serialize + zbus::zvariant::DynamicType,
@@ -444,16 +455,8 @@ mod tests {
         assert_eq!(header.member().unwrap().as_str(), "Notify");
         assert_eq!(header.interface().unwrap().as_str(), SERVICE);
         let body = message.body();
-        let (app_name, replaces, _icon, _summary, text, actions, hints, timeout): (
-            String,
-            u32,
-            String,
-            String,
-            String,
-            Vec<String>,
-            HashMap<String, Value>,
-            i32,
-        ) = body.deserialize().unwrap();
+        let (app_name, replaces, _icon, _summary, text, actions, hints, timeout): NotifyArguments =
+            body.deserialize().unwrap();
         assert_eq!(app_name, "xd");
         assert_eq!(replaces, 0);
         assert_eq!(text, "body");
