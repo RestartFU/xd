@@ -27,8 +27,9 @@ internal fun ShortcutEditorDialog(
     state: ShortcutEditorState,
     onDismiss: () -> Unit,
     onSave: (List<String>) -> Unit,
+    onRetry: () -> Unit,
 ) {
-    var prompts by remember(state.folderId, state.prompts) {
+    var prompts by remember(state.opening, state.prompts) {
         mutableStateOf(state.prompts)
     }
 
@@ -56,6 +57,10 @@ internal fun ShortcutEditorDialog(
                 } else {
                     state.error?.let { message ->
                         Text(message, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (!state.loaded) {
+                        TextButton(onClick = onRetry) { Text("Try again") }
+                        return@Column
                     }
                     prompts.forEachIndexed { index, prompt ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -88,7 +93,7 @@ internal fun ShortcutEditorDialog(
                 onClick = {
                     onSave(prompts.map { it.trim() }.filter { it.isNotEmpty() })
                 },
-                enabled = !state.loading && !state.saving,
+                enabled = state.loaded && !state.saving,
             ) { Text(if (state.saving) "Saving…" else "Save") }
         },
         dismissButton = {

@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
@@ -39,6 +40,13 @@ data class ShortcutEditorState(
     val loading: Boolean = true,
     val saving: Boolean = false,
     val error: String? = null,
+    /**
+     * Saving replaces the whole list, so it waits until the current list has
+     * arrived: otherwise a failed load would let Save erase shortcuts nobody saw.
+     */
+    val loaded: Boolean = false,
+    /** Identifies one opening, so a late reply never revives a closed or reopened editor. */
+    val opening: Long = 0,
 )
 
 data class CreatedDirectSession(
@@ -62,6 +70,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _pendingHostKey = MutableStateFlow<PendingHostKeyConfirmation?>(null)
     private val _privateKeyName = MutableStateFlow<String?>(null)
     private var pendingConnection: SshConnection? = null
+    private var shortcutOpenings = 0L
     private var privateKeyBytes: ByteArray? = null
     private val _forgetting = MutableStateFlow(false)
     private val _creatingChat = MutableStateFlow(false)
@@ -306,27 +315,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openShortcutEditor(folderId: String?, title: String) {
-        val opened = ShortcutEditorState(folderId = folderId, title = title)
+        val opened = ShortcutEditorState(folderId = folderId, title = title, opening = ++shortcutOpenings)
         _shortcutEditor.value = opened
         viewModelScope.launch {
-            try {
+            val update: ShortcutEditorState = try {
                 val reply = client.shortcuts(folderId)
-                if (_shortcutEditor.value?.folderId == folderId) {
-                    _shortcutEditor.value = opened.copy(
-                        prompts = if (folderId == null) reply.global else reply.workspace,
-                        loading = false,
-                    )
-                }
+                opened.copy(
+                    prompts = if (folderId == null) reply.global else reply.workspace,
+                    loading = false,
+                    loaded = true,
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (_shortcutEditor.value?.folderId == folderId) {
-                    _shortcutEditor.value = opened.copy(
-                        loading = false,
-                        error = error.message ?: "Could not load shortcuts",
-                    )
-                }
+                opened.copy(loading = false, error = error.message ?: "Could not load shortcuts")
             }
+            _shortcutEditor.update { current -> if (current?.opening == opened.opening) update else current }
         }
     }
 
@@ -336,22 +340,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveShortcuts(prompts: List<String>) {
         val editor = _shortcutEditor.value ?: return
-        if (editor.saving) return
-        _shortcutEditor.value = editor.copy(saving = true, error = null)
+        if (editor.saving || !editor.loaded) return
+        val saving = editor.copy(saving = true, error = null)
+        _shortcutEditor.value = saving
         viewModelScope.launch {
             try {
                 client.setShortcuts(editor.folderId, prompts)
-                if (_shortcutEditor.value?.folderId == editor.folderId) {
-                    _shortcutEditor.value = null
-                }
+                _shortcutEditor.update { current -> if (current?.opening == editor.opening) null else current }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (_shortcutEditor.value?.folderId == editor.folderId) {
-                    _shortcutEditor.value = editor.copy(
-                        saving = false,
-                        error = error.message ?: "Could not save shortcuts",
-                    )
+                _shortcutEditor.update { current ->
+                    if (current?.opening == editor.opening) {
+                        saving.copy(saving = false, error = error.message ?: "Could not save shortcuts")
+                    } else {
+                        current
+                    }
                 }
             }
         }
@@ -367,6 +371,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun hostUpdate(action: String = "status") {
         if (_updating.value) return
         _updating.value = true
+        // A new attempt replaces the last failure; the dialog shows an error in
+        // place of any status, so a stale one would hide what happened next.
+        _hostError.value = null
         viewModelScope.launch {
             try {
                 _host.value = client.hostUpdate(action)
