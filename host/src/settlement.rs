@@ -891,6 +891,55 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_chat_reports_its_pull_request_even_with_uncommitted_work() {
+        with_fake_gh("echo https://github.com/o/r/pull/7", |fixture, workdir| {
+            std::fs::write(workdir.join("uncommitted"), "work").unwrap();
+            assert_eq!(
+                fixture.store.chat_pull_request(&fixture.chat),
+                Some(json!({"branch": "feature", "url": "https://github.com/o/r/pull/7"})),
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_chat_tells_no_pull_request_apart_from_a_failed_lookup() {
+        with_fake_gh(
+            "echo 'no pull requests found for branch \"feature\"' >&2; exit 1",
+            |fixture, _| {
+                assert_eq!(
+                    fixture.store.chat_pull_request(&fixture.chat),
+                    Some(json!({"branch": "feature", "url": ""})),
+                );
+            },
+        );
+        with_fake_gh("echo 'could not connect' >&2; exit 1", |fixture, _| {
+            assert_eq!(
+                fixture.store.chat_pull_request(&fixture.chat),
+                Some(json!({"branch": "feature"})),
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_chat_on_the_default_branch_does_not_ask_github() {
+        with_fake_gh("exit 1", |fixture, workdir| {
+            let status = std::process::Command::new("git")
+                .args(["checkout", "-q", "-b", "main"])
+                .current_dir(workdir)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert_eq!(
+                fixture.store.chat_pull_request(&fixture.chat),
+                Some(json!({"branch": "main", "url": ""})),
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_merged_pull_request_settles_a_session_right_away() {
         let merged_at = now_seconds() + 60;
         with_fake_gh(

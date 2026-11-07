@@ -1206,12 +1206,12 @@ impl HostHandle {
         )
     }
 
-    pub fn git_state(&self, chat_id: &str) -> Result<(), String> {
+    pub fn git_state(&self, chat_id: &str, pull_request: bool) -> Result<(), String> {
         self.send(
             RequestKind::GitState {
                 chat_id: chat_id.to_owned(),
             },
-            json!({"op": "git-state", "chat": chat_id}),
+            json!({"op": "git-state", "chat": chat_id, "pull_request": pull_request}),
         )
     }
 

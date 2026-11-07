@@ -2834,6 +2834,37 @@ impl StateStore {
         Ok(json!({"ok": true, "url": url}))
     }
 
+    /// The pull request of the branch checked out for a chat, as `branch` and
+    /// `url`, whatever state the working tree is in. An empty `url` means there
+    /// is none; a missing `url` means GitHub could not say, which is not the
+    /// same as no. `None` outside a repository.
+    pub(crate) fn chat_pull_request(&self, chat_id: &str) -> Option<Value> {
+        let workdir = {
+            let database = self.database.lock().ok()?;
+            resolve_chat_workdir(&database, &self.workspace_root, chat_id).ok()?
+        };
+        let workdir = Path::new(&workdir);
+        let repository = repository_status(workdir).ok()?;
+        let branch = repository.get("branch").and_then(Value::as_str)?;
+        let base = repository.get("base").and_then(Value::as_str);
+        if matches!(branch, "" | "(detached)" | "(initial)") || Some(branch) == base {
+            return Some(json!({"branch": branch, "url": ""}));
+        }
+        let url = match run_gh(workdir, &["pr", "view", "--json", "url", "--jq", ".url"]) {
+            Ok((status, stdout, _)) if status.success() => extract_web_url(&stdout),
+            Ok((_, _, stderr))
+                if String::from_utf8_lossy(&stderr).contains("no pull requests found") =>
+            {
+                Some(String::new())
+            }
+            _ => None,
+        };
+        Some(match url {
+            Some(url) => json!({"branch": branch, "url": url}),
+            None => json!({"branch": branch}),
+        })
+    }
+
     pub fn git_create_pull_request(&self, request: &Value) -> Result<Value, StorageError> {
         let workdir = self.chat_repository(request, "git-pr-create needs a chat.")?;
         let title = required_string(request, "title", "A pull request title is required.")?.trim();

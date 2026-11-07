@@ -859,6 +859,7 @@ impl Engine {
             .get("request")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let with_pull_request = request.get("pull_request").and_then(Value::as_bool) == Some(true);
         let store = store.clone();
         let events = self.events.clone();
         thread::Builder::new()
@@ -867,6 +868,9 @@ impl Engine {
                 let mut event = store
                     .git_action_state(&chat_id)
                     .unwrap_or_else(|_| hidden_git_state());
+                if with_pull_request && let Some(pull_request) = store.chat_pull_request(&chat_id) {
+                    event["pull_request"] = pull_request;
+                }
                 event["event"] = Value::String("git-state".into());
                 event["chat"] = Value::String(chat_id);
                 if let Some(request_id) = request_id {
