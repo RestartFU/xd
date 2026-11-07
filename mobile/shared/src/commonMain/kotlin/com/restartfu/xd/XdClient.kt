@@ -239,6 +239,12 @@ public class XdClient(
                 if (value is Link.Up) {
                     // Broadcasts sent while disconnected were missed.
                     if (autoSettleWanted.value) rereadAutoSettle()
+                    if (agentAuthStates.items.value != null) {
+                        scope.launch { runCatching { loadAgentAuth() } }
+                    }
+                    if (agentCliStates.items.value != null) {
+                        scope.launch { runCatching { agentCliUpdates("status") } }
+                    }
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
                         entry.core.requestReload()

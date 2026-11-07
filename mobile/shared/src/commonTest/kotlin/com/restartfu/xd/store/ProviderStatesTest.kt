@@ -21,6 +21,16 @@ class ProviderStatesTest {
     }
 
     @Test
+    fun anOlderReplyArrivingLastDoesNotReplaceANewerOne() {
+        val states = ProviderStates<Item> { it.name }
+        val older = states.mark()
+        val newer = states.mark()
+        states.reply(listOf(Item("codex", "updated")), newer)
+        states.reply(listOf(Item("codex", "updating")), older)
+        assertEquals("updated", states.items.value!!.getValue("codex").state)
+    }
+
+    @Test
     fun aLaterReplyAppliesOnceNoEventIsPending() {
         val states = ProviderStates<Item> { it.name }
         states.event(Item("codex", "signing-in"))

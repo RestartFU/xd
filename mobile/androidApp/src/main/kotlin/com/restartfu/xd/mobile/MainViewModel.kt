@@ -166,12 +166,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             client.link.collect { link ->
                 val up = link is Link.Up
                 if (up && !wasUp && (application as XdApplication).settings.resumeChats.value) {
-                    try {
-                        client.resumeInterrupted(resume = true)
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Throwable) {
-                        // The play button on each chat still continues it.
+                    // Off the watcher, so a reconnect during the request is still seen.
+                    launch {
+                        try {
+                            client.resumeInterrupted(resume = true)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            // The play button on each chat still continues it.
+                        }
                     }
                 }
                 wasUp = up
