@@ -7,6 +7,7 @@ import com.restartfu.xd.net.ConnectionActor
 import com.restartfu.xd.net.Link
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocketFactory
+import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
@@ -21,6 +22,7 @@ import com.restartfu.xd.store.TreeStore
 import com.restartfu.xd.time.currentEpochMillis
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,11 +30,14 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -67,6 +72,76 @@ public class XdClient(
     private val unreadTerminalOwners = MutableStateFlow<Set<String>>(emptySet())
     private val terminalBusy = MutableStateFlow<Set<String>>(emptySet())
     private val visibleChat = MutableStateFlow<String?>(null)
+    private val _autoSettleSettings = MutableStateFlow<AutoSettleSettingsReply?>(null)
+    /** Counts the host's auto-settle broadcasts, to tell whether one arrived during a request. */
+    private val autoSettleBroadcasts = MutableStateFlow(0L)
+    /** Something has asked for the rules on this host, so a reconnect should read them again. */
+    private val autoSettleWanted = MutableStateFlow(false)
+    private val _autoSettleStale = MutableStateFlow(false)
+    /** Numbers every rules request, to order failures and successes. */
+    private val autoSettleCalls = MutableStateFlow(0L)
+    /** The newest request that failed, and the newest whose answer was shown. */
+    private var autoSettleFailedCall = 0L
+    private var autoSettleAppliedCall = 0L
+    /** Guards the checks above together with the updates they allow. */
+    private val autoSettleLock = Mutex()
+    /**
+     * A read shows the current rules but says nothing about whether a change
+     * was made, so a failed change keeps its own error until a newer change
+     * succeeds.
+     */
+    private var autoSettleWriteFailed = 0L
+    private var autoSettleWriteSucceeded = 0L
+    private val _autoSettleWriteError = MutableStateFlow<String?>(null)
+    public val autoSettleWriteError: StateFlow<String?> = _autoSettleWriteError.asStateFlow()
+
+    /** The person has seen the failed change; only their own Try again clears it without a newer change. */
+    public suspend fun dismissAutoSettleWriteError() {
+        autoSettleLock.withLock { _autoSettleWriteError.value = null }
+    }
+    private val _autoSettleError = MutableStateFlow<String?>(null)
+
+    /**
+     * Why the newest rules request failed, in the same request order as the
+     * stale mark: an answer to a newer request clears it, and a failure
+     * superseded by one never shows.
+     */
+    public val autoSettleError: StateFlow<String?> = _autoSettleError.asStateFlow()
+
+    /**
+     * The rules shown may be out of date: the host said they changed and the
+     * read that followed failed. Cleared by the next read that lands.
+     */
+    public val autoSettleStale: StateFlow<Boolean> = _autoSettleStale.asStateFlow()
+
+    /**
+     * The host's auto-settle rules. Null until read, and again after
+     * forgetting the host.
+     *
+     * A reply and a concurrently published broadcast can reach the socket in
+     * either order (see the protocol's ordering caveat), so neither is trusted
+     * over the other. A broadcast only says the rules changed: it starts a
+     * fresh read, sent after it arrived and so reflecting at least that
+     * change. A reply is kept only when no broadcast arrived while it was in
+     * flight. Every change broadcasts, so the value always settles on the
+     * host's.
+     */
+    public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> = _autoSettleSettings.asStateFlow()
+
+    private val _autoSettleInFlight = MutableStateFlow(0)
+
+    /**
+     * Rules requests still waiting on the host, including the reads a
+     * broadcast starts. While any is out the rules shown may be about to
+     * change, so a client should not offer edits computed from them.
+     */
+    public val autoSettleInFlight: StateFlow<Int> = _autoSettleInFlight.asStateFlow()
+
+    private fun rereadAutoSettle() {
+        // Counted before launching, so there is no moment the read is due but not counted.
+        _autoSettleInFlight.update { it + 1 }
+        scope.launch { autoSettleCall(Ops.autoSettleSettings(), background = true, counted = true) }
+    }
 
     /** Chats with an approval or question waiting on the user, across every chat. */
     public val waitingChats: StateFlow<Set<String>> = _waitingChats.asStateFlow()
@@ -140,6 +215,8 @@ public class XdClient(
         scope.launch {
             actor.link.collect { value ->
                 if (value is Link.Up) {
+                    // Broadcasts sent while disconnected were missed.
+                    if (autoSettleWanted.value) rereadAutoSettle()
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
                         entry.core.requestReload()
@@ -151,6 +228,10 @@ public class XdClient(
             actor.events.collect { event ->
                 val eventName =
                     (event.value["event"] as? JsonPrimitive)?.contentOrNull
+                if (eventName == "auto-settle-settings") {
+                    autoSettleLock.withLock { autoSettleBroadcasts.update { it + 1 } }
+                    rereadAutoSettle()
+                }
                 if (eventName == "tree") {
                     requestTreeRefresh()
                     sessions.value.values.forEach { entry ->
@@ -204,6 +285,17 @@ public class XdClient(
         terminalBusy.value = emptySet()
         visibleChat.value = null
         _sessionGeneration.update { it + 1 }
+        autoSettleLock.withLock {
+            _autoSettleSettings.value = null
+            autoSettleWanted.value = false
+            _autoSettleStale.value = false
+            autoSettleFailedCall = 0
+            autoSettleAppliedCall = 0
+            _autoSettleError.value = null
+            autoSettleWriteFailed = 0
+            autoSettleWriteSucceeded = 0
+            _autoSettleWriteError.value = null
+        }
     }
 
     public fun openChat(chatId: String): ChatSession {
@@ -297,6 +389,127 @@ public class XdClient(
         // would keep showing its old title in the header until something else
         // reloaded it.
         sessions.value[chatId]?.core?.requestReload()
+    }
+
+    /** Renames a session. Its chats keep their own titles. */
+    public suspend fun renameSession(sessionId: String, title: String) {
+        actor.call(Ops.renameSession(sessionId, title))
+        requestTreeRefresh()
+    }
+
+    /** Deletes a session with every chat in it. There is no undo. */
+    public suspend fun deleteSession(sessionId: String) {
+        actor.call(Ops.deleteSession(sessionId))
+        requestTreeRefresh()
+    }
+
+    public suspend fun settleSession(sessionId: String) {
+        actor.call(Ops.settleSession(sessionId))
+        requestTreeRefresh()
+    }
+
+    public suspend fun unsettleSession(sessionId: String) {
+        actor.call(Ops.unsettleSession(sessionId))
+        requestTreeRefresh()
+    }
+
+    public suspend fun setSessionAutoSettle(sessionId: String, enabled: Boolean) {
+        actor.call(Ops.setSessionAutoSettle(sessionId, enabled))
+        requestTreeRefresh()
+    }
+
+    /** Reads the rules into [autoSettleSettings]. */
+    public suspend fun loadAutoSettleSettings() {
+        autoSettleCall(Ops.autoSettleSettings())
+    }
+
+    /** Changes only the rules given; [autoSettleSettings] then holds all of them. */
+    public suspend fun setAutoSettleSettings(
+        afterDays: Ops.AfterDays? = null,
+        onMerge: Boolean? = null,
+        keepPullRequests: Boolean? = null,
+    ) {
+        autoSettleCall(Ops.setAutoSettleSettings(afterDays, onMerge, keepPullRequests), write = true)
+    }
+
+    /**
+     * A [background] read reports failure only by marking the rules stale,
+     * and only when no newer request has been made since it started.
+     */
+    private suspend fun autoSettleCall(
+        request: kotlinx.serialization.json.JsonObject,
+        background: Boolean = false,
+        counted: Boolean = false,
+        write: Boolean = false,
+    ) {
+        if (!counted) _autoSettleInFlight.update { it + 1 }
+        try {
+            autoSettleWanted.value = true
+            val generation = _sessionGeneration.value
+            val broadcasts = autoSettleBroadcasts.value
+            val call = autoSettleCalls.updateAndGet { it + 1 }
+            val rules = try {
+                val value = actor.call(request)
+                actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // Any failure, in the foreground or not, leaves the rules shown
+                // possibly old until a newer request's answer is shown.
+                // Only the newest failure counts: an older one finishing last
+                // must not replace its error.
+                autoSettleLock.withLock {
+                    if (write && generation == _sessionGeneration.value && call > autoSettleWriteFailed) {
+                        autoSettleWriteFailed = call
+                        if (call > autoSettleWriteSucceeded) {
+                            _autoSettleWriteError.value = error.message ?: "The change was not made"
+                        }
+                    }
+                    if (generation == _sessionGeneration.value && call > autoSettleFailedCall) {
+                        autoSettleFailedCall = call
+                        if (call > autoSettleAppliedCall) {
+                            _autoSettleStale.value = true
+                            // A background read's failure is told by the stale mark alone.
+                            if (!background) _autoSettleError.value = error.message ?: "The host did not answer"
+                        }
+                    }
+                }
+                if (!background) throw error
+                return
+            }
+            // Otherwise the read that broadcast started decides the value.
+            // Only an answer to a newer request than the one shown: an older
+            // reply arriving last must not bring back older rules.
+            autoSettleLock.withLock {
+                if (write && generation == _sessionGeneration.value && call > autoSettleWriteSucceeded) {
+                    autoSettleWriteSucceeded = call
+                    if (call > autoSettleWriteFailed) _autoSettleWriteError.value = null
+                }
+                if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value &&
+                    call > autoSettleAppliedCall
+                ) {
+                    _autoSettleSettings.value = rules
+                    autoSettleAppliedCall = call
+                    if (call > autoSettleFailedCall) {
+                        _autoSettleStale.value = false
+                        _autoSettleError.value = null
+                    }
+                }
+            }
+        } finally {
+            _autoSettleInFlight.update { it - 1 }
+        }
+    }
+
+    public suspend fun renameFolder(folderId: String, name: String) {
+        actor.call(Ops.renameFolder(folderId, name))
+        requestTreeRefresh()
+    }
+
+    /** Removes a project from xd; the host moves its files to the workspace trash. */
+    public suspend fun trashFolder(folderId: String) {
+        actor.call(Ops.trashFolder(folderId))
+        requestTreeRefresh()
     }
 
     public suspend fun createChat(

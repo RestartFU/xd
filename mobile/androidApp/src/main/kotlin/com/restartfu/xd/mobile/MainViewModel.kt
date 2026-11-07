@@ -13,10 +13,12 @@ import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.parsePairingInvitation
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
+import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
 import com.restartfu.xd.protocol.ChatOption
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.Limits
+import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.store.ChatSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
@@ -65,6 +67,27 @@ data class DraftPrompt(val id: Long, val text: String)
 /** The most prompt buttons one editor offers. */
 const val MAX_SHORTCUTS = 24
 
+/** A session the user just settled, which the app offers to bring back. */
+data class SettledNotice(
+    val sessionId: String,
+    val title: String,
+    val serial: Long,
+    /** The paired host it was settled on; Undo goes nowhere else. */
+    val generation: Long = 0,
+)
+
+/** The queue as a queued message was opened on, and the host's revision of it. */
+data class OpenedQueue(val messages: List<String>, val revision: Long?)
+
+/** A queued message open for editing: its place, its text, and the queue around it. */
+data class OpenedMessage(
+    val index: Int,
+    val text: String,
+    val queue: OpenedQueue,
+    /** The edit in progress, kept here so no message text goes into saved state. */
+    val draft: String = text,
+)
+
 data class CreatedDirectSession(
     val projectId: String,
     val chatId: String,
@@ -104,6 +127,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _createdDirectSession.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
+    val renamingChat: StateFlow<Boolean> = _renamingChat.asStateFlow()
+    private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
+    private var settledSerial = 0L
+    val settledNotice: StateFlow<SettledNotice?> = _settledNotice.asStateFlow()
+    /** Auto-settle requests still waiting on the host, including reads a broadcast started. */
+    val autoSettleBusy: StateFlow<Int> = client.autoSettleInFlight
+
+    /** The connected host's rules; the client keeps them current and clears them on forgetting. */
+    val autoSettle: StateFlow<AutoSettleSettingsReply?> = client.autoSettleSettings
+    /** The client orders failures and answers by request, so a superseded failure never shows. */
+    val autoSettleError: StateFlow<String?> = client.autoSettleError
+    /** A change that failed, kept until a newer change succeeds; a read does not clear it. */
+    val autoSettleWriteError: StateFlow<String?> = client.autoSettleWriteError
+    val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
+
+    init {
+        viewModelScope.launch {
+            client.sessionGeneration.collect {
+                // An Undo offered for another host must not reach this one.
+                _settledNotice.value = null
+            }
+        }
+    }
     val shortcutEditor: StateFlow<ShortcutEditorState?> = _shortcutEditor.asStateFlow()
     private val _host = MutableStateFlow<HostUpdateReply?>(null)
     private val _hostError = MutableStateFlow<String?>(null)
@@ -330,6 +376,105 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Runs one tree change on the host, reporting a refusal where the app shows errors. */
+    private fun treeAction(failure: String, action: suspend () -> Unit) {
+        _error.value = null
+        viewModelScope.launch {
+            try {
+                action()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _error.value = error.message ?: failure
+            }
+        }
+    }
+
+    /**
+     * Moves a session to the Settled shelf. The host refuses while one of its
+     * chats is running, has a queued message, or waits on an approval, and
+     * says why.
+     */
+    fun settleSession(sessionId: String, title: String) = treeAction("Could not settle the session") {
+        val generation = client.sessionGeneration.value
+        client.settleSession(sessionId)
+        if (generation == client.sessionGeneration.value) {
+            _settledNotice.value = SettledNotice(sessionId, title, ++settledSerial, generation)
+        }
+    }
+
+    /** Brings back what [notice] settled, only on the host it was settled on. */
+    fun undoSettle(notice: SettledNotice) {
+        if (notice.generation == client.sessionGeneration.value) unsettleSession(notice.sessionId)
+    }
+
+    fun consumeSettledNotice(notice: SettledNotice) {
+        _settledNotice.compareAndSet(notice, null)
+    }
+
+    fun unsettleSession(sessionId: String) = treeAction("Could not bring the session back") {
+        client.unsettleSession(sessionId)
+    }
+
+    fun setSessionAutoSettle(sessionId: String, enabled: Boolean) =
+        treeAction("Could not change auto-settle for the session") {
+            client.setSessionAutoSettle(sessionId, enabled)
+        }
+
+    fun renameSession(sessionId: String, title: String) = treeAction("Could not rename the session") {
+        client.renameSession(sessionId, title)
+    }
+
+    fun deleteSession(sessionId: String) = treeAction("Could not delete the session") {
+        client.deleteSession(sessionId)
+    }
+
+    fun renameProject(folderId: String, name: String) = treeAction("Could not rename the project") {
+        client.renameFolder(folderId, name)
+    }
+
+    fun deleteProject(folderId: String) = treeAction("Could not delete the project") {
+        client.trashFolder(folderId)
+    }
+
+    /** Reads the rules on opening Settings, leaving any failed change shown. */
+    fun refreshAutoSettle() = autoSettleRequest("Could not read the auto-settle rules") {
+        client.loadAutoSettleSettings()
+    }
+
+    /** Reads the rules again; pressed by the person, it also acknowledges a failed change. */
+    fun loadAutoSettle() = autoSettleRequest("Could not read the auto-settle rules") {
+        client.dismissAutoSettleWriteError()
+        client.loadAutoSettleSettings()
+    }
+
+    /** Changes one auto-settle rule; the host answers with all of them. */
+    fun setAutoSettle(
+        afterDays: Ops.AfterDays? = null,
+        onMerge: Boolean? = null,
+        keepPullRequests: Boolean? = null,
+    ) = autoSettleRequest("Could not change the auto-settle rules") {
+        client.setAutoSettleSettings(afterDays = afterDays, onMerge = onMerge, keepPullRequests = keepPullRequests)
+    }
+
+    /**
+     * The rules themselves arrive through [autoSettle]; this only reports
+     * whether the newest request failed, so an older failure cannot cover a
+     * later success.
+     */
+    /** The client records the outcome, in request order, through [autoSettleError]. */
+    private fun autoSettleRequest(failure: String, request: suspend () -> Unit) {
+        viewModelScope.launch {
+            try {
+                request()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                // Already reported by the client as $failure, unless superseded.
+            }
+        }
+    }
+
     fun openShortcutEditor(folderId: String?, title: String) {
         val opened = ShortcutEditorState(folderId = folderId, title = title, opening = ++shortcutOpenings)
         _shortcutEditor.value = opened
@@ -485,6 +630,32 @@ class ChatViewModel(
     private val _draft = MutableStateFlow("")
     private val _attachments = MutableStateFlow(emptyList<Attachment>())
     private val _attachmentError = MutableStateFlow<String?>(null)
+    private val _queueNotice = MutableStateFlow<String?>(null)
+    private val _openQueued = MutableStateFlow<OpenedMessage?>(null)
+
+    /**
+     * The queued message being edited, with the queue it was opened on. Kept
+     * here, not in saved state: it survives rotation, and a long queue never
+     * has to fit in the activity's saved state.
+     */
+    val openQueued: StateFlow<OpenedMessage?> = _openQueued.asStateFlow()
+
+    fun openQueuedMessage(index: Int) {
+        val state = state.value
+        val text = state.queue.getOrNull(index) ?: return
+        _openQueued.value = OpenedMessage(index, text, OpenedQueue(state.queue, state.queueRevision))
+    }
+
+    fun closeQueuedMessage() {
+        _openQueued.value = null
+    }
+
+    fun editQueuedDraft(draft: String) {
+        _openQueued.update { it?.copy(draft = draft) }
+    }
+
+    /** Why a queued-message action was not done, shown beside the queue. */
+    val queueNotice: StateFlow<String?> = _queueNotice.asStateFlow()
     val attachments: StateFlow<List<Attachment>> = _attachments.asStateFlow()
     val attachmentError: StateFlow<String?> = _attachmentError.asStateFlow()
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
@@ -736,9 +907,10 @@ class ChatViewModel(
         _catalogError.value = null
     }
 
-    fun editQueued(index: Int, oldText: String, text: String) {
+    fun editQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
+        if (!sameQueue(state.value.queue, opened) || opened.revision == null) return
         launchGuarded(_droppingQueued) {
-            session.editQueued(index, oldText, text)
+            session.editQueued(index, oldText, text, opened.revision)
         }
     }
 
@@ -755,11 +927,20 @@ class ChatViewModel(
      * the turn to change or the queue to shrink rather than reporting success
      * while the old one is still winding down.
      */
-    fun steerQueued(index: Int, oldText: String, text: String) {
+    fun steerQueued(index: Int, oldText: String, text: String, opened: OpenedQueue) {
         val before = state.value
+        if (!sameQueue(before.queue, opened) || opened.revision == null) return
         launchGuarded(_steering) {
-            if (text != oldText) session.editQueued(index, oldText, text)
-            session.steerQueued(index, text)
+            // Each step names the queue it expects, so a message another device
+            // moved or dropped meanwhile is never mistaken for an equal one.
+            // An edit the host accepts against a revision raises it by exactly one.
+            val revision = if (text != oldText) {
+                session.editQueued(index, oldText, text, opened.revision)
+                opened.revision?.plus(1)
+            } else {
+                opened.revision
+            }
+            session.steerQueued(index, text, revision)
             withTimeoutOrNull(CANCEL_EVENT_TIMEOUT_MILLIS) {
                 state.first {
                     !it.working ||
@@ -770,10 +951,43 @@ class ChatViewModel(
         }
     }
 
-    fun dropQueued(index: Int) {
-        val before = state.value.queue
+    /**
+     * Moves queued message [index] one place [up] or down. The host checks
+     * both texts, so a queue another device just changed is refused instead
+     * of being shuffled wrongly.
+     */
+    fun moveQueued(index: Int, text: String, up: Boolean, opened: OpenedQueue) {
+        val queue = state.value.queue
+        // Queued messages have no identity but their place, and texts can
+        // repeat, so an action applies only to the queue it was opened on,
+        // which the host checks by revision.
+        if (!sameQueue(queue, opened)) return
+        val anchor = if (up) index - 1 else index + 1
+        if (queue.getOrNull(index) != text || anchor !in queue.indices) return
+        // Swapping two equal messages changes nothing, and the queue would never
+        // look changed for the wait below to end.
+        if (queue[anchor] == text) return
+        if (opened.revision == null) return
         launchGuarded(_droppingQueued) {
-            session.dropQueued(index)
+            session.reorderQueued(index, text, anchor, queue[anchor], after = !up, revision = opened.revision)
+            withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
+                state.first { it.queue != queue }
+            }
+        }
+    }
+
+    /** Continues a turn that was stopped, cut off, or ended by a usage limit. */
+    fun resumeTurn() {
+        if (!state.value.resumable || state.value.working) return
+        launchGuarded(_sending) { session.resumeTurn() }
+    }
+
+    fun dropQueued(index: Int, text: String, opened: OpenedQueue) {
+        val before = state.value.queue
+        if (!sameQueue(before, opened) || before.getOrNull(index) != text) return
+        if (opened.revision == null) return
+        launchGuarded(_droppingQueued) {
+            session.dropQueued(index, text, opened.revision)
             withTimeoutOrNull(QUEUE_EVENT_TIMEOUT_MILLIS) {
                 state.first { it.queue != before }
             }
@@ -782,6 +996,23 @@ class ChatViewModel(
 
     fun loadOlder() {
         launchGuarded { session.loadOlder() }
+    }
+
+    /** False, with a notice saying so, when the queue moved on since a message was opened. */
+    private fun sameQueue(queue: List<String>, opened: OpenedQueue): Boolean {
+        // The revision too: equal texts can stand for a queue that changed.
+        val revisionHeld = opened.revision == null || state.value.queueRevision == opened.revision
+        if (queue == opened.messages && revisionHeld) {
+            _queueNotice.value = null
+            return true
+        }
+        _queueNotice.value = QUEUE_CHANGED
+        return false
+    }
+
+    /** The queue changed while a message was open, so its dialog closed. */
+    fun queueChanged() {
+        _queueNotice.value = QUEUE_CHANGED
     }
 
     private fun launchGuarded(
@@ -871,3 +1102,5 @@ class ChatViewModel(
         current[index].png.bytes.contentEquals(synced[index].bytes)
     }
 }
+
+private const val QUEUE_CHANGED = "The queue changed on another device. Open the message again."

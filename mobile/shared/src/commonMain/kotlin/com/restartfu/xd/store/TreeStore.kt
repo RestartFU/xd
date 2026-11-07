@@ -119,8 +119,11 @@ internal class TreeStore(
                         },
                         sessions = reply.sessions.map {
                             WorkspaceSession(it.id, it.folder, it.title, it.chats,
-                                it.branch, it.working, it.terminalChat)
+                                it.branch, it.working, it.terminalChat,
+                                settledAt = it.settledAt,
+                                autoSettleDisabled = it.autoSettleDisabled)
                         },
+                        settlement = reply.settlement,
                         chats = reply.chats.map {
                             ChatSummary(
                                 id = it.id,

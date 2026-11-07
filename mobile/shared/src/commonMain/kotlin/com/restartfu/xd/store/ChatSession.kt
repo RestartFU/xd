@@ -93,18 +93,32 @@ public class ChatSession internal constructor(
         images: List<PngAttachment>? = null,
     ): Unit = core.call(Ops.setDraft(core.chatId, text, images))
 
-    public suspend fun dropQueued(index: Int? = null): Unit =
-        core.call(Ops.dropQueue(core.chatId, index))
+    public suspend fun dropQueued(index: Int? = null, text: String? = null, revision: Long? = null): Unit =
+        core.call(Ops.dropQueue(core.chatId, index, text, revision))
 
     public suspend fun editQueued(
         index: Int,
         oldText: String,
         text: String,
-    ): Unit = core.call(Ops.editQueue(core.chatId, index, oldText, text))
+        revision: Long? = null,
+    ): Unit = core.call(Ops.editQueue(core.chatId, index, oldText, text, revision))
 
     /** Redirects the running turn to a queued message; see [Ops.steerQueue]. */
-    public suspend fun steerQueued(index: Int, text: String): Unit =
-        core.call(Ops.steerQueue(core.chatId, index, text))
+    public suspend fun steerQueued(index: Int, text: String, revision: Long? = null): Unit =
+        core.call(Ops.steerQueue(core.chatId, index, text, revision))
+
+    /** Moves queued message [source] next to [anchor]; see [Ops.reorderQueue]. */
+    public suspend fun reorderQueued(
+        source: Int,
+        sourceText: String,
+        anchor: Int,
+        anchorText: String,
+        after: Boolean,
+        revision: Long? = null,
+    ): Unit = core.call(Ops.reorderQueue(core.chatId, source, sourceText, anchor, anchorText, after, revision))
+
+    /** Continues the chat's cut-short turn; see [Ops.resumeTurn]. */
+    public suspend fun resumeTurn(): Unit = core.call(Ops.resumeTurn(core.chatId))
 
     public suspend fun loadOlder(): Unit = core.loadOlder()
 
@@ -520,7 +534,7 @@ internal class ChatSessionCore(
             }
             "queued" -> {
                 val queue = value.requiredStringArray("queue") ?: return
-                apply(TranscriptInput.Queued(queue), event.sequence)
+                apply(TranscriptInput.Queued(queue, value.longOrNull("queue_revision")), event.sequence)
             }
             "draft" -> {
                 val text = (value["draft"] as? JsonPrimitive)?.contentOrNull ?: return

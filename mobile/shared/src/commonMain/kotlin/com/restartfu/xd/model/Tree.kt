@@ -26,6 +26,8 @@ public data class WorkspaceSession(
     val branch: String? = null,
     val working: Boolean = false,
     val terminalChatId: String = "session:$id",
+    val settledAt: Long? = null,
+    val autoSettleDisabled: Boolean = false,
 )
 
 public data class TreeSnapshot(
@@ -34,4 +36,6 @@ public data class TreeSnapshot(
     val loading: Boolean = false,
     val error: String? = null,
     val sessions: List<WorkspaceSession> = emptyList(),
+    /** The connected host can settle sessions. */
+    val settlement: Boolean = false,
 )

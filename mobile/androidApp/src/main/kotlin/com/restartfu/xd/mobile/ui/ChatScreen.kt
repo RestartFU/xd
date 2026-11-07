@@ -90,6 +90,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.AndroidSpeechSpeaker
 import com.restartfu.xd.mobile.ChatViewModel
+import com.restartfu.xd.mobile.OpenedQueue
 import com.restartfu.xd.mobile.DiffViewModel
 import com.restartfu.xd.mobile.FilesViewModel
 import com.restartfu.xd.mobile.MobileSettings
@@ -469,24 +470,54 @@ private fun Composer(
     val attachments by model.attachments.collectAsStateWithLifecycle()
     val catalog by model.catalog.collectAsStateWithLifecycle()
     val attachmentError by model.attachmentError.collectAsStateWithLifecycle()
-    var editing by remember { mutableStateOf<Pair<Int, String>?>(null) }
+    // The queue as it was when a message was opened: actions apply to that
+    // queue only, and the dialog closes if another device changes it.
+    // In the view model, so an open queued message survives rotating the phone.
+    val opened by model.openQueued.collectAsStateWithLifecycle()
+    val editing = opened?.let { Triple(it.index, it.text, it.queue) }
+    val openDraft = opened?.draft
+    val queueNotice by model.queueNotice.collectAsStateWithLifecycle()
+    LaunchedEffect(state.queue, state.queueRevision) {
+        val opened = editing ?: return@LaunchedEffect
+        val revision = opened.third.revision
+        if (state.queue != opened.third.messages || (revision != null && state.queueRevision != revision)) {
+            model.closeQueuedMessage()
+            model.queueChanged()
+        }
+    }
 
-    editing?.let { (index, original) ->
+    // Another queue action still out would make these do nothing, so they wait.
+    val queueBusy by model.queueBusy.collectAsStateWithLifecycle()
+    editing?.let { (index, original, opened) ->
+        // Queued messages have no identity but their place, and texts can
+        // repeat, so changing one needs a host that keeps a queue revision.
+        val identifiable = opened.revision != null
         QueuedMessageDialog(
+            draft = openDraft ?: original,
+            onDraft = model::editQueuedDraft,
             original = original,
+            busy = queueBusy || steering,
             working = state.working,
-            onDismiss = { editing = null },
+            canMoveUp = index > 0 && identifiable,
+            canMoveDown = index < state.queue.lastIndex && identifiable,
+            canDrop = identifiable,
+            canEdit = identifiable,
+            onMove = { up ->
+                model.closeQueuedMessage()
+                model.moveQueued(index, original, up, opened)
+            },
+            onDismiss = { model.closeQueuedMessage() },
             onSave = { text ->
-                editing = null
-                if (text != original) model.editQueued(index, original, text)
+                model.closeQueuedMessage()
+                if (text != original) model.editQueued(index, original, text, opened)
             },
             onSteer = { text ->
-                editing = null
-                model.steerQueued(index, original, text)
+                model.closeQueuedMessage()
+                model.steerQueued(index, original, text, opened)
             },
             onDrop = {
-                editing = null
-                model.dropQueued(index)
+                model.closeQueuedMessage()
+                model.dropQueued(index, original, opened)
             },
         )
     }
@@ -619,6 +650,9 @@ private fun Composer(
                 }
             }
         }
+        queueNotice?.let {
+            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
         if (state.queue.isNotEmpty()) {
             Row(
                 modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -629,7 +663,7 @@ private fun Composer(
                         // Tapping opens the controls rather than dropping:
                         // discarding a queued message on a stray tap, with no
                         // undo, is not a good trade for one less tap.
-                        onClick = { editing = index to queued },
+                        onClick = { model.openQueuedMessage(index) },
                         label = {
                             Text(
                                 queued,
@@ -704,13 +738,23 @@ private fun Composer(
                     // One round button that sends and then stops, as on the
                     // desktop: an arrow in the accent while it is yours to send,
                     // a neutral stop while the turn is the assistant's to finish.
+                    // With nothing typed after a turn was cut short, the same button
+                    // continues it, as the desktop's play button does.
+                    val resuming = !state.working && state.resumable &&
+                        composer.isBlank() && attachments.isEmpty()
                     FilledIconButton(
-                        onClick = { if (state.working) model.cancel() else model.send() },
-                        enabled = if (state.working) {
-                            !cancelling && !steering
-                        } else {
+                        onClick = {
+                            when {
+                                state.working -> model.cancel()
+                                resuming -> model.resumeTurn()
+                                else -> model.send()
+                            }
+                        },
+                        enabled = when {
+                            state.working -> !cancelling && !steering
+                            resuming -> !sending
                             // The host accepts text, images, or both.
-                            !sending && (composer.isNotBlank() || attachments.isNotEmpty())
+                            else -> !sending && (composer.isNotBlank() || attachments.isNotEmpty())
                         },
                         modifier = Modifier.size(48.dp),
                         colors = if (state.working) {
@@ -727,15 +771,20 @@ private fun Composer(
                     ) {
                         Icon(
                             painter = painterResource(
-                                if (state.working) R.drawable.ic_stop else R.drawable.ic_send,
+                                when {
+                                    state.working -> R.drawable.ic_stop
+                                    resuming -> R.drawable.ic_play
+                                    else -> R.drawable.ic_send
+                                },
                             ),
                             contentDescription = when {
                                 cancelling -> "Stopping"
                                 state.working -> "Stop"
                                 sending -> "Sending"
+                                resuming -> "Continue where it left off"
                                 else -> "Send"
                             },
-                            modifier = Modifier.size(if (state.working) 16.dp else 20.dp),
+                            modifier = Modifier.size(if (state.working || resuming) 16.dp else 20.dp),
                         )
                     }
                 }
@@ -754,13 +803,23 @@ private fun Composer(
 @Composable
 private fun QueuedMessageDialog(
     original: String,
+    /** The edit in progress, held by the view model with the open message. */
+    draft: String,
+    onDraft: (String) -> Unit,
+    /** A queue action is still out; actions wait for it rather than being dropped. */
+    busy: Boolean,
     working: Boolean,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    canDrop: Boolean,
+    canEdit: Boolean,
+    onMove: (up: Boolean) -> Unit,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit,
     onSteer: (String) -> Unit,
     onDrop: () -> Unit,
 ) {
-    var text by rememberSaveable(original) { mutableStateOf(original) }
+    val text = draft
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -769,12 +828,32 @@ private fun QueuedMessageDialog(
             Column {
                 OutlinedTextField(
                     value = text,
-                    onValueChange = { text = it },
+                    onValueChange = onDraft,
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Message") },
                     minLines = 2,
                     maxLines = 6,
                 )
+                if (canMoveUp || canMoveDown) {
+                    // Reordering moves the message as it was queued; an edit
+                    // still in the field above is not sent with it.
+                    Row {
+                        TextButton(onClick = { onMove(true) }, enabled = !busy && canMoveUp && text == original) {
+                            Text("Move earlier")
+                        }
+                        TextButton(onClick = { onMove(false) }, enabled = !busy && canMoveDown && text == original) {
+                            Text("Move later")
+                        }
+                    }
+                }
+                if (!canEdit) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Update the host to change queued messages from here.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
                 if (working) {
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -790,18 +869,18 @@ private fun QueuedMessageDialog(
                 if (working) {
                     TextButton(
                         onClick = { onSteer(text) },
-                        enabled = text.isNotBlank(),
+                        enabled = !busy && canEdit && text.isNotBlank(),
                     ) { Text("Steer") }
                 }
                 TextButton(
                     onClick = { onSave(text) },
-                    enabled = text.isNotBlank(),
+                    enabled = !busy && canEdit && text.isNotBlank(),
                 ) { Text("Save") }
             }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = onDrop) { Text("Drop") }
+                TextButton(onClick = onDrop, enabled = !busy && canDrop) { Text("Drop") }
                 TextButton(onClick = onDismiss) { Text("Cancel") }
             }
         },

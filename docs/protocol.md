@@ -603,7 +603,13 @@ with the same composer.
 ```
 
 `queue` requires non-empty `text`. `drop-queue` without `index` clears the whole
-queue. All four broadcast a `queued` event carrying the new queue, so every
+queue. With `index`, an optional `text` names the message the client saw there;
+the host refuses the drop if a different message now holds that place. `chat` replies and `queued` events carry the queue's `queue_revision`, which every change
+to the queue increases. `drop-queue`, `edit-queue`, `steer-queue`, and `reorder-queue` take
+an optional `queue_revision`, the one the client saw; the host refuses any of them if the
+queue has changed since. Messages have no identity but their place and texts can repeat,
+so this is what keeps one of two equal messages from standing in for the other, even
+after changes that leave the same texts behind. All four broadcast a `queued` event carrying the new queue, so every
 attached device sees what is waiting and either can steer it.
 
 `steer-queue` takes `chat`, `index`, and the `text` the client saw at that

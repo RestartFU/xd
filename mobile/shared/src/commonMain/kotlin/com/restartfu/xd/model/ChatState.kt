@@ -49,10 +49,14 @@ public data class ChatState(
     val plan: Boolean = false,
     val fast: Boolean = false,
     val queue: List<String> = emptyList(),
+    /** The host's count of changes to [queue]; null from hosts that keep none. */
+    val queueRevision: Long? = null,
     val draft: String = "",
     val draftRevision: Long = 0,
     val draftAttachments: List<PngAttachment> = emptyList(),
     val working: Boolean = false,
+    /** The last turn was cut short, so the composer can offer to continue it. */
+    val resumable: Boolean = false,
     val label: String? = null,
     /** Live turn this state reflects, and how far into it we have applied. */
     val turnEpoch: String = "",

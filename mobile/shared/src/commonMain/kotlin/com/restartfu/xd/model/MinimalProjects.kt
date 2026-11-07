@@ -30,10 +30,29 @@ public data class MinimalSession(
     val working: Boolean,
     val chatIds: List<String> = listOf(id),
     val terminalChatId: String = id,
+    /** Seconds since the epoch when the session was settled; null while it is active. */
+    val settledAt: Long? = null,
+    /** Kept out of the host's automatic settling. */
+    val autoSettleDisabled: Boolean = false,
+) {
+    val settled: Boolean get() = settledAt != null
+
+    /**
+     * The host groups chats into sessions. Older hosts show each chat as its
+     * own session under the chat's id, so session operations do not apply.
+     */
+    val grouped: Boolean get() = terminalChatId.startsWith("session:")
+}
+
+/** A settled session on the shelf, with the project it belongs to. */
+public data class SettledSession(
+    val project: MinimalProject,
+    val session: MinimalSession,
 )
 
+/** Projects count only active sessions: settled ones sit on the shelf instead. */
 public fun TreeSnapshot.minimalProjects(): List<MinimalProject> = folders.map { folder ->
-    val sessions = minimalSessions(folder.id)
+    val sessions = minimalSessions(folder.id).filterNot(MinimalSession::settled)
     MinimalProject(
         id = folder.id,
         name = folder.name,
@@ -62,6 +81,17 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
             working = grouped.any { it.working || it.terminalWorking },
             chatIds = orderedIds,
             terminalChatId = workspace?.terminalChatId ?: first.id,
+            settledAt = workspace?.settledAt,
+            autoSettleDisabled = workspace?.autoSettleDisabled ?: false,
         )
     }
 }
+
+/** A project's sessions that are not settled, in the host's order. */
+public fun TreeSnapshot.activeSessions(projectId: String): List<MinimalSession> =
+    minimalSessions(projectId).filterNot(MinimalSession::settled)
+
+/** Every settled session, most recently settled first, as the desktop's shelf lists them. */
+public fun TreeSnapshot.settledSessions(): List<SettledSession> = minimalProjects().flatMap { project ->
+    minimalSessions(project.id).filter(MinimalSession::settled).map { SettledSession(project, it) }
+}.sortedByDescending { it.session.settledAt }
