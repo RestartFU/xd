@@ -46,10 +46,12 @@ public class MobileSettings(context: Context) {
     public fun resetAttempt(accountKey: String): String? =
         preferences.getString(KEY_RESET_ATTEMPT + accountKey, null)
 
-    /** Written before the request is sent, synchronously, so it cannot be lost. */
-    public fun saveResetAttempt(accountKey: String, attempt: String) {
+    /**
+     * Written synchronously before the request is sent; false if it could
+     * not be stored, in which case nothing may be sent.
+     */
+    public fun saveResetAttempt(accountKey: String, attempt: String): Boolean =
         preferences.edit().putString(KEY_RESET_ATTEMPT + accountKey, attempt).commit()
-    }
 
     public fun clearResetAttempt(accountKey: String, attempt: String) {
         if (resetAttempt(accountKey) == attempt) {

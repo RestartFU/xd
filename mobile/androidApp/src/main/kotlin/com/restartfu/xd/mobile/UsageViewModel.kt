@@ -27,6 +27,8 @@ data class UsageState(
     val limitsError: String? = null,
     val resetting: Boolean = false,
     val resetMessage: String? = null,
+    /** Accounts with a reset attempt the host has not settled yet. */
+    val unsettledResets: Set<String> = emptySet(),
 )
 
 /**
@@ -99,7 +101,15 @@ class UsageViewModel(
         viewModelScope.launch {
             try {
                 val accounts = client.usageLimits(timeZone)
-                if (read == limitReads) _state.update { it.copy(accounts = accounts, limitsLoading = false) }
+                if (read == limitReads) {
+                    _state.update {
+                        it.copy(
+                            accounts = accounts,
+                            limitsLoading = false,
+                            unsettledResets = unsettled(accounts),
+                        )
+                    }
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -118,14 +128,24 @@ class UsageViewModel(
         // Each account's unsettled attempt is kept on disk until the host
         // settles it, so retrying after a lost answer, another account, or the
         // app being killed cannot spend a second credit, as the desktop keeps them.
-        val attempt = settings.resetAttempt(accountKey)
-            ?: UUID.randomUUID().toString().also { settings.saveResetAttempt(accountKey, it) }
-        _state.update { it.copy(resetting = true, resetMessage = null) }
+        val attempt = settings.resetAttempt(accountKey) ?: UUID.randomUUID().toString().also { fresh ->
+            if (!settings.saveResetAttempt(accountKey, fresh)) {
+                _state.update { it.copy(resetMessage = "Could not keep a record of the reset, so it was not sent.") }
+                return
+            }
+        }
+        _state.update { it.copy(resetting = true, resetMessage = null, unsettledResets = it.unsettledResets + accountKey) }
         viewModelScope.launch {
             try {
                 val outcome = client.consumeResetCredit(accountKey, attempt)
                 settings.clearResetAttempt(accountKey, attempt)
-                _state.update { it.copy(resetting = false, resetMessage = resetOutcome(outcome)) }
+                _state.update {
+                    it.copy(
+                        resetting = false,
+                        resetMessage = resetOutcome(outcome),
+                        unsettledResets = it.unsettledResets - accountKey,
+                    )
+                }
                 readLimits()
             } catch (error: CancellationException) {
                 throw error
@@ -135,6 +155,9 @@ class UsageViewModel(
             }
         }
     }
+
+    private fun unsettled(accounts: List<UsageAccountReply>): Set<String> =
+        accounts.mapNotNull { it.accountKey }.filter { settings.resetAttempt(it) != null }.toSet()
 
     suspend fun prices(): UsagePricesReply = client.usagePrices()
 

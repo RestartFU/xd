@@ -104,7 +104,14 @@ internal fun UsageContent(model: UsageViewModel) {
             accounts == null -> Text("Reading limits…", color = MaterialTheme.colorScheme.onSurfaceVariant)
             accounts.isEmpty() -> Text("No providers", color = MaterialTheme.colorScheme.onSurfaceVariant)
             else -> accounts.forEach { account ->
-                LimitsCard(account, resetting = state.resetting, onReset = { confirmingReset = account })
+                val unsettled = account.accountKey in state.unsettledResets
+                LimitsCard(
+                    account,
+                    resetting = state.resetting,
+                    unsettled = unsettled,
+                    // Checking an earlier attempt again spends nothing new, so it needs no question.
+                    onReset = { if (unsettled) account.accountKey?.let(model::useResetCredit) else confirmingReset = account },
+                )
             }
         }
         state.limitsError?.takeIf { accounts != null }?.let { ErrorLine(it, model::readLimits) }
@@ -236,7 +243,7 @@ private fun CostChart(summary: UsageSummaryReply) {
 }
 
 @Composable
-private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, onReset: () -> Unit) {
+private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled: Boolean, onReset: () -> Unit) {
     val signals = LocalXdSignals.current
     Column(
         Modifier
@@ -276,15 +283,25 @@ private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, onReset: 
                 window.resetsAtLabel?.let { Text("Resets $it", color = signals.faint, style = MaterialTheme.typography.labelSmall) }
             }
         }
-        account.resetCredits?.takeIf { it.availableCount > 0 && account.accountKey != null }?.let { credits ->
+        val credits = account.resetCredits?.availableCount ?: 0
+        if (account.accountKey != null && (unsettled || credits > 0)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "${credits.availableCount} reset credit${if (credits.availableCount == 1) "" else "s"}",
+                    // An earlier attempt's answer was lost; asking again settles that
+                    // same attempt, whatever credits are left now.
+                    if (unsettled) "A reset is waiting for the host's answer."
+                    else "$credits reset credit${if (credits == 1) "" else "s"}",
                     modifier = Modifier.weight(1f),
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedButton(onClick = onReset, enabled = !resetting) {
-                    Text(if (resetting) "Resetting…" else "Use a credit")
+                    Text(
+                        when {
+                            resetting -> "Resetting…"
+                            unsettled -> "Check again"
+                            else -> "Use a credit"
+                        },
+                    )
                 }
             }
         }
