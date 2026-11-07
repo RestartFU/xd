@@ -3795,15 +3795,16 @@ impl StateStore {
         Ok(changed == 1)
     }
 
-    /// The branch checked out in `workdir`. `None` outside a repository and on
-    /// a detached HEAD, which cannot have a pull request of their own.
+    /// The branch checked out in `workdir`, which may be anywhere inside the
+    /// repository. `None` outside a repository and on a detached HEAD, which
+    /// cannot have a pull request of their own.
     pub(crate) fn checked_out_branch(&self, workdir: &Path) -> Option<String> {
-        let current = normalize_existing_path(workdir);
-        list_git_worktrees(workdir)
-            .ok()?
-            .into_iter()
-            .find(|worktree| normalize_existing_path(&worktree.path) == current)?
-            .branch
+        let (status, stdout, _) =
+            run_git(workdir, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+        status
+            .success()
+            .then(|| String::from_utf8_lossy(&stdout).trim().to_owned())
+            .filter(|branch| !branch.is_empty())
     }
 
     /// The pull request of the branch checked out in `workdir`, if it has one.

@@ -779,6 +779,53 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_session_in_a_subdirectory_still_answers_for_its_branch() {
+        with_fake_gh(
+            "echo '{\"state\":\"OPEN\",\"finished_at\":null}'",
+            |fixture, workdir| {
+                let nested = workdir.join("packages/app");
+                std::fs::create_dir_all(&nested).unwrap();
+                fixture.sql(&format!(
+                    "UPDATE chats SET workdir = '{}'",
+                    nested.display()
+                ));
+                assert_eq!(
+                    fixture.store.checked_out_branch(&nested).as_deref(),
+                    Some("feature")
+                );
+                fixture
+                    .store
+                    .set_auto_settle_settings(&json!({"keep_pull_requests": true}))
+                    .unwrap();
+                fixture.age(30);
+                assert_eq!(fixture.sweep(), 0, "its pull request keeps it");
+            },
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_detached_head_or_no_repository_has_no_branch() {
+        with_fake_gh("exit 1", |fixture, workdir| {
+            let detached = std::process::Command::new("git")
+                .args(["checkout", "-q", "--detach"])
+                .current_dir(workdir)
+                .status()
+                .unwrap();
+            assert!(detached.success());
+            assert_eq!(fixture.store.checked_out_branch(workdir), None);
+        });
+        let fixture = Fixture::new();
+        assert_eq!(
+            fixture
+                .store
+                .checked_out_branch(&fixture.root.join("Workspaces")),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_branch_switched_during_the_lookup_discards_its_answer() {
         let merged_at = now_seconds() + 60;
         with_fake_gh(
