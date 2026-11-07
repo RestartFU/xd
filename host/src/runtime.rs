@@ -1346,6 +1346,11 @@ impl TurnRuntime {
                         ) {
                             latest_error = Some(error.to_string());
                         }
+                        // The session has the note now, even if this host dies
+                        // before the turn ends.
+                        if turn.carries_cut_off_note && !background {
+                            let _ = self.inner.store.clear_cut_off_turn(&turn.chat_id);
+                        }
                     }
                     AgentEvent::Commands(commands) => {
                         if let Ok(mut cached) = self.inner.commands.lock() {
@@ -1579,7 +1584,7 @@ impl TurnRuntime {
                 .inner
                 .store
                 .mark_cut_off_turn(&turn.chat_id, &turn.request);
-        } else if turn.carries_cut_off_note && !background && (completed || recorded) {
+        } else if turn.carries_cut_off_note && !background && completed {
             let _ = self.inner.store.clear_cut_off_turn(&turn.chat_id);
         }
         let error = if success {
@@ -2706,6 +2711,7 @@ if [ "$runs" -le 2 ]; then
   sleep 30
 elif [ "$runs" = 3 ]; then
   echo '{{"type":"system","subtype":"init","session_id":"kept"}}'
+  until [ -e "$log.go" ]; do sleep 0.05; done
   echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Answered."}}]}}}}'
   echo '{{"type":"result","subtype":"success","result":"Answered."}}'
   read second
@@ -2788,6 +2794,21 @@ fi
         assert_eq!(notices(), 2, "{:?}", contents(&store, &chat));
 
         send("are you ok?");
+        // The note is delivered with `init`, not when the turn ends: a host that
+        // dies in between must not repeat it.
+        let pending_note = || {
+            rusqlite::Connection::open(root.join("chats.db"))
+                .unwrap()
+                .query_row(
+                    "SELECT cut_off_turn FROM chats WHERE id = ?",
+                    [&chat],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+        };
+        wait_for("the note to be delivered", || pending_note().is_none());
+        assert!(runtime.live_turn(&chat).is_some());
+        fs::write(format!("{}.go", log.display()), "").unwrap();
         wait_for("the answer", || {
             contents(&store, &chat)
                 .iter()
