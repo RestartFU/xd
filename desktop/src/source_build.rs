@@ -402,7 +402,8 @@ fn build_and_install(
 
 /// xd's own repository is public, so fetching it needs no credentials. A user's
 /// `insteadOf` rule that sends GitHub through SSH would otherwise make the update
-/// depend on a key a GUI process often cannot reach, so the longest-match rule
+/// depend on a key that opens without a prompt, which is why the host's update
+/// check avoids `git` altogether. A build needs `git`, so the longest-match rule
 /// here keeps this one URL on HTTPS. Other repositories may be private and keep
 /// the user's rules.
 fn fetch_arguments(checkout: &str, target: &SourceTarget) -> Vec<String> {
@@ -746,6 +747,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_git_failure_reports_what_git_said_and_a_build_failure_keeps_its_exit_code() {
         let (sender, _receiver) = async_channel::bounded(64);
         let control = Arc::new(RunControl {
