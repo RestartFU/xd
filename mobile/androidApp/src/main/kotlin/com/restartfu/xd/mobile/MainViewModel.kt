@@ -220,18 +220,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * dialog until a newer action succeeds. An older failure arriving late, or
      * one from a host since forgotten, is set aside.
      */
-    private fun accountsAction(failure: String, action: suspend () -> Unit) {
+    private fun accountsAction(failure: String, done: (Boolean) -> Unit = {}, action: suspend () -> Unit) {
         val serial = ++accountActions
         val generation = client.sessionGeneration.value
         viewModelScope.launch {
             try {
                 action()
+                done(true)
                 if (generation != client.sessionGeneration.value) return@launch
                 accountActionSucceeded = maxOf(accountActionSucceeded, serial)
                 if (serial > accountActionFailed) _accountsError.value = null
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                done(false)
                 // Nor does it replace a newer action's failure.
                 if (generation != client.sessionGeneration.value || serial < accountActionSucceeded || serial < accountActionFailed) return@launch
                 accountActionFailed = serial
@@ -274,8 +276,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun signIn(provider: String) =
         accountsAction("Could not start signing in") { client.agentAuthAction(Ops.AuthAction.START, provider) }
 
-    fun sendSignInInput(provider: String, input: String) =
-        accountsAction("Could not send that") { client.agentAuthAction(Ops.AuthAction.INPUT, provider, input) }
+    /** [done] hears whether the host took it, so a failed code can be kept and sent again. */
+    fun sendSignInInput(provider: String, input: String, done: (Boolean) -> Unit) =
+        accountsAction("Could not send that", done) { client.agentAuthAction(Ops.AuthAction.INPUT, provider, input) }
 
     fun cancelSignIn(provider: String) =
         accountsAction("Could not cancel signing in") { client.agentAuthAction(Ops.AuthAction.CANCEL, provider) }

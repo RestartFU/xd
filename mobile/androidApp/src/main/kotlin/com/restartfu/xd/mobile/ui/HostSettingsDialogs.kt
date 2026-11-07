@@ -114,6 +114,9 @@ private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
     val openLink = rememberLinkOpener()
     val signingIn = provider.state == "signing-in"
     var input by rememberSaveable(provider.provider) { mutableStateOf("") }
+    var sending by remember { mutableStateOf(false) }
+    // A code belongs to one sign-in; another attempt starts with none.
+    LaunchedEffect(signingIn) { if (!signingIn) input = "" }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 8.dp)) {
@@ -147,14 +150,20 @@ private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
                         modifier = Modifier.weight(1f),
                         placeholder = { Text("Code from the sign-in page") },
                         singleLine = true,
+                        enabled = !sending,
                     )
                     TextButton(
                         onClick = {
-                            model.sendSignInInput(provider.provider, input.trim())
-                            input = ""
+                            val sent = input.trim()
+                            sending = true
+                            // Kept until the host takes it, so a failure can be sent again.
+                            model.sendSignInInput(provider.provider, sent) { taken ->
+                                sending = false
+                                if (taken && input.trim() == sent) input = ""
+                            }
                         },
-                        enabled = input.isNotBlank(),
-                    ) { Text("Send") }
+                        enabled = input.isNotBlank() && !sending,
+                    ) { Text(if (sending) "Sending…" else "Send") }
                 }
             }
         }
