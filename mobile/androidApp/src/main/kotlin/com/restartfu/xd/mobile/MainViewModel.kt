@@ -989,12 +989,15 @@ class ChatViewModel(
      * Asks GitHub, through the host, whether the checked-out branch has a pull
      * request. A failure on the same branch leaves the last answer.
      */
-    fun refreshPullRequest(branch: String?) {
-        // Another branch's pull request is never right, even if this lookup fails.
+    fun refreshPullRequest(branch: String?, fetch: Boolean = true) {
+        // Another branch's pull request is never right, even if this lookup
+        // fails or waits; any lookup still out was for the old branch.
         if (branch != pullRequestBranch) {
             pullRequestBranch = branch
             _pullRequest.value = null
+            pullRequestReads++
         }
+        if (!fetch) return
         val read = ++pullRequestReads
         viewModelScope.launch {
             try {

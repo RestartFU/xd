@@ -496,7 +496,8 @@ private fun MinimalProjectsHome(
     val operationError by model.error.collectAsStateWithLifecycle()
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     var createProject by rememberSaveable { mutableStateOf(false) }
-    var createSession by rememberSaveable { mutableStateOf(false) }
+    // The project the dialog was opened for; it closes if that project goes away.
+    var createSessionIn by rememberSaveable { mutableStateOf<String?>(null) }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
 
     val selected = projects.firstOrNull { it.id == selectedId } ?: projects.firstOrNull()
@@ -599,7 +600,7 @@ private fun MinimalProjectsHome(
             }
             if (selected != null) {
                 ExtendedFloatingActionButton(
-                    onClick = { createSession = true },
+                    onClick = { createSessionIn = selected.id },
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(16.dp),
@@ -623,14 +624,18 @@ private fun MinimalProjectsHome(
             },
         )
     }
-    if (createSession && selected != null) {
+    val creatingIn = projects.firstOrNull { it.id == createSessionIn }
+    LaunchedEffect(createSessionIn, creatingIn == null, loading) {
+        if (createSessionIn != null && creatingIn == null && !loading) createSessionIn = null
+    }
+    if (creatingIn != null) key(creatingIn.id) {
         NewSessionDialog(
-            projectName = selected.name,
-            places = { NewSessionPlaces.load(model.client, selected.id) },
-            onDismiss = { createSession = false },
+            projectName = creatingIn.name,
+            places = { NewSessionPlaces.load(model.client, creatingIn.id) },
+            onDismiss = { createSessionIn = null },
             onCreate = { title, agent, worktree ->
-                createSession = false
-                model.createDirectSession(selected.id, title, agent, worktree = worktree)
+                createSessionIn = null
+                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree)
             },
         )
     }

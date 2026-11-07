@@ -188,7 +188,8 @@ internal fun ChatScreen(
     // A finished turn may have pushed a branch or opened its pull request.
     // So does a branch switched under an idle session.
     LaunchedEffect(state.chatId, state.working, branch) {
-        if (!state.working) model.refreshPullRequest(branch)
+        // While a turn runs the branch may still move, so only forget a stale link.
+        model.refreshPullRequest(branch, fetch = !state.working)
     }
     val listState = rememberLazyListState()
     val items = state.visibleItems
