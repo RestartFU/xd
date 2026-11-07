@@ -6324,7 +6324,9 @@ impl XdDesktop {
     ) {
         let viewport = window.bounds().size;
         let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 216.0).max(8.0));
-        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - 140.0).max(8.0));
+        // Three two-line rows, plus the "Add to …" heading inside a folder.
+        let height = if parent.is_some() { 216.0 } else { 188.0 };
+        let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - height).max(8.0));
         self.sidebar_context_menu = None;
         self.project_add_menu = Some(ProjectAddMenu {
             parent,
