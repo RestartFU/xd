@@ -1206,12 +1206,23 @@ impl HostHandle {
         )
     }
 
-    pub fn git_state(&self, chat_id: &str) -> Result<(), String> {
+    /// With `pull_request_lookup`, also asks about the branch's pull request;
+    /// the event echoes that token so the answer can be matched to this request.
+    pub fn git_state(
+        &self,
+        chat_id: &str,
+        pull_request_lookup: Option<&str>,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": "git-state", "chat": chat_id});
+        if let Some(lookup) = pull_request_lookup {
+            body["pull_request"] = Value::Bool(true);
+            body["request"] = Value::String(lookup.to_owned());
+        }
         self.send(
             RequestKind::GitState {
                 chat_id: chat_id.to_owned(),
             },
-            json!({"op": "git-state", "chat": chat_id}),
+            body,
         )
     }
 

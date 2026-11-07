@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -144,6 +144,7 @@ const PLAY_ICON: &str = "icons/play.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
+const GIT_PULL_REQUEST_ICON: &str = "icons/git-pull-request.svg";
 const TRASH_ICON: &str = "icons/trash.svg";
 const CHEVRON_LEFT_ICON: &str = "icons/chevron-left.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
@@ -1193,6 +1194,86 @@ impl GitStatus {
     }
 }
 
+/// How long the session header trusts what it knows about a pull request. An
+/// agent can open one from a terminal without the app hearing about it.
+const CHAT_PULL_REQUEST_LIFETIME: Duration = Duration::from_secs(60);
+
+/// What a host last said about the pull request of a chat's branch.
+#[derive(Default)]
+struct ChatPullRequest {
+    requested_at: Option<Instant>,
+    lookups: u64,
+    branch: Option<String>,
+    url: Option<String>,
+}
+
+impl ChatPullRequest {
+    fn lookup_due(&self, now: Instant) -> bool {
+        self.requested_at
+            .is_none_or(|at| now.duration_since(at) >= CHAT_PULL_REQUEST_LIFETIME)
+    }
+
+    /// Starts a lookup, superseding any still running, and returns its token.
+    fn start_lookup(&mut self, now: Instant) -> String {
+        self.requested_at = Some(now);
+        self.lookups += 1;
+        self.lookup_token()
+    }
+
+    /// Hosts broadcast these answers, so the token also says which client asked.
+    fn lookup_token(&self) -> String {
+        static CLIENT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| {
+            use std::hash::BuildHasher;
+            std::collections::hash_map::RandomState::new().hash_one(std::process::id())
+        });
+        format!("pull-request-{client:x}-{}", self.lookups)
+    }
+
+    /// Lookups overlap and can finish in any order, so only the latest counts.
+    /// A failed lookup says nothing, so it keeps the branch's known pull request.
+    fn apply(&mut self, lookup: Option<&str>, answer: &Value) {
+        if lookup != Some(self.lookup_token().as_str()) {
+            return;
+        }
+        let Some(branch) = answer.get("branch").and_then(Value::as_str) else {
+            return;
+        };
+        let same_branch = self.branch.as_deref() == Some(branch);
+        match answer.get("url").and_then(Value::as_str) {
+            Some(url) => self.url = (!url.is_empty()).then(|| url.to_owned()),
+            None if !same_branch => self.url = None,
+            None => {}
+        }
+        if !same_branch {
+            self.branch = Some(branch.to_owned());
+        }
+    }
+
+    fn url_for(&self, branch: &str) -> Option<&str> {
+        (self.branch.as_deref() == Some(branch))
+            .then_some(self.url.as_deref())
+            .flatten()
+    }
+}
+
+/// `#123` for a pull request's web address, or `PR` when it has no number in it.
+fn pull_request_label(url: &str) -> String {
+    let number = url
+        .rsplit_once("/pull/")
+        .map(|(_, rest)| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .unwrap_or_default();
+    if number.is_empty() {
+        "PR".into()
+    } else {
+        format!("#{number}")
+    }
+}
+
 struct PendingSend {
     chat_id: String,
     text: String,
@@ -1957,6 +2038,7 @@ struct XdDesktop {
     chat_create_can_new_worktree: bool,
     chat_create_branches: Vec<NewSessionBranch>,
     chat_create_pull_requests: Vec<NewSessionPullRequest>,
+    chat_pull_requests: HashMap<(ChatEndpoint, String), ChatPullRequest>,
     chat_create_sources_loading: bool,
     chat_create_sources_error: Option<String>,
     workspace_context_folder: Option<String>,
@@ -2547,6 +2629,7 @@ impl XdDesktop {
             chat_create_can_new_worktree: false,
             chat_create_branches: Vec::new(),
             chat_create_pull_requests: Vec::new(),
+            chat_pull_requests: HashMap::new(),
             chat_create_sources_loading: false,
             chat_create_sources_error: None,
             workspace_context_folder: None,
@@ -2619,6 +2702,18 @@ impl XdDesktop {
             }
         }
         desktop.listen_for_terminal_runtime(terminal_updates, cx);
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_secs(10)).await;
+                let alive = this
+                    .update(cx, |this, _| this.refresh_displayed_pull_request())
+                    .is_ok();
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(PULSE_INTERVAL).await;
@@ -2868,6 +2963,8 @@ impl XdDesktop {
                 | "terminal-output"
                 | "terminal-resized"
                 | "terminal-closed"
+                | "git-state"
+                | "repository-changed"
                 | "git-draft-finished"
                 | "interaction"
                 | "interaction-resolved"
@@ -3424,7 +3521,7 @@ impl XdDesktop {
                         let _ = host.agent_catalog();
                         self.request_local_host_state(host);
                         if let Some(chat_id) = self.inactive_model.selected_chat.as_deref() {
-                            let _ = host.git_state(chat_id);
+                            let _ = host.git_state(chat_id, None);
                         }
                     }
                 }
@@ -5528,6 +5625,15 @@ impl XdDesktop {
         if Self::is_terminal_screen_event(name) {
             self.handle_terminal_screen_event(self.active_endpoint, name, &body, cx);
         }
+        if name == "git-state"
+            && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
+            && let Some(answer) = body.get("pull_request")
+            && let Some(known) = self
+                .chat_pull_requests
+                .get_mut(&(self.active_endpoint, chat_id.to_owned()))
+        {
+            known.apply(body.get("request").and_then(Value::as_str), answer);
+        }
         if name == "turn-started" && !self.event_is_active(&body) {
             self.model.apply_event(name, &body);
         }
@@ -5635,6 +5741,8 @@ impl XdDesktop {
             "repository-changed" if self.event_is_active(&body) => {
                 if let Some(chat_id) = self.model.selected_chat.clone() {
                     self.request_chat(&chat_id);
+                    self.expire_chat_pull_request(&chat_id);
+                    let _ = self.request_git_state(&chat_id);
                     if self.should_refresh_side_tool() {
                         self.refresh_diff(cx);
                     }
@@ -5750,6 +5858,8 @@ impl XdDesktop {
                     });
                     self.request_messages(&chat_id);
                     self.request_chat(&chat_id);
+                    self.expire_chat_pull_request(&chat_id);
+                    let _ = self.request_git_state(&chat_id);
                 }
             }
             "queued" if self.event_is_active(&body) => {
@@ -8694,6 +8804,50 @@ impl XdDesktop {
         cx.notify();
     }
 
+    /// Asks about a chat's repository, and about its pull request too once
+    /// what is known about that has aged.
+    fn request_git_state(&mut self, chat_id: &str) -> Result<(), String> {
+        let Some(host) = self.active_host().cloned() else {
+            return Ok(());
+        };
+        let known = self
+            .chat_pull_requests
+            .entry((self.active_endpoint, chat_id.to_owned()))
+            .or_default();
+        let now = Instant::now();
+        let lookup = known.lookup_due(now).then(|| known.start_lookup(now));
+        host.git_state(chat_id, lookup.as_deref())
+    }
+
+    fn expire_chat_pull_request(&mut self, chat_id: &str) {
+        if let Some(known) = self
+            .chat_pull_requests
+            .get_mut(&(self.active_endpoint, chat_id.to_owned()))
+        {
+            known.requested_at = None;
+        }
+    }
+
+    /// Keeps the session header's pull request current for a branch it shows.
+    fn refresh_displayed_pull_request(&mut self) {
+        let MinimalRoute::Cli { chat_id, .. } = &self.minimal_route else {
+            return;
+        };
+        let chat_id = chat_id.clone();
+        let has_branch = self
+            .model
+            .chats
+            .iter()
+            .any(|chat| chat.id == chat_id && chat.branch.is_some());
+        let due = self
+            .chat_pull_requests
+            .get(&(self.active_endpoint, chat_id.clone()))
+            .is_none_or(|known| known.lookup_due(Instant::now()));
+        if has_branch && due {
+            let _ = self.request_git_state(&chat_id);
+        }
+    }
+
     fn request_chat(&mut self, chat_id: &str) {
         if let Some(host) = self.active_host()
             && let Err(error) = host.chat(chat_id)
@@ -8725,9 +8879,8 @@ impl XdDesktop {
             self.list_tree_directory(path, cx);
         }
         self.refresh_terminal_sessions(cx);
-        if let Some(host) = self.active_host()
-            && let Err(error) = host.git_state(&chat_id)
-        {
+        self.expire_chat_pull_request(&chat_id);
+        if let Err(error) = self.request_git_state(&chat_id) {
             self.model.connection_error = Some(error);
         }
         cx.notify();
@@ -10055,9 +10208,7 @@ impl XdDesktop {
         self.request_chat(&chat_id);
         self.request_messages(&chat_id);
         self.list_tree_directory(String::new(), cx);
-        if let Some(host) = self.active_host() {
-            let _ = host.git_state(&chat_id);
-        }
+        let _ = self.request_git_state(&chat_id);
         cx.notify();
     }
 
@@ -10760,6 +10911,12 @@ impl XdDesktop {
             .unwrap_or(DEFAULT_CHAT_TITLE)
             .to_owned();
         let branch = chat.and_then(|chat| chat.branch.clone());
+        let pull_request_url = chat.and_then(|chat| {
+            self.chat_pull_requests
+                .get(&(self.active_endpoint, chat.id.clone()))?
+                .url_for(chat.branch.as_deref()?)
+                .map(str::to_owned)
+        });
         let signal = chat
             .map(|chat| {
                 SessionSignal::of(
@@ -10847,6 +11004,45 @@ impl XdDesktop {
                                 .text_color(rgb(colors.muted)),
                         )
                         .child(div().min_w_0().truncate().child(branch)),
+                )
+            })
+            .when_some(pull_request_url, |toolbar, url| {
+                let label = pull_request_label(&url);
+                toolbar.child(
+                    div()
+                        .id("minimal-session-pull-request")
+                        .debug_selector(|| "minimal-session-pull-request".into())
+                        .h(px(22.0))
+                        .px(px(8.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .rounded_full()
+                        .bg(rgb(colors.surface_high))
+                        .font_family(MONO)
+                        .text_size(px(11.5))
+                        .text_color(rgb(colors.muted))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgb(colors.selected_surface)))
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| PaneTooltip {
+                                label: "Open pull request",
+                                colors,
+                            })
+                            .into()
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_browser_url(&url, window, cx);
+                        }))
+                        .child(
+                            svg()
+                                .path(GIT_PULL_REQUEST_ICON)
+                                .size(px(12.0))
+                                .flex_none()
+                                .text_color(rgb(colors.muted)),
+                        )
+                        .child(label),
                 )
             })
             .child(div().flex_1())
@@ -17728,6 +17924,9 @@ impl AssetSource for EmbeddedIcons {
             GIT_BRANCH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/git-branch.svg").as_slice(),
             )),
+            GIT_PULL_REQUEST_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/git-pull-request.svg").as_slice(),
+            )),
             TRASH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/trash.svg").as_slice(),
             )),
@@ -17832,6 +18031,7 @@ impl AssetSource for EmbeddedIcons {
             FOLDER_ICON.into(),
             FILE_ICON.into(),
             GIT_BRANCH_ICON.into(),
+            GIT_PULL_REQUEST_ICON.into(),
             TRASH_ICON.into(),
             CHEVRON_RIGHT_ICON.into(),
             CHEVRON_DOWN_ICON.into(),
@@ -19949,6 +20149,157 @@ Binary files /dev/null and b/image.png differ\n";
         assert!(production.contains("settings.remote_credentials = Some"));
     }
 
+    #[test]
+    fn a_pull_request_is_labelled_by_its_number() {
+        assert_eq!(
+            pull_request_label("https://github.com/restartfu/xd/pull/173"),
+            "#173"
+        );
+        assert_eq!(
+            pull_request_label("https://github.example/o/r/pull/9/files?w=1"),
+            "#9"
+        );
+        assert_eq!(pull_request_label("https://example.com/o/r/merge/9"), "PR");
+    }
+
+    #[test]
+    fn a_failed_lookup_keeps_the_branchs_pull_request_but_not_anothers() {
+        let url = "https://github.com/o/r/pull/1";
+        let mut known = ChatPullRequest::default();
+        let answer = |known: &mut ChatPullRequest, answer: Value| {
+            let lookup = known.start_lookup(Instant::now());
+            known.apply(Some(&lookup), &answer);
+        };
+        answer(&mut known, serde_json::json!({"branch": "a", "url": url}));
+        assert_eq!(known.url_for("a"), Some(url));
+        assert_eq!(
+            known.url_for("b"),
+            None,
+            "the header moved to another branch"
+        );
+
+        answer(&mut known, serde_json::json!({"branch": "a"}));
+        assert_eq!(known.url_for("a"), Some(url));
+
+        answer(&mut known, serde_json::json!({"branch": "b"}));
+        assert_eq!(known.url_for("b"), None);
+        answer(&mut known, serde_json::json!({"branch": "a"}));
+        assert_eq!(known.url_for("a"), None);
+
+        answer(&mut known, serde_json::json!({"branch": "a", "url": url}));
+        answer(&mut known, serde_json::json!({"branch": "a", "url": ""}));
+        assert_eq!(known.url_for("a"), None, "the pull request is gone");
+    }
+
+    #[test]
+    fn a_superseded_lookup_cannot_overwrite_a_newer_answer() {
+        let url = "https://github.com/o/r/pull/1";
+        let now = Instant::now();
+        let mut known = ChatPullRequest::default();
+        let first = known.start_lookup(now);
+        let second = known.start_lookup(now);
+        assert_ne!(first, second);
+
+        // The later lookup found the pull request, then the earlier one, which
+        // ran before it existed, finishes last.
+        known.apply(
+            Some(&second),
+            &serde_json::json!({"branch": "a", "url": url}),
+        );
+        known.apply(Some(&first), &serde_json::json!({"branch": "a", "url": ""}));
+        assert_eq!(known.url_for("a"), Some(url));
+
+        // Nor does an answer nobody here asked for count, such as another
+        // client's lookup with the same sequence number.
+        known.apply(None, &serde_json::json!({"branch": "a", "url": ""}));
+        assert_eq!(known.url_for("a"), Some(url));
+        known.apply(
+            Some(&format!("pull-request-0-{}", known.lookups)),
+            &serde_json::json!({"branch": "a", "url": ""}),
+        );
+        assert_eq!(known.url_for("a"), Some(url));
+    }
+
+    #[test]
+    fn a_pull_request_lookup_comes_due_once_what_is_known_has_aged() {
+        let now = Instant::now();
+        let mut known = ChatPullRequest::default();
+        assert!(known.lookup_due(now));
+        known.requested_at = Some(now);
+        assert!(!known.lookup_due(now + CHAT_PULL_REQUEST_LIFETIME / 2));
+        assert!(known.lookup_due(now + CHAT_PULL_REQUEST_LIFETIME));
+    }
+
+    #[test]
+    fn a_remote_hosts_repository_news_reaches_the_session_header() {
+        assert!(XdDesktop::remote_read_event("git-state"));
+        assert!(XdDesktop::remote_read_event("repository-changed"));
+    }
+
+    #[gpui::test]
+    fn the_session_header_opens_the_branchs_pull_request_in_the_side_browser(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let url = "http://localhost:3000/o/r/pull/173";
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.set_browser_open(false);
+            desktop.settings.browser_sessions.clear();
+            desktop.model.folders = vec![Folder {
+                id: "pr-project".into(),
+                name: "Pull requests".into(),
+                parent: None,
+                owner: None,
+            }];
+            desktop.model.chats = vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": "pr-chat",
+                    "folder": "pr-project",
+                    "backend": "codex",
+                    "branch": "feature",
+                }))
+                .unwrap(),
+            ];
+            desktop.model.select_chat("pr-chat");
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "pr-project".into(),
+                chat_id: "pr-chat".into(),
+                agent: AgentCli::Codex,
+            };
+            let mut known = ChatPullRequest::default();
+            let lookup = known.start_lookup(Instant::now());
+            desktop
+                .chat_pull_requests
+                .insert((ChatEndpoint::Local, "pr-chat".into()), known);
+            desktop.handle_event(
+                "git-state",
+                serde_json::json!({
+                    "chat": "pr-chat",
+                    "request": lookup,
+                    "pull_request": {"branch": "feature", "url": url},
+                }),
+                None,
+                cx,
+            );
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let chip = cx
+            .debug_bounds("minimal-session-pull-request")
+            .expect("the header shows the branch's pull request");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+
+        desktop.update(cx, |desktop, cx| {
+            assert!(desktop.browser_is_open());
+            let pane = desktop.browser_panes["local/chat/pr-chat"].clone();
+            assert_eq!(pane.read(cx).current_url().as_deref(), Some(url));
+        });
+        assert!(cx.opened_url().is_none(), "it stays inside the app");
+    }
+
     #[gpui::test]
     fn opening_links_preserves_the_chats_open_tabs(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -21999,6 +22350,7 @@ Binary files /dev/null and b/image.png differ\n";
             "icons/stop.svg",
             PLAY_ICON,
             GIT_BRANCH_ICON,
+            GIT_PULL_REQUEST_ICON,
             TRASH_ICON,
         ] {
             let bytes = EmbeddedIcons

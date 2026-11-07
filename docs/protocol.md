@@ -789,7 +789,15 @@ was. JCode chats are not titled.
 `git-state` takes a `chat` and an optional request correlation string. It
 acknowledges immediately, reads repository state away from the connection
 loop, and publishes `git-state` with `visible`, `action`, `label`, `enabled`,
-and an optional pull-request `url`.
+and an optional pull-request `url`. That `url` is only there when the branch is
+clean and pushed. A request with `pull_request: true` also asks for the branch's
+pull request whatever state the working tree is in, and the event then carries
+`pull_request: {branch, url}`: an empty `url` means the branch has none, and a
+missing `url` means GitHub could not say. The member is left out outside a
+repository, on a detached HEAD, and when HEAD moved during the lookup.
+These lookups can finish out of order, so a client that overlaps them should send
+a request correlation string, which the event echoes as `request`, and keep only
+the latest answer.
 
 `git-action` takes a `chat`, one of `commit`, `push`, `create-pr`, or `view-pr`,
 and an optional request correlation string. Commits also require `message`;
