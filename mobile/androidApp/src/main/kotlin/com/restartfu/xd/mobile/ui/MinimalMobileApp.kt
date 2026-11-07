@@ -1457,9 +1457,11 @@ private fun NewSessionDialog(
                 onClick = { onCreate(title.trim(), agent, worktree) },
                 // Wait for the choices, as the desktop does; if they cannot be
                 // read, the host's own default checkout still works.
-                // A project with no checkout to list leaves the choice to the host, as before.
-                enabled = places == null || placesError != null || worktree != null ||
-                    (loaded != null && loaded?.default == null),
+                // Only once this opening's choices have loaded, even if a choice
+                // was restored from before a rotation; a project with no
+                // checkout to list leaves the choice to the host, as before.
+                enabled = places == null || placesError != null ||
+                    (loaded != null && (worktree != null || loaded?.default == null)),
             ) {
                 Text(if (chatTab) "Create chat" else "Create session")
             }
