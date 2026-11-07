@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, TcpListener, UdpSocket},
     os::{
         fd::AsRawFd,
@@ -31,6 +31,10 @@ use xd_transport::rustls::{
 
 const START_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CLIENTS: usize = 64;
+/// A child forked just before its daemon died keeps the lock and the listening
+/// socket until its `exec` closes them, so a busy lock can outlive the daemon.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+const LOCK_HOLDER_ANSWER_WAIT: Duration = Duration::from_millis(200);
 static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn stop_signal(_: libc::c_int) {
     STOP.store(true, Ordering::Release);
@@ -95,7 +99,7 @@ impl Drop for Singleton {
         let _ = fs::remove_file(&self.socket);
     }
 }
-fn singleton(paths: &Paths) -> io::Result<Option<Singleton>> {
+fn singleton(paths: &Paths, wait: Duration) -> io::Result<Option<Singleton>> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -104,12 +108,19 @@ fn singleton(paths: &Paths) -> io::Result<Option<Singleton>> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&paths.lock)?;
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    let deadline = Instant::now() + wait;
+    while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::WouldBlock {
+        if error.kind() != io::ErrorKind::WouldBlock {
+            return Err(error);
+        }
+        // Only a daemon that is really running can answer, and then there is
+        // nothing to wait for. Staying could even start a second one after it
+        // is asked to stop.
+        if Instant::now() >= deadline || daemon_answers(&paths.socket) {
             return Ok(None);
         }
-        return Err(error);
+        thread::sleep(Duration::from_millis(10));
     }
     match fs::symlink_metadata(&paths.socket) {
         Ok(metadata) => {
@@ -130,12 +141,24 @@ fn singleton(paths: &Paths) -> io::Result<Option<Singleton>> {
     }))
 }
 
+fn daemon_answers(socket: &Path) -> bool {
+    let Ok(mut stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    let mut answer = [0];
+    stream
+        .set_read_timeout(Some(LOCK_HOLDER_ANSWER_WAIT))
+        .is_ok()
+        && writeln!(stream, "{}", json!({"op": "ping"})).is_ok()
+        && stream.read(&mut answer).is_ok_and(|read| read > 0)
+}
+
 pub(super) fn run(options: HostOptions) -> Result<(), String> {
     run_inner(options).map_err(|e| e.to_string())
 }
 fn run_inner(options: HostOptions) -> io::Result<()> {
     let paths = paths(&options)?;
-    let Some(_singleton) = singleton(&paths)? else {
+    let Some(_singleton) = singleton(&paths, LOCK_WAIT)? else {
         return Ok(());
     };
     let store =
@@ -584,6 +607,89 @@ impl PeerServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lock_fixture() -> (PathBuf, Paths, File) {
+        let root = std::env::temp_dir().join(format!("xd-lock-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let paths = Paths {
+            socket: root.join("socket"),
+            lock: root.join("lock"),
+            data: root.clone(),
+        };
+        let holder = File::create(&paths.lock).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        (root, paths, holder)
+    }
+
+    #[test]
+    fn a_new_daemon_outlasts_a_lock_that_is_about_to_be_released() {
+        let (root, paths, holder) = lock_fixture();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(holder);
+        });
+        assert!(
+            singleton(&paths, Duration::from_secs(10))
+                .unwrap()
+                .is_some()
+        );
+        release.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_new_daemon_is_not_fooled_by_a_listener_nobody_serves() {
+        let (root, paths, holder) = lock_fixture();
+        let doomed = UnixListener::bind(&paths.socket).unwrap();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            drop((holder, doomed));
+        });
+        assert!(
+            singleton(&paths, Duration::from_secs(10))
+                .unwrap()
+                .is_some()
+        );
+        release.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_new_daemon_leaves_at_once_when_the_running_one_answers() {
+        let (root, paths, _holder) = lock_fixture();
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        let running = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            stream.write_all(b"{\"ok\":true}\n").unwrap();
+        });
+        let began = Instant::now();
+        assert!(
+            singleton(&paths, Duration::from_secs(10))
+                .unwrap()
+                .is_none()
+        );
+        assert!(began.elapsed() < Duration::from_secs(5));
+        running.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_new_daemon_leaves_a_lock_that_stays_held() {
+        let (root, paths, _holder) = lock_fixture();
+        assert!(
+            singleton(&paths, Duration::from_millis(50))
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn concurrent_daemons_create_a_private_runtime_directory() {
