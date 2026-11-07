@@ -20486,7 +20486,7 @@ Binary files /dev/null and b/image.png differ\n";
         cx: &mut gpui::TestAppContext,
     ) {
         let url = "http://localhost:3000/o/r/pull/173";
-        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
             desktop.active_endpoint = ChatEndpoint::Local;
             desktop.set_browser_open(false);
