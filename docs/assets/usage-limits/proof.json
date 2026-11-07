@@ -1,14 +1,17 @@
 {
-  "before_base": "30dc0d7",
-  "before_state": "Unmodified Usage page at 30dc0d7.",
-  "after_state": "This change, before rebasing onto 27351c9, which does not touch the usage page.",
-  "environment": "Xvfb with lavapipe Vulkan and a throwaway HOME. Limits come from a capture-only patch, applied to both builds and not part of this change, that answers usage-limits from a fixture matching the reported screenshot. The multiple-accounts fixture labels both accounts Local, because the capture has one host.",
+  "before_base": "aa237a5",
+  "before_state": "Unmodified Usage page at aa237a5.",
+  "after_state": "This change on aa237a5.",
+  "environment": "Xvfb with lavapipe Vulkan and a throwaway HOME. Limits and usage come from a capture-only patch, applied to both builds and not part of this change, that answers from made-up fixtures. The limits fixture matches the reported screenshot. The accounts fixture labels both accounts Local because the capture has one host.",
   "captures": [
     {"surface": "Limits", "theme": "dark", "viewport": [1600, 1000], "before": "desktop-limits-dark-before.png", "after": "desktop-limits-dark-after.png"},
     {"surface": "Limits", "theme": "light", "viewport": [1600, 1000], "before": "desktop-limits-light-before.png", "after": "desktop-limits-light-after.png"},
     {"surface": "Limits with accounts sharing a limit and a failed read", "theme": "dark", "viewport": [1600, 1000], "before": "desktop-limits-accounts-dark-before.png", "after": "desktop-limits-accounts-dark-after.png"},
     {"surface": "Limits at the minimum window", "theme": "dark", "viewport": [760, 560], "before": "desktop-limits-minimum-dark-before.png", "after": "desktop-limits-minimum-dark-after.png"},
     {"surface": "Limit details popover", "theme": "dark", "viewport": [1600, 1000], "before": "desktop-limits-details-dark-before.png", "after": "desktop-limits-details-dark-after.png"},
-    {"surface": "Cost, which shares the header", "theme": "dark", "viewport": [1600, 1000], "before": "desktop-cost-dark-before.png", "after": "desktop-cost-dark-after.png"}
+    {"surface": "Cost", "theme": "dark", "viewport": [1600, 1000], "before": "desktop-cost-dark-before.png", "after": "desktop-cost-dark-after.png"},
+    {"surface": "Tokens", "theme": "dark", "viewport": [1600, 1000], "before": "desktop-tokens-dark-before.png", "after": "desktop-tokens-dark-after.png"},
+    {"surface": "Cost at the minimum window", "theme": "dark", "viewport": [760, 560], "before": "desktop-cost-minimum-dark-before.png", "after": "desktop-cost-minimum-dark-after.png"},
+    {"surface": "Cost full page", "theme": "dark", "viewport": [1600, 1000], "before": "desktop-cost-full-page-dark-before.png", "after": "desktop-cost-full-page-dark-after.png"}
   ]
 }

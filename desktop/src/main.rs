@@ -19087,12 +19087,11 @@ Binary files /dev/null and b/image.png differ\n";
         let footer_y = cx.update(|window, _| window.viewport_size().height - px(26.0));
         cx.simulate_click(point(px(82.0), footer_y), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
-        // A press on the page stays on it; one on the backdrop dismisses it.
-        let center = cx.update(|window, _| {
-            let viewport = window.viewport_size();
-            point(viewport.width / 2.0, viewport.height / 2.0)
-        });
-        cx.simulate_click(center, gpui::Modifiers::default());
+        // A press on the flyout stays on it; one beside it dismisses it.
+        cx.simulate_click(
+            point(px(100.0), footer_y - px(34.0)),
+            gpui::Modifiers::default(),
+        );
         cx.update(|_, cx| assert!(desktop.read(cx).usage_open));
         cx.simulate_click(point(px(8.0), px(8.0)), gpui::Modifiers::default());
         cx.update(|_, cx| assert!(!desktop.read(cx).usage_open));

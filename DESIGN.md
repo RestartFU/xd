@@ -176,7 +176,7 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 **Settings.** Desktop groups Appearance, General, Agents, Devices and Shortcuts in one panel using existing capabilities. Android preserves its native settings dialog. Both offer Dark and Light.
 
-**Usage.** Cost and Tokens fill a large panel for their charts. Limits is a compact table in a 760px panel that hugs its rows: provider, then one 30px row per limit with a thin neutral bar, a tick where even spending would be, what is left, pace and reset. A row stays neutral until it needs attention: amber when spending ahead of pace, rose when spent. Pooled accounts nest under their total. Pressing a row opens its details and reset credit.
+**Usage.** The chart icon opens a 348px flyout just above the sidebar footer, without dimming the work behind it. Tabs switch between Limits, Cost and Tokens. Each limit compares what is left with the time left as two thin bars, and stays neutral until it needs attention: amber when spending ahead of pace, rose when spent. Pooled accounts nest under their total, and pressing a row opens its details and reset credit. Cost and Tokens show a total, small period bars and ranked models, in neutral shades. The maximize button or a model row opens the full page, a large panel holding filters, model prices, charts and breakdowns.
 
 **Buttons and fields.** Primary actions use the neutral action role; secondary and ghost controls use tonal hover and focus feedback. Destructive actions use the danger role and explicit confirmation where data is removed. Search and text fields retain visible focus and readable hints.
 
