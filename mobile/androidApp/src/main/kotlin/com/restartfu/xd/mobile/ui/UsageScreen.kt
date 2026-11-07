@@ -28,6 +28,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -318,20 +319,33 @@ private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled
     }
 }
 
-/** A price row being edited; text so a half-typed number is kept. */
-private data class PriceRow(val model: String, val input: String, val output: String, val cacheRead: String, val cacheWrite: String)
+/**
+ * A price row being edited; text so a half-typed number is kept. Its [id]
+ * never changes, unlike the editable model name, so removing a row never moves
+ * another row's fields, focus included, onto a neighbour.
+ */
+private data class PriceRow(
+    val model: String,
+    val input: String,
+    val output: String,
+    val cacheRead: String,
+    val cacheWrite: String,
+    val id: String = java.util.UUID.randomUUID().toString(),
+)
 
 /** Null (not loaded yet) is saved as an empty list with no marker, so it reads back as null. */
 private val PriceRowsSaver = androidx.compose.runtime.saveable.listSaver<List<PriceRow>?, String>(
     save = { rows ->
-        rows?.let { listOf("loaded") + it.flatMap { row -> listOf(row.model, row.input, row.output, row.cacheRead, row.cacheWrite) } }
+        rows?.let { listOf(PRICE_ROWS_MARKER) + it.flatMap { row -> listOf(row.id, row.model, row.input, row.output, row.cacheRead, row.cacheWrite) } }
             ?: emptyList()
     },
     restore = { saved ->
-        if (saved.firstOrNull() != "loaded") null
-        else saved.drop(1).chunked(5).filter { it.size == 5 }.map { PriceRow(it[0], it[1], it[2], it[3], it[4]) }
+        if (saved.firstOrNull() != PRICE_ROWS_MARKER) null
+        else saved.drop(1).chunked(6).filter { it.size == 6 }.map { PriceRow(it[1], it[2], it[3], it[4], it[5], id = it[0]) }
     },
 )
+
+private const val PRICE_ROWS_MARKER = "loaded-with-ids"
 
 
 /**
@@ -406,8 +420,8 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                         if (current.isEmpty()) {
                             Text("No custom prices. Add a row to set one.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        current.forEachIndexed { index, row ->
-                            val update = { changed: PriceRow -> rows = current.toMutableList().also { it[index] = changed } }
+                        current.forEach { row -> key(row.id) {
+                            val update = { changed: PriceRow -> rows = rows?.map { if (it.id == row.id) changed else it } }
                             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     OutlinedTextField(
@@ -418,7 +432,7 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                                         singleLine = true,
                                         enabled = !saving,
                                     )
-                                    TextButton(onClick = { rows = current.filterIndexed { at, _ -> at != index } }, enabled = !saving) { Text("Remove") }
+                                    TextButton(onClick = { rows = rows?.filter { it.id != row.id } }, enabled = !saving) { Text("Remove") }
                                 }
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     PriceField("Input", row.input, !saving, Modifier.weight(1f)) { update(row.copy(input = it)) }
@@ -429,8 +443,8 @@ private fun ModelPricesDialog(model: UsageViewModel, onDismiss: () -> Unit) {
                                     PriceField("Cache write", row.cacheWrite, !saving, Modifier.weight(1f)) { update(row.copy(cacheWrite = it)) }
                                 }
                             }
-                        }
-                        TextButton(onClick = { rows = current + PriceRow("", "", "", "", "") }, enabled = !saving) { Text("Add model price") }
+                        } }
+                        TextButton(onClick = { rows = rows.orEmpty() + PriceRow("", "", "", "", "") }, enabled = !saving) { Text("Add model price") }
                     }
                 }
                 if (rows != null && !hostKeepsAliases) {
