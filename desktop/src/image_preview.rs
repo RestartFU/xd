@@ -1644,16 +1644,28 @@ mod tests {
         // The byte budget shrinks with each file read.
         let small = root.join("small.txt");
         fs::write(&small, [1; 6]).unwrap();
-        let read = read_attachments(vec![small.clone(), small], room(10, 4, 10));
+        let read = read_attachments(vec![small.clone(), small.clone()], room(10, 4, 10));
         assert!(read[0].is_ok());
         assert!(read[1].as_ref().unwrap_err().contains("20 MiB"));
         // An image with no image slot left is refused without taking the slot
         // a file after it can still use.
         let shot = root.join("shot.png");
         fs::write(&shot, png(4, 4, |_, _| [0, 0, 0, 255])).unwrap();
-        let read = read_attachments(vec![shot, report], room(1, 0, MAX_TOTAL_ATTACHMENT_BYTES));
+        let read = read_attachments(
+            vec![shot.clone(), report],
+            room(1, 0, MAX_TOTAL_ATTACHMENT_BYTES),
+        );
         assert!(read[0].as_ref().unwrap_err().contains("4 images"));
         assert_eq!(read[1].as_ref().unwrap().name, "Report.pdf");
+        // It is refused from its first bytes, before the byte budget, which
+        // a read of the whole file would have run into first.
+        let read = read_attachments(vec![shot.clone(); 3], room(1, 0, 0));
+        assert_eq!(read.len(), 3);
+        assert!(
+            read.iter()
+                .all(|read| read.as_ref().unwrap_err().contains("4 images"))
+        );
+        assert!(starts_like_png(&shot) && !starts_like_png(&small));
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -3359,7 +3359,9 @@ impl XdDesktop {
                     return;
                 }
                 // Its clear will not answer now; the reconnect reloads the draft.
-                self.awaiting_sent_clear = None;
+                if self.active_endpoint == ChatEndpoint::Remote {
+                    self.awaiting_sent_clear = None;
+                }
                 self.terminal_cache_refresh.insert(ChatEndpoint::Remote);
                 self.remote_host = None;
                 self.remote_bridge = None;
@@ -3711,7 +3713,9 @@ impl XdDesktop {
                     return;
                 }
                 // Its clear will not answer now; the reconnect reloads the draft.
-                self.awaiting_sent_clear = None;
+                if self.active_endpoint == ChatEndpoint::Local {
+                    self.awaiting_sent_clear = None;
+                }
                 self.terminal_cache_refresh.insert(ChatEndpoint::Local);
                 self.host = None;
                 self.model.connected = false;
@@ -19137,6 +19141,14 @@ fn read_attachments(paths: Vec<PathBuf>, mut room: DraftRoom) -> Vec<Result<Atta
             )));
             break;
         }
+        // With no image slot left a PNG is refused from its first bytes, so
+        // refused pictures cost no more to choose than accepted files.
+        if room.images == 0 && starts_like_png(&path) {
+            read.push(Err(format!(
+                "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
+            )));
+            continue;
+        }
         let attachment = read_attachment(&path, room.bytes).and_then(|attachment| {
             let image = attachment.preview.is_some();
             if image && room.images == 0 {
@@ -19152,6 +19164,15 @@ fn read_attachments(paths: Vec<PathBuf>, mut room: DraftRoom) -> Vec<Result<Atta
         read.push(attachment);
     }
     read
+}
+
+/// Whether a file begins as a PNG does, which is what makes an attachment an
+/// image. Only its first bytes are read.
+fn starts_like_png(path: &Path) -> bool {
+    let mut signature = [0; 8];
+    open_without_waiting(path)
+        .and_then(|mut file| file.read_exact(&mut signature))
+        .is_ok_and(|()| signature == *b"\x89PNG\r\n\x1a\n")
 }
 
 /// Opens a file without waiting on it: a FIFO put where the file was opens at
