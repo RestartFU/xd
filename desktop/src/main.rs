@@ -7095,7 +7095,7 @@ impl XdDesktop {
     ) -> Option<Entity<BrowserPane>> {
         let key = self.browser_scope_key();
         let open = self.browser_is_open();
-        let visible = open && !self.browser_occluded_by_popup() && self.catalog_drag.is_none();
+        let visible = open && !self.browser_occluded_by_popup();
         for (scope, pane) in &self.browser_panes {
             pane.update(cx, |pane, _| pane.set_visible(visible && scope == &key));
         }
@@ -15032,9 +15032,6 @@ impl XdDesktop {
                         cx.stop_propagation();
                         this.catalog_drag =
                             Some((f32::from(event.position.x), catalog_width as u16));
-                        for pane in this.browser_panes.values() {
-                            pane.update(cx, |pane, _| pane.set_visible(false));
-                        }
                         cx.notify();
                     }),
                 )
@@ -19819,6 +19816,56 @@ mod tests {
     }
 
     #[gpui::test]
+    fn dragging_the_catalog_edge_does_not_hide_the_browser_page(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.simulate_resize(size(px(1400.0), px(800.0)));
+        cx.update(|_, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.settings.catalog_width = 256;
+                desktop.toggle_browser(cx);
+            })
+        });
+        cx.run_until_parked();
+        let page_is_visible = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                desktop.update(cx, |desktop, cx| {
+                    desktop
+                        .sync_browser_pane(window, cx)
+                        .is_some_and(|pane| pane.read(cx).is_visible())
+                })
+            })
+        };
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_down(
+            point(px(256.0), px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(desktop.read(cx).catalog_drag.is_some()));
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_move(
+            point(px(320.0), px(300.0)),
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert_eq!(desktop.read(cx).settings.catalog_width, 320));
+        assert!(page_is_visible(cx));
+
+        cx.simulate_mouse_up(
+            point(px(320.0), px(300.0)),
+            MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|_, cx| assert!(desktop.read(cx).catalog_drag.is_none()));
+        assert!(page_is_visible(cx));
+    }
+
+    #[gpui::test]
     fn browser_panes_preserve_each_chats_tabs_toggle_and_settings_visibility(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -19914,7 +19961,7 @@ mod tests {
             desktop.browser_drag = None;
             desktop.catalog_drag = Some((100.0, 256));
             desktop.sync_browser_pane(window, cx);
-            assert!(!a.read(cx).is_visible());
+            assert!(a.read(cx).is_visible());
             desktop.catalog_drag = None;
 
             desktop.settings.remote_ssh_command = Some("ssh remote.example".into());
