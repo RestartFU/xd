@@ -15,9 +15,11 @@ use std::{
 use serde_json::{Value, json};
 
 mod agent;
+mod agent_text;
 mod ask;
 mod auth;
 mod background_process;
+mod chat_title;
 mod cli_updates;
 mod cli_versions;
 mod codex_app;
@@ -48,6 +50,7 @@ mod workflow;
 mod worktree_name;
 
 use auth::AuthManager;
+use chat_title::ChatTitleService;
 use cli_updates::CliUpdates;
 use cli_versions::CliVersions;
 use git_draft::GitDraftService;
@@ -85,6 +88,7 @@ pub struct Engine {
     session_resources: Mutex<()>,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
+    chat_titles: ChatTitleService,
     git_actions: Arc<Mutex<()>>,
     repository_monitor: RepositoryMonitor,
     self_update: SelfUpdate,
@@ -146,6 +150,7 @@ impl Engine {
             session_resources: Mutex::new(()),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
+            chat_titles: ChatTitleService::new(None, events.clone()),
             git_actions: Arc::new(Mutex::new(())),
             repository_monitor: RepositoryMonitor::disabled(),
             self_update,
@@ -170,6 +175,10 @@ impl Engine {
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
+        // Unit tests send messages on hosts with no fake assistant behind them, and
+        // must not reach a real CLI. The daemon tests cover titles end to end.
+        let chat_titles =
+            ChatTitleService::new(cfg!(not(test)).then(|| store.clone()), events.clone());
         let self_update = SelfUpdate::new(events.clone());
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
@@ -191,6 +200,7 @@ impl Engine {
             session_resources: Mutex::new(()),
             secrets,
             git_drafts,
+            chat_titles,
             git_actions: Arc::new(Mutex::new(())),
             repository_monitor,
             self_update,
@@ -338,6 +348,10 @@ impl Engine {
                 self.auth_mutation(&request, |auth, provider, _| auth.logout(provider))
             }
             Some("shortcuts") => self.read(|store| store.shortcuts(&request)),
+            Some("chat-title-settings") => self.read(StateStore::chat_title_settings),
+            Some("set-chat-title-settings") => {
+                self.read(|store| store.set_chat_title_settings(&request))
+            }
             Some("folder-context") => self.read(|store| store.folder_context(&request)),
             Some("folder-settings") => self.read(|store| store.folder_settings(&request)),
             Some("new-chat-sources") => self.read(|store| store.new_chat_sources(&request)),
@@ -1251,6 +1265,11 @@ impl Engine {
                 Err(error) => eprintln!("xd: cannot prepare AI worktree naming: {error}"),
             }
         }
+        // Asked before the message is stored, since it depends on there being none.
+        let chat_title = store.prepare_chat_title(&request).unwrap_or_else(|error| {
+            eprintln!("xd: cannot prepare a chat title: {error}");
+            None
+        });
         let _resources = match self.session_resources.lock() {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
@@ -1265,7 +1284,12 @@ impl Engine {
                 reply
             }
             Ok(SendDisposition::Start { reply, turn }) => match runtime.start(turn.clone()) {
-                Ok(()) => reply,
+                Ok(()) => {
+                    if let Some(spec) = chat_title {
+                        self.chat_titles.start(spec);
+                    }
+                    reply
+                }
                 Err(error) => {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
                     error_reply(error)

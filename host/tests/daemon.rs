@@ -38,6 +38,13 @@ if sys.argv[1:] == ['login', 'status']:
     signed_in = pathlib.Path(os.environ.get('CODEX_HOME', '/nonexistent'), 'signed-in').exists()
     print('Logged in using existing CLI login' if signed_in else 'Not logged in')
     sys.exit(0 if signed_in else 1)
+if sys.argv[1:2] == ['exec']:
+    with pathlib.Path(__file__).with_suffix('.titles').open('a') as log:
+        log.write(json.dumps(sys.argv) + '\n')
+    print(json.dumps({'type':'thread.started','thread_id':'title-thread'}), flush=True)
+    print(json.dumps({'type':'item.completed','item':{'id':'item','type':'agent_message','text':json.dumps({'title':'Generated title'})}}), flush=True)
+    print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)
+    sys.exit(0)
 for line in sys.stdin:
     frame = json.loads(line)
     with pathlib.Path(__file__).with_suffix('.requests').open('a') as log:
@@ -528,6 +535,61 @@ fn installed_cli_reuses_sessions_and_resumes_after_process_loss() {
             .unwrap()
             .iter()
             .any(|arg| arg == "service_tier=\"priority\"")
+    );
+}
+
+#[test]
+fn a_first_message_names_the_chat_and_later_ones_do_not() {
+    let daemon = Daemon::start();
+    let mut client = daemon.client();
+    let chat = daemon.chat(&mut client);
+    let settings = client.call(json!({
+        "op":"set-chat-title-settings", "backend":"codex", "model":"gpt-5.5",
+    }));
+    assert_eq!(settings["models"]["codex"], "gpt-5.5", "{settings}");
+
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"fix the scroll"}))["ok"],
+        true
+    );
+    let named = client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["title"] == "Generated title" && reply["working"] == false
+    });
+    assert_eq!(named["session_title"], "Generated title");
+
+    let titles = fs::read_to_string(daemon.root.join("codex.titles")).unwrap();
+    let runs = titles
+        .lines()
+        .map(|line| serde_json::from_str::<Vec<String>>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(runs.len(), 1, "{titles}");
+    assert!(
+        runs[0].windows(2).any(|pair| pair == ["-m", "gpt-5.5"]),
+        "{titles}"
+    );
+    assert!(runs[0].contains(&"--ephemeral".to_owned()), "{titles}");
+    assert!(
+        runs[0]
+            .iter()
+            .any(|argument| argument.contains("fix the scroll")),
+        "{titles}"
+    );
+
+    assert_eq!(
+        client.call(json!({"op":"send", "chat":chat, "text":"and the header"}))["ok"],
+        true
+    );
+    client.wait_for(json!({"op":"chat", "chat":chat}), |reply| {
+        reply["working"] == false
+    });
+    let titles = fs::read_to_string(daemon.root.join("codex.titles")).unwrap();
+    assert_eq!(titles.lines().count(), 1, "{titles}");
+
+    let settings = client.call(json!({"op":"set-chat-title-settings", "enabled":false}));
+    assert_eq!(settings["enabled"], false, "{settings}");
+    assert_eq!(
+        client.call(json!({"op":"chat-title-settings"}))["enabled"],
+        false
     );
 }
 

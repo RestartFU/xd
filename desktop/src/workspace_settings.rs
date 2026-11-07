@@ -8,6 +8,49 @@ const SETTINGS_SECTIONS: [(&str, &str); 5] = [
     ("Shortcuts", "Keep your hands on the keyboard."),
 ];
 
+/// The assistants a title model can be chosen for, each with its row's element
+/// id, title, and description.
+const CHAT_TITLE_BACKENDS: [(&str, &str, &str, &str); 2] = [
+    (
+        "codex",
+        "workspace-settings-chat-title-codex",
+        "Codex title model",
+        "Used to name Codex chats.",
+    ),
+    (
+        "claude",
+        "workspace-settings-chat-title-claude",
+        "Claude title model",
+        "Used to name Claude chats.",
+    ),
+];
+
+/// The host's chat title settings. They live on the host because that is where
+/// titles are generated, for messages sent from any client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ChatTitleSettings {
+    pub(super) enabled: bool,
+    models: HashMap<String, String>,
+}
+
+impl ChatTitleSettings {
+    pub(super) fn from_reply(reply: &Value) -> Option<Self> {
+        Some(Self {
+            enabled: reply.get("enabled")?.as_bool()?,
+            models: reply
+                .get("models")?
+                .as_object()?
+                .iter()
+                .filter_map(|(backend, model)| Some((backend.clone(), model.as_str()?.to_owned())))
+                .collect(),
+        })
+    }
+
+    pub(super) fn model(&self, backend: &str) -> Option<&str> {
+        self.models.get(backend).map(String::as_str)
+    }
+}
+
 fn settings_heading(title: &'static str, colors: ThemeColors) -> gpui::Div {
     div()
         .mt(px(26.0))
@@ -58,6 +101,149 @@ fn settings_row(
 }
 
 impl XdDesktop {
+    pub(super) fn request_chat_title_settings(&mut self) {
+        if let Some(host) = self.active_host()
+            && let Err(error) = host.chat_title_settings()
+        {
+            self.model.connection_error = Some(error);
+        }
+    }
+
+    fn toggle_chat_titles(&mut self, cx: &mut Context<Self>) {
+        let Some(enabled) = self
+            .chat_title_settings
+            .as_ref()
+            .map(|settings| !settings.enabled)
+        else {
+            return;
+        };
+        let result = match self.active_host() {
+            Some(host) => host.set_chat_titles_enabled(enabled),
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                if let Some(settings) = &mut self.chat_title_settings {
+                    settings.enabled = enabled;
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn toggle_chat_title_model_menu(
+        &mut self,
+        backend: &'static str,
+        cx: &mut Context<Self>,
+    ) {
+        self.chat_title_model_menu =
+            (self.chat_title_model_menu != Some(backend)).then_some(backend);
+        cx.notify();
+    }
+
+    fn choose_chat_title_model(&mut self, backend: &str, model: String, cx: &mut Context<Self>) {
+        self.chat_title_model_menu = None;
+        let result = match self.active_host() {
+            Some(host) => host.set_chat_title_model(backend, &model),
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                if let Some(settings) = &mut self.chat_title_settings {
+                    settings.models.insert(backend.to_owned(), model);
+                }
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn render_chat_title_settings(
+        &self,
+        settings: &ChatTitleSettings,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let mut section = div().child(settings_heading("Chat titles", colors)).child(
+            settings_row(
+                "workspace-settings-chat-titles",
+                "Generate chat titles",
+                "Name a new chat from its first message, using a low-cost model.",
+                colors,
+            )
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_titles(cx)))
+            .child(settings_switch(colors, settings.enabled)),
+        );
+        if !settings.enabled {
+            return section;
+        }
+        for (backend, row, title, description) in CHAT_TITLE_BACKENDS {
+            let catalog = self
+                .model
+                .agent_backends
+                .iter()
+                .find(|known| known.id == backend);
+            let selected = settings.model(backend);
+            let label = selected.map_or_else(
+                || "Choose a model".to_owned(),
+                |selected| {
+                    let name = catalog
+                        .and_then(|catalog| {
+                            catalog.models.iter().find(|model| model.id == selected)
+                        })
+                        .map(|model| model.name.as_str());
+                    presentation::model_name(selected, name)
+                },
+            );
+            section = section.child(
+                settings_row(row, title, description, colors).child(
+                    ui_button((row, 0_usize), ButtonKind::Secondary, colors)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_chat_title_model_menu(backend, cx)
+                        }))
+                        .child(label),
+                ),
+            );
+            if self.chat_title_model_menu != Some(backend) {
+                continue;
+            }
+            let models = catalog.map_or(&[][..], |catalog| catalog.models.as_slice());
+            section = section.child(
+                div()
+                    .py(px(6.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .children(models.iter().enumerate().map(|(index, model)| {
+                        let id = model.id.clone();
+                        div()
+                            .id((row, index + 1))
+                            .h(px(32.0))
+                            .px(px(10.0))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.0))
+                            .text_size(px(13.0))
+                            .text_color(rgb(colors.text))
+                            .when(selected == Some(model.id.as_str()), |choice| {
+                                choice.bg(rgb(colors.selected_surface))
+                            })
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.choose_chat_title_model(backend, id.clone(), cx)
+                            }))
+                            .child(presentation::model_name(&model.id, Some(&model.name)))
+                    })),
+            );
+        }
+        section
+    }
+
     pub(super) fn render_workspace_settings(
         &mut self,
         colors: ThemeColors,
@@ -537,6 +723,9 @@ impl XdDesktop {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_minimal_all_permissions(cx)))
                             .child(settings_switch(colors, self.settings.allow_all_permissions)),
                     );
+                if let Some(settings) = self.chat_title_settings.clone() {
+                    content = content.child(self.render_chat_title_settings(&settings, colors, cx));
+                }
             }
             3 => {
                 content = content

@@ -310,6 +310,7 @@ boundary, not an event cursor.
 | `folder-settings` | `folder: string` | inherited folder settings |
 | `new-chat-sources` | `folder: string` | `branches:[{name,reference,oid}]`, `pull_requests:[{number,title,oid}]`, optional `pull_request_error`; branch discovery works without GitHub CLI |
 | `shortcuts` | optional `folder: string` | host-wide `global`, folder-owned `workspace`, and merged `effective` prompt arrays |
+| `chat-title-settings` | none | `enabled: boolean`, `models: {codex, claude}`, each the model that will title that assistant's chats, or `null` if its CLI offers none of the choices |
 | `list-dir` | optional `path: string` | `path`, `entries: string[]`; defaults to host home, lists non-hidden directories |
 | `file-browse` | `chat`, `action`, optional relative `path`, `content`, and `original` | `action:"list"` returns `entries:[{name,directory}]`; `action:"read"` returns UTF-8 `content` for a regular file no larger than 1 MiB; `action:"write"` saves bounded UTF-8 text and rejects a stale optional `original` |
 | `agent-secrets` | none | `names: string[]`; values never cross the wire |
@@ -655,6 +656,17 @@ checkout. A successful request replies with `ok` alone.
 `move-chat`, `set-folder-context`, and `set-folder-settings` acknowledge with
 `ok` and broadcast a `tree` event. `new-folder` also returns its id;
 `delete-chat` additionally returns the session deletion fields described above.
+
+`set-chat-title-settings` takes `enabled: boolean`, or `backend` of `codex` or
+`claude` with a `model` to choose or `null` to go back to the built-in choice, or
+both. It replies like `chat-title-settings`. The settings apply to the whole host.
+
+While titles are enabled, a chat's first message also names it. The host asks a
+low-cost model in the background, `gpt-6-luna` for Codex and `claude-haiku-5-5`
+for Claude unless another was chosen, and then publishes `tree` and `changed`. The
+title replaces only a placeholder name such as `New Chat`, on the chat and on its
+session; a name given in the meantime stays. A failed attempt leaves the name as it
+was. JCode chats are not titled.
 
 `set-shortcuts` replies with the resulting shortcut sets and broadcasts a
 `shortcuts-changed` event so open chats can refresh their buttons.

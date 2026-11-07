@@ -264,6 +264,8 @@ pub enum RequestKind {
     SetShortcuts {
         folder_id: Option<String>,
     },
+    ChatTitleSettings,
+    SetChatTitleSettings,
     RemoveWorktree {
         chat_id: String,
     },
@@ -696,6 +698,27 @@ impl HostHandle {
                 folder_id: folder_id.map(str::to_owned),
             },
             body,
+        )
+    }
+
+    pub fn chat_title_settings(&self) -> Result<(), String> {
+        self.send(
+            RequestKind::ChatTitleSettings,
+            json!({"op": "chat-title-settings"}),
+        )
+    }
+
+    pub fn set_chat_titles_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.send(
+            RequestKind::SetChatTitleSettings,
+            json!({"op": "set-chat-title-settings", "enabled": enabled}),
+        )
+    }
+
+    pub fn set_chat_title_model(&self, backend: &str, model: &str) -> Result<(), String> {
+        self.send(
+            RequestKind::SetChatTitleSettings,
+            json!({"op": "set-chat-title-settings", "backend": backend, "model": model}),
         )
     }
 

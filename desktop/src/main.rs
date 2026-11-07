@@ -1571,6 +1571,10 @@ struct XdDesktop {
     chat_column_width: f32,
     native_option_open: Option<&'static str>,
     settings_section: usize,
+    /// The host's chat title settings; `None` until it answers, or if it is too
+    /// old to have them, which hides the controls.
+    chat_title_settings: Option<workspace_settings::ChatTitleSettings>,
+    chat_title_model_menu: Option<&'static str>,
     expanded_activities: HashSet<i64>,
     expanded_work_logs: HashSet<i64>,
     /// Agents asked to stop or move to the background, until their record
@@ -2117,6 +2121,8 @@ impl XdDesktop {
             chat_column_width: 780.0,
             native_option_open: None,
             settings_section: 0,
+            chat_title_settings: None,
+            chat_title_model_menu: None,
             expanded_activities: HashSet::new(),
             expanded_work_logs: HashSet::new(),
             subagent_actions: HashMap::new(),
@@ -2460,6 +2466,8 @@ impl XdDesktop {
                 | RequestKind::Cancel { .. }
                 | RequestKind::SetOption { .. }
                 | RequestKind::SetShortcuts { .. }
+                | RequestKind::ChatTitleSettings
+                | RequestKind::SetChatTitleSettings
                 | RequestKind::RemoveWorktree { .. }
                 | RequestKind::SetDraft { .. }
                 | RequestKind::DiffRead { .. }
@@ -2602,6 +2610,9 @@ impl XdDesktop {
         self.minimal_route = MinimalRoute::default();
         self.pending_minimal_session = None;
         self.request_agent_catalog();
+        self.chat_title_model_menu = None;
+        self.chat_title_settings = None;
+        self.request_chat_title_settings();
         true
     }
 
@@ -3293,6 +3304,7 @@ impl XdDesktop {
                     | RequestKind::ImageRead { .. }
                     | RequestKind::Shortcuts { .. }
                     | RequestKind::SetShortcuts { .. }
+                    | RequestKind::SetChatTitleSettings
             ) {
                 self.model.connection_error = Some(
                     value
@@ -3307,6 +3319,9 @@ impl XdDesktop {
                     self.sending = false;
                     self.restore_pending_send(cx);
                 }
+                RequestKind::ChatTitleSettings => self.chat_title_settings = None,
+                // The switch moved ahead of the host, so take back its answer.
+                RequestKind::SetChatTitleSettings => self.request_chat_title_settings(),
                 RequestKind::QueueMutation { chat_id }
                 | RequestKind::Cancel { chat_id }
                 | RequestKind::SetOption { chat_id }
@@ -3891,6 +3906,10 @@ impl XdDesktop {
                     self.model.connection_error =
                         Some(format!("Invalid assistant catalog response: {error}"));
                 }
+            }
+            RequestKind::ChatTitleSettings | RequestKind::SetChatTitleSettings => {
+                self.chat_title_settings =
+                    workspace_settings::ChatTitleSettings::from_reply(&value);
             }
             RequestKind::AgentAuth => self.apply_auth_providers(&value),
             RequestKind::AgentAuthMutation => {}
@@ -9429,6 +9448,7 @@ impl XdDesktop {
     fn toggle_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.minimal_theme_open = !self.minimal_theme_open;
         if self.minimal_theme_open {
+            self.request_chat_title_settings();
             self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         } else {
             self.restore_minimal_popup_focus(window);
@@ -17324,6 +17344,51 @@ mod tests {
             "deleted-chat",
             &live_chats
         ));
+    }
+
+    #[test]
+    fn chat_title_settings_read_the_hosts_reply() {
+        let settings = workspace_settings::ChatTitleSettings::from_reply(&serde_json::json!({
+            "ok": true,
+            "enabled": false,
+            "models": {"codex": "gpt-6-luna", "claude": null},
+        }))
+        .unwrap();
+        assert!(!settings.enabled);
+        assert_eq!(settings.model("codex"), Some("gpt-6-luna"));
+        assert_eq!(settings.model("claude"), None);
+        assert!(
+            workspace_settings::ChatTitleSettings::from_reply(&serde_json::json!({"ok": true}))
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn chat_title_controls_show_only_once_the_host_has_answered(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).expect("register bundled UI font");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let agents_with = |settings: Option<workspace_settings::ChatTitleSettings>,
+                           cx: &mut gpui::VisualTestContext| {
+            desktop.update_in(cx, |desktop, window, cx| {
+                desktop.chat_title_settings = settings;
+                desktop.settings_section = 2;
+                desktop.minimal_theme_open = true;
+                desktop.render_workspace_settings(ThemePreset::Dark.colors(), window, cx);
+            });
+            cx.run_until_parked();
+        };
+        agents_with(None, cx);
+        let settings = workspace_settings::ChatTitleSettings::from_reply(&serde_json::json!({
+            "enabled": true,
+            "models": {"codex": "gpt-6-luna", "claude": "claude-haiku-5-5"},
+        }));
+        agents_with(settings, cx);
+        desktop.update_in(cx, |desktop, _, cx| {
+            desktop.toggle_chat_title_model_menu("codex", cx);
+            assert_eq!(desktop.chat_title_model_menu, Some("codex"));
+            desktop.toggle_chat_title_model_menu("codex", cx);
+            assert_eq!(desktop.chat_title_model_menu, None);
+        });
     }
 
     #[test]

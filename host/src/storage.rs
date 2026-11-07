@@ -72,6 +72,22 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
 ];
 const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const CHAT_TITLES_ENABLED_KEY: &str = "chat_titles_enabled";
+const MAX_CHAT_TITLE_MESSAGE_CHARS: usize = 2_000;
+/// The assistants that can title chats, each with its low-cost models, newest
+/// first. The older ones serve a CLI that does not offer the newest yet. JCode
+/// has no model choice to make, so its chats keep the name they were given.
+const CHAT_TITLE_MODELS: &[(&str, &[&str])] = &[
+    ("codex", &["gpt-6-luna", "gpt-5.6-luna"]),
+    (
+        "claude",
+        &[
+            "claude-haiku-5-5",
+            "claude-haiku-4-5-20251001",
+            "claude-haiku-4-5",
+        ],
+    ),
+];
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -99,6 +115,7 @@ pub struct StateStore {
     database: Mutex<Connection>,
     workspace_root: PathBuf,
     paste_root: PathBuf,
+    chat_title_root: PathBuf,
 }
 
 struct ValidatedAttachment {
@@ -189,6 +206,15 @@ pub(crate) struct WorktreeNameSpec {
 pub struct ChatToResume {
     pub chat_id: String,
     pub last_message: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChatTitleSpec {
+    pub chat_id: String,
+    pub backend: String,
+    pub message: String,
+    pub workdir: String,
+    pub model: String,
 }
 
 pub enum SendDisposition {
@@ -367,6 +393,10 @@ impl StateStore {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join("remote-pasted"),
+            chat_title_root: database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("chat-titles"),
         })
     }
 
@@ -1611,6 +1641,172 @@ impl StateStore {
             model,
             effort,
         }))
+    }
+
+    pub fn chat_title_settings(&self) -> Result<Value, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        chat_title_settings_reply(&database)
+    }
+
+    pub fn set_chat_title_settings(&self, request: &Value) -> Result<Value, StorageError> {
+        let enabled = match request.get("enabled") {
+            None => None,
+            Some(value) => Some(value.as_bool().ok_or_else(|| {
+                StorageError::InvalidRequest("enabled must be true or false.".into())
+            })?),
+        };
+        let backend = optional_string(request, "backend")?;
+        let model = optional_string(request, "model")?;
+        if enabled.is_none() && backend.is_none() {
+            return Err(StorageError::InvalidRequest(
+                "set-chat-title-settings needs enabled, or a backend and model.".into(),
+            ));
+        }
+        if let Some(backend) = backend {
+            if chat_title_models(backend).is_empty() {
+                return Err(StorageError::InvalidRequest(format!(
+                    "{backend} cannot title chats."
+                )));
+            }
+            if let Some(model) = model {
+                validate_model(backend, model)?;
+            }
+        } else if model.is_some() {
+            return Err(StorageError::InvalidRequest(
+                "A chat title model needs a backend.".into(),
+            ));
+        }
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        if let Some(enabled) = enabled {
+            set_meta(
+                &transaction,
+                CHAT_TITLES_ENABLED_KEY,
+                if enabled { "1" } else { "0" },
+            )?;
+        }
+        if let Some(backend) = backend {
+            let key = chat_title_model_key(backend);
+            match model {
+                Some(model) => set_meta(&transaction, &key, model)?,
+                // No model puts the assistant back on the built-in choice.
+                None => {
+                    transaction.execute("DELETE FROM meta WHERE key = ?", [&key])?;
+                }
+            }
+        }
+        let reply = chat_title_settings_reply(&transaction)?;
+        transaction.commit()?;
+        Ok(reply)
+    }
+
+    /// What to generate a title with, when this send is a chat's first message
+    /// and the chat still has the name it was created with.
+    pub(crate) fn prepare_chat_title(
+        &self,
+        request: &Value,
+    ) -> Result<Option<ChatTitleSpec>, StorageError> {
+        let chat_id = required_string(
+            request,
+            "chat",
+            "A message needs a chat and something to say.",
+        )?;
+        let message = optional_string(request, "text")?.unwrap_or("").trim();
+        if message.is_empty() {
+            return Ok(None);
+        }
+        let backend = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            if !chat_titles_enabled(&database)? {
+                return Ok(None);
+            }
+            let Some((backend, title, used)) = database
+                .query_row(
+                    "SELECT backend, title, host_working OR EXISTS \
+                     (SELECT 1 FROM messages WHERE chat_id = chats.id AND role = 'user') \
+                     FROM chats WHERE id = ?",
+                    [chat_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, bool>(2)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            if used || !is_default_chat_title(title.as_deref()) {
+                return Ok(None);
+            }
+            backend
+        };
+        let Some(model) = chat_title_model(&self.database, &backend)? else {
+            return Ok(None);
+        };
+        // An empty directory, so the run loads no project instructions: they
+        // cost tokens and say nothing about what to call the chat.
+        fs::create_dir_all(&self.chat_title_root).map_err(|source| StorageError::Filesystem {
+            context: format!("cannot create {}", self.chat_title_root.display()),
+            source,
+        })?;
+        Ok(Some(ChatTitleSpec {
+            chat_id: chat_id.to_owned(),
+            backend,
+            message: message.chars().take(MAX_CHAT_TITLE_MESSAGE_CHARS).collect(),
+            workdir: self.chat_title_root.to_string_lossy().into_owned(),
+            model,
+        }))
+    }
+
+    /// Saves a generated title unless someone named the chat while it was being
+    /// generated. The session takes the title too if it is still unnamed; a chat
+    /// added to a named session leaves that name alone. Returns whether anything
+    /// changed.
+    pub(crate) fn apply_chat_title(
+        &self,
+        chat_id: &str,
+        title: &str,
+    ) -> Result<bool, StorageError> {
+        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let transaction = database.transaction()?;
+        let Some((chat_title, session, session_title)) = transaction
+            .query_row(
+                "SELECT c.title, s.id, s.title FROM chats c LEFT JOIN workspace_sessions s \
+                 ON s.id = COALESCE(c.workspace_session_id, c.id) WHERE c.id = ?",
+                [chat_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        else {
+            return Ok(false);
+        };
+        if !is_default_chat_title(chat_title.as_deref()) {
+            return Ok(false);
+        }
+        let now = now_seconds();
+        transaction.execute(
+            "UPDATE chats SET title = ?, updated_at = ? WHERE id = ?",
+            params![title, now, chat_id],
+        )?;
+        if let Some(session) = session
+            && is_default_chat_title(session_title.as_deref())
+        {
+            transaction.execute(
+                "UPDATE workspace_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                params![title, now, session],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(true)
     }
 
     fn materialize_message(
@@ -4691,6 +4887,89 @@ fn new_chat_model_and_effort(
     }
     let effort = picked_effort.filter(|effort| effort_supported(backend, effort));
     Ok((model, effort))
+}
+
+fn set_meta(database: &Connection, key: &str, value: &str) -> Result<(), StorageError> {
+    database.execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn meta(database: &Connection, key: &str) -> Result<Option<String>, StorageError> {
+    Ok(database
+        .query_row("SELECT value FROM meta WHERE key = ?", [key], |row| {
+            row.get(0)
+        })
+        .optional()?)
+}
+
+fn chat_titles_enabled(database: &Connection) -> Result<bool, StorageError> {
+    Ok(meta(database, CHAT_TITLES_ENABLED_KEY)?.as_deref() != Some("0"))
+}
+
+fn chat_title_model_key(backend: &str) -> String {
+    format!("chat_title_model_{backend}")
+}
+
+fn chat_title_models(backend: &str) -> &'static [&'static str] {
+    CHAT_TITLE_MODELS
+        .iter()
+        .find(|(known, _)| *known == backend)
+        .map_or(&[], |(_, models)| models)
+}
+
+/// The chosen model while the CLI still offers it, otherwise the newest low-cost
+/// one it does. This never falls back to the chat's own model, which could cost
+/// far more than a title is worth.
+fn resolve_chat_title_model(backend: &str, chosen: Option<&str>) -> Option<String> {
+    let discovered = crate::model_catalog::cached_models(backend);
+    chosen
+        .into_iter()
+        .chain(chat_title_models(backend).iter().copied())
+        .find(|model| choice_still_offered(&discovered, model))
+        .map(str::to_owned)
+}
+
+fn chat_title_model(
+    database: &Mutex<Connection>,
+    backend: &str,
+) -> Result<Option<String>, StorageError> {
+    if chat_title_models(backend).is_empty() {
+        return Ok(None);
+    }
+    let chosen = {
+        let database = database.lock().map_err(|_| StorageError::Poisoned)?;
+        meta(&database, &chat_title_model_key(backend))?
+    };
+    Ok(resolve_chat_title_model(backend, chosen.as_deref()))
+}
+
+fn chat_title_settings_reply(database: &Connection) -> Result<Value, StorageError> {
+    let mut models = serde_json::Map::new();
+    for (backend, _) in CHAT_TITLE_MODELS {
+        let chosen = meta(database, &chat_title_model_key(backend))?;
+        models.insert(
+            (*backend).to_owned(),
+            json!(resolve_chat_title_model(backend, chosen.as_deref())),
+        );
+    }
+    Ok(json!({
+        "ok": true,
+        "enabled": chat_titles_enabled(database)?,
+        "models": models,
+    }))
+}
+
+/// Whether a chat or session still has a placeholder name, which clients create
+/// with different capitalization.
+fn is_default_chat_title(title: Option<&str>) -> bool {
+    let title = title.unwrap_or("").trim();
+    title.is_empty()
+        || title.eq_ignore_ascii_case("new chat")
+        || title.eq_ignore_ascii_case("new session")
 }
 
 /// An undiscovered catalog says nothing about whether a choice still exists.
@@ -8069,6 +8348,237 @@ mod tests {
         pick(&store, &codex, "model", "cli-frontier");
         let codex = store.chat(codex["id"].as_str().unwrap()).unwrap();
         assert_eq!(codex["effort"], "medium");
+    }
+
+    fn first_message(chat: &Value) -> Value {
+        json!({"chat": chat["id"], "text": "  fix the sidebar scroll  "})
+    }
+
+    #[test]
+    fn a_first_message_is_titled_with_the_low_cost_model_of_its_assistant() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-6-sol", true, None),
+                discovered("gpt-6-luna", false, None),
+            ],
+        );
+        crate::model_catalog::set_test_models(
+            "claude",
+            vec![
+                discovered("claude-opus-5-5", true, None),
+                discovered("claude-haiku-5-5", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let codex = new_chat_on(&store, &folder, "codex");
+        let spec = store
+            .prepare_chat_title(&first_message(&codex))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.backend, "codex");
+        assert_eq!(spec.model, "gpt-6-luna");
+        assert_eq!(spec.message, "fix the sidebar scroll");
+        assert!(
+            fs::read_dir(&spec.workdir).unwrap().next().is_none(),
+            "the run must not load any project's instructions"
+        );
+
+        let claude = new_chat_on(&store, &folder, "claude");
+        let spec = store
+            .prepare_chat_title(&first_message(&claude))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.backend, "claude");
+        assert_eq!(spec.model, "claude-haiku-5-5");
+    }
+
+    #[test]
+    fn only_a_first_message_to_an_unnamed_chat_is_titled() {
+        crate::model_catalog::set_test_models("codex", vec![]);
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let named = store
+            .new_chat(&json!({"folder": folder, "title": "My task", "backend": "codex"}))
+            .unwrap();
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&named))
+                .unwrap()
+                .is_none()
+        );
+
+        let jcode = new_chat_on(&store, &folder, "jcode");
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&jcode))
+                .unwrap()
+                .is_none()
+        );
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        let blank = json!({"chat": chat["id"], "text": "   "});
+        assert!(store.prepare_chat_title(&blank).unwrap().is_none());
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_some()
+        );
+        store.prepare_send(&first_message(&chat)).unwrap();
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_none(),
+            "the chat already has its first message"
+        );
+    }
+
+    #[test]
+    fn chat_titles_can_be_turned_off_and_given_another_model() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-6-luna", true, None),
+                discovered("gpt-6-terra", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+
+        let settings = store.chat_title_settings().unwrap();
+        assert_eq!(settings["enabled"], true, "titles are on until turned off");
+        assert_eq!(settings["models"]["codex"], "gpt-6-luna");
+
+        let settings = store
+            .set_chat_title_settings(&json!({"backend": "codex", "model": "gpt-6-terra"}))
+            .unwrap();
+        assert_eq!(settings["models"]["codex"], "gpt-6-terra");
+        let spec = store
+            .prepare_chat_title(&first_message(&chat))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.model, "gpt-6-terra");
+
+        let settings = store
+            .set_chat_title_settings(&json!({"enabled": false}))
+            .unwrap();
+        assert_eq!(settings["enabled"], false);
+        assert_eq!(settings["models"]["codex"], "gpt-6-terra");
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_none()
+        );
+
+        let settings = store
+            .set_chat_title_settings(&json!({"enabled": true, "backend": "codex", "model": null}))
+            .unwrap();
+        assert_eq!(settings["enabled"], true);
+        assert_eq!(settings["models"]["codex"], "gpt-6-luna");
+
+        for invalid in [
+            json!({}),
+            json!({"enabled": "yes"}),
+            json!({"model": "gpt-6-luna"}),
+            json!({"backend": "jcode", "model": "default"}),
+            json!({"backend": "codex", "model": 5}),
+        ] {
+            assert!(
+                store.set_chat_title_settings(&invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retired_title_model_falls_back_but_never_to_an_expensive_one() {
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-6-terra", true, None),
+                discovered("gpt-5.6-luna", false, None),
+            ],
+        );
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        store
+            .set_chat_title_settings(&json!({"backend": "codex", "model": "gpt-6-terra"}))
+            .unwrap();
+        let chat = new_chat_on(&store, &folder, "codex");
+
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("gpt-5.6-luna", true, None)],
+        );
+        let spec = store
+            .prepare_chat_title(&first_message(&chat))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.model, "gpt-5.6-luna", "the chosen model is gone");
+
+        crate::model_catalog::set_test_models("codex", vec![discovered("gpt-6-sol", true, None)]);
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store.chat_title_settings().unwrap()["models"]["codex"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn a_generated_title_replaces_only_placeholder_names() {
+        crate::model_catalog::set_test_models("codex", vec![]);
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+
+        let chat = new_chat_on(&store, &folder, "codex");
+        let id = chat["id"].as_str().unwrap();
+        assert!(store.apply_chat_title(id, "Fix scroll").unwrap());
+        let saved = store.chat(id).unwrap();
+        assert_eq!(saved["title"], "Fix scroll");
+        assert_eq!(saved["session_title"], "Fix scroll");
+        assert!(!store.apply_chat_title(id, "Second try").unwrap());
+
+        // Named while the title was being generated: the person wins.
+        let renamed = new_chat_on(&store, &folder, "codex");
+        let renamed_id = renamed["id"].as_str().unwrap();
+        store
+            .rename_chat(&json!({"chat": renamed_id, "title": "Mine"}))
+            .unwrap();
+        assert!(!store.apply_chat_title(renamed_id, "Generated").unwrap());
+        assert_eq!(store.chat(renamed_id).unwrap()["title"], "Mine");
+
+        // A new tab keeps the name of the session it joined.
+        let session = saved["session"].clone();
+        let tab = store
+            .new_chat(&json!({"folder": folder, "session": session, "title": "new chat", "backend": "codex"}))
+            .unwrap();
+        let tab_id = tab["id"].as_str().unwrap();
+        store
+            .rename_session(&json!({"session": session, "title": "Shared task"}))
+            .unwrap();
+        assert!(store.apply_chat_title(tab_id, "Second tab").unwrap());
+        let saved = store.chat(tab_id).unwrap();
+        assert_eq!(saved["title"], "Second tab");
+        assert_eq!(saved["session_title"], "Shared task");
+
+        assert!(!store.apply_chat_title("no-such-chat", "Nothing").unwrap());
     }
 
     #[test]
