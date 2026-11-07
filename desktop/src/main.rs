@@ -9852,7 +9852,11 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if text.is_empty() || !self.model.draft_attachments.is_empty() {
+        // A file still being read would be left behind for the next message.
+        if text.is_empty()
+            || !self.model.draft_attachments.is_empty()
+            || self.attachments_reading > 0
+        {
             return;
         }
         let Some(host) = self.active_host().cloned() else {
@@ -15286,7 +15290,8 @@ impl XdDesktop {
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
         let can_queue = self.model.connected
             && !self.composer.trim().is_empty()
-            && self.model.draft_attachments.is_empty();
+            && self.model.draft_attachments.is_empty()
+            && self.attachments_reading == 0;
         let working = self.model.working;
         let shows_resume = self.shows_resume();
         let can_resume = shows_resume && self.model.connected && metadata_ready && !self.sending;
@@ -19046,14 +19051,34 @@ fn read_attachments(paths: Vec<PathBuf>, mut room: DraftRoom) -> Vec<Result<Atta
     read
 }
 
+/// Opens a file without waiting on it: a FIFO put where the file was opens at
+/// once instead of blocking until a writer appears.
+fn open_without_waiting(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
 /// One file the user chose to attach, read whole if it is at most `room`
-/// bytes. Only a regular file is opened, so a FIFO or device cannot stall it.
+/// bytes. What was opened is checked, not the path, so a FIFO or device that
+/// takes the file's place cannot stall the read.
 fn read_attachment(path: &Path, room: usize) -> Result<Attachment, String> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
-    let metadata = fs::metadata(path).map_err(|_| format!("{name} could not be read."))?;
+    if fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(format!("{name} is a folder. Attach the files inside it."));
+    }
+    let file = open_without_waiting(path).map_err(|_| format!("{name} could not be read."))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| format!("{name} could not be read."))?;
     if metadata.is_dir() {
         return Err(format!("{name} is a folder. Attach the files inside it."));
     }
@@ -19071,8 +19096,8 @@ fn read_attachment(path: &Path, room: usize) -> Result<Attachment, String> {
     // The file may have grown since it was measured.
     let limit = room.min(MAX_ATTACHMENT_BYTES);
     let mut bytes = Vec::new();
-    fs::File::open(path)
-        .and_then(|file| file.take(limit as u64 + 1).read_to_end(&mut bytes))
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|_| format!("{name} could not be read."))?;
     if bytes.len() > MAX_ATTACHMENT_BYTES {
         return Err(too_large());

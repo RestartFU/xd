@@ -1365,7 +1365,8 @@ mod tests {
             desktop.composer = "with the notes".into();
             desktop.model.connection_error = None;
             desktop.send_composer(cx);
-            // With no host, a send that went ahead would have said so.
+            desktop.queue_composer(cx);
+            // With no host, a send or queue that went ahead would have said so.
             assert_eq!(desktop.model.connection_error, None);
             // The user moves on before the read finishes.
             desktop.model.selected_chat = Some("elsewhere".into());
@@ -1429,6 +1430,18 @@ mod tests {
                 .unwrap_err()
                 .contains("larger than 10 MiB")
         );
+        #[cfg(unix)]
+        {
+            // A FIFO with no writer is refused at once rather than waited on.
+            let fifo = root.join("fifo.txt");
+            let path = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            assert!(
+                read_attachment(&fifo, MAX_TOTAL_ATTACHMENT_BYTES)
+                    .unwrap_err()
+                    .contains("not a file")
+            );
+        }
         assert!(
             read_attachment(&root.join("missing"), MAX_TOTAL_ATTACHMENT_BYTES)
                 .unwrap_err()
