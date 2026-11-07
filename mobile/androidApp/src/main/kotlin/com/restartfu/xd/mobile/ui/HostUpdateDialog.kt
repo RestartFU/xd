@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import com.restartfu.xd.mobile.MainViewModel
 
 /**
@@ -33,6 +34,15 @@ internal fun HostUpdateDialog(
     val busy by model.hostBusy.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) { model.hostUpdate("check") }
+    // Checking and installing finish on the host after it answers, so ask
+    // again until they do; this also catches up after a reconnect.
+    val pending = status?.state == "checking" || status?.state == "installing"
+    LaunchedEffect(pending) {
+        while (pending) {
+            delay(HOST_UPDATE_POLL_MILLIS)
+            model.hostUpdate("status")
+        }
+    }
 
     val supported = status?.supported == true
     val state = status?.state ?: "idle"
@@ -113,3 +123,5 @@ internal fun HostUpdateDialog(
         },
     )
 }
+
+private const val HOST_UPDATE_POLL_MILLIS = 2_000L
