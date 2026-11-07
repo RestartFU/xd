@@ -5969,7 +5969,12 @@ fn prepare_turn(
             ));
         }
     }
+    // Keep the conversation on this model if the assistant's default later moves.
     let model = chat.3.unwrap_or_else(|| default_model(&chat.1));
+    transaction.execute(
+        "UPDATE chats SET model = ? WHERE id = ? AND model IS NULL",
+        params![model, chat_id],
+    )?;
     let effort = chat
         .4
         .unwrap_or_else(|| default_effort(&chat.1, Some(&model)));
@@ -8145,6 +8150,7 @@ mod tests {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         let folder = workspace(&store);
+        fs::create_dir_all(fixture.workspaces.join("Workspace")).unwrap();
         let chat = new_chat_on(&store, &folder, "codex");
         assert!(chat.get("model").is_none());
         assert_eq!(chat["effort"], "high");
@@ -8156,6 +8162,15 @@ mod tests {
         );
         assert_eq!(default_model("codex"), "cli-everyday");
         assert_eq!(default_effort("codex", None), "low");
+
+        // The first turn keeps the chat on that model when the default moves on.
+        assert_eq!(first_turn(&store, &chat).model, "cli-everyday");
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("cli-next", true, Some("low"))],
+        );
+        let chat = store.chat(chat["id"].as_str().unwrap()).unwrap();
+        assert_eq!(chat["model"], "cli-everyday");
     }
 
     #[test]
