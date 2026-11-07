@@ -40,8 +40,8 @@ use xd_desktop::{
     host::{HostHandle, HostUpdate, MessageCursor, NewSessionWorktree, RequestKind, StartedHost},
     markdown,
     model::{
-        AppModel, Attachment, ChatSummary, Message, MessageImage, MessagePageDirection, ToolView,
-        Worktree,
+        AppModel, Attachment, ChatSummary, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage,
+        MessagePageDirection, ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -1194,6 +1194,10 @@ const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
 /// How much memory images in a chat may hold. Scrolling through a long chat
 /// should not keep every image it passes.
 const MESSAGE_IMAGE_BUDGET: usize = 256 * 1024 * 1024;
+/// The most images the host lets one reply show. All of a row's images count as
+/// drawn together, so a full row has to fit the budget for eviction to hold.
+const MAX_IMAGES_IN_A_ROW: usize = 32;
+const _: () = assert!(MAX_IMAGES_IN_A_ROW * MAX_MESSAGE_IMAGE_BYTES <= MESSAGE_IMAGE_BUDGET);
 
 /// Which images to let go of to get back under budget: the longest undrawn first,
 /// and never one the latest frame drew, which would only be asked for again. Each
@@ -1738,6 +1742,10 @@ struct XdDesktop {
     /// The images of the open chat, kept for its rows to draw.
     message_images: Arc<MessageImages>,
     message_image_frame: u64,
+    /// Replies waiting to be decoded. Decoding takes all of an image's pixels
+    /// before it is scaled, so doing one at a time bounds what that can cost.
+    message_image_decodes: VecDeque<(String, String, String)>,
+    message_image_decoding: bool,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
@@ -2268,6 +2276,8 @@ impl XdDesktop {
             owner_icons: HashMap::new(),
             message_images: Arc::default(),
             message_image_frame: 0,
+            message_image_decodes: VecDeque::new(),
+            message_image_decoding: false,
             owner_icons_requested: HashSet::new(),
             workflow_ticking: HashSet::new(),
             live_render_generation: 0,
@@ -3830,20 +3840,12 @@ impl XdDesktop {
                 self.record_owner_icon(owner, &value);
             }
             RequestKind::ImageRead { path } => {
-                let path = path.clone();
                 let field = |name| value.get(name).and_then(Value::as_str).map(str::to_owned);
                 let mime = field("mime").unwrap_or_default();
                 let data = field("data").unwrap_or_default();
-                cx.spawn(async move |this, cx| {
-                    let image = cx
-                        .background_spawn(async move { MessageImage::decode(&mime, &data) })
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        this.record_message_image(path, image, cx);
-                        cx.notify();
-                    });
-                })
-                .detach();
+                self.message_image_decodes
+                    .push_back((path.clone(), mime, data));
+                self.decode_next_message_image(cx);
             }
             RequestKind::AgentCatalog => {
                 if let Err(error) = self.model.apply_agent_catalog(&value) {
@@ -8251,6 +8253,28 @@ impl XdDesktop {
         }
     }
 
+    fn decode_next_message_image(&mut self, cx: &mut Context<Self>) {
+        if self.message_image_decoding {
+            return;
+        }
+        let Some((path, mime, data)) = self.message_image_decodes.pop_front() else {
+            return;
+        };
+        self.message_image_decoding = true;
+        cx.spawn(async move |this, cx| {
+            let image = cx
+                .background_spawn(async move { MessageImage::decode(&mime, &data) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.message_image_decoding = false;
+                this.record_message_image(path, image, cx);
+                this.decode_next_message_image(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn record_message_image(
         &mut self,
         path: String,
@@ -8289,6 +8313,7 @@ impl XdDesktop {
 
     /// Lets go of the open chat's images, as it closes.
     fn forget_message_images(&mut self, cx: &mut Context<Self>) {
+        self.message_image_decodes.clear();
         let images = std::mem::take(&mut self.message_images);
         let released = images
             .values()
@@ -17215,6 +17240,69 @@ mod tests {
         assert_eq!(working_dot_alphas(2), [0xff, 0xff, 0x4d]);
         assert_eq!(working_dot_alphas(3), [0xff, 0xff, 0xff]);
         assert_eq!(working_dot_alphas(4), [0x4d, 0x4d, 0x4d]);
+    }
+
+    /// Decoding holds all of an image's pixels before scaling them, so a reply
+    /// full of large images must not decode them all at once.
+    #[gpui::test]
+    fn message_images_decode_one_at_a_time_and_all_arrive(cx: &mut gpui::TestAppContext) {
+        let pixel = {
+            use base64::Engine as _;
+            use image::ImageEncoder as _;
+            let mut png = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&[1, 2, 3, 255], 1, 1, image::ExtendedColorType::Rgba8)
+                .unwrap();
+            base64::engine::general_purpose::STANDARD.encode(png)
+        };
+        let body = |value: Value| value.as_object().unwrap().clone();
+        let read = |path: &str| RequestKind::ImageRead {
+            path: path.to_owned(),
+        };
+
+        let (desktop, cx) = cx.add_window_view(|window, cx| XdDesktop::new(window, cx));
+        desktop.update(cx, |desktop, cx| {
+            for path in ["/kept/a.png", "/kept/b.png", "/kept/c.png"] {
+                let reply =
+                    body(serde_json::json!({"ok": true, "mime": "image/png", "data": pixel}));
+                desktop.handle_reply(read(path), reply, None, cx);
+            }
+            assert!(desktop.message_image_decoding);
+            assert_eq!(desktop.message_image_decodes.len(), 2);
+
+            // A refusal has nothing to decode, and is answered at once.
+            let refused = body(serde_json::json!({"ok": false, "error": "no"}));
+            desktop.handle_reply(read("/kept/refused.png"), refused, None, cx);
+            assert!(matches!(
+                desktop.message_images.get("/kept/refused.png"),
+                Some(MessageImageState::Unavailable)
+            ));
+            assert_eq!(desktop.model.connection_error, None);
+        });
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, cx| {
+            assert!(!desktop.message_image_decoding);
+            assert!(desktop.message_image_decodes.is_empty());
+            for path in ["/kept/a.png", "/kept/b.png", "/kept/c.png"] {
+                assert!(
+                    matches!(
+                        desktop.message_images.get(path),
+                        Some(MessageImageState::Ready(_))
+                    ),
+                    "{path} should have arrived"
+                );
+            }
+
+            // Leaving the chat drops what was still waiting.
+            desktop.message_image_decodes.push_back((
+                "/kept/d.png".into(),
+                "image/png".into(),
+                pixel.clone(),
+            ));
+            desktop.forget_message_images(cx);
+            assert!(desktop.message_image_decodes.is_empty());
+            assert!(desktop.message_images.is_empty());
+        });
     }
 
     #[test]

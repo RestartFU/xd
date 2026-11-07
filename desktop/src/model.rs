@@ -33,9 +33,12 @@ pub fn owner_icon(mime: &str, data: &str) -> Option<Arc<Image>> {
 /// The most pixels a chat will decode for one image. A small file can still
 /// describe an enormous picture, and decoding it would allocate all of it.
 const MAX_MESSAGE_IMAGE_PIXELS: u64 = 64_000_000;
-/// Decoded images are scaled to this, which is more than a transcript column can
-/// show even on a dense display, so each one holds a bounded amount of memory.
-const MAX_MESSAGE_IMAGE_SIDE: u32 = 2048;
+/// The largest pixels worth keeping: twice the widest and tallest a transcript
+/// draws an image, for dense displays. Layout goes by the original's size.
+const MAX_KEPT_WIDTH: u32 = 1560;
+const MAX_KEPT_HEIGHT: u32 = 960;
+/// What one decoded image can hold in memory at most.
+pub const MAX_MESSAGE_IMAGE_BYTES: usize = MAX_KEPT_WIDTH as usize * MAX_KEPT_HEIGHT as usize * 4;
 
 fn worth_decoding(width: u32, height: u32) -> bool {
     let pixels = u64::from(width) * u64::from(height);
@@ -72,8 +75,8 @@ impl MessageImage {
             return None;
         }
         let mut decoded = reader()?.decode().ok()?;
-        if width.max(height) > MAX_MESSAGE_IMAGE_SIDE {
-            decoded = decoded.thumbnail(MAX_MESSAGE_IMAGE_SIDE, MAX_MESSAGE_IMAGE_SIDE);
+        if width > MAX_KEPT_WIDTH || height > MAX_KEPT_HEIGHT {
+            decoded = decoded.thumbnail(MAX_KEPT_WIDTH, MAX_KEPT_HEIGHT);
         }
         let mut frame = decoded.into_rgba8();
         // The renderer takes BGRA.
@@ -2761,9 +2764,20 @@ mod tests {
     #[test]
     fn a_large_image_keeps_its_size_for_layout_but_not_its_pixels() {
         let shown =
-            MessageImage::decode("image/png", &encoded_png(4096, 8, [9, 9, 9, 255])).unwrap();
-        assert_eq!((shown.width, shown.height), (4096, 8));
-        assert_eq!(shown.bytes(), 2048 * 4 * 4);
+            MessageImage::decode("image/png", &encoded_png(3120, 960, [9, 9, 9, 255])).unwrap();
+        assert_eq!((shown.width, shown.height), (3120, 960));
+        assert_eq!(shown.bytes(), 1560 * 480 * 4);
+
+        // A square one is limited by the height it can be drawn at.
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(1920, 1920, [9, 9, 9, 255])).unwrap();
+        assert_eq!(shown.bytes(), 960 * 960 * 4);
+        assert!(shown.bytes() <= MAX_MESSAGE_IMAGE_BYTES);
+
+        // One that already fits is left alone.
+        let shown =
+            MessageImage::decode("image/png", &encoded_png(1560, 960, [9, 9, 9, 255])).unwrap();
+        assert_eq!(shown.bytes(), MAX_MESSAGE_IMAGE_BYTES);
     }
 
     #[test]
