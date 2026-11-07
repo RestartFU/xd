@@ -13,11 +13,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.listSaver
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -29,12 +24,11 @@ internal fun ShortcutEditorDialog(
     onDismiss: () -> Unit,
     onSave: (List<String>) -> Unit,
     onRetry: () -> Unit,
+    onEdit: (List<String>) -> Unit,
 ) {
-    // Saved, so recreating the activity keeps unsaved edits; keyed on the
-    // opening and the loaded list, so a fresh load starts from the host's.
-    var prompts by rememberSaveable(state.opening, state.prompts, stateSaver = PromptsSaver) {
-        mutableStateOf(state.prompts)
-    }
+    // The draft lives in the editor state, so recreating the activity keeps it
+    // and another opening never sees it.
+    val prompts = state.draft
     // Locked while saving: the request carries the list as Save found it.
     val editable = !state.saving
 
@@ -72,7 +66,7 @@ internal fun ShortcutEditorDialog(
                             OutlinedTextField(
                                 value = prompt,
                                 onValueChange = { value ->
-                                    prompts = prompts.toMutableList().also { it[index] = value }
+                                    onEdit(prompts.toMutableList().also { it[index] = value })
                                 },
                                 modifier = Modifier.weight(1f),
                                 label = { Text("Prompt") },
@@ -82,14 +76,14 @@ internal fun ShortcutEditorDialog(
                             )
                             TextButton(
                                 onClick = {
-                                    prompts = prompts.filterIndexed { at, _ -> at != index }
+                                    onEdit(prompts.filterIndexed { at, _ -> at != index })
                                 },
                                 enabled = editable,
                             ) { Text("Remove") }
                         }
                     }
                     TextButton(
-                        onClick = { prompts = prompts + "" },
+                        onClick = { onEdit(prompts + "") },
                         enabled = editable && prompts.size < 24,
                     ) { Text("Add prompt") }
                 }
@@ -108,5 +102,3 @@ internal fun ShortcutEditorDialog(
         },
     )
 }
-
-private val PromptsSaver = listSaver<List<String>, String>(save = { it }, restore = { it })

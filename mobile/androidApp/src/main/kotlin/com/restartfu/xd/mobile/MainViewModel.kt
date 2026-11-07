@@ -47,6 +47,11 @@ data class ShortcutEditorState(
     val loaded: Boolean = false,
     /** Identifies one opening, so a late reply never revives a closed or reopened editor. */
     val opening: Long = 0,
+    /**
+     * The list being edited. Kept here rather than in the dialog, so it
+     * outlives recreating the activity and belongs to this opening alone.
+     */
+    val draft: List<String> = emptyList(),
 )
 
 data class CreatedDirectSession(
@@ -320,8 +325,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val update: ShortcutEditorState = try {
                 val reply = client.shortcuts(folderId)
+                val prompts = if (folderId == null) reply.global else reply.workspace
                 opened.copy(
-                    prompts = if (folderId == null) reply.global else reply.workspace,
+                    prompts = prompts,
+                    draft = prompts,
                     loading = false,
                     loaded = true,
                 )
@@ -331,6 +338,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 opened.copy(loading = false, error = error.message ?: "Could not load shortcuts")
             }
             _shortcutEditor.update { current -> if (current?.opening == opened.opening) update else current }
+        }
+    }
+
+    /** Replaces the open editor's draft; ignored while saving, which sends the draft as it was. */
+    fun editShortcutDraft(opening: Long, draft: List<String>) {
+        _shortcutEditor.update { current ->
+            if (current?.opening == opening && !current.saving) current.copy(draft = draft) else current
         }
     }
 
