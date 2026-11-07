@@ -50,13 +50,16 @@ development server needs a reachable LAN/Tailscale URL or a port forward; `local
 always means the machine displaying xd. For example, forward port 3000 with
 `ssh -L 3000:localhost:3000 user@server` before opening `localhost:3000`.
 
-macOS uses the system WKWebView. Linux uses GTK3/WebKitGTK 4.1 through X11, so
-Wayland desktops need XWayland and a working `DISPLAY`. The Linux bundle ships
-the browser engine, auxiliary processes, TLS backend, and GTK/media resources.
-The host supplies `bubblewrap` (`bwrap`), `xdg-dbus-proxy`, and its GBM/DRM and
-Wayland graphics libraries. WebKit's process sandbox stays enabled. Browser
-toolkit settings are restored before xd starts terminals, agents, or its host
-service.
+macOS uses the system WKWebView. Linux uses Chromium through CEF, embedded over
+X11, so Wayland desktops need XWayland and a working `DISPLAY`. The Linux bundle
+ships the browser engine, its data files, and the libraries it loads. The host
+supplies its GBM/DRM and Wayland graphics libraries.
+
+Chromium's sandbox stays enabled, and needs unprivileged user namespaces. Without
+them the browser pane explains that it cannot start and the rest of xd keeps
+working. Ubuntu 23.10 and later restrict these namespaces through AppArmor; allow
+them with `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`. Website
+data lives in `browser/chromium` under xd's data directory.
 
 ## Build and test
 
@@ -67,9 +70,10 @@ docker build --target gpui-desktop-check .
 docker build --target gpui-desktop-clippy .
 ```
 
-Linux source builds additionally need GTK3 and WebKitGTK 4.1 development
-packages (`libgtk-3-dev` and `libwebkit2gtk-4.1-dev` on Debian). Docker installs
-these dependencies automatically.
+Linux source builds additionally need `cmake` and `ninja`, and the libraries
+CEF links against (`libnss3`, `libgbm1`, and the others the Dockerfile lists). The
+`cef` crate downloads a matching CEF unless `CEF_PATH` names one; Docker pins and
+verifies its own and installs everything else automatically.
 
 Every push to `master` replaces the rolling Linux, macOS, and Windows nightly. Tagged
 releases use the stable application id and install beside the nightly.

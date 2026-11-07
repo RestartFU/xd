@@ -31,7 +31,7 @@ xd does not ship its own model or agent. It wraps the user's own CLIs, authentic
 
 - Desktop UI is GPUI: no CSS, no web components; everything is drawn in Rust in `desktop/src/main.rs` and its siblings. The palette lives in `desktop/src/theme.rs` as semantic roles.
 - Themes: exactly two, Dark and Light (confirmed 2026-10-23). Saved legacy theme names load as Dark.
-- The Linux browser pane is WebKitGTK over X11.
+- The Linux browser pane is Chromium (through CEF) over X11.
 - Redesign scope (confirmed 2026-10-23): the whole UI, including navigation and flows, on both desktop and Android. Existing capabilities stay available; sessions gain separate chat tabs sharing their workspace.
 
 ## Brand Commitments

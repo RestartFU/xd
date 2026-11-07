@@ -2209,13 +2209,7 @@ impl XdDesktop {
         });
         let desktop = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
-            let _ = desktop.update(cx, |desktop, cx| {
-                // Rendered frames can retain the native child after the view
-                // entity is released. Dispose it while its parent still exists.
-                for pane in desktop.browser_panes.values() {
-                    pane.update(cx, |pane, _| pane.shutdown());
-                }
-            });
+            let _ = desktop.update(cx, |desktop, cx| desktop.shutdown_browsers(cx));
             true
         });
         let composer_input = cx.new(FileEditor::composer);
@@ -4471,7 +4465,10 @@ impl XdDesktop {
                         let mut command =
                             xd_desktop::channel::restart_command(&path, std::process::id());
                         match command.spawn() {
-                            Ok(_) => cx.quit(),
+                            Ok(_) => {
+                                self.shutdown_browsers(cx);
+                                cx.quit();
+                            }
                             Err(error) => {
                                 if let Some(panel) = &mut self.self_update_panel {
                                     panel.error = Some(format!(
@@ -6258,6 +6255,16 @@ impl XdDesktop {
         } else {
             window.blur();
         }
+    }
+
+    /// Close every browser page, then the engine behind them, before xd exits.
+    fn shutdown_browsers(&mut self, cx: &mut Context<Self>) {
+        // Rendered frames can retain the native child after the view entity
+        // is released. Dispose it while its parent still exists.
+        for pane in self.browser_panes.values() {
+            pane.update(cx, |pane, _| pane.shutdown());
+        }
+        browser::shutdown_engine();
     }
 
     fn open_image_viewer(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -24776,9 +24783,13 @@ fn install_embedded_fonts(text_system: &gpui::TextSystem) -> Result<(), String> 
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    browser::run_subprocess_if_requested();
     #[cfg(target_os = "windows")]
     windows::configure_environment();
     browser::configure_platform();
+    #[cfg(target_os = "linux")]
+    browser::run_smoke_test_if_requested();
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if arguments
         .iter()

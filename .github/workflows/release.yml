@@ -187,6 +187,10 @@ jobs:
       - name: Build the bundle
         run: ./scripts/build.sh
 
+      # The bundle build proves the browser runs, but with its sandbox off.
+      - name: Run the browser in its sandbox
+        run: ./scripts/test-browser-sandbox.sh dist
+
       - name: Pack it
         run: |
           set -euo pipefail

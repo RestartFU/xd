@@ -36,35 +36,28 @@ require_file libexec/tmux
 require_file libexec/install.sh
 require_file libexec/curl
 require_file libexec/openssl
-require_file lib/xd-webkit-paths.so
-require_file libexec/webkit2gtk-4.1/WebKitWebProcess
-require_file libexec/webkit2gtk-4.1/WebKitNetworkProcess
-patchelf --print-needed "$BUNDLE/libexec/webkit2gtk-4.1/WebKitNetworkProcess" \
-  | grep -Fx xd-webkit-paths.so >/dev/null
-require_file libexec/webkit2gtk-4.1/WebKitGPUProcess
-require_file libexec/webkit2gtk-4.1/injected-bundle/libwebkit2gtkinjectedbundle.so
-require_file lib/gio/modules/libgiognutls.so
-require_file lib/gio/modules/giomodule.cache
-require_file libexec/gst-plugin-scanner
-require_file share/glib-2.0/schemas/gschemas.compiled
-require_file etc/pixbuf-loaders.cache.in
-require_file etc/gtk-immodules.cache.in
+require_file lib/libcef.so
+require_file lib/icudtl.dat
+require_file lib/v8_context_snapshot.bin
+require_file lib/resources.pak
+require_file lib/locales/en-US.pak
+require_file lib/libsoftokn3.so
+test ! -e "$BUNDLE/lib/chrome-sandbox" || {
+  echo "bundle smoke: must not ship an unconfigured sandbox helper" >&2
+  exit 1
+}
 
-# These helpers link against the private engine. Check the relocated library
-# closure without a display, rather than trusting the builder's /usr/lib copy.
-for process in WebKitWebProcess WebKitNetworkProcess WebKitGPUProcess; do
-  dependencies=$(ldd "$BUNDLE/libexec/webkit2gtk-4.1/$process")
-  if printf '%s\n' "$dependencies" | grep -F 'not found' >/dev/null; then
-    echo "bundle smoke: unresolved browser dependencies in $process" >&2
-    exit 1
-  fi
-  engine=$(printf '%s\n' "$dependencies" |
-    awk '$1 == "libwebkit2gtk-4.1.so.0" { print $3 }')
-  test "$(readlink -f "$engine")" = "$BUNDLE/lib/libwebkit2gtk-4.1.so.0" || {
-    echo "bundle smoke: $process selected a host browser engine" >&2
-    exit 1
-  }
-done
+# Check the relocated library closure rather than trusting the builder's copy.
+dependencies=$(ldd "$BUNDLE/bin/xd")
+if printf '%s\n' "$dependencies" | grep -F 'not found' >/dev/null; then
+  echo "bundle smoke: unresolved browser dependencies" >&2
+  exit 1
+fi
+engine=$(printf '%s\n' "$dependencies" | awk '$1 == "libcef.so" { print $3 }')
+test "$(readlink -f "$engine")" = "$BUNDLE/lib/libcef.so" || {
+  echo "bundle smoke: xd selected a host browser engine" >&2
+  exit 1
+}
 
 # glibc and the compiler runtimes belong to the host. Shipping either can make
 # distro GPU drivers fail before GPUI creates its Vulkan context.
@@ -89,6 +82,11 @@ done
 # GPUI loads Vulkan dynamically. The loader ships with xd; the host supplies
 # the driver matching its GPU and kernel.
 require_file lib/libvulkan.so.1
+
+# libnss3 loads these by name, so no library closure would bring them along.
+for module in libsoftokn3 libfreebl3 libfreeblpriv3 libnssckbi libnssdbm3; do
+  require_file "lib/$module.so"
+done
 
 # Exercise the public entrypoint with only the host's base utilities visible.
 # Preserve PATH because NixOS does not place those utilities in /usr/bin.
