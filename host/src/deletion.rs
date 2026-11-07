@@ -667,4 +667,25 @@ mod tests {
         );
         assert!(worktree.exists());
     }
+
+    #[test]
+    fn a_worktree_made_again_at_the_same_place_is_not_taken_for_xds() {
+        let fixture = Fixture::new();
+        let worktree = fixture.generated_worktree();
+        let repository = fixture.root.join("Workspaces/Project");
+        let branch = fixture.git(&worktree, &["branch", "--show-current"]);
+        let target = worktree.to_str().unwrap();
+        fixture.git(&repository, &["worktree", "remove", target]);
+        fixture.git(
+            &repository,
+            &["worktree", "add", "-q", target, branch.trim()],
+        );
+        fixture.enable(1);
+        fixture.age(3);
+        assert!(matches!(
+            fixture.sweep().as_slice(),
+            [AutoDeletion::Deleted { worktrees, .. }] if worktrees.is_empty()
+        ));
+        assert!(worktree.exists(), "the user made this one");
+    }
 }

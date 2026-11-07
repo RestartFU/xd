@@ -4726,10 +4726,13 @@ fn initialize_generated_worktrees(database: &Connection) -> Result<(), StorageEr
         return Ok(());
     }
     // `branch` is the branch xd checked out there; NULL for a worktree entered
-    // from before the record, which then needs one of xd's own branches.
+    // from before the record.
+    // `identity` matches the file xd leaves in the worktree's private Git
+    // directory, which goes when the worktree is removed by any means; NULL
+    // for a worktree entered from before the record.
     database.execute_batch(
         "CREATE TABLE generated_worktrees (path TEXT PRIMARY KEY, branch TEXT, \
-           created_at INTEGER NOT NULL);",
+           identity TEXT, created_at INTEGER NOT NULL);",
     )?;
     let containers = {
         let mut statement = database.prepare("SELECT path FROM worktree_containers")?;
@@ -5488,7 +5491,7 @@ struct KnownWorktrees {
     /// Folders xd generates worktrees in.
     containers: Vec<PathBuf>,
     /// Worktrees xd recorded generating, with the branch it checked out.
-    generated: HashMap<PathBuf, Option<String>>,
+    generated: HashMap<PathBuf, WorktreeRecord>,
     /// Folders chats outside the session, and project folders, work in.
     elsewhere: HashSet<PathBuf>,
 }
@@ -5509,12 +5512,15 @@ impl KnownWorktrees {
                 .collect(),
             generated: {
                 let mut statement =
-                    database.prepare("SELECT path, branch FROM generated_worktrees")?;
+                    database.prepare("SELECT path, branch, identity FROM generated_worktrees")?;
                 statement
                     .query_map([], |row| {
                         Ok((
                             PathBuf::from(row.get::<_, String>(0)?),
-                            row.get::<_, Option<String>>(1)?,
+                            WorktreeRecord {
+                                branch: row.get(1)?,
+                                identity: row.get(2)?,
+                            },
                         ))
                     })?
                     .collect::<Result<HashMap<_, _>, _>>()?
@@ -5542,7 +5548,7 @@ impl KnownWorktrees {
         list_git_worktrees(path).is_ok_and(|worktrees| {
             worktrees.iter().skip(1).any(|worktree| {
                 Path::new(&normalize_existing_path(&worktree.path)) == path
-                    && still_generated(recorded, worktree.branch.as_deref(), chats)
+                    && still_generated(path, recorded, worktree.branch.as_deref(), chats)
             })
         })
     }
@@ -5576,34 +5582,70 @@ fn session_deletable(
     )?)
 }
 
-/// Records a worktree xd has just added, with the branch it checked out.
-/// A path used before keeps no older record.
+/// The file in a linked worktree's private Git directory that names it as
+/// one xd added.
+const WORKTREE_IDENTITY_FILE: &str = "xd-worktree-id";
+
+/// Records a worktree xd has just added, with the branch it checked out, and
+/// marks it with an identity only that registration carries. If the mark
+/// cannot be written the worktree is still recorded, and is treated like
+/// one from before the record. A path used before keeps no older record.
 fn record_generated_worktree(
     transaction: &rusqlite::Transaction<'_>,
     path: &str,
     branch: &str,
 ) -> Result<(), StorageError> {
+    let identity = Uuid::new_v4().simple().to_string();
+    let marked = worktree_git_directory(Path::new(path)).is_some_and(|directory| {
+        fs::write(directory.join(WORKTREE_IDENTITY_FILE), &identity).is_ok()
+    });
     transaction.execute(
-        "INSERT INTO generated_worktrees (path, branch, created_at) VALUES (?, ?, ?) \
-         ON CONFLICT(path) DO UPDATE SET branch = excluded.branch, \
-           created_at = excluded.created_at",
-        params![path, branch, now_seconds()],
+        "INSERT INTO generated_worktrees (path, branch, identity, created_at) \
+         VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET branch = excluded.branch, \
+           identity = excluded.identity, created_at = excluded.created_at",
+        params![path, branch, marked.then_some(&identity), now_seconds()],
     )?;
     Ok(())
 }
 
-/// Whether the worktree at a recorded path is still the one xd made there:
-/// it has the branch xd checked out. A worktree recorded from before xd noted
-/// branches needs the branch xd names after one of these chats, which only
-/// xd's own worktrees have. A detached HEAD in a recorded worktree still
-/// counts; [`removable_worktree`] then checks that no commit would be lost.
-fn still_generated(recorded: &Option<String>, branch: Option<&str>, chats: &[&str]) -> bool {
-    match (recorded, branch) {
-        (Some(recorded), Some(branch)) => recorded == branch,
-        (None, Some(branch)) => xd_branch_for(branch, chats),
-        (Some(_), None) => true,
-        (None, None) => false,
-    }
+/// A linked worktree's private directory inside its repository's `.git`.
+fn worktree_git_directory(path: &Path) -> Option<PathBuf> {
+    let output = run_git(path, &["rev-parse", "--absolute-git-dir"]).ok()?;
+    let directory = String::from_utf8(output.1).ok()?;
+    let directory = directory.trim();
+    (output.0.success() && !directory.is_empty()).then(|| PathBuf::from(directory))
+}
+
+/// What xd recorded about a worktree it generated.
+struct WorktreeRecord {
+    branch: Option<String>,
+    identity: Option<String>,
+}
+
+/// Whether the worktree at a recorded path is still the one xd made there.
+/// A marked worktree must carry its identity, which a worktree made again at
+/// the same path does not, and still have the branch xd checked out; a
+/// detached HEAD still counts, and [`removable_worktree`] then checks that no
+/// commit would be lost. An unmarked one, from before the record, needs the
+/// branch xd names after one of these chats, which only xd's own have.
+fn still_generated(
+    path: &Path,
+    record: &WorktreeRecord,
+    branch: Option<&str>,
+    chats: &[&str],
+) -> bool {
+    let Some(identity) = &record.identity else {
+        return branch.is_some_and(|branch| xd_branch_for(branch, chats));
+    };
+    let carried = worktree_git_directory(path)
+        .and_then(|directory| fs::read_to_string(directory.join(WORKTREE_IDENTITY_FILE)).ok())
+        .is_some_and(|carried| carried.trim() == identity);
+    carried
+        && match (&record.branch, branch) {
+            (Some(recorded), Some(branch)) => recorded == branch,
+            (None, Some(branch)) => xd_branch_for(branch, chats),
+            (_, None) => true,
+        }
 }
 
 /// Whether `branch` is the one xd gives the worktree it makes for one of
@@ -5667,11 +5709,9 @@ fn generated_worktrees(
         else {
             continue;
         };
-        if !known
-            .generated
-            .get(&path)
-            .is_some_and(|recorded| still_generated(recorded, linked.branch.as_deref(), &chats))
-        {
+        if !known.generated.get(&path).is_some_and(|recorded| {
+            still_generated(&path, recorded, linked.branch.as_deref(), &chats)
+        }) {
             continue;
         }
         if let Err(reason) = removable_worktree(&path)? {
