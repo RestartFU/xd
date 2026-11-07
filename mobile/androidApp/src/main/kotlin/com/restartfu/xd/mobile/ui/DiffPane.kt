@@ -113,7 +113,7 @@ internal fun DiffPaneContent(model: DiffViewModel) {
 @Composable
 private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewModel) {
     val signals = LocalXdSignals.current
-    val uriHandler = LocalUriHandler.current
+    val openLink = rememberLinkOpener()
     Column(
         Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -140,7 +140,7 @@ private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewMode
             )
             Box(Modifier.weight(1f))
             state.pullRequestUrl?.let { url ->
-                TextButton(onClick = { uriHandler.openUri(url) }) {
+                TextButton(onClick = { openLink(url) }) {
                     Text(pullRequestLabel(url))
                 }
             }

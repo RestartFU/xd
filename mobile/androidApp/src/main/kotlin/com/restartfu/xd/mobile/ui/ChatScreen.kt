@@ -186,7 +186,7 @@ internal fun ChatScreen(
         )
     }
     val pullRequest by model.pullRequest.collectAsStateWithLifecycle()
-    val uriHandler = LocalUriHandler.current
+    val openLink = rememberLinkOpener()
     // A finished turn may have pushed a branch or opened its pull request.
     // A sibling chat's turn shares the checkout, so the whole session counts,
     // and so does a branch switched under an idle session.
@@ -265,7 +265,7 @@ internal fun ChatScreen(
                                     pullRequest?.let { url ->
                                         Text(
                                             pullRequestLabel(url),
-                                            modifier = Modifier.clickable(role = Role.Button) { uriHandler.openUri(url) },
+                                            modifier = Modifier.clickable(role = Role.Button) { openLink(url) },
                                             style = MaterialTheme.typography.labelMedium,
                                             color = LocalXdSignals.current.link,
                                             textDecoration = TextDecoration.Underline,
