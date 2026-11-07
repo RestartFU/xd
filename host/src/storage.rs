@@ -1231,15 +1231,9 @@ impl StateStore {
         let transaction = database.transaction()?;
         let previous = transaction
             .query_row(
-                "SELECT backend, model, effort FROM chats WHERE id = ?",
+                "SELECT backend, effort FROM chats WHERE id = ?",
                 [chat_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
@@ -1270,7 +1264,7 @@ impl StateStore {
                 })?;
                 validate_model(backend, model)?;
                 let effort = previous
-                    .2
+                    .1
                     .as_deref()
                     .filter(|effort| effort_supported(backend, effort));
                 let changed = transaction.execute(
@@ -1278,17 +1272,6 @@ impl StateStore {
                     params![model, effort, now, chat_id],
                 )?;
                 remember_backend_choice(&transaction, backend, "model", Some(model))?;
-                if previous.1.as_deref() != Some(model) {
-                    transaction.execute(
-                        "INSERT INTO messages (chat_id, role, content, created_at) \
-                         VALUES (?, 'event', ?, ?)",
-                        params![
-                            chat_id,
-                            format!("Switched to {}", model_label(backend, model)),
-                            now
-                        ],
-                    )?;
-                }
                 changed
             }
             "effort" => {
@@ -8610,12 +8593,28 @@ mod tests {
         assert_eq!(chat["backend"], "codex");
         assert_eq!(chat["model"], "gpt-5.6-sol");
         assert_eq!(chat["effort"], "ultra");
-        let events = store.messages(&json!({"chat": "chat-1"})).unwrap()["messages"]
-            .as_array()
-            .unwrap()
-            .clone();
-        assert_eq!(events[0]["role"], "event");
-        assert_eq!(events[0]["content"], "Switched to GPT-5.6 Sol");
+    }
+
+    #[test]
+    fn changing_the_model_adds_nothing_to_the_transcript() {
+        let fixture = Fixture::new();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        for model in ["gpt-5.6-sol", "gpt-5.5"] {
+            store
+                .set_option(&json!({
+                    "chat": "chat-1", "option": "model", "backend": "codex", "value": model
+                }))
+                .unwrap();
+            assert_eq!(store.chat("chat-1").unwrap()["model"], model);
+        }
+
+        let messages = store.messages(&json!({"chat": "chat-1"})).unwrap();
+        assert_eq!(messages["messages"], json!([]));
     }
 
     #[test]
@@ -8649,7 +8648,7 @@ mod tests {
     }
 
     #[test]
-    fn model_switch_event_does_not_lock_worktree_selection() {
+    fn model_switch_does_not_lock_worktree_selection() {
         let fixture = Fixture::new();
         let database = Connection::open(&fixture.database).unwrap();
         fixture.schema(&database);

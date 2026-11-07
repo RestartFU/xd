@@ -34,10 +34,7 @@ read unexpected
     let store = StateStore::open(root.join("state.sqlite"), &root).unwrap();
     let catalog = store.agent_catalog().unwrap();
     let backends = catalog["backends"].as_array().unwrap();
-    for (backend, model, label) in [
-        ("codex", "future-codex", "Future Codex"),
-        ("claude", "future-claude", "Future Claude"),
-    ] {
+    for (backend, model) in [("codex", "future-codex"), ("claude", "future-claude")] {
         let entry = backends
             .iter()
             .find(|entry| entry["id"] == backend)
@@ -54,11 +51,6 @@ read unexpected
                 &json!({"chat":chat["id"],"option":"model","backend":backend,"value":model}),
             )
             .unwrap();
-        let messages = store.messages(&json!({"chat":chat["id"]})).unwrap();
-        assert_eq!(
-            messages["messages"][0]["content"],
-            format!("Switched to {label}")
-        );
         assert_eq!(
             store.chat(chat["id"].as_str().unwrap()).unwrap()["model"],
             model
