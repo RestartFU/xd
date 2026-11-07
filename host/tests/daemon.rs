@@ -4,9 +4,16 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     net::Shutdown,
-    os::unix::{fs::PermissionsExt, net::UnixStream},
-    path::PathBuf,
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -598,6 +605,248 @@ fn bridges_autostart_one_daemon_and_preserve_pairing_after_restart() {
     let start = Instant::now();
     assert_eq!(remote.call(json!({"op":"cancel","chat":chat}))["ok"], true);
     assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+/// Stands in for the previous build's daemon, which a test binary cannot be.
+struct StaleDaemon {
+    root: PathBuf,
+    socket: PathBuf,
+    requests: Arc<Mutex<Vec<Value>>>,
+    info: Arc<Mutex<Value>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+impl StaleDaemon {
+    fn start(allow_restart: bool) -> Self {
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("xd-stale-{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        fs::create_dir_all(data.join("Workspaces")).unwrap();
+        let data = fs::canonicalize(data).unwrap();
+        let digest = format!(
+            "{:x}",
+            Sha256::digest(data.join("chats.db").as_os_str().as_encoded_bytes())
+        );
+        let runtime = PathBuf::from(format!("/tmp/xd-{}", unsafe { libc::geteuid() }));
+        fs::create_dir_all(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = runtime.join(format!("daemon-{}.sock", &digest[..24]));
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let info = Arc::new(Mutex::new(json!({
+            "ok": true,
+            "version": "0.0.0-stale",
+            "protocol": 2,
+            "build": "stale",
+            "pid": 1,
+            "workspaces": data.join("Workspaces"),
+        })));
+        let thread = {
+            let (requests, stop, socket) = (requests.clone(), stop.clone(), socket.clone());
+            let info = info.clone();
+            thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    let Ok((stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut writer = stream.try_clone().unwrap();
+                    for line in BufReader::new(stream).lines() {
+                        let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+                        requests.lock().unwrap().push(request.clone());
+                        let restart = request["action"] == "restart";
+                        let mut reply = match request["op"].as_str() {
+                            Some("daemon-info") => info.lock().unwrap().clone(),
+                            Some("host-update") if restart && !allow_restart => {
+                                json!({"ok": false, "error": "Close terminal tabs"})
+                            }
+                            Some("host-update") => {
+                                json!({"ok": true, "supported": true, "state": "idle"})
+                            }
+                            _ => json!({"ok": false}),
+                        };
+                        reply["_xd_request"] = request["_xd_request"].clone();
+                        writeln!(writer, "{reply}").unwrap();
+                        if restart && allow_restart {
+                            stop.store(true, Ordering::Release);
+                            let _ = fs::remove_file(&socket);
+                            return;
+                        }
+                    }
+                }
+            })
+        };
+        Self {
+            root,
+            socket,
+            requests,
+            info,
+            stop,
+            thread: Some(thread),
+        }
+    }
+    fn report(&self, field: &str, value: Value) {
+        self.info.lock().unwrap()[field] = value;
+    }
+    /// A host binary laid out the way the installer lays it out.
+    fn install_host(&self) -> PathBuf {
+        let libexec = self.root.join(".local/opt/xd/libexec");
+        fs::create_dir_all(&libexec).unwrap();
+        let installer = libexec.join("install.sh");
+        fs::write(&installer, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&installer, fs::Permissions::from_mode(0o755)).unwrap();
+        let host = libexec.join("xd-host");
+        // A link cannot hit ETXTBSY from a copy still open during another fork.
+        fs::hard_link(env!("CARGO_BIN_EXE_xd-host"), &host).unwrap();
+        fs::canonicalize(host).unwrap()
+    }
+    fn bridge(&self, host: &Path) -> Child {
+        Command::new(host)
+            .args(["stdio", "--data"])
+            .arg(self.root.join("data"))
+            .env("HOME", &self.root)
+            .env("SHELL", "/bin/sh")
+            .env("XD_DISABLE_AUTO_UPDATE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+    fn rejection(&self, host: &Path) -> String {
+        let output = self.bridge(host).wait_with_output().unwrap();
+        assert!(!output.status.success());
+        String::from_utf8(output.stderr).unwrap()
+    }
+    fn restart_requests(&self) -> usize {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request["action"] == "restart")
+            .count()
+    }
+}
+impl Drop for StaleDaemon {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.thread.take().unwrap().join();
+        let _ = fs::remove_file(&self.socket);
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn assert_bridge_replaces(stale: &StaleDaemon, host: &Path) {
+    let mut bridge = stale.bridge(host);
+    let mut stdin = bridge.stdin.take().unwrap();
+    let mut stdout = BufReader::new(bridge.stdout.take().unwrap());
+    writeln!(stdin, "{}", json!({"op":"daemon-info","_xd_request":1})).unwrap();
+    let info = loop {
+        let mut line = String::new();
+        if stdout.read_line(&mut line).unwrap() == 0 {
+            let mut error = String::new();
+            let mut stderr = bridge.stderr.take().unwrap();
+            stderr.read_to_string(&mut error).unwrap();
+            panic!("bridge closed: {error}");
+        }
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        if frame["_xd_request"] == 1 {
+            break frame;
+        }
+    };
+    assert_eq!(stale.restart_requests(), 1);
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"), "{info}");
+    assert_eq!(info["executable"], host.to_str().unwrap());
+    // Only cleanup: this test isn't about the stop acknowledgement.
+    writeln!(stdin, "{}", json!({"op":"daemon-stop"})).unwrap();
+    bridge.wait().unwrap();
+}
+
+#[test]
+fn bridge_replaces_an_idle_daemon_left_behind_by_an_update() {
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    stale.report("executable", json!(host));
+    assert_bridge_replaces(&stale, &host);
+}
+
+#[test]
+fn bridge_replaces_an_idle_daemon_from_before_executable_was_reported() {
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    // A real process started from the installed path, identified only by its
+    // command line. Its own database keeps it apart from the bridge's daemon.
+    let other = stale.root.join("other");
+    fs::create_dir_all(other.join("Workspaces")).unwrap();
+    let mut legacy = Command::new(&host)
+        .arg("daemon")
+        .arg("--database")
+        .arg(other.join("chats.db"))
+        .arg("--workspaces")
+        .arg(other.join("Workspaces"))
+        .env("HOME", &stale.root)
+        .env("XD_DISABLE_AUTO_UPDATE", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    stale.report("pid", json!(legacy.id()));
+    assert_bridge_replaces(&stale, &host);
+    legacy.kill().unwrap();
+    legacy.wait().unwrap();
+}
+
+#[test]
+fn bridge_keeps_a_busy_daemon_running_and_explains_how_to_stop_it() {
+    let stale = StaleDaemon::start(false);
+    let host = stale.install_host();
+    stale.report("executable", json!(host));
+    let error = stale.rejection(&host);
+    assert_eq!(stale.restart_requests(), 1);
+    assert!(error.contains("chats or terminals are active"), "{error}");
+    assert!(error.contains("daemon-stop --data"), "{error}");
+}
+
+fn assert_bridge_leaves_running(stale: &StaleDaemon, host: &Path) {
+    let error = stale.rejection(host);
+    assert_eq!(stale.restart_requests(), 0);
+    assert!(error.contains("different xd daemon version"), "{error}");
+}
+
+#[test]
+fn bridge_never_restarts_a_daemon_it_cannot_replace() {
+    // A development build sharing the data directory of an installed daemon.
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    stale.report("executable", json!(host));
+    assert_bridge_leaves_running(&stale, Path::new(env!("CARGO_BIN_EXE_xd-host")));
+    drop(stale);
+
+    // An installed bridge whose daemon came from another install.
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    stale.report("executable", json!("/elsewhere/libexec/xd-host"));
+    assert_bridge_leaves_running(&stale, &host);
+    drop(stale);
+
+    // An older daemon whose command line doesn't name this install (PID 1).
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    assert_bridge_leaves_running(&stale, &host);
+}
+
+#[test]
+fn bridge_never_restarts_a_daemon_serving_other_workspaces() {
+    let stale = StaleDaemon::start(true);
+    let host = stale.install_host();
+    stale.report("executable", json!(host));
+    stale.report("workspaces", json!("/elsewhere/Workspaces"));
+    let error = stale.rejection(&host);
+    assert_eq!(stale.restart_requests(), 0);
+    assert!(error.contains("different workspace directory"), "{error}");
 }
 
 #[test]

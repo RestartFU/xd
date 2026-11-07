@@ -259,21 +259,12 @@ fn connect(options: &HostOptions, start: bool) -> io::Result<UnixStream> {
 
 pub(super) fn bridge(options: HostOptions) -> Result<(), String> {
     let mut stream = connect(&options, true).map_err(|e| e.to_string())?;
-    // Reject incompatible live daemons without interrupting their running turns.
-    let info = rpc(&mut stream, "daemon-info").map_err(|e| e.to_string())?;
-    if info["protocol"] != 2
-        || info["version"] != env!("CARGO_PKG_VERSION")
-        || info["build"] != option_env!("XD_COMMIT").unwrap_or("development")
-    {
-        return Err(
-            "A different xd daemon version is running. Stop it with daemon-stop and reconnect."
-                .into(),
-        );
-    }
-    let expected = fs::canonicalize(&options.workspaces)
-        .map_err(|_| "The running daemon uses a different workspace directory.".to_owned())?;
-    if info["workspaces"].as_str() != expected.to_str() {
-        return Err("This database is already served with a different workspace directory. Stop that daemon before changing its workspace root.".into());
+    let mut info = rpc(&mut stream, "daemon-info").map_err(|e| e.to_string())?;
+    // A restart keeps the daemon's arguments, so it cannot fix this mismatch.
+    check_workspaces(&options, &info)?;
+    if !matches_this_build(&info) {
+        (stream, info) = replace_stale_daemon(&options, stream, &info)?;
+        check_workspaces(&options, &info)?;
     }
     let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
     let close = stream.try_clone().map_err(|e| e.to_string())?;
@@ -287,9 +278,124 @@ pub(super) fn bridge(options: HostOptions) -> Result<(), String> {
     let _ = close.shutdown(Shutdown::Both);
     result
 }
+fn check_workspaces(options: &HostOptions, info: &Value) -> Result<(), String> {
+    let expected = fs::canonicalize(&options.workspaces)
+        .map_err(|_| "The running daemon uses a different workspace directory.".to_owned())?;
+    if info["workspaces"].as_str() != expected.to_str() {
+        return Err("This database is already served with a different workspace directory. Stop that daemon before changing its workspace root.".into());
+    }
+    Ok(())
+}
+fn matches_this_build(info: &Value) -> bool {
+    info["protocol"] == 2
+        && info["version"] == env!("CARGO_PKG_VERSION")
+        && info["build"] == option_env!("XD_COMMIT").unwrap_or("development")
+}
+/// An update replaces the installed files but leaves the previous daemon
+/// running, so the next client finds a build it cannot talk to. The daemon's
+/// own update restart refuses while turns or shells are live, which keeps this
+/// from interrupting work. Clients retry, so the upgrade completes once idle.
+fn replace_stale_daemon(
+    options: &HostOptions,
+    mut stale: UnixStream,
+    info: &Value,
+) -> Result<(UnixStream, Value), String> {
+    let stop = stop_command(options);
+    let status = request(&mut stale, json!({"op": "host-update"})).unwrap_or_default();
+    if !restarts_into_this_host(info, &status) {
+        return Err(format!(
+            "A different xd daemon version is running. Stop it with `{stop}` and reconnect."
+        ));
+    }
+    if status["state"] == "installing" {
+        return Err("xd is installing an update. It reconnects when the update finishes.".into());
+    }
+    let reply = request(
+        &mut stale,
+        json!({"op": "host-update", "action": "restart"}),
+    )
+    .map_err(|e| e.to_string())?;
+    if reply["ok"] != true {
+        return Err(format!(
+            "xd was updated, but the previous daemon is still running because chats or terminals are active. It restarts by itself when they finish. To restart it now and interrupt them, run `{stop}`."
+        ));
+    }
+    drop(stale);
+    let deadline = Instant::now() + START_TIMEOUT;
+    loop {
+        // The old process answers until it re-executes, then refuses briefly.
+        if let Ok(mut stream) = connect(options, true)
+            && let Ok(info) = rpc(&mut stream, "daemon-info")
+            && matches_this_build(&info)
+        {
+            return Ok((stream, info));
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "The xd daemon did not restart after the update. Stop it with `{stop}` and reconnect."
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+/// Restarting only helps when the daemon re-executes the binary running here.
+/// Development builds and other installs sharing this data must not disturb it.
+fn restarts_into_this_host(info: &Value, status: &Value) -> bool {
+    let Some(host) = xd_host::installed_host_executable() else {
+        return false;
+    };
+    let same_host = match info["executable"].as_str() {
+        Some(daemon) => Some(daemon) == host.to_str(),
+        // Older daemons don't report it. Their command line still names the
+        // path they were started from, even after an update replaces that file.
+        None => info["pid"]
+            .as_u64()
+            .and_then(process_command)
+            .is_some_and(|command| command.starts_with(&format!("{} daemon ", host.display()))),
+    };
+    status["supported"] == true && same_host
+}
+#[cfg(target_os = "linux")]
+fn process_command(pid: u64) -> Option<String> {
+    let command = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(String::from_utf8_lossy(&command).replace('\0', " "))
+}
+#[cfg(not(target_os = "linux"))]
+fn process_command(pid: u64) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+fn stop_command(options: &HostOptions) -> String {
+    let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"));
+    let host = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("xd-host"));
+    let host = quote(&host);
+    match options.database.parent() {
+        Some(data)
+            if options.database == data.join("chats.db")
+                && options.workspaces == data.join("Workspaces") =>
+        {
+            format!("{host} daemon-stop --data {}", quote(data))
+        }
+        _ => format!(
+            "{host} daemon-stop --database {} --workspaces {}",
+            quote(&options.database),
+            quote(&options.workspaces)
+        ),
+    }
+}
 fn rpc(stream: &mut UnixStream, operation: &str) -> io::Result<Value> {
+    request(stream, json!({"op": operation}))
+}
+fn request(stream: &mut UnixStream, mut body: Value) -> io::Result<Value> {
+    body["_xd_request"] = json!(0);
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    writeln!(stream, "{}", json!({"op": operation, "_xd_request": 0}))?;
+    writeln!(stream, "{body}")?;
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
         let mut line = String::new();
@@ -298,7 +404,9 @@ fn rpc(stream: &mut UnixStream, operation: &str) -> io::Result<Value> {
         }
         let frame: Value = serde_json::from_str(&line)?;
         if frame["_xd_request"] == 0 {
-            stream.set_read_timeout(None)?;
+            // A restarting daemon can close right after replying, and macOS then
+            // rejects socket options with EINVAL. The reply is already in hand.
+            let _ = stream.set_read_timeout(None);
             return Ok(frame);
         }
     }

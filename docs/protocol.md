@@ -114,7 +114,9 @@ stored hashed on the host. `devices`, `rename-device`, `revoke-device`,
 session for that device immediately. A revoked token or changed certificate
 requires explicit re-pairing.
 
-`daemon-info` returns protocol/build identity and PID. `daemon-stop` acknowledges
+`daemon-info` returns protocol/build identity, PID, and the installed host binary
+that an update restart re-executes (`executable`, null outside an installed
+bundle). `daemon-stop` acknowledges
 before shutting down the shared runtime. Remote listeners persist across daemon
 restarts, but unused codes and pending backend requests do not.
 

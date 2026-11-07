@@ -117,6 +117,14 @@ impl SelfUpdate {
         updater
     }
 
+    /// The binary an update restart re-executes, if this is an installed bundle.
+    pub(crate) fn host_executable(&self) -> Option<&Path> {
+        self.inner
+            .install
+            .as_ref()
+            .map(|location| location.host.as_path())
+    }
+
     pub(crate) fn perform(&self, action: Option<&str>) -> Result<Value, String> {
         match action.unwrap_or("status") {
             "status" => {}
@@ -427,6 +435,11 @@ fn installer_command(installer: &Path, channel: UpdateChannel, _mode: InstallerM
         }
     }
     command
+}
+
+/// The installed host binary this process belongs to, if it is a bundle.
+pub fn installed_host_executable() -> Option<PathBuf> {
+    install_location().map(|location| location.host)
 }
 
 fn install_location() -> Option<InstallLocation> {
