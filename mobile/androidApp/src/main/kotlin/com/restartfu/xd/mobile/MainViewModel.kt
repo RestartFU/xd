@@ -29,7 +29,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -134,10 +133,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val autoSettleStale: StateFlow<Boolean> = client.autoSettleStale
 
     init {
-        // Rules that land after a failure, from any read, make that failure old news.
+        // Every failed rules request marks them stale, and only an answer to a
+        // newer request clears that, so the stale mark turning off is the
+        // ordered sign that a failure is old news, equal rules included.
         viewModelScope.launch {
-            client.autoSettleSettings.drop(1).collect { rules ->
-                if (rules != null) _autoSettleError.value = null
+            var wasStale = client.autoSettleStale.value
+            client.autoSettleStale.collect { stale ->
+                if (wasStale && !stale) _autoSettleError.value = null
+                wasStale = stale
             }
         }
         // A failure belongs to the host it came from.
