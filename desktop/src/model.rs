@@ -1334,6 +1334,13 @@ impl AppModel {
         self.working_started_at = None;
     }
 
+    /// Moves a queued message to the front, leaving the others in order.
+    pub fn promote_queued(&mut self, index: usize) {
+        if index < self.queue.len() {
+            self.queue[..=index].rotate_right(1);
+        }
+    }
+
     pub fn working_for(&self) -> Option<u64> {
         self.working.then(|| {
             self.working_started_at
@@ -1877,6 +1884,23 @@ mod tests {
             &json!({"chat":"chat-1", "queue":["first", "second"]}),
         );
         assert_eq!(model.queue, ["first", "second"]);
+    }
+
+    #[test]
+    fn promoting_a_queued_message_keeps_the_others_in_order() {
+        let mut model = AppModel {
+            queue: vec!["first".into(), "second".into(), "third".into()],
+            ..Default::default()
+        };
+
+        model.promote_queued(2);
+        assert_eq!(model.queue, ["third", "first", "second"]);
+
+        model.promote_queued(0);
+        assert_eq!(model.queue, ["third", "first", "second"]);
+
+        model.promote_queued(3);
+        assert_eq!(model.queue, ["third", "first", "second"]);
     }
 
     #[test]
