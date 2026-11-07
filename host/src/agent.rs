@@ -739,11 +739,13 @@ impl ClaudeParser {
                 events
             }
             Some("stream_event") => {
+                self.note_replacement_begun();
                 let events = self.stream_event(&root);
                 self.without_superseded_text(events)
             }
             Some("user") => self.user_event(&root),
             Some("assistant") if !self.saw_streamed_text => {
+                self.note_replacement_begun();
                 let events = self.assistant_event(&root);
                 self.without_superseded_text(events)
             }
@@ -840,6 +842,16 @@ impl ClaudeParser {
             events.retain(|event| !matches!(event, AgentEvent::Text(_) | AgentEvent::TextDelta(_)));
         }
         events
+    }
+
+    /// A run ended with a steer unread, and now the agent is talking again: that
+    /// is the steer being answered, even if `init` is held back by a forked skill.
+    fn note_replacement_begun(&mut self) {
+        if std::mem::take(&mut self.settling) {
+            self.unread_steers.pop_front();
+            self.replacement_pending = true;
+            self.superseded = false;
+        }
     }
 
     fn begin_steer(&mut self, steer: u64) -> bool {
@@ -2205,6 +2217,27 @@ mod tests {
         parser.feed(init);
         assert_eq!(parser.take_unread_steers(), [] as [u64; 0]);
         assert!(!parser.settling());
+    }
+
+    /// The run ended by itself with a steer unread, and the answer arrives with
+    /// its `init` held back. The turn must not end and send the message again.
+    #[test]
+    fn talking_again_after_a_run_ended_means_the_steer_was_read() {
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Answer"}}}"#;
+        let init = r#"{"type":"system","subtype":"init","session_id":"s1"}"#;
+        let done = r#"{"type":"result","terminal_reason":"completed","result":"Answer"}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(init);
+        parser.steer_frame(1, "One").unwrap();
+        parser.steer_frame(2, "Two").unwrap();
+        parser.feed(done);
+        assert!(parser.settling());
+        assert_eq!(parser.feed(r#"{"type":"rate_limit_event"}"#), []);
+        assert!(parser.settling(), "that says nothing about the steer");
+        assert_eq!(parser.feed(delta), [AgentEvent::TextDelta("Answer".into())]);
+        assert!(!parser.settling());
+        parser.feed(init);
+        assert_eq!(parser.take_unread_steers(), [2]);
     }
 
     /// A forked skill holds `init` back until it finishes, and its text comes

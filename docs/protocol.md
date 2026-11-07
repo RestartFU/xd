@@ -586,8 +586,8 @@ when a steer fails, the message starts a new turn instead of waiting in the queu
 
 A steered message is stored as an ordinary `user` row. While the turn runs it
 arrives as a `tool` event and `items` entry whose text is `steer\n` followed by
-the message. Clients show that as the user's message; the marker is only ever
-seen live, never in `messages`.
+the message, with its stored row in `message_id`. Clients show that as the user's
+message; the marker is only ever seen live, never in `messages`.
 
 ### `cancel`
 

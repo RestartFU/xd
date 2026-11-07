@@ -484,16 +484,10 @@ impl TurnRuntime {
         };
         if let Some(message_id) = message.row {
             let _ = self.inner.store.delete_message(chat_id, message_id);
-            // Rows with the same text look the same, and the later is this one
-            // if any is: an earlier steer is the one more likely to be read.
-            let row = format!("{STEER_ROW_PREFIX}{}", message.prompt);
-            if let Ok(mut state) = progress.state.lock()
-                && let Some(index) = state
+            if let Ok(mut state) = progress.state.lock() {
+                state
                     .items
-                    .iter()
-                    .rposition(|item| item["text"].as_str() == Some(row.as_str()))
-            {
-                state.items.remove(index);
+                    .retain(|item| item["message_id"].as_i64() != Some(message_id));
             }
         }
         self.requeue_steer(chat_id, steer, &message.prompt, returned);
@@ -1468,6 +1462,7 @@ impl TurnRuntime {
                                     "text": format!("{STEER_ROW_PREFIX}{prompt}"),
                                     "workdir": turn.workdir,
                                     "context": turn.workdir,
+                                    "message_id": message_id,
                                 }),
                             );
                         }
@@ -1806,6 +1801,13 @@ impl TurnRuntime {
             let stranded = if alive && completed && !was_cancelled && unread_steers.is_empty() {
                 self.detach_feed(&turn.chat_id, source)
             } else {
+                // Closed before the drain, under the lock a steer sends with, or
+                // one arriving between the two would land where nothing reads it.
+                if let Some(router) = self.router(&turn.chat_id)
+                    && let Ok(mut router) = router.lock()
+                {
+                    router.sink = None;
+                }
                 self.drop_session(&turn.chat_id);
                 source.stranded_steers()
             };
@@ -2252,7 +2254,9 @@ impl TurnRuntime {
                 let mut item = json!({"tool":true,"text":fields["text"]});
                 if let Some(record) = fields.get("record") {
                     item["record"] = record.clone();
-                    item["message_id"] = fields["message_id"].clone();
+                }
+                if let Some(message_id) = fields.get("message_id") {
+                    item["message_id"] = message_id.clone();
                 }
                 state.items.push(item);
             } else if name == "record" {
@@ -3018,6 +3022,53 @@ read next
             ]
             .map(|(role, text)| (role.to_owned(), text.to_owned()))
         );
+    }
+
+    /// Two steers with the same text: taking back the first must leave the second
+    /// alone, in the live view as well as in the transcript.
+    #[cfg(unix)]
+    #[test]
+    fn taking_back_a_steer_leaves_one_with_the_same_text_in_the_live_view() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+read release
+"#,
+        );
+        let store = &fixture.store;
+        let chat = &fixture.chat;
+        let row = |text: &str| store.append_turn_message(chat, "user", text, None).unwrap();
+        let (first, second) = (row("Same text"), row("Same text"));
+        let progress = TurnProgress::default();
+        {
+            let mut state = progress.state.lock().unwrap();
+            for id in [first, second] {
+                state
+                    .items
+                    .push(json!({"tool":true, "text":"steer\nSame text", "message_id":id}));
+            }
+        }
+        let mut steered = HashMap::from([(
+            1,
+            SteeredMessage {
+                prompt: "Same text".into(),
+                row: Some(first),
+            },
+        )]);
+        fixture
+            .runtime
+            .return_steer(chat, &progress, &mut steered, 1, &mut Vec::new());
+        let state = progress.state.lock().unwrap();
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0]["message_id"], second);
+        let remaining = fixture
+            .transcript()
+            .iter()
+            .filter(|(_, content)| content == "Same text")
+            .count();
+        assert_eq!(remaining, 1);
+        assert_eq!(store.chat(chat).unwrap()["queue"], json!(["Same text"]));
     }
 
     /// However they come back, and whatever the user has since dropped from the
