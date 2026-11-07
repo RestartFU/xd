@@ -605,15 +605,18 @@ pub struct ClaudeParser {
     /// Whether this turn's run has begun. A steer sent before that would be
     /// mistaken for the turn's own start.
     running: bool,
-    /// Steers written that no run has picked up yet. Each one Claude picks up
+    /// Steers written that Claude has not picked up yet. Each one it picks up
     /// ends the run in progress and opens a new run for the same xd turn.
     unread_steers: VecDeque<u64>,
     /// A run finished by itself while a steer was still unread. If that steer
     /// opens a new run the turn goes on; otherwise this was its end.
     settling: bool,
-    /// A steer was written and no run has begun since, so the reply in progress
-    /// is being abandoned.
+    /// A steer was written and Claude has not responded to it yet, so the reply
+    /// in progress is being abandoned.
     superseded: bool,
+    /// A run was cut short for a steer, and the `init` still to come is the one
+    /// that answers it rather than a sign of another steer picked up.
+    replacement_pending: bool,
 }
 
 /// Whether a rate limit report turns work away, or `None` when it says neither.
@@ -714,7 +717,9 @@ impl ClaudeParser {
                 self.running = true;
                 self.settling = false;
                 self.superseded = false;
-                self.unread_steers.pop_front();
+                if !std::mem::take(&mut self.replacement_pending) {
+                    self.unread_steers.pop_front();
+                }
                 let mut events = Vec::new();
                 if let Some(session) = root.get("session_id").and_then(Value::as_str) {
                     events.push(AgentEvent::Session(session.to_owned()));
@@ -753,9 +758,13 @@ impl ClaudeParser {
                         .and_then(Value::as_str)
                         .is_some_and(|reason| reason.starts_with("aborted_"))
                 {
-                    // The new run should follow at once. If it never does, this
-                    // was the end of the turn after all.
-                    self.settling = true;
+                    // It only stops for a steer it has taken, so the message is
+                    // read. There is no limit on what follows: `init` can be held
+                    // back for as long as a forked skill runs, and an agent gone
+                    // quiet from here is no different from any turn doing so.
+                    self.unread_steers.pop_front();
+                    self.replacement_pending = true;
+                    self.superseded = false;
                     self.begin_next_run();
                     return events;
                 }
@@ -2109,9 +2118,9 @@ mod tests {
             assert_eq!(frame["message"]["content"][0]["text"], "Instead");
 
             assert_eq!(parser.feed(aborted), []);
-            assert!(parser.settling(), "the new run has not begun yet");
+            assert!(!parser.settling(), "`init` may be a long way off");
+            assert_eq!(parser.take_unread_steers(), [] as [u64; 0]);
             parser.feed(init);
-            assert!(!parser.settling());
             let reply = parser.feed(
                 r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Two"}]}}"#,
             );
@@ -2148,15 +2157,6 @@ mod tests {
         assert_eq!(parser.take_settled(), [AgentEvent::Completed]);
         assert!(!parser.settling());
         assert_eq!(parser.take_unread_steers(), [1, 2]);
-
-        // The same if the run was cut short and its replacement never begins.
-        let mut parser = AgentParser::Claude(ClaudeParser::default());
-        parser.feed(init);
-        parser.steer_frame(1, "Instead").unwrap();
-        parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}"#);
-        assert!(parser.settling());
-        assert_eq!(parser.take_settled(), [AgentEvent::Completed]);
-        assert_eq!(parser.take_unread_steers(), [1]);
     }
 
     #[test]
@@ -2199,10 +2199,29 @@ mod tests {
         parser.feed(aborted);
         parser.feed(init);
         assert_eq!(parser.feed(delta), [AgentEvent::TextDelta("Answer".into())]);
+        assert_eq!(parser.take_unread_steers(), [2]);
+        parser.steer_frame(2, "Two").unwrap();
         parser.feed(aborted);
         parser.feed(init);
         assert_eq!(parser.take_unread_steers(), [] as [u64; 0]);
         assert!(!parser.settling());
+    }
+
+    /// A forked skill holds `init` back until it finishes, and its text comes
+    /// first. An abort means the steer was read, so that text is the answer.
+    #[test]
+    fn the_answer_to_a_steer_may_arrive_before_its_init() {
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Answer"}}}"#;
+        let mut parser = AgentParser::Claude(ClaudeParser::default());
+        parser.feed(r#"{"type":"system","subtype":"init","session_id":"s1"}"#);
+        parser.steer_frame(1, "One").unwrap();
+        parser.feed(r#"{"type":"result","is_error":true,"terminal_reason":"aborted_tools"}"#);
+        assert_eq!(parser.feed(delta), [AgentEvent::TextDelta("Answer".into())]);
+        assert!(
+            parser
+                .feed(r#"{"type":"result","terminal_reason":"completed","result":"Answer"}"#)
+                .contains(&AgentEvent::Completed)
+        );
     }
 
     #[test]

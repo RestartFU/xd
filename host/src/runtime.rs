@@ -1440,9 +1440,13 @@ impl TurnRuntime {
                             row: None,
                         },
                     );
-                    // A pipe that won't take it means the agent has died, and
-                    // the turn gives back what it did not read as it ends.
+                    // It can't be told anything more, whether or not it has died
+                    // and whatever is still holding its output open. Ending it
+                    // ends the turn, which gives back what it did not read.
                     if self.write_rpc(&turn.chat_id, &frame).is_err() {
+                        if let Ok(mut child) = child.lock() {
+                            let _ = terminate_agent(&mut child);
+                        }
                         continue;
                     }
                     match self
@@ -3059,7 +3063,7 @@ read release
     }
 
     /// Other output, such as a background agent's progress, must not put off the
-    /// end of a turn whose replacement run never begins.
+    /// end of a turn that finished without reading a steer.
     #[cfg(unix)]
     #[test]
     fn output_from_elsewhere_does_not_extend_the_wait_for_a_new_run() {
@@ -3079,7 +3083,7 @@ read first
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
 read steer
-echo '{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}'
+echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Working on it."}'
 while :; do
   echo '{"type":"rate_limit_event"}'
   sleep 0.05
@@ -3144,11 +3148,12 @@ read next
         );
     }
 
-    /// The agent cut its reply short for a steer and then went quiet. The turn
-    /// must end, and the message must still get an answer.
+    /// An agent that has stopped reading can't be told anything more. The turn
+    /// must end even though something still holds its output open, and the message
+    /// must still get an answer.
     #[cfg(unix)]
     #[test]
-    fn a_run_cut_short_with_nothing_after_it_still_ends_the_turn() {
+    fn a_steer_the_agent_cannot_be_sent_ends_its_process_and_is_sent_again() {
         let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
         let fixture = SteerFixture::start(
             r#"#!/bin/sh
@@ -3162,11 +3167,10 @@ if [ -e "$HEARD" ]; then
 fi
 : > "$HEARD"
 read first
+exec 0<&-
 echo '{"type":"system","subtype":"init","session_id":"s1"}'
 echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working on it."}}}'
-read steer
-echo '{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}'
-read next
+sleep 30
 "#,
         );
         fixture.wait_for_streamed("Working on it.");
