@@ -19,9 +19,9 @@ use std::{
 
 use async_channel::Sender;
 use gpui::{
-    App, Bounds, Context, DispatchPhase, ElementId, Entity, EventEmitter, Focusable,
+    App, Bounds, Context, DispatchPhase, ElementId, Entity, EventEmitter, Focusable, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, IntoElement, LayoutId, MouseDownEvent, Pixels, Render,
-    ScrollHandle, Style, Timer, Window, div, prelude::*, px, relative, rgb,
+    ScrollHandle, Style, Timer, Window, div, prelude::*, px, relative, rgb, rgba,
 };
 #[cfg(target_os = "linux")]
 use raw_window_handle::XlibWindowHandle;
@@ -33,6 +33,14 @@ use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBu
 use xd_desktop::theme::ThemeColors;
 
 use crate::input::{ComposerEvent, ComposerInput};
+
+/// The pane runs the window's full height, so its two header rows sit level with
+/// the session's: the tabs beside the session header, and the address bar, or a
+/// side tool's own controls, beside the chat tabs. One rule closes both columns.
+pub const SESSION_HEADER_HEIGHT: f32 = 48.0;
+pub const TAB_BAR_HEIGHT: f32 = 43.0;
+/// Page tabs keep one width so a loading title does not move its neighbours.
+const BROWSER_TAB_WIDTH: f32 = 148.0;
 
 #[derive(Clone, Debug)]
 pub enum BrowserEvent {
@@ -53,6 +61,13 @@ impl SideTab {
         match self {
             Self::Files => "Files",
             Self::Changes => "Changes",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Files => crate::FILE_ICON,
+            Self::Changes => crate::CHANGES_ICON,
         }
     }
 }
@@ -77,7 +92,6 @@ enum TabEvent {
     Navigated(String),
     Updated,
     Open(String),
-    ClosePane,
 }
 
 enum NativeEvent {
@@ -251,7 +265,6 @@ pub struct BrowserPane {
     auxiliary: Option<SideTab>,
     auxiliary_tabs: Vec<SideTab>,
     tools_enabled: bool,
-    add_menu_open: bool,
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
@@ -295,7 +308,6 @@ impl BrowserPane {
             auxiliary: None,
             auxiliary_tabs: Vec::new(),
             tools_enabled: false,
-            add_menu_open: false,
         };
         for url in session.tabs {
             pane.insert_tab(url, window, cx);
@@ -348,18 +360,7 @@ impl BrowserPane {
         }
     }
 
-    pub fn dismiss_add_menu(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.add_menu_open;
-        if open {
-            self.add_menu_open = false;
-            self.update_visibility();
-            cx.notify();
-        }
-        open
-    }
-
     fn select_auxiliary(&mut self, selected: Option<SideTab>, cx: &mut Context<Self>) {
-        self.dismiss_add_menu(cx);
         self.configure_side_tabs(selected, self.tools_enabled, cx);
         cx.emit(BrowserEvent::AuxiliarySelected(selected));
         cx.notify();
@@ -388,9 +389,6 @@ impl BrowserPane {
     }
 
     pub fn set_visible(&mut self, visible: bool) {
-        if !visible {
-            self.add_menu_open = false;
-        }
         if visible && !self.visible {
             self.tab_scroll.scroll_to_item(self.active_tab_index());
         }
@@ -471,10 +469,6 @@ impl BrowserPane {
                 }
                 TabEvent::Updated => {}
                 TabEvent::Open(url) => pane.add_tab(Some(url.clone()), window, cx),
-                TabEvent::ClosePane => {
-                    pane.set_visible(false);
-                    cx.emit(BrowserEvent::Close);
-                }
             }
             cx.notify();
         })
@@ -545,16 +539,13 @@ impl BrowserPane {
     fn update_visibility(&self) {
         for (index, tab) in self.tabs.iter().enumerate() {
             tab.display.set_visible(
-                self.visible
-                    && self.auxiliary.is_none()
-                    && !self.add_menu_open
-                    && index == self.session.active_tab,
+                self.visible && self.auxiliary.is_none() && index == self.session.active_tab,
             );
         }
     }
 
     fn focus_active_tab(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.visible || self.auxiliary.is_some() || self.add_menu_open {
+        if !self.visible || self.auxiliary.is_some() {
             return;
         }
         window.blur();
@@ -598,106 +589,43 @@ impl Render for BrowserPane {
             .copied()
             .enumerate()
             .map(|(index, tab)| {
-                div()
-                    .id(("side-tool-tab", index))
-                    .h_full()
-                    .px_2()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .border_r_1()
-                    .border_color(rgb(colors.border))
-                    .text_size(px(11.0))
-                    .text_color(rgb(if self.auxiliary == Some(tab) {
-                        colors.text
-                    } else {
-                        colors.muted
-                    }))
-                    .when(self.auxiliary == Some(tab), |tab| {
-                        tab.bg(rgb(colors.background))
-                    })
-                    .cursor_pointer()
+                tab_pill(
+                    ("side-tool-tab", index),
+                    self.auxiliary == Some(tab),
+                    colors,
+                )
+                .on_click(cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)))
+                .child(crate::icon(tab.icon(), 13., colors.muted))
+                .child(tab.label())
+                .child(
+                    tab_close(("close-side-tool", index), colors).on_click(cx.listener(
+                        move |pane, _, _, cx| {
+                            cx.stop_propagation();
+                            pane.close_auxiliary(tab, cx);
+                        },
+                    )),
+                )
+            })
+            .collect::<Vec<_>>();
+        let tools = self.tools_enabled.then(|| {
+            [SideTab::Files, SideTab::Changes]
+                .into_iter()
+                .enumerate()
+                // An open tool already has its tab; only offer the others.
+                .filter(|(_, tab)| !self.auxiliary_tabs.contains(tab))
+                .map(|(index, tab)| {
+                    crate::pane_icon_button(
+                        ("side-add-tool", index),
+                        tab.label(),
+                        tab.icon(),
+                        false,
+                        colors,
+                    )
                     .on_click(
                         cx.listener(move |pane, _, _, cx| pane.select_auxiliary(Some(tab), cx)),
                     )
-                    .child(tab.label())
-                    .child(
-                        div()
-                            .id(("close-side-tool", index))
-                            .px_1()
-                            .hover(|s| s.bg(rgb(colors.surface_high)))
-                            .child(crate::icon(crate::CLOSE_ICON, 10.0, colors.muted))
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                cx.stop_propagation();
-                                pane.close_auxiliary(tab, cx);
-                            })),
-                    )
-            })
-            .collect::<Vec<_>>();
-        let menu = self.add_menu_open.then(|| {
-            let mut menu = div()
-                .id("side-add-menu")
-                .absolute()
-                .top(px(32.0))
-                .right(px(4.0))
-                .w(px(172.0))
-                .p_1()
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgb(colors.border))
-                .bg(rgb(colors.surface_high))
-                .occlude()
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .id("side-add-page")
-                        .h(px(30.0))
-                        .px_2()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_size(px(12.0))
-                        .text_color(rgb(colors.text))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(colors.selected_surface)))
-                        .child(crate::icon(crate::BROWSER_ICON, 14.0, colors.muted))
-                        .child("New browser page")
-                        .on_click(
-                            cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
-                        ),
-                );
-            if self.tools_enabled {
-                for (index, tab) in [SideTab::Files, SideTab::Changes].into_iter().enumerate() {
-                    menu = menu.child(
-                        div()
-                            .id(("side-add-tool", index))
-                            .h(px(30.0))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(12.0))
-                            .text_color(rgb(colors.text))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(colors.selected_surface)))
-                            .child(crate::icon(
-                                if tab == SideTab::Files {
-                                    crate::FILE_ICON
-                                } else {
-                                    crate::CHANGES_ICON
-                                },
-                                14.0,
-                                colors.muted,
-                            ))
-                            .child(tab.label())
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                pane.select_auxiliary(Some(tab), cx)
-                            })),
-                    );
-                }
-            }
-            gpui::deferred(menu).with_priority(1)
+                })
+                .collect::<Vec<_>>()
         });
         div()
             .relative()
@@ -709,20 +637,21 @@ impl Render for BrowserPane {
             .child(
                 div()
                     .id("browser-tabs")
-                    .h(px(32.))
+                    .h(px(SESSION_HEADER_HEIGHT))
                     .flex_shrink_0()
+                    .px_3()
                     .flex()
                     .items_center()
-                    .bg(rgb(colors.sidebar))
-                    .border_b_1()
-                    .border_color(rgb(colors.border))
+                    .gap_1()
+                    .bg(rgb(colors.chrome))
                     .child(
                         div()
                             .id("browser-tab-list")
                             .flex_1()
                             .min_w_0()
-                            .h_full()
                             .flex()
+                            .items_center()
+                            .gap_1()
                             .overflow_x_scroll()
                             .track_scroll(&self.tab_scroll)
                             .children(self.tabs.iter().enumerate().map(|(index, slot)| {
@@ -739,79 +668,33 @@ impl Render for BrowserPane {
                                 };
                                 let active =
                                     self.auxiliary.is_none() && index == self.session.active_tab;
-                                div()
-                                    .id(("browser-tab", slot.id))
-                                    .h_full()
-                                    .w(px(148.))
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .pl(px(10.))
-                                    .pr(px(3.))
-                                    .border_r_1()
-                                    .border_color(rgb(colors.border))
-                                    .text_size(px(11.))
-                                    .text_color(rgb(if active {
-                                        colors.text
-                                    } else {
-                                        colors.muted
-                                    }))
-                                    .when(active, |tab| {
-                                        tab.bg(rgb(colors.background))
-                                            .border_b_1()
-                                            .border_color(rgb(colors.accent))
-                                    })
-                                    .cursor_pointer()
+                                tab_pill(("browser-tab", slot.id), active, colors)
+                                    .w(px(BROWSER_TAB_WIDTH))
                                     .on_click(cx.listener(move |pane, _, window, cx| {
                                         pane.select_tab(index, window, cx)
                                     }))
+                                    .child(crate::icon(crate::BROWSER_ICON, 13., colors.muted))
                                     .child(div().flex_1().min_w_0().text_ellipsis().child(label))
                                     .child(
-                                        div()
-                                            .id(("browser-close-tab", slot.id))
-                                            .w(px(22.))
-                                            .h(px(22.))
-                                            .flex_shrink_0()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded(px(3.))
-                                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                                            .child("×")
-                                            .on_click(cx.listener(move |pane, _, window, cx| {
+                                        tab_close(("browser-close-tab", slot.id), colors).on_click(
+                                            cx.listener(move |pane, _, window, cx| {
                                                 cx.stop_propagation();
                                                 pane.close_tab(index, window, cx);
-                                            })),
+                                            }),
+                                        ),
                                     )
                             }))
                             .children(auxiliary_tabs),
                     )
+                    .when_some(tools, |bar, tools| bar.children(tools))
                     .child(
-                        div()
-                            .id("browser-new-tab")
-                            .w(px(32.))
-                            .h_full()
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(colors.muted))
-                            .cursor_pointer()
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(colors.surface_high))
-                                    .text_color(rgb(colors.text))
-                            })
-                            .child(crate::plus_icon(colors.muted))
-                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation()
-                            })
-                            .on_click(cx.listener(|pane, _, _, cx| {
-                                pane.add_menu_open = !pane.add_menu_open;
-                                pane.update_visibility();
-                                cx.notify();
-                            })),
+                        crate::ui_button("browser-new-tab", crate::ButtonKind::Ghost, colors)
+                            .size(px(28.))
+                            .px_0()
+                            .on_click(
+                                cx.listener(|pane, _, window, cx| pane.add_tab(None, window, cx)),
+                            )
+                            .child(crate::plus_icon(colors.muted)),
                     ),
             )
             .when(self.auxiliary.is_none(), |pane| {
@@ -822,8 +705,49 @@ impl Render for BrowserPane {
                         .child(self.tabs[self.session.active_tab].entity.clone()),
                 )
             })
-            .when_some(menu, |pane, menu| pane.child(menu))
     }
+}
+
+/// The side pane's tab, in the shape of the chat tabs beside it.
+fn tab_pill(
+    id: impl Into<ElementId>,
+    selected: bool,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(30.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .pl_2()
+        .pr_1()
+        .rounded(px(7.))
+        .border_1()
+        .border_color(rgba(if selected {
+            (colors.border << 8) | 0xff
+        } else {
+            0
+        }))
+        .when(selected, |tab| tab.bg(rgb(colors.selected_surface)))
+        .text_size(px(12.))
+        .text_color(rgb(if selected { colors.text } else { colors.muted }))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(colors.surface_high)))
+}
+
+fn tab_close(id: impl Into<ElementId>, colors: ThemeColors) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .size(px(22.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .hover(|style| style.bg(rgb(colors.surface_high)))
+        .child(crate::icon(crate::CLOSE_ICON, 11., colors.muted))
 }
 
 struct BrowserTab {
@@ -853,6 +777,7 @@ impl BrowserTab {
     ) -> Self {
         let address = cx.new(|cx| {
             let mut input = ComposerInput::new(cx, "URL or localhost:3000");
+            input.set_compact(true);
             input.set_colors(colors, cx);
             input
         });
@@ -1176,12 +1101,24 @@ impl BrowserTab {
         cx.notify();
     }
 
+    /// Back to the page behind an error, whose address may be one that failed.
+    fn retry(&mut self, cx: &mut Context<Self>) {
+        if let Some(url) = self.url.clone() {
+            self.draft = url.clone();
+            self.address_dirty = false;
+            self.address.update(cx, |input, cx| input.set_text(url, cx));
+        }
+        self.error = None;
+        self.reload(cx);
+    }
+
     fn button(
         &self,
         id: &'static str,
-        label: &'static str,
+        path: &'static str,
         enabled: bool,
     ) -> gpui::Stateful<gpui::Div> {
+        let colors = self.colors;
         div()
             .id(id)
             .w(px(28.))
@@ -1190,18 +1127,14 @@ impl BrowserTab {
             .flex()
             .items_center()
             .justify_center()
-            .rounded(px(5.))
-            .text_size(px(15.))
-            .text_color(rgb(self.colors.muted))
+            .rounded(px(6.))
             .opacity(if enabled { 1. } else { 0.4 })
             .when(enabled, |button| {
-                button.cursor_pointer().hover(|style| {
-                    style
-                        .bg(rgb(self.colors.surface_high))
-                        .text_color(rgb(self.colors.text))
-                })
+                button
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
             })
-            .child(label)
+            .child(crate::icon(path, 15., colors.muted))
     }
 }
 
@@ -1212,99 +1145,128 @@ impl Drop for BrowserTab {
 }
 
 impl Render for BrowserTab {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_page = self.current_url().is_some();
         let back_enabled = self.can_back;
         let forward_enabled = self.can_forward;
-        let mut pane =
-            div()
-                .size_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .bg(rgb(self.colors.background))
-                .text_color(rgb(self.colors.text))
-                .child(
-                    div()
-                        .id("browser-toolbar")
-                        .h(px(42.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(3.))
-                        .px(px(6.))
-                        .bg(rgb(self.colors.sidebar))
-                        .border_b_1()
-                        .border_color(rgb(self.colors.border))
-                        .child(self.button("browser-back", "←", back_enabled).on_click(
-                            cx.listener(move |pane, _, _, cx| {
+        let colors = self.colors;
+        let address_focused = self.address.read(cx).focus_handle(cx).is_focused(window);
+        let mut pane = div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(colors.background))
+            .text_color(rgb(colors.text))
+            .child(
+                div()
+                    .id("browser-toolbar")
+                    .h(px(TAB_BAR_HEIGHT))
+                    .bg(rgb(colors.chrome))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .px(px(8.))
+                    .border_b_1()
+                    .border_color(rgb(colors.border))
+                    .child(
+                        self.button("browser-back", crate::ARROW_LEFT_ICON, back_enabled)
+                            .on_click(cx.listener(move |pane, _, _, cx| {
                                 if back_enabled {
                                     pane.history(true, cx);
                                 }
-                            }),
-                        ))
-                        .child(
-                            self.button("browser-forward", "→", forward_enabled)
-                                .on_click(cx.listener(move |pane, _, _, cx| {
-                                    if forward_enabled {
-                                        pane.history(false, cx);
-                                    }
-                                })),
-                        )
-                        .child(
-                            self.button("browser-reload", "↻", has_page)
-                                .on_click(cx.listener(move |pane, _, _, cx| {
-                                    if has_page {
-                                        pane.reload(cx);
-                                    }
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id("browser-address")
-                                .flex_1()
-                                .min_w_0()
-                                .h(px(30.))
-                                .flex()
-                                .items_center()
-                                .px(px(8.))
-                                .bg(rgb(self.colors.background))
-                                .border_1()
-                                .border_color(rgb(self.colors.border))
-                                .rounded(px(5.))
-                                .text_size(px(12.))
-                                .cursor_text()
-                                .on_mouse_down(
-                                    gpui::MouseButton::Left,
-                                    cx.listener(|pane, _, window, cx| {
-                                        pane.address.read(cx).focus_handle(cx).focus(window);
-                                    }),
+                            })),
+                    )
+                    .child(
+                        self.button("browser-forward", crate::ARROW_RIGHT_ICON, forward_enabled)
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                if forward_enabled {
+                                    pane.history(false, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        self.button("browser-reload", crate::ROTATE_CW_ICON, has_page)
+                            .on_click(cx.listener(move |pane, _, _, cx| {
+                                if has_page {
+                                    pane.reload(cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("browser-address")
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(28.))
+                            .mx(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px(px(10.))
+                            .bg(rgb(colors.background))
+                            .border_1()
+                            .border_color(rgb(if address_focused {
+                                colors.selected_border
+                            } else {
+                                colors.border
+                            }))
+                            .rounded(px(6.))
+                            .cursor_text()
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|pane, _, window, cx| {
+                                    pane.address.read(cx).focus_handle(cx).focus(window);
+                                }),
+                            )
+                            .child(div().flex_1().min_w_0().child(self.address.clone()))
+                            .when(self.loading, |field| {
+                                field.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(colors.faint))
+                                        .child("Loading…"),
                                 )
-                                .child(self.address.clone()),
-                        )
-                        .child(self.button("browser-external", "↗", has_page).on_click(
-                            cx.listener(move |pane, _, _, cx| {
+                            }),
+                    )
+                    .child(
+                        self.button("browser-external", crate::EXTERNAL_LINK_ICON, has_page)
+                            .on_click(cx.listener(move |pane, _, _, cx| {
                                 if let Some(url) = &pane.url {
                                     cx.open_url(url);
                                 }
-                            }),
-                        ))
-                        .child(
-                            self.button("browser-close", "×", true)
-                                .on_click(cx.listener(|pane, _, _, cx| {
-                                    pane.display.set_visible(false);
-                                    cx.emit(TabEvent::ClosePane);
-                                })),
-                        ),
-                );
+                            })),
+                    ),
+            );
         if let Some(error) = &self.error {
             pane = pane.child(
                 div()
                     .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(12.))
                     .p(px(24.))
-                    .text_size(px(13.))
-                    .text_color(rgb(self.colors.muted))
-                    .child(error.clone()),
+                    .child(crate::icon(crate::ALERT_ICON, 18., colors.muted))
+                    .child(
+                        div()
+                            .max_w(px(320.))
+                            .text_center()
+                            .text_size(px(13.))
+                            .text_color(rgb(colors.muted))
+                            .child(error.clone()),
+                    )
+                    .when(has_page, |state| {
+                        state.child(
+                            crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
+                                .h(px(28.))
+                                .on_click(cx.listener(|pane, _, _, cx| pane.retry(cx)))
+                                .child("Reload"),
+                        )
+                    }),
             );
         } else if has_page {
             if let Some(native) = &self.display.native {
@@ -1325,55 +1287,49 @@ impl Render for BrowserTab {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .gap(px(12.))
-                    .p(px(20.))
-                    .child(div().text_size(px(16.)).child("Preview your app"))
+                    .gap(px(8.))
+                    .p(px(24.))
+                    .text_center()
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .text_color(rgb(self.colors.muted))
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Preview your app"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(rgb(colors.muted))
                             .child("Enter a URL above, or open a local development server."),
                     )
                     .child(
                         div()
+                            .mt(px(8.))
                             .flex()
+                            .flex_wrap()
+                            .justify_center()
                             .gap(px(8.))
                             .children([3000_u32, 5173, 8080].map(|port| {
-                                div()
-                                    .id(("browser-localhost", port))
-                                    .px(px(8.))
-                                    .py(px(5.))
-                                    .rounded(px(4.))
-                                    .bg(rgb(self.colors.surface))
-                                    .text_size(px(12.))
-                                    .cursor_pointer()
-                                    .child(format!(":{port}"))
-                                    .on_click(cx.listener(move |pane, _, _, cx| {
+                                crate::ui_button(
+                                    ("browser-localhost", port),
+                                    crate::ButtonKind::Secondary,
+                                    colors,
+                                )
+                                .h(px(28.))
+                                .font_family(crate::MONO)
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::NORMAL)
+                                .child(format!("localhost:{port}"))
+                                .on_click(cx.listener(
+                                    move |pane, _, _, cx| {
                                         pane.navigate(&format!("http://localhost:{port}"), cx);
-                                    }))
+                                    },
+                                ))
                             })),
                     ),
             );
         }
-        pane.child(
-            div()
-                .h(px(24.))
-                .bg(rgb(self.colors.sidebar))
-                .flex_shrink_0()
-                .px(px(10.))
-                .flex()
-                .items_center()
-                .border_t_1()
-                .border_color(rgb(self.colors.border))
-                .text_size(px(11.))
-                .text_color(rgb(self.colors.muted))
-                .overflow_hidden()
-                .child(if self.loading {
-                    "Loading…".to_string()
-                } else {
-                    self.title.clone()
-                }),
-        )
+        pane
     }
 }
 
@@ -2107,17 +2063,34 @@ mod tests {
                 assert!(pane.auxiliary.is_none());
                 assert!(pane.tabs[0].display.visible.get());
                 assert_eq!(pane.tabs[0].entity.read(cx).draft, "unfinished.localhost");
-                pane.add_menu_open = true;
-                pane.update_visibility();
-                assert!(!pane.tabs[0].display.visible.get());
-                assert!(pane.dismiss_add_menu(cx));
-                assert!(pane.tabs[0].display.visible.get());
                 pane.select_auxiliary(Some(SideTab::Changes), cx);
                 pane.add_tab(None, window, cx);
                 assert!(pane.auxiliary.is_none());
                 assert_eq!(pane.session.active_tab, 1);
                 assert!(pane.tabs[1].display.visible.get());
                 assert_eq!(pane.auxiliary_tabs, vec![SideTab::Files, SideTab::Changes]);
+            })
+        });
+    }
+
+    #[gpui::test]
+    fn retrying_after_a_bad_address_returns_to_the_open_page(cx: &mut gpui::TestAppContext) {
+        let (tab, cx) = cx.add_window_view(|window, cx| {
+            BrowserTab::new(
+                Some("http://localhost:3000/".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|_, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.navigate("ftp://example.invalid/", cx);
+                assert!(tab.error.is_some());
+                tab.retry(cx);
+                assert!(tab.error.is_none());
+                assert_eq!(tab.draft, "http://localhost:3000/");
+                assert_eq!(tab.current_url().as_deref(), Some("http://localhost:3000/"));
             })
         });
     }
@@ -2155,16 +2128,11 @@ mod tests {
             )
         });
         cx.run_until_parked();
-        cx.simulate_click(gpui::point(px(150.), px(53.)), gpui::Modifiers::default());
+        cx.simulate_click(gpui::point(px(150.), px(69.)), gpui::Modifiers::default());
         cx.simulate_input("first.localhost:3000");
-        let plus_x = cx.update(|window, _| window.viewport_size().width - px(16.));
-        cx.simulate_click(gpui::point(plus_x, px(16.)), gpui::Modifiers::default());
-        cx.run_until_parked();
-        cx.update(|_, cx| assert!(pane.read(cx).add_menu_open));
-        cx.simulate_click(
-            gpui::point(plus_x - px(80.0), px(48.0)),
-            gpui::Modifiers::default(),
-        );
+        // With no side tools to offer, the add button opens a page at once.
+        let plus_x = cx.update(|window, _| window.viewport_size().width - px(26.));
+        cx.simulate_click(gpui::point(plus_x, px(24.)), gpui::Modifiers::default());
         cx.run_until_parked();
         cx.simulate_input("second.localhost:5173");
         cx.run_until_parked();
@@ -2177,7 +2145,7 @@ mod tests {
             assert!(pane.tabs[1].display.visible.get());
         });
 
-        cx.simulate_click(gpui::point(px(50.), px(16.)), gpui::Modifiers::default());
+        cx.simulate_click(gpui::point(px(50.), px(24.)), gpui::Modifiers::default());
         cx.run_until_parked();
         cx.update(|window, cx| {
             let pane = pane.read(cx);
@@ -2190,14 +2158,14 @@ mod tests {
         });
 
         // Close the first tab using its button; the second tab remains intact.
-        cx.simulate_click(gpui::point(px(134.), px(16.)), gpui::Modifiers::default());
+        cx.simulate_click(gpui::point(px(144.), px(24.)), gpui::Modifiers::default());
         cx.run_until_parked();
         cx.update(|_, cx| {
             let pane = pane.read(cx);
             assert_eq!(pane.tabs.len(), 1);
             assert_eq!(pane.tabs[0].entity.read(cx).draft, "second.localhost:5173");
         });
-        cx.simulate_click(gpui::point(px(134.), px(16.)), gpui::Modifiers::default());
+        cx.simulate_click(gpui::point(px(144.), px(24.)), gpui::Modifiers::default());
         cx.run_until_parked();
         // Closing the only tab collapses the pane and leaves a blank tab behind.
         cx.update(|_, cx| {

@@ -150,7 +150,7 @@ Keep the conversation readable at its actual window size. Titles truncate where 
 
 Desktop has a project sidebar, 256px by default and resizable by dragging its edge, a session header, a separate 43px chat-tab row, and a central conversation. The regular composer and chat measure cap at 736px; an empty conversation centers a 660px composer beneath its context, heading and description. A short transcript starts at the top; longer transcripts retain scrolling and the existing latest-output behavior.
 
-Changes, Files, Browser and Terminal belong to the session workspace. Chat tabs control independent conversations. Desktop settings use a bounded panel up to 900×760px, with section navigation that changes to a horizontal strip in compact windows. The application minimum is 760×560px.
+Changes, Files, Browser and Terminal belong to the session workspace. The desktop side pane runs the workspace's full height beside the session column: its tabs sit level with the session header, its address bar or tool controls level with the chat tabs, and one rule closes both columns. Chat tabs control independent conversations. Desktop settings use a bounded panel up to 900×760px, with section navigation that changes to a horizontal strip in compact windows. The application minimum is 760×560px.
 
 Android uses bottom navigation outside an open chat on compact screens and a navigation rail from 600dp. Phone chats use the header back action to return to projects. Chat tabs scroll horizontally and reveal the selected chat. Changes, Files and Terminal remain separate workspace tabs below them. Touch controls preserve 48dp targets; dialogs and reading areas respect system insets and enlarged text.
 

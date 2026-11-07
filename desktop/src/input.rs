@@ -142,6 +142,8 @@ pub struct ComposerInput {
     terminal: bool,
     terminal_bracketed_paste: bool,
     concealed: bool,
+    /// Sized to sit inside a toolbar field instead of a form row.
+    compact: bool,
     colors: Option<ThemeColors>,
 }
 
@@ -163,8 +165,13 @@ impl ComposerInput {
             terminal: false,
             terminal_bracketed_paste: false,
             concealed: false,
+            compact: false,
             colors: None,
         }
+    }
+
+    pub fn set_compact(&mut self, compact: bool) {
+        self.compact = compact;
     }
 
     pub fn terminal(cx: &mut Context<Self>) -> Self {
@@ -1036,14 +1043,13 @@ impl Render for ComposerInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .line_height(px(22.))
-            .text_size(px(14.))
+            .line_height(px(if self.compact { 18. } else { 22. }))
+            .text_size(px(if self.compact { 12.5 } else { 14. }))
             .text_color(rgb(self.colors.map_or(0xe8eaf0, |colors| colors.text)))
             .child(
                 div()
-                    .h(px(30.))
+                    .when(!self.compact, |line| line.h(px(30.)).py_1())
                     .w_full()
-                    .py_1()
                     .child(TextElement { input: cx.entity() }),
             )
     }
