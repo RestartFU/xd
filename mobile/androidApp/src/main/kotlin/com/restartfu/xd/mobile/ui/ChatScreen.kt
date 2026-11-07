@@ -138,6 +138,8 @@ internal fun ChatScreen(
     goBack: () -> Unit,
     sessionTitle: String = "",
     projectName: String = "",
+    /** The session's checked-out branch, as the tree reports it. */
+    branch: String? = null,
     workspaceId: String = model.state.value.chatId,
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
@@ -184,7 +186,8 @@ internal fun ChatScreen(
     val pullRequest by model.pullRequest.collectAsStateWithLifecycle()
     val uriHandler = LocalUriHandler.current
     // A finished turn may have pushed a branch or opened its pull request.
-    LaunchedEffect(state.chatId, state.working) {
+    // So does a branch switched under an idle session.
+    LaunchedEffect(state.chatId, state.working, branch) {
         if (!state.working) model.refreshPullRequest()
     }
     val listState = rememberLazyListState()

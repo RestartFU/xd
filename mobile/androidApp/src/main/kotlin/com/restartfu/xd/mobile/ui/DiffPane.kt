@@ -114,7 +114,6 @@ internal fun DiffPaneContent(model: DiffViewModel) {
 private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewModel) {
     val signals = LocalXdSignals.current
     val uriHandler = LocalUriHandler.current
-    var message by rememberSaveable(state.commits) { mutableStateOf("") }
     Column(
         Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -149,16 +148,16 @@ private fun GitSummary(git: GitStatusReply, state: DiffPane, model: DiffViewMode
         if (git.canCommit) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
-                    value = message,
-                    onValueChange = { message = it },
+                    value = state.commitMessage,
+                    onValueChange = model::editCommitMessage,
                     modifier = Modifier.weight(1f),
                     placeholder = { Text("Commit message") },
                     singleLine = true,
                     enabled = !state.committing,
                 )
                 Button(
-                    onClick = { model.commit(message) },
-                    enabled = !state.committing && message.isNotBlank(),
+                    onClick = model::commit,
+                    enabled = !state.committing && state.commitMessage.isNotBlank(),
                 ) { Text(if (state.committing) "Committing…" else "Commit all") }
             }
         }

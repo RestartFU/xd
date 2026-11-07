@@ -26,8 +26,8 @@ public data class DiffPane(
     val pullRequestUrl: String? = null,
     val committing: Boolean = false,
     val commitError: String? = null,
-    /** Bumped by each successful commit, so the message field can clear. */
-    val commits: Int = 0,
+    /** The commit message being typed; kept here so a refresh cannot lose it. */
+    val commitMessage: String = "",
 )
 
 /**
@@ -63,14 +63,24 @@ class DiffViewModel(
      * Commits every change with [message], as the desktop's Changes pane does,
      * then reads the patch again.
      */
-    fun commit(message: String) {
+    fun editCommitMessage(message: String) {
+        _state.value = _state.value.copy(commitMessage = message)
+    }
+
+    fun commit() {
         val current = _state.value
+        val message = current.commitMessage
         if (current.committing || current.git?.canCommit != true || message.isBlank()) return
         _state.value = current.copy(committing = true, commitError = null)
         viewModelScope.launch {
             try {
                 val git = session().commitAll(message)
-                _state.value = _state.value.copy(git = git, committing = false, commits = _state.value.commits + 1)
+                // Clear only what was committed; anything typed since stays.
+                _state.value = _state.value.copy(
+                    git = git,
+                    committing = false,
+                    commitMessage = _state.value.commitMessage.takeIf { it != message }.orEmpty(),
+                )
                 refresh()
             } catch (error: CancellationException) {
                 throw error
@@ -94,7 +104,9 @@ class DiffViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                null
+                // Keep what was known: a dropped request should not hide the
+                // commit box, and a checkout outside Git never had a status.
+                _state.value.git
             }
             val pullRequest = if (git?.mayHavePullRequest == true) {
                 try {
@@ -112,8 +124,11 @@ class DiffViewModel(
         }
     }
 
+    private var patchReads = 0L
+
     fun refresh() {
         val branch = _state.value.branch
+        val read = ++patchReads
         _state.value = _state.value.copy(loading = true, error = null)
         refreshGit()
         viewModelScope.launch {
@@ -123,14 +138,17 @@ class DiffViewModel(
                 } else {
                     session().diff("working-all")
                 }
-                _state.value = _state.value.copy(patch = patch, loading = false)
+                // A slower, older read (before a commit, or of the other scope) must not win.
+                if (read == patchReads) _state.value = _state.value.copy(patch = patch, loading = false)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _state.value = _state.value.copy(
-                    loading = false,
-                    error = error.message ?: "Could not read the diff",
-                )
+                if (read == patchReads) {
+                    _state.value = _state.value.copy(
+                        loading = false,
+                        error = error.message ?: "Could not read the diff",
+                    )
+                }
             }
         }
     }
