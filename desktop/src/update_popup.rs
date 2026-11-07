@@ -220,16 +220,29 @@ impl XdDesktop {
     }
 
     /// Published channels install through the host. Nothing is published for
-    /// master, so a dev build compiles it here.
+    /// master, so a dev build compiles the exact commit the user was shown here,
+    /// even if master has moved on since.
     pub(super) fn install_app_update(&mut self, cx: &mut Context<Self>) {
-        let builds_from_source = self
-            .self_update_panel
-            .as_ref()
-            .is_some_and(SelfUpdatePanel::builds_from_source);
-        if !builds_from_source {
+        let Some(panel) = self.self_update_panel.as_ref() else {
+            return;
+        };
+        if !panel.builds_from_source() {
             self.request_app_update("install", cx);
-        } else if let Some(target) = source_build::master_target() {
-            self.run_source_build(target, cx);
+            return;
+        }
+        let target = panel
+            .status
+            .as_ref()
+            .and_then(|status| status.latest.as_deref())
+            .and_then(source_build::parse_target);
+        match target {
+            Some(target) => self.run_source_build(target, cx),
+            None => {
+                if let Some(panel) = self.self_update_panel.as_mut() {
+                    panel.source_error = Some("Cannot tell which commit to build.".into());
+                }
+                cx.notify();
+            }
         }
     }
 

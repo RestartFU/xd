@@ -123,11 +123,6 @@ pub fn supported() -> bool {
         && BuildChannel::current().is_some_and(|channel| installed_root(channel).is_some())
 }
 
-/// Where a dev build's updates come from.
-pub fn master_target() -> Option<SourceTarget> {
-    parse_branch(REPOSITORY, "master")
-}
-
 fn build_platform() -> Option<BuildPlatform> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some(BuildPlatform::Linux)
@@ -649,8 +644,8 @@ mod tests {
             install_arguments(BuildPlatform::Linux, BuildChannel::Nightly),
             ["scripts/install.sh", "--from", "dist"]
         );
-        let master = master_target().unwrap();
-        assert_eq!(master.git_ref, "refs/heads/master");
+        let commit = "77af5848ea1eb3941752a3de6a31ee9da5ed8a2f";
+        assert_eq!(parse_target(commit).unwrap().git_ref, commit);
     }
 
     #[test]
