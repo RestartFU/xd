@@ -2128,6 +2128,10 @@ struct XdDesktop {
     draft_generation: u64,
     draft_dirty: bool,
     attachments_dirty: bool,
+    /// A send's clear is out: the attachment list is empty because the host
+    /// took what was sent, not because the user emptied it, so it is not
+    /// uploaded, and drafts arriving meanwhile do not bring the sent ones back.
+    awaiting_sent_clear: bool,
     attachment_generation: u64,
     /// Batches of chosen files still being read. Sending waits for them, so a
     /// message never leaves without a file the user saw themselves choose.
@@ -2726,6 +2730,7 @@ impl XdDesktop {
             draft_generation: 0,
             draft_dirty: false,
             attachments_dirty: false,
+            awaiting_sent_clear: false,
             attachment_generation: 0,
             attachments_reading: 0,
             composer_thumbnails: HashMap::new(),
@@ -5104,8 +5109,7 @@ impl XdDesktop {
             RequestKind::MoveChat { .. } => self.request_tree(),
             RequestKind::DeleteChat { .. } => self.request_tree(),
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
-                let local_attachments = self
-                    .attachments_dirty
+                let local_attachments = (self.attachments_dirty || self.awaiting_sent_clear)
                     .then(|| self.model.draft_attachments.clone());
                 self.model.apply_chat(&value);
                 self.sync_active_auth_state();
@@ -5284,7 +5288,8 @@ impl XdDesktop {
             } if self.chat_is_active(&chat_id) => {
                 let attachment_reply_is_current = attachment_generation
                     .is_some_and(|generation| generation == self.attachment_generation);
-                let local_attachments = (!attachment_reply_is_current && self.attachments_dirty)
+                let local_attachments = (!attachment_reply_is_current
+                    && (self.attachments_dirty || self.awaiting_sent_clear))
                     .then(|| self.model.draft_attachments.clone());
                 self.model.apply_draft_snapshot(&value);
                 if let Some(local_attachments) = local_attachments {
@@ -5297,6 +5302,7 @@ impl XdDesktop {
                 }
                 if attachment_reply_is_current {
                     self.attachments_dirty = false;
+                    self.awaiting_sent_clear = false;
                 }
             }
             RequestKind::TerminalOpen { chat_id, agent, .. }
@@ -5843,8 +5849,7 @@ impl XdDesktop {
                 }
             }
             "draft" if self.event_is_active(&body) => {
-                let local_attachments = self
-                    .attachments_dirty
+                let local_attachments = (self.attachments_dirty || self.awaiting_sent_clear)
                     .then(|| self.model.draft_attachments.clone());
                 self.model.apply_event(name, &body);
                 if let Some(local_attachments) = local_attachments {
@@ -9681,12 +9686,14 @@ impl XdDesktop {
         self.set_composer_text(String::new(), cx);
         self.model.draft_attachments.clear();
         self.draft_dirty = true;
-        self.attachments_dirty = true;
+        self.attachments_dirty = false;
         self.attachment_generation = self.attachment_generation.saturating_add(1);
         self.draft_generation = self.draft_generation.saturating_add(1);
         // The host took what was sent; whatever else reached the draft, such
         // as a file another device added, comes back in the reply.
-        let _ = host.clear_sent_draft(&chat_id, self.attachment_generation);
+        self.awaiting_sent_clear = host
+            .clear_sent_draft(&chat_id, self.attachment_generation)
+            .is_ok();
         cx.notify();
     }
 
@@ -10316,6 +10323,7 @@ impl XdDesktop {
         }
         self.draft_dirty = false;
         self.attachments_dirty = false;
+        self.awaiting_sent_clear = false;
         true
     }
 
@@ -10623,6 +10631,7 @@ impl XdDesktop {
             self.set_composer_text(String::new(), cx);
             self.draft_dirty = false;
             self.attachments_dirty = false;
+            self.awaiting_sent_clear = false;
             self.remember_last_chat(&chat_id);
             self.invalidate_live_render();
             self.forget_message_images(cx);

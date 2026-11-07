@@ -8558,6 +8558,7 @@ fn validate_attachment_list(
         || StorageError::InvalidRequest("The attached files are invalid or too large.".into());
     let mut total = 0_usize;
     let mut images = 0_usize;
+    let mut image_total = 0_usize;
     attachments
         .iter()
         .map(|attachment| {
@@ -8586,6 +8587,14 @@ fn validate_attachment_list(
             }
             let image = mime == PNG_MIME;
             if image {
+                // A draft's images alone keep to a message's total, which is
+                // what clients that show only images accept.
+                if image_total > MAX_TOTAL_ATTACHMENT_BYTES.saturating_sub(data.len()) {
+                    return Err(StorageError::InvalidRequest(
+                        "Images can add up to at most 20 MiB.".into(),
+                    ));
+                }
+                image_total += data.len();
                 if !data.starts_with(PNG_SIGNATURE) {
                     return Err(StorageError::InvalidRequest(
                         "An attached image is not a valid PNG.".into(),
@@ -12990,6 +12999,24 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("20 MiB")
+        );
+        // A draft's images keep to what image-only clients accept, even where
+        // the draft has room for more.
+        let big_png = |name: &str| {
+            let mut data = PNG_SIGNATURE.to_vec();
+            data.resize(MAX_IMAGE_BYTES, 0);
+            json!({"name": name, "mime": "image/png", "data": STANDARD.encode(data)})
+        };
+        let refused = store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [big_png("a.png"), big_png("b.png"), big_png("c.png")],
+            }))
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("Images can add up to at most 20 MiB")
         );
         // Its own list still keeps to a message's limits.
         let refused = store

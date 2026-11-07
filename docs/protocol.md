@@ -613,7 +613,8 @@ client learns what its send left in the draft. Without
 `"files":true`, which a client that shows files as well as images sends, the
 list replaces only the draft's images: the files the client cannot see are kept
 after them. The client's own list keeps to
-a message's limits, but a draft may hold up to 14 attachments and 40 MiB, so
+a message's limits, but a draft may hold up to 14 attachments and 40 MiB (its
+images still at most 4 and 20 MiB), so
 files kept beside a client's images never refuse them; a message sent from it
 must still fit a message's limits. A
 client that shows only images skips the other files. The `chat` snapshot returns `draft`,

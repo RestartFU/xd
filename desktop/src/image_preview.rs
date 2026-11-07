@@ -1478,6 +1478,54 @@ mod tests {
         assert!(message_fits(&[]).is_ok());
     }
 
+    #[gpui::test]
+    fn after_a_send_the_empty_list_is_neither_uploaded_nor_refilled(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        desktop.update(cx, |desktop, cx| {
+            // As a send leaves it: the clear is out and nothing to upload.
+            desktop.awaiting_sent_clear = true;
+            desktop.attachments_dirty = false;
+            desktop.attachment_generation = 5;
+            let sent = Attachment::from_file("sent.pdf", b"%PDF".to_vec());
+            let added = Attachment::from_file("added.txt", b"from elsewhere".to_vec());
+
+            // An echo of an earlier draft does not bring the sent file back,
+            // though its text still applies.
+            desktop.handle_event(
+                "draft",
+                serde_json::json!({"chat": "implementation", "draft": "echo", "draft_revision": 90}),
+                Some(vec![sent]),
+                cx,
+            );
+            assert_eq!(desktop.model.draft_revision, 90);
+            assert!(desktop.model.draft_attachments.is_empty());
+
+            // The clear's reply shows what the send left, and ends the wait.
+            let mut reply = serde_json::Map::new();
+            reply.insert("ok".into(), true.into());
+            reply.insert("draft".into(), "".into());
+            reply.insert("draft_revision".into(), 91.into());
+            desktop.handle_reply(
+                RequestKind::SetDraft {
+                    chat_id: "implementation".into(),
+                    text: String::new(),
+                    attachment_generation: Some(5),
+                },
+                reply,
+                Some(vec![added]),
+                cx,
+            );
+            let names = desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["added.txt"]);
+            assert!(!desktop.awaiting_sent_clear && !desktop.attachments_dirty);
+        });
+    }
+
     #[test]
     fn file_sizes_read_the_way_people_write_them() {
         assert_eq!(file_size_label(812), "812 B");
