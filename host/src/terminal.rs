@@ -486,13 +486,18 @@ impl TerminalManager {
     }
 
     /// When each terminal was last used, by owner: those open now, and those
-    /// closed since the last call.
+    /// closed and not yet passed to [`Self::forget_closed_usage`].
     pub(crate) fn usage(&self) -> Vec<(String, i64)> {
         let mut usage = self
             .activity
             .closed_usage
             .lock()
-            .map(|mut closed| closed.drain().collect::<Vec<_>>())
+            .map(|closed| {
+                closed
+                    .iter()
+                    .map(|(owner, used)| (owner.clone(), *used))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         if let Ok(sessions) = self.sessions.lock() {
             usage.extend(
@@ -502,6 +507,18 @@ impl TerminalManager {
             );
         }
         usage
+    }
+
+    /// Drops closed terminals' use once it is kept elsewhere, unless a
+    /// terminal of the same owner closed later still.
+    pub(crate) fn forget_closed_usage(&self, kept: &[(String, i64)]) {
+        if let Ok(mut closed) = self.activity.closed_usage.lock() {
+            for (owner, used) in kept {
+                if closed.get(owner).is_some_and(|closed| closed <= used) {
+                    closed.remove(owner);
+                }
+            }
+        }
     }
 
     fn owned_by(&self, owners: &HashSet<String>) -> Vec<Arc<TerminalSession>> {

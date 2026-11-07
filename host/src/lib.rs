@@ -1256,9 +1256,15 @@ impl Engine {
             return 0;
         };
         // Kept in the store, even while the rule is off, so terminal use still
-        // counts after the terminal closes or the host restarts.
-        if let Err(error) = store.record_terminal_use(&self.terminals.usage()) {
-            eprintln!("xd: cannot record terminal use: {error}");
+        // counts after the terminal closes or the host restarts. Until it is,
+        // nothing is deleted.
+        let usage = self.terminals.usage();
+        match store.record_terminal_use(&usage) {
+            Ok(()) => self.terminals.forget_closed_usage(&usage),
+            Err(error) => {
+                eprintln!("xd: automatic deletion skipped: cannot record terminal use: {error}");
+                return 0;
+            }
         }
         let chosen = store
             .auto_delete_settings()
