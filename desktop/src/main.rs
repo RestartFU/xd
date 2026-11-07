@@ -65,6 +65,7 @@ use xd_desktop::{
 mod browser;
 mod editor;
 mod files;
+mod image_preview;
 mod input;
 mod minimal;
 mod selection;
@@ -144,6 +145,7 @@ const FOLDER_ICON: &str = "icons/folder.svg";
 const FILE_ICON: &str = "icons/file.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
 const TRASH_ICON: &str = "icons/trash.svg";
+const CHEVRON_LEFT_ICON: &str = "icons/chevron-left.svg";
 const CHEVRON_RIGHT_ICON: &str = "icons/chevron-right.svg";
 const CHEVRON_DOWN_ICON: &str = "icons/chevron-down.svg";
 const CLOSE_ICON: &str = "icons/close.svg";
@@ -1374,15 +1376,6 @@ struct ReadyImage {
 
 type MessageImages = HashMap<String, MessageImageState>;
 
-/// The image open over the window.
-#[derive(Clone)]
-enum ImageViewer {
-    /// One of the open chat's, which stays in `message_images` while it is open.
-    Message(String),
-    /// One attached to the draft.
-    Draft(Arc<Image>),
-}
-
 /// The tallest an image is drawn in a transcript, so a long screenshot cannot
 /// push the rest of the turn out of view.
 const MESSAGE_IMAGE_MAX_HEIGHT: f32 = 480.0;
@@ -1996,6 +1989,8 @@ struct XdDesktop {
     draft_dirty: bool,
     attachments_dirty: bool,
     attachment_generation: u64,
+    composer_thumbnails: image_preview::ComposerThumbnails,
+    image_preview: Option<image_preview::ImagePreview>,
     sending: bool,
     pending_send: Option<PendingSend>,
     open_question: Option<OpenQuestion>,
@@ -2023,7 +2018,9 @@ struct XdDesktop {
     /// Pixels of closed chats' images that have not been let go of yet, which
     /// count against the budget until they are.
     message_images_closing: usize,
-    image_viewer: Option<ImageViewer>,
+    /// The path of the open chat's image shown over the window, which stays in
+    /// `message_images` while it is open. A draft's images have `image_preview`.
+    image_viewer: Option<String>,
     /// Owners already asked about, so one avatar is fetched once per host.
     owner_icons_requested: HashSet<String>,
     live_render_generation: u64,
@@ -2071,7 +2068,7 @@ impl XdDesktop {
             cx.defer(move |cx| {
                 let _ = browser_window.update(cx, |_, window, cx| {
                     let _ = desktop.update(cx, |desktop, cx| {
-                        desktop.open_image_viewer(ImageViewer::Message(path), window, cx);
+                        desktop.open_image_viewer(path, window, cx);
                     });
                 });
             });
@@ -2578,6 +2575,8 @@ impl XdDesktop {
             draft_dirty: false,
             attachments_dirty: false,
             attachment_generation: 0,
+            composer_thumbnails: HashMap::new(),
+            image_preview: None,
             sending: false,
             pending_send: None,
             open_question: None,
@@ -6026,6 +6025,7 @@ impl XdDesktop {
     /// also hides the page; otherwise the page would paint over the popup.
     fn minimal_popup_is_open(&self) -> bool {
         self.minimal_theme_open
+            || self.image_preview.is_some()
             || self.image_viewer.is_some()
             || self.auth_open
             || self.update_popup_open
@@ -6073,22 +6073,15 @@ impl XdDesktop {
         }
     }
 
-    fn open_image_viewer(
-        &mut self,
-        viewer: ImageViewer,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_image_viewer(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         // It may have gone in the moment since the click.
-        if let ImageViewer::Message(path) = &viewer
-            && !matches!(
-                self.message_images.get(path),
-                Some(MessageImageState::Ready(_))
-            )
-        {
+        if !matches!(
+            self.message_images.get(&path),
+            Some(MessageImageState::Ready(_))
+        ) {
             return;
         }
-        self.image_viewer = Some(viewer);
+        self.image_viewer = Some(path);
         self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         cx.notify();
     }
@@ -8929,10 +8922,7 @@ impl XdDesktop {
     /// Lets go of images past the budget. Scrolling away from images is what
     /// makes them eligible, so this runs after frames as well as new arrivals.
     fn evict_message_images(&mut self, cx: &mut Context<Self>) {
-        let viewed = match &self.image_viewer {
-            Some(ImageViewer::Message(path)) => Some(path),
-            _ => None,
-        };
+        let viewed = self.image_viewer.as_ref();
         let held = self
             .message_images
             .iter()
@@ -14255,55 +14245,7 @@ impl XdDesktop {
         let can_submit = can_send || can_resume;
         let agent = AgentCli::from_backend(&self.model.backend);
 
-        let attachments = self
-            .model
-            .draft_attachments
-            .clone()
-            .into_iter()
-            .enumerate()
-            .map(|(index, attachment)| {
-                let name = attachment.name.clone();
-                let preview = attachment.preview.clone();
-                div()
-                    .id(("draft-image", index))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        gpui::img(attachment.preview)
-                            .id(("open-draft-image", index))
-                            .w(px(96.0))
-                            .h(px(72.0))
-                            .object_fit(gpui::ObjectFit::Contain)
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_image_viewer(
-                                    ImageViewer::Draft(preview.clone()),
-                                    window,
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(div().text_xs().text_color(rgb(colors.muted)).child(name))
-                    .child(
-                        div()
-                            .id(("remove-draft-image", index))
-                            .text_xs()
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if index < this.model.draft_attachments.len() {
-                                    this.model.draft_attachments.remove(index);
-                                    this.attachments_dirty = true;
-                                    this.attachment_generation =
-                                        this.attachment_generation.saturating_add(1);
-                                    this.schedule_draft_sync(cx);
-                                }
-                                cx.notify();
-                            }))
-                            .child("Remove"),
-                    )
-            })
-            .collect::<Vec<_>>();
+        let attachments = self.render_composer_attachments(colors, window, cx);
         let interaction = self.render_interaction(colors, cx);
         let agents_tray =
             Self::render_agents_tray(colors, &self.transcript_snapshot.running_agents);
@@ -14434,17 +14376,6 @@ impl XdDesktop {
                         },
                     ),
             )
-            .when(!attachments.is_empty(), |chat| {
-                chat.child(
-                    div()
-                        .w_full()
-                        .max_w(px(736.0))
-                        .mb_2()
-                        .flex()
-                        .gap_3()
-                        .children(attachments),
-                )
-            })
             .when_some(interaction, |chat, card| {
                 chat.child(div().w_full().max_w(px(736.0)).mb_3().child(card))
             })
@@ -14582,6 +14513,7 @@ impl XdDesktop {
                         let focus = this.composer_input.read(cx).focus_handle(cx);
                         window.focus(&focus);
                     }))
+                    .children(attachments)
                     .child(
                         div()
                             .id("native-composer")
@@ -15700,6 +15632,7 @@ impl XdDesktop {
         let update_overlay = self
             .update_popup_open
             .then(|| self.render_update_popup(colors, cx));
+        let image_preview_overlay = self.render_image_preview(colors, window, cx);
         let share_overlay = self.share_panel.clone().map(|panel| {
             let pairing_code = xd_transport::PairingCode { code: panel.code.clone(), fingerprint: panel.fingerprint.clone() }.encode().ok().filter(|_| !panel.loading);
             let can_copy = pairing_code.is_some();
@@ -17172,13 +17105,10 @@ impl XdDesktop {
                 .into_any_element()
         });
         let viewport = window.viewport_size();
-        let image_viewer_overlay = self.image_viewer.as_ref().and_then(|viewer| {
-            let image = match viewer {
-                ImageViewer::Message(path) => match self.message_images.get(path) {
-                    Some(MessageImageState::Ready(ready)) => img(ready.image.image.clone()),
-                    _ => return None,
-                },
-                ImageViewer::Draft(preview) => img(preview.clone()),
+        let image_viewer_overlay = self.image_viewer.as_ref().and_then(|path| {
+            let image = match self.message_images.get(path) {
+                Some(MessageImageState::Ready(ready)) => img(ready.image.image.clone()),
+                _ => return None,
             };
             Some(
                 div()
@@ -17345,6 +17275,10 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if this.image_preview.is_some() {
+                    this.close_image_preview(window, cx);
+                    return;
+                }
                 if this.image_viewer.take().is_some() {
                     cx.notify();
                     return;
@@ -17500,6 +17434,7 @@ impl XdDesktop {
             })
             .when_some(chat_delete_overlay, |root, overlay| root.child(overlay))
             .when_some(chat_overlay, |root, overlay| root.child(overlay))
+            .when_some(image_preview_overlay, |root, overlay| root.child(overlay))
             .when_some(image_viewer_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
             .when(!minimal_popup_open, |root| {
@@ -17795,6 +17730,9 @@ impl AssetSource for EmbeddedIcons {
             )),
             TRASH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/trash.svg").as_slice(),
+            )),
+            CHEVRON_LEFT_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/chevron-left.svg").as_slice(),
             )),
             ARROW_LEFT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/arrow-left.svg").as_slice(),
@@ -18316,7 +18254,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     use super::*;
 
-    fn grouped_workspace_fixture() -> AppModel {
+    pub(super) fn grouped_workspace_fixture() -> AppModel {
         let mut model = AppModel::default();
         model.apply_tree(&serde_json::json!({
             "folders":[{"id":"atlas","name":"Atlas"}],
@@ -20877,10 +20815,7 @@ Binary files /dev/null and b/image.png differ\n";
         });
         cx.run_until_parked();
         desktop.update(cx, |desktop, _| {
-            assert!(matches!(
-                &desktop.image_viewer,
-                Some(ImageViewer::Message(path)) if path == "/kept/a.png"
-            ));
+            assert_eq!(desktop.image_viewer.as_deref(), Some("/kept/a.png"));
             assert!(desktop.minimal_popup_is_open());
         });
 
@@ -20911,7 +20846,7 @@ Binary files /dev/null and b/image.png differ\n";
                         drawn: Rc::default(),
                     }),
                 );
-                desktop.open_image_viewer(ImageViewer::Message("/kept/a.png".into()), window, cx);
+                desktop.open_image_viewer("/kept/a.png".into(), window, cx);
             });
             cx.run_until_parked();
             let viewport = cx.update(|window, _| window.viewport_size());
@@ -20940,7 +20875,7 @@ Binary files /dev/null and b/image.png differ\n";
             desktop.auth_open = true;
             Arc::make_mut(&mut desktop.message_images)
                 .insert("/kept/a.png".to_owned(), ready_message_image(0));
-            desktop.open_image_viewer(ImageViewer::Message("/kept/a.png".into()), window, cx);
+            desktop.open_image_viewer("/kept/a.png".into(), window, cx);
             assert!(desktop.minimal_popup_focus.is_focused(window));
         });
         cx.run_until_parked();
@@ -20956,7 +20891,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn an_image_that_is_not_ready_does_not_open(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
-            desktop.open_image_viewer(ImageViewer::Message("/gone.png".into()), window, cx);
+            desktop.open_image_viewer("/gone.png".into(), window, cx);
             assert!(desktop.image_viewer.is_none());
             assert!(!desktop.minimal_popup_is_open());
         });
@@ -20972,7 +20907,7 @@ Binary files /dev/null and b/image.png differ\n";
                 ("/viewed".to_owned(), ready_message_image(1)),
                 ("/scrolled-away".to_owned(), ready_message_image(4)),
             ]);
-            desktop.open_image_viewer(ImageViewer::Message("/viewed".into()), window, cx);
+            desktop.open_image_viewer("/viewed".into(), window, cx);
 
             desktop.evict_message_images(cx);
             assert!(desktop.message_images.contains_key("/viewed"));

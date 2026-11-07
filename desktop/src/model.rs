@@ -111,6 +111,9 @@ pub struct Attachment {
     pub mime: String,
     pub data: String,
     pub preview: Arc<Image>,
+    /// Pixel size from the PNG's header, when it has a readable one and the
+    /// picture is small enough to be worth decoding.
+    pub size: Option<(u32, u32)>,
 }
 
 impl Attachment {
@@ -118,11 +121,16 @@ impl Attachment {
         if !bytes.starts_with(PNG_SIGNATURE) {
             return Err("Only PNG images can be attached.".into());
         }
+        let size = image::ImageReader::with_format(Cursor::new(&bytes), image::ImageFormat::Png)
+            .into_dimensions()
+            .ok()
+            .filter(|&(width, height)| worth_decoding(width, height));
         Ok(Self {
             name: name.into(),
             mime: "image/png".into(),
             data: STANDARD.encode(&bytes),
             preview: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+            size,
         })
     }
 
@@ -2875,6 +2883,40 @@ mod tests {
         assert_eq!(model.draft, "shared");
         assert_eq!(model.queue, ["next"]);
         assert!(model.working);
+    }
+
+    /// A PNG's signature and headers, describing a picture its bytes don't hold.
+    const PNG_OF_8000_BY_8000: &str = "89504e470d0a1a0a0000000d4948445200001f4000001f40080600000006f1adf4000000004944415435af061e";
+    const PNG_OF_8001_BY_8000: &str = "89504e470d0a1a0a0000000d4948445200001f4100001f400806000000e933c6ca000000004944415435af061e";
+
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn an_attachment_too_large_to_decode_has_no_size() {
+        let largest = Attachment::from_png("a.png", hex_bytes(PNG_OF_8000_BY_8000)).unwrap();
+        assert_eq!(largest.size, Some((8000, 8000)));
+
+        let oversized = Attachment::from_png("b.png", hex_bytes(PNG_OF_8001_BY_8000)).unwrap();
+        assert_eq!(oversized.size, None);
+    }
+
+    #[test]
+    fn an_attachment_reads_its_size_from_the_png_header() {
+        let encoded = encoded_png(7, 3, [10, 20, 30, 255]);
+        let attachment = Attachment::from_value(&serde_json::json!({
+            "name": "screen.png", "mime": "image/png", "data": encoded
+        }))
+        .unwrap();
+        assert_eq!(attachment.size, Some((7, 3)));
+
+        // Still attachable, as it always was, with nothing to size it by.
+        let truncated = Attachment::from_png("broken.png", PNG_SIGNATURE.to_vec()).unwrap();
+        assert_eq!(truncated.size, None);
     }
 
     #[test]
