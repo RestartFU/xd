@@ -1187,13 +1187,13 @@ private fun NewProjectDialog(
     if (browsing) {
         RepositoryPickerDialog(
             listDirectories = model.client::listDirectories,
-            initialPath = repository.trim(),
+            initialPath = repository,
             onDismiss = { browsing = false },
             onChoose = { path ->
                 browsing = false
                 repository = path
                 // A repository usually names its project; keep any name already typed.
-                if (name.isBlank()) name = path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\')
+                if (name.isBlank()) name = path.trimEnd('/').substringAfterLast('/')
             },
         )
     }
