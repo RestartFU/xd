@@ -76,8 +76,8 @@ public class XdClient(
     /** Something has asked for the rules on this host, so a reconnect should read them again. */
     private val autoSettleWanted = MutableStateFlow(false)
     private val _autoSettleStale = MutableStateFlow(false)
-    /** Counts background reads, so only the newest one's failure can mark the rules stale. */
-    private val autoSettleRereads = MutableStateFlow(0L)
+    /** Counts every rules request, so only a failure no newer request superseded marks them stale. */
+    private val autoSettleCalls = MutableStateFlow(0L)
 
     /**
      * The rules shown may be out of date: the host said they changed and the
@@ -100,19 +100,7 @@ public class XdClient(
     public val autoSettleSettings: StateFlow<AutoSettleSettingsReply?> = _autoSettleSettings.asStateFlow()
 
     private fun rereadAutoSettle() {
-        val generation = _sessionGeneration.value
-        val read = autoSettleRereads.updateAndGet { it + 1 }
-        scope.launch {
-            try {
-                autoSettleCall(Ops.autoSettleSettings())
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (generation == _sessionGeneration.value && read == autoSettleRereads.value) {
-                    _autoSettleStale.value = true
-                }
-            }
-        }
+        scope.launch { autoSettleCall(Ops.autoSettleSettings(), background = true) }
     }
 
     /** Chats with an approval or question waiting on the user, across every chat. */
@@ -396,12 +384,30 @@ public class XdClient(
         autoSettleCall(Ops.setAutoSettleSettings(afterDays, onMerge, keepPullRequests))
     }
 
-    private suspend fun autoSettleCall(request: kotlinx.serialization.json.JsonObject) {
+    /**
+     * A [background] read reports failure only by marking the rules stale,
+     * and only when no newer request has been made since it started.
+     */
+    private suspend fun autoSettleCall(
+        request: kotlinx.serialization.json.JsonObject,
+        background: Boolean = false,
+    ) {
         autoSettleWanted.value = true
         val generation = _sessionGeneration.value
         val broadcasts = autoSettleBroadcasts.value
-        val value = actor.call(request)
-        val rules = actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+        val call = autoSettleCalls.updateAndGet { it + 1 }
+        val rules = try {
+            val value = actor.call(request)
+            actor.decodeReply(value) { it.decodeReply<AutoSettleSettingsReply>() }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (!background) throw error
+            if (generation == _sessionGeneration.value && call == autoSettleCalls.value) {
+                _autoSettleStale.value = true
+            }
+            return
+        }
         // Otherwise the read that broadcast started decides the value.
         if (generation == _sessionGeneration.value && broadcasts == autoSettleBroadcasts.value) {
             _autoSettleSettings.value = rules
