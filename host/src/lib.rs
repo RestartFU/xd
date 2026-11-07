@@ -439,7 +439,7 @@ impl Engine {
             Some("drop-queue") => self.event_mutation(|store| store.drop_queue(&request)),
             Some("edit-queue") => self.event_mutation(|store| store.edit_queue(&request)),
             Some("reorder-queue") => self.event_mutation(|store| store.reorder_queue(&request)),
-            Some("steer-queue") => self.steer_queue(&request),
+            Some("steer-queue") => self.steer_queued(&request),
             Some("workflow-status") => self.workflow_status(owner, &request),
             Some("usage-summary") => self
                 .usage
@@ -1402,8 +1402,24 @@ impl Engine {
             self.events.publish(json!({"event": "tree"}));
         }
         match prepared {
-            Ok(SendDisposition::Queued { reply, event }) => {
+            Ok(SendDisposition::Queued { mut reply, event }) => {
+                let newest = event["queue"].as_array().and_then(|queue| {
+                    Some((
+                        queue.len().checked_sub(1)?,
+                        queue.last()?.as_str()?.to_owned(),
+                    ))
+                });
                 self.events.publish(event);
+                if request.get("steer").and_then(Value::as_bool) == Some(true)
+                    && let Some((index, text)) = newest
+                {
+                    let steer =
+                        self.steer_queued(&json!({"chat": chat_id, "index": index, "text": text}));
+                    if steer.get("ok").and_then(Value::as_bool) != Some(true) {
+                        return steer;
+                    }
+                    reply["steered"] = steer["steered"].clone();
+                }
                 reply
             }
             Ok(SendDisposition::Start { reply, turn }) => match runtime.start(turn.clone()) {
@@ -1443,18 +1459,32 @@ impl Engine {
         json!({"ok": true})
     }
 
-    fn steer_queue(&self, request: &Value) -> Value {
+    /// Redirects the running turn to a queued message: into the turn itself
+    /// when its agent can take it, otherwise by stopping the turn with the
+    /// message first in line.
+    fn steer_queued(&self, request: &Value) -> Value {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
-        match store.steer_queue(request) {
-            Ok((reply, event)) => {
+        match store.take_queued(request) {
+            Ok((mut reply, event)) => {
                 self.events.publish(event);
-                if let Some(chat_id) = request.get("chat").and_then(Value::as_str)
-                    && let Some(runtime) = &self.runtime
-                {
-                    runtime.cancel(chat_id);
+                let chat_id = request["chat"].as_str().unwrap_or_default();
+                let text = request["text"].as_str().unwrap_or_default();
+                let steered = self
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.steer(chat_id, text));
+                if !steered {
+                    match store.requeue_front(chat_id, text) {
+                        Ok(event) => self.events.publish(event),
+                        Err(error) => return error_reply(error),
+                    }
+                    if let Some(runtime) = &self.runtime {
+                        runtime.cancel(chat_id);
+                    }
                 }
+                reply["steered"] = Value::Bool(steered);
                 reply
             }
             Err(error) => error_reply(error),
@@ -2237,6 +2267,132 @@ mod tests {
         assert_eq!(reply["ok"], false);
         assert_eq!(reply["_xd_request"], 7);
         assert!(reply["error"].as_str().unwrap().contains("terminal-open"));
+    }
+
+    fn steer_engine(root: &std::path::Path) -> (Engine, String) {
+        std::fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let engine = Engine::with_store(
+            StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap(),
+        );
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = engine
+            .dispatch(json!({"op": "new-chat", "folder": folder, "backend": "claude"}))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        (engine, chat)
+    }
+
+    /// With no running agent to take it, a steer keeps the message and puts it
+    /// first in line, and refuses a message that is no longer the one the
+    /// client saw.
+    #[test]
+    fn a_steer_nothing_can_take_keeps_the_message_first_in_line() {
+        let root = std::env::temp_dir().join(format!("xd-steer-idle-{}", uuid::Uuid::new_v4()));
+        let (engine, chat) = steer_engine(&root);
+        let store = engine.store.as_ref().unwrap();
+        store
+            .requeue_front(&chat, "second")
+            .and_then(|_| store.requeue_front(&chat, "first"))
+            .unwrap();
+
+        let refused = engine
+            .dispatch(json!({"op": "steer-queue", "chat": chat, "index": 1, "text": "changed"}));
+        assert_eq!(refused["ok"], false);
+        assert_eq!(
+            store.chat(&chat).unwrap()["queue"],
+            json!(["first", "second"])
+        );
+
+        let reply = engine
+            .dispatch(json!({"op": "steer-queue", "chat": chat, "index": 1, "text": "second"}));
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["steered"], false);
+        assert_eq!(
+            store.chat(&chat).unwrap()["queue"],
+            json!(["second", "first"])
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_send_marked_steer_goes_into_the_running_turn_and_not_the_queue() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("xd-steer-send-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let agent = root.join("claude");
+        std::fs::write(
+            &agent,
+            r#"#!/bin/sh
+case "$*" in *--strict-mcp-config*) exit 0;; esac
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Begun."}}}'
+read steer
+echo '{"type":"result","is_error":true,"terminal_reason":"aborted_streaming"}'
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Redirected."}]}}'
+echo '{"type":"result","terminal_reason":"completed","result":"Redirected."}'
+read next
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+
+        let (engine, chat) = steer_engine(&root);
+        let store = engine.store.as_ref().unwrap();
+        let wait_for = |what: &str, ready: &dyn Fn() -> bool| {
+            for _ in 0..400 {
+                if ready() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            panic!("timed out waiting for {what}");
+        };
+        let first = engine.dispatch(json!({"op": "send", "chat": chat, "text": "first"}));
+        assert_eq!(first["queued"], false, "{first}");
+        // Until the run has begun the message would only return to the queue.
+        wait_for("the agent to begin", &|| {
+            engine
+                .runtime
+                .as_ref()
+                .unwrap()
+                .live_turn(&chat)
+                .is_some_and(|turn| turn.segment == "Begun.")
+        });
+
+        let reply = engine.dispatch(
+            json!({"op": "send", "chat": chat, "text": "Do this instead", "steer": true}),
+        );
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["steered"], true, "{reply}");
+        wait_for("the turn to end", &|| {
+            store.chat(&chat).unwrap()["working"] == false
+        });
+        let messages = store.messages(&json!({"chat": chat})).unwrap();
+        let rows = messages["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["role"] != "duration")
+            .map(|row| row["content"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows, ["first", "Begun.", "Do this instead", "Redirected."]);
+        assert_eq!(store.chat(&chat).unwrap()["queue"], json!([]));
+
+        engine.runtime.as_ref().unwrap().discard_chat(&chat);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

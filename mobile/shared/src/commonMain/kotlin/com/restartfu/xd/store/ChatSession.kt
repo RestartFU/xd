@@ -102,7 +102,7 @@ public class ChatSession internal constructor(
         text: String,
     ): Unit = core.call(Ops.editQueue(core.chatId, index, oldText, text))
 
-    /** Promotes a queued message and stops the running turn to take it up. */
+    /** Redirects the running turn to a queued message; see [Ops.steerQueue]. */
     public suspend fun steerQueued(index: Int, text: String): Unit =
         core.call(Ops.steerQueue(core.chatId, index, text))
 

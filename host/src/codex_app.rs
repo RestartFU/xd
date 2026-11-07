@@ -5,7 +5,10 @@ use crate::{
     subagent::{SubagentPatch, SubagentStatus, SubagentStep},
 };
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+/// RPC ids from here up answer a `turn/steer`; those below are the handshake.
+const FIRST_STEER_RPC: u64 = 100;
 
 pub(crate) struct CodexAppParser {
     thread: Option<String>,
@@ -15,6 +18,19 @@ pub(crate) struct CodexAppParser {
     /// Threads of agents this thread spawned. Their notifications feed the
     /// agent's card instead of being dropped.
     children: HashSet<String>,
+    /// The running native turn, which a steer has to name.
+    turn: Option<String>,
+    next_steer: u64,
+    /// Steers Codex has not answered yet, by RPC id.
+    pending_steers: HashMap<u64, String>,
+    /// How the turn ended, held back until those answers are in: Codex refuses
+    /// a steer that arrives too late only after reporting the turn finished.
+    held_outcome: Vec<AgentEvent>,
+    /// The agent message streaming now, which a steer cuts short.
+    streaming_item: Option<String>,
+    /// Messages a steer cut short. Their last words are still on the way, and
+    /// would otherwise land after the user's message as part of the answer.
+    superseded: HashSet<String>,
 }
 impl CodexAppParser {
     pub(crate) fn new(turn: &TurnSpec) -> Self {
@@ -32,23 +48,19 @@ impl CodexAppParser {
         if let Some(thread) = &turn.session_id {
             thread_params["threadId"] = json!(thread);
         }
-        let mut input = vec![json!({"type":"text", "text":turn.prompt})];
-        // Attachments are host paths materialized by storage, so no image bytes
-        // or desktop-local paths need to cross the backend protocol.
-        for line in turn.prompt.lines() {
-            if let Some(path) = line
-                .strip_prefix("[image: ")
-                .and_then(|s| s.strip_suffix(']'))
-            {
-                input.push(json!({"type":"localImage", "path":path}));
-            }
-        }
+        let input = input_items(&turn.prompt);
         Self {
             thread: turn.session_id.clone(),
             thread_params,
             input: json!({"input":input, "effort":turn.effort}),
             streamed: HashSet::new(),
             children: HashSet::new(),
+            turn: None,
+            next_steer: FIRST_STEER_RPC,
+            pending_steers: HashMap::new(),
+            held_outcome: Vec::new(),
+            streaming_item: None,
+            superseded: HashSet::new(),
         }
     }
     pub(crate) fn initialize() -> Value {
@@ -59,11 +71,48 @@ impl CodexAppParser {
         params["threadId"] = json!(self.thread);
         json!({"id":3, "method":"turn/start", "params":params})
     }
+    /// Sends `prompt` into the running turn, if there is one to name yet.
+    pub(crate) fn steer_request(&mut self, prompt: &str) -> Option<Value> {
+        let thread = self.thread.as_ref()?;
+        let turn = self.turn.as_ref()?;
+        let id = self.next_steer;
+        let frame = json!({"id":id, "method":"turn/steer", "params":{
+            "threadId":thread, "expectedTurnId":turn, "input":input_items(prompt),
+        }});
+        self.next_steer += 1;
+        self.pending_steers.insert(id, prompt.to_owned());
+        if let Some(item) = self.streaming_item.take() {
+            self.superseded.insert(item);
+        }
+        Some(frame)
+    }
+    pub(crate) fn settling(&self) -> bool {
+        !self.held_outcome.is_empty()
+    }
+    pub(crate) fn take_settled(&mut self) -> Vec<AgentEvent> {
+        std::mem::take(&mut self.held_outcome)
+    }
+    fn steer_reply(&mut self, id: u64, refused: bool) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        if let Some(prompt) = self.pending_steers.remove(&id)
+            && refused
+        {
+            self.superseded.clear();
+            events.push(AgentEvent::SteerRejected(prompt));
+        }
+        if self.pending_steers.is_empty() {
+            events.append(&mut self.held_outcome);
+        }
+        events
+    }
     pub(crate) fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(root) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
         if root.get("id").is_some() && root.get("method").is_none() {
+            if let Some(id) = root["id"].as_u64().filter(|id| *id >= FIRST_STEER_RPC) {
+                return self.steer_reply(id, root.get("error").is_some());
+            }
             if let Some(error) = root.get("error") {
                 return vec![AgentEvent::Error(
                     error["message"]
@@ -91,7 +140,12 @@ impl CodexAppParser {
                         AgentEvent::Rpc(self.turn_request()),
                     ];
                 }
-                Some(3) => return vec![AgentEvent::Ready],
+                Some(3) => {
+                    if let Some(turn) = root["result"]["turn"]["id"].as_str() {
+                        self.turn = Some(turn.into());
+                    }
+                    return vec![AgentEvent::Ready];
+                }
                 _ => return Vec::new(),
             }
         }
@@ -114,6 +168,12 @@ impl CodexAppParser {
             };
         }
         match method {
+            "turn/started" => {
+                if let Some(turn) = params["turn"]["id"].as_str() {
+                    self.turn = Some(turn.into());
+                }
+                Vec::new()
+            }
             "item/started" | "item/completed"
                 if params["item"]["type"].as_str() == Some("collabAgentToolCall") =>
             {
@@ -121,7 +181,11 @@ impl CodexAppParser {
             }
             "item/agentMessage/delta" => {
                 if let Some(id) = params["itemId"].as_str() {
+                    if self.superseded.contains(id) {
+                        return Vec::new();
+                    }
                     self.streamed.insert(id.into());
+                    self.streaming_item = Some(id.into());
                 }
                 params["delta"]
                     .as_str()
@@ -194,22 +258,47 @@ impl CodexAppParser {
                 .get("requestId")
                 .map(|id| vec![AgentEvent::InteractionResolved(id.clone())])
                 .unwrap_or_default(),
-            "turn/completed" => match params["turn"]["status"].as_str() {
-                Some("completed") => vec![AgentEvent::Completed],
-                Some("interrupted") => {
-                    vec![
-                        AgentEvent::Resumable,
-                        AgentEvent::Error("Turn interrupted.".into()),
-                    ]
+            "turn/completed" => {
+                self.turn = None;
+                let outcome = match params["turn"]["status"].as_str() {
+                    Some("completed") => vec![AgentEvent::Completed],
+                    Some("interrupted") => {
+                        vec![
+                            AgentEvent::Resumable,
+                            AgentEvent::Error("Turn interrupted.".into()),
+                        ]
+                    }
+                    _ => codex_failure(&params["turn"]["error"], "Codex turn failed."),
+                };
+                if self.pending_steers.is_empty() {
+                    outcome
+                } else {
+                    self.held_outcome = outcome;
+                    Vec::new()
                 }
-                _ => codex_failure(&params["turn"]["error"], "Codex turn failed."),
-            },
+            }
             "error" if params["willRetry"] != true => {
                 codex_failure(&params["error"], "Codex error.")
             }
             _ => Vec::new(),
         }
     }
+}
+
+/// A message as Codex takes it. Attachments are host paths materialized by
+/// storage, so no image bytes or desktop-local paths need to cross the backend
+/// protocol.
+fn input_items(prompt: &str) -> Vec<Value> {
+    let mut input = vec![json!({"type":"text", "text":prompt})];
+    for line in prompt.lines() {
+        if let Some(path) = line
+            .strip_prefix("[image: ")
+            .and_then(|s| s.strip_suffix(']'))
+        {
+            input.push(json!({"type":"localImage", "path":path}));
+        }
+    }
+    input
 }
 
 impl CodexAppParser {
@@ -336,6 +425,168 @@ fn child_event(thread: &str, method: &str, params: &Value) -> Vec<AgentEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn running_parser() -> CodexAppParser {
+        let mut parser = CodexAppParser {
+            thread: Some("thread-1".into()),
+            thread_params: json!({}),
+            input: json!({"input":[]}),
+            streamed: HashSet::new(),
+            children: HashSet::new(),
+            turn: None,
+            next_steer: FIRST_STEER_RPC,
+            pending_steers: HashMap::new(),
+            held_outcome: Vec::new(),
+            streaming_item: None,
+            superseded: HashSet::new(),
+        };
+        parser.feed(r#"{"id":3,"result":{"turn":{"id":"turn-1"}}}"#);
+        parser
+    }
+
+    #[test]
+    fn a_steer_names_the_running_turn_and_carries_images() {
+        let mut parser = running_parser();
+        let frame = parser
+            .steer_request("Instead\n[image: /tmp/a.png]")
+            .unwrap();
+        assert_eq!(frame["method"], "turn/steer");
+        assert_eq!(frame["params"]["threadId"], "thread-1");
+        assert_eq!(frame["params"]["expectedTurnId"], "turn-1");
+        assert_eq!(
+            frame["params"]["input"][0]["text"],
+            "Instead\n[image: /tmp/a.png]"
+        );
+        assert_eq!(frame["params"]["input"][1]["path"], "/tmp/a.png");
+        // Each needs its own id for its answer to find it.
+        assert_ne!(parser.steer_request("Again").unwrap()["id"], frame["id"]);
+    }
+
+    #[test]
+    fn a_steer_needs_a_turn_to_name() {
+        let mut parser = running_parser();
+        parser.turn = None;
+        assert_eq!(parser.steer_request("Instead"), None);
+        parser.feed(
+            r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-2"}}}"#,
+        );
+        assert_eq!(
+            parser.steer_request("Instead").unwrap()["params"]["expectedTurnId"],
+            "turn-2"
+        );
+        parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}"#);
+        assert_eq!(parser.steer_request("Too late"), None);
+    }
+
+    #[test]
+    fn a_refused_steer_comes_back_and_does_not_fail_the_turn() {
+        let mut parser = running_parser();
+        let id = parser.steer_request("Instead").unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            parser.feed(&format!(
+                r#"{{"id":{id},"error":{{"message":"no active turn"}}}}"#
+            )),
+            [AgentEvent::SteerRejected("Instead".into())]
+        );
+    }
+
+    #[test]
+    fn an_accepted_steer_keeps_the_turn_running() {
+        let mut parser = running_parser();
+        let id = parser.steer_request("Instead").unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            parser.feed(&format!(r#"{{"id":{id},"result":{{"turnId":"turn-1"}}}}"#)),
+            []
+        );
+        assert!(!parser.settling());
+        assert_eq!(
+            parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}"#),
+            [AgentEvent::Completed]
+        );
+    }
+
+    /// Codex says the turn finished, then refuses the steer that arrived too
+    /// late. Ending at the first would strand the message with the next turn.
+    #[test]
+    fn the_end_of_a_turn_waits_for_the_answer_to_a_steer() {
+        let mut parser = running_parser();
+        let id = parser.steer_request("Instead").unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"completed"}}}"#),
+            []
+        );
+        assert!(parser.settling());
+        assert_eq!(
+            parser.feed(&format!(
+                r#"{{"id":{id},"error":{{"message":"no active turn"}}}}"#
+            )),
+            [
+                AgentEvent::SteerRejected("Instead".into()),
+                AgentEvent::Completed
+            ]
+        );
+        assert!(!parser.settling());
+
+        // An answer that never comes still lets the turn end.
+        let mut parser = running_parser();
+        parser.steer_request("Instead").unwrap();
+        parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"status":"failed","error":{"message":"Boom"}}}}"#);
+        assert_eq!(parser.take_settled(), [AgentEvent::Error("Boom".into())]);
+    }
+
+    /// The reply a steer cut short is still arriving when the steer lands. It
+    /// must not run on into the answer, which comes as a new message.
+    #[test]
+    fn the_last_words_of_a_reply_cut_short_are_dropped() {
+        let delta = |item: &str, text: &str| {
+            format!(
+                r#"{{"method":"item/agentMessage/delta","params":{{"threadId":"thread-1","itemId":"{item}","delta":"{text}"}}}}"#
+            )
+        };
+        let mut parser = running_parser();
+        assert_eq!(
+            parser.feed(&delta("old", "Bridges")),
+            [AgentEvent::TextDelta("Bridges".into())]
+        );
+        parser.steer_request("Instead").unwrap();
+        assert_eq!(parser.feed(&delta("old", " are old")), []);
+        assert_eq!(
+            parser.feed(&delta("new", "Understood")),
+            [AgentEvent::TextDelta("Understood".into())]
+        );
+
+        // A steer Codex refused cut nothing short.
+        let mut parser = running_parser();
+        parser.feed(&delta("old", "Bridges"));
+        let id = parser.steer_request("Instead").unwrap()["id"]
+            .as_u64()
+            .unwrap();
+        parser.feed(&format!(r#"{{"id":{id},"error":{{"message":"no"}}}}"#));
+        assert_eq!(
+            parser.feed(&delta("old", " are old")),
+            [AgentEvent::TextDelta(" are old".into())]
+        );
+    }
+
+    /// An answer that outlived its turn reaches the next turn's parser, which
+    /// must not take it for a failure of its own.
+    #[test]
+    fn a_stale_steer_answer_does_not_fail_the_next_turn() {
+        let mut parser = running_parser();
+        assert_eq!(
+            parser.feed(&format!(
+                r#"{{"id":{FIRST_STEER_RPC},"error":{{"message":"no active turn"}}}}"#
+            )),
+            []
+        );
+    }
+
     #[test]
     fn handshake_stream_and_approval_are_structured() {
         let mut parser = CodexAppParser {
@@ -344,6 +595,12 @@ mod tests {
             input: json!({"input":[{"type":"text","text":"hello"}]}),
             streamed: HashSet::new(),
             children: HashSet::new(),
+            turn: None,
+            next_steer: FIRST_STEER_RPC,
+            pending_steers: HashMap::new(),
+            held_outcome: Vec::new(),
+            streaming_item: None,
+            superseded: HashSet::new(),
         };
         assert_eq!(parser.feed(r#"{"id":1,"result":{}}"#).len(), 2);
         let events = parser.feed(r#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#);
@@ -394,6 +651,12 @@ mod tests {
             input: json!({}),
             streamed: HashSet::new(),
             children: HashSet::new(),
+            turn: None,
+            next_steer: FIRST_STEER_RPC,
+            pending_steers: HashMap::new(),
+            held_outcome: Vec::new(),
+            streaming_item: None,
+            superseded: HashSet::new(),
         }
     }
 

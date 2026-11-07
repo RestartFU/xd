@@ -62,6 +62,17 @@ const MAX_BACKLOG_LINES: usize = 10_000;
 /// A turn the agent started by itself ends if it goes this long without a
 /// word, so a lost result cannot leave the chat working forever.
 const BACKGROUND_QUIET_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// How long a turn that has finished waits on a steer it has not heard back
+/// about. Long enough for an agent to start on it; if it has not by then, the
+/// turn really is over.
+#[cfg(not(test))]
+const STEER_SETTLE_LIMIT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const STEER_SETTLE_LIMIT: Duration = Duration::from_millis(300);
+/// Marks a live `tool` row that is really a message the user sent into the
+/// turn. The stored row is an ordinary user message; a client that does not
+/// know the marker shows a small tool row rather than the agent's own words.
+const STEER_ROW_PREFIX: &str = "steer\n";
 
 #[derive(Default)]
 struct ChatRecords {
@@ -95,6 +106,9 @@ enum RecordWrite {
 /// One line of a kept process's output, or its end.
 enum Feed {
     Line(String),
+    /// A message for the running turn. It travels with the output so the turn
+    /// handles it in order, between one line and the next.
+    Steer(String),
     End,
 }
 
@@ -124,11 +138,14 @@ enum LineSource {
     Feed {
         lines: mpsc::Receiver<Feed>,
         background: bool,
+        /// How long to wait for a line before calling the turn over.
+        patience: Option<Duration>,
     },
 }
 
 enum NextLine {
     Line,
+    Steer(String),
     End,
     Quiet,
     Failed,
@@ -143,9 +160,14 @@ impl LineSource {
                 Ok(_) => NextLine::Line,
                 Err(_) => NextLine::Failed,
             },
-            Self::Feed { lines, background } => {
-                let received = if *background {
-                    match lines.recv_timeout(BACKGROUND_QUIET_LIMIT) {
+            Self::Feed {
+                lines,
+                background,
+                patience,
+            } => {
+                let limit = patience.or(background.then_some(BACKGROUND_QUIET_LIMIT));
+                let received = if let Some(limit) = limit {
+                    match lines.recv_timeout(limit) {
                         Ok(feed) => feed,
                         Err(mpsc::RecvTimeoutError::Timeout) => return NextLine::Quiet,
                         Err(mpsc::RecvTimeoutError::Disconnected) => Feed::End,
@@ -158,10 +180,31 @@ impl LineSource {
                         *line = text;
                         NextLine::Line
                     }
+                    Feed::Steer(prompt) => NextLine::Steer(prompt),
                     Feed::End => NextLine::End,
                 }
             }
         }
+    }
+
+    fn set_patience(&mut self, limit: Option<Duration>) {
+        if let Self::Feed { patience, .. } = self {
+            *patience = limit;
+        }
+    }
+
+    /// Steers that arrived too late for the turn to see, oldest first.
+    fn stranded_steers(&self) -> Vec<String> {
+        let Self::Feed { lines, .. } = self else {
+            return Vec::new();
+        };
+        lines
+            .try_iter()
+            .filter_map(|feed| match feed {
+                Feed::Steer(prompt) => Some(prompt),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -360,6 +403,46 @@ impl TurnRuntime {
                 }
             }
             sessions.clear();
+        }
+    }
+
+    /// Hands `prompt` to the chat's running turn. False means the turn cannot
+    /// take it: there is none, it needs an answer from the user first, or its
+    /// agent has no process to write to. The caller keeps the message then.
+    pub(crate) fn steer(&self, chat_id: &str, prompt: &str) -> bool {
+        let running = self.inner.active.lock().is_ok_and(|active| {
+            active
+                .get(chat_id)
+                .is_some_and(|process| !process.cancelled.load(Ordering::Acquire))
+        });
+        let asking = self.inner.interactions.lock().is_ok_and(|interactions| {
+            interactions
+                .get(chat_id)
+                .is_some_and(|pending| !pending.requests.is_empty())
+        });
+        if !running || asking {
+            return false;
+        }
+        let Some(router) = self.router(chat_id) else {
+            return false;
+        };
+        let Ok(router) = router.lock() else {
+            return false;
+        };
+        router
+            .sink
+            .as_ref()
+            .is_some_and(|sink| sink.send(Feed::Steer(prompt.to_owned())).is_ok())
+    }
+
+    /// Puts messages the agent never read back at the front of the queue, in
+    /// the order they were sent.
+    fn requeue_steers(&self, chat_id: &str, prompts: &[String]) {
+        for prompt in prompts.iter().rev() {
+            match self.inner.store.requeue_front(chat_id, prompt) {
+                Ok(event) => self.inner.events.publish(event),
+                Err(error) => eprintln!("xd: cannot requeue a steered message: {error}"),
+            }
         }
     }
 
@@ -774,6 +857,7 @@ impl TurnRuntime {
             LineSource::Feed {
                 lines,
                 background: true,
+                patience: None,
             },
             router.complaint.clone(),
             true,
@@ -888,24 +972,30 @@ impl TurnRuntime {
 
     /// Ends a turn's hold on its process's output. Lines it had not read yet
     /// go back to the front of the line, for whatever handles them next.
-    fn detach_feed(&self, chat_id: &str, source: LineSource) {
+    fn detach_feed(&self, chat_id: &str, source: LineSource) -> Vec<String> {
         let LineSource::Feed { lines, .. } = source else {
-            return;
+            return Vec::new();
         };
         let Some(router) = self.router(chat_id) else {
-            return;
+            return Vec::new();
         };
         let Ok(mut router) = router.lock() else {
-            return;
+            return Vec::new();
         };
         router.sink = None;
         let mut unread = Vec::new();
-        while let Ok(Feed::Line(line)) = lines.try_recv() {
-            unread.push(line);
+        let mut steers = Vec::new();
+        while let Ok(feed) = lines.try_recv() {
+            match feed {
+                Feed::Line(line) => unread.push(line),
+                Feed::Steer(prompt) => steers.push(prompt),
+                Feed::End => break,
+            }
         }
         for line in unread.into_iter().rev() {
             router.backlog.push_front(line);
         }
+        steers
     }
 
     /// Deals with output that is waiting now that no turn holds the process.
@@ -1049,6 +1139,7 @@ impl TurnRuntime {
                         LineSource::Feed {
                             lines,
                             background: false,
+                            patience: None,
                         },
                         session.complaint.clone(),
                     ));
@@ -1125,6 +1216,7 @@ impl TurnRuntime {
             LineSource::Feed {
                 lines,
                 background: false,
+                patience: None,
             },
             complaint,
         ))
@@ -1215,6 +1307,8 @@ impl TurnRuntime {
         let store = self.inner.store.clone();
         let workdir = turn.workdir.clone();
         let mut keep_image = move |path: &str| store.keep_reply_image(&workdir, path);
+        // Messages sent into this turn, with their stored rows.
+        let mut steered: Vec<(String, i64)> = Vec::new();
 
         let mut line = String::new();
         // Stores the reply streamed so far as its own message, which a tool
@@ -1254,13 +1348,58 @@ impl TurnRuntime {
             };
         }
         loop {
+            source.set_patience(parser.settling().then_some(STEER_SETTLE_LIMIT));
             match source.next(&mut line) {
                 NextLine::Line => {}
+                NextLine::Steer(prompt) => {
+                    close_segment!();
+                    // Whatever the agent was saying no longer stands, so a
+                    // question in it is not the question this turn ends on.
+                    assistant_text.clear();
+                    let written = parser
+                        .steer_frame(&prompt)
+                        .is_some_and(|frame| self.write_rpc(&turn.chat_id, &frame).is_ok());
+                    if !written {
+                        self.requeue_steers(&turn.chat_id, std::slice::from_ref(&prompt));
+                        continue;
+                    }
+                    match self
+                        .inner
+                        .store
+                        .append_turn_message(&turn.chat_id, "user", &prompt, None)
+                    {
+                        Ok(message_id) => {
+                            had_activity = true;
+                            steered.push((prompt.clone(), message_id));
+                            self.publish_sequenced(
+                                "tool",
+                                &turn,
+                                turn_id,
+                                &progress,
+                                json!({
+                                    "text": format!("{STEER_ROW_PREFIX}{prompt}"),
+                                    "workdir": turn.workdir,
+                                    "context": turn.workdir,
+                                }),
+                            );
+                        }
+                        Err(error) => latest_error = Some(error.to_string()),
+                    }
+                    continue;
+                }
                 // End of output. For a process that answers once this is the
                 // end of the turn; for a kept one it means it died.
                 NextLine::End => break,
                 NextLine::Quiet => {
-                    completed = true;
+                    let settled = parser.take_settled();
+                    completed = settled.is_empty();
+                    for event in settled {
+                        match event {
+                            AgentEvent::Completed => completed = true,
+                            AgentEvent::Error(error) => latest_error = Some(error),
+                            _ => {}
+                        }
+                    }
                     break;
                 }
                 NextLine::Failed => {
@@ -1497,6 +1636,22 @@ impl TurnRuntime {
                     }
                     AgentEvent::Resumable => cut_short = true,
                     AgentEvent::Error(error) => latest_error = Some(error),
+                    AgentEvent::SteerRejected(prompt) => {
+                        if let Some(index) = steered.iter().position(|(sent, _)| *sent == prompt) {
+                            let (_, message_id) = steered.remove(index);
+                            let _ = self.inner.store.delete_message(&turn.chat_id, message_id);
+                            let row = format!("{STEER_ROW_PREFIX}{prompt}");
+                            if let Ok(mut state) = progress.state.lock() {
+                                state
+                                    .items
+                                    .retain(|item| item["text"].as_str() != Some(row.as_str()));
+                            }
+                        }
+                        self.requeue_steers(&turn.chat_id, std::slice::from_ref(&prompt));
+                        self.inner
+                            .events
+                            .publish(json!({"event": "changed", "chat": turn.chat_id}));
+                    }
                     AgentEvent::Usage {
                         input,
                         output,
@@ -1550,11 +1705,13 @@ impl TurnRuntime {
                 .ok()
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_none();
-            if alive && completed && !was_cancelled {
-                self.detach_feed(&turn.chat_id, source);
+            let stranded = if alive && completed && !was_cancelled {
+                self.detach_feed(&turn.chat_id, source)
             } else {
                 self.drop_session(&turn.chat_id);
-            }
+                source.stranded_steers()
+            };
+            self.requeue_steers(&turn.chat_id, &stranded);
             was_cancelled || completed
         } else {
             let status = child.lock().ok().and_then(|mut child| child.wait().ok());
@@ -2520,6 +2677,263 @@ read second
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
         let _ = fs::remove_dir_all(root);
+    }
+
+    struct SteerFixture {
+        root: std::path::PathBuf,
+        store: Arc<StateStore>,
+        runtime: TurnRuntime,
+        chat: String,
+    }
+
+    #[cfg(unix)]
+    impl SteerFixture {
+        fn start(script: &str) -> Self {
+            use std::{env, fs, os::unix::fs::PermissionsExt};
+            let root = env::temp_dir().join(format!(
+                "xd-runtime-steer-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(root.join("Workspaces")).unwrap();
+            let agent = root.join("claude");
+            let script = script.replace("$HEARD", root.join("heard").to_str().unwrap());
+            fs::write(&agent, script).unwrap();
+            fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+            // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+            unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+            let store =
+                Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+            let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let chat = store
+                .new_chat(&json!({"folder": folder, "backend": "claude"}))
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let runtime = TurnRuntime::new(
+                store.clone(),
+                Arc::new(EventBus::default()),
+                Arc::new(SecretsStore::new(None)),
+            );
+            match store
+                .prepare_send(&json!({"chat": chat, "text": "first"}))
+                .unwrap()
+            {
+                crate::storage::SendDisposition::Start { turn, .. } => runtime.start(turn).unwrap(),
+                crate::storage::SendDisposition::Queued { .. } => panic!("first was queued"),
+            }
+            Self {
+                root,
+                store,
+                runtime,
+                chat,
+            }
+        }
+
+        fn wait_for_text(&self, text: &str) {
+            wait_for(text, || {
+                contents(&self.store, &self.chat)
+                    .iter()
+                    .any(|(_, content)| content == text)
+            });
+        }
+
+        fn wait_for_streamed(&self, text: &str) {
+            wait_for(text, || {
+                self.runtime
+                    .live_turn(&self.chat)
+                    .is_some_and(|turn| turn.segment == text)
+            });
+        }
+
+        fn transcript(&self) -> Vec<(String, String)> {
+            contents(&self.store, &self.chat)
+                .into_iter()
+                .filter(|(role, _)| role != "duration")
+                .collect()
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for SteerFixture {
+        fn drop(&mut self) {
+            self.runtime.discard_chat(&self.chat);
+            // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+            unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The agent must not be killed: whatever it has running keeps running, and
+    /// the same process answers the message sent into its turn.
+    #[cfg(unix)]
+    #[test]
+    fn a_steer_reaches_the_running_agent_and_keeps_its_turn_and_process() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on it."}]}}'
+read steer
+printf '%s
+' "$steer" > "$HEARD"
+echo '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}'
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Redirected."}]}}'
+echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Redirected."}'
+read next
+"#,
+        );
+        fixture.wait_for_streamed("Working on it.");
+        assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
+        fixture.wait_for_text("Redirected.");
+        wait_for("the turn to end", || {
+            fixture.runtime.live_turn(&fixture.chat).is_none()
+        });
+
+        assert_eq!(
+            fixture.transcript(),
+            [
+                ("user", "first"),
+                ("assistant", "Working on it."),
+                ("user", "Do this instead"),
+                ("assistant", "Redirected."),
+            ]
+            .map(|(role, text)| (role.to_owned(), text.to_owned()))
+        );
+        let heard: Value =
+            serde_json::from_str(&std::fs::read_to_string(fixture.root.join("heard")).unwrap())
+                .unwrap();
+        assert_eq!(heard["priority"], "now");
+        assert_eq!(heard["message"]["content"][0]["text"], "Do this instead");
+        assert_eq!(fixture.store.chat(&fixture.chat).unwrap()["working"], false);
+        assert!(
+            fixture
+                .runtime
+                .inner
+                .sessions
+                .lock()
+                .unwrap()
+                .contains_key(&fixture.chat),
+            "steering must leave the agent's process running"
+        );
+    }
+
+    /// A client that opens the chat mid-turn sees the message where it was sent.
+    #[cfg(unix)]
+    #[test]
+    fn a_steered_message_is_in_the_live_snapshot_with_its_marker() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on it."}]}}'
+read steer
+read never
+"#,
+        );
+        fixture.wait_for_streamed("Working on it.");
+        assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
+        wait_for("the live row", || {
+            fixture
+                .runtime
+                .live_turn(&fixture.chat)
+                .is_some_and(|turn| {
+                    turn.items.iter().any(|item| {
+                        item["tool"] == true && item["text"] == "steer\nDo this instead"
+                    })
+                })
+        });
+    }
+
+    /// The turn ended just as the steer was written, and the agent never starts
+    /// on it. The turn must still end rather than wait forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_turn_finishing_as_a_steer_arrives_still_ends() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on it."}]}}'
+read steer
+echo '{"type":"result","subtype":"success","terminal_reason":"completed","result":"Working on it."}'
+read next
+"#,
+        );
+        fixture.wait_for_streamed("Working on it.");
+        assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
+        wait_for("the turn to end", || {
+            fixture.runtime.live_turn(&fixture.chat).is_none()
+        });
+        assert_eq!(fixture.store.chat(&fixture.chat).unwrap()["working"], false);
+    }
+
+    /// Before the agent has begun, a steer could be mistaken for the turn's own
+    /// start, so the message goes back to the queue instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_steer_before_the_agent_has_begun_returns_to_the_queue() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+read release
+"#,
+        );
+        assert!(fixture.runtime.steer(&fixture.chat, "Do this instead"));
+        wait_for("the message to return to the queue", || {
+            fixture.store.chat(&fixture.chat).unwrap()["queue"] == json!(["Do this instead"])
+        });
+        assert!(
+            !fixture
+                .transcript()
+                .iter()
+                .any(|(_, content)| content == "Do this instead")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_steer_is_refused_with_no_running_turn_or_while_an_answer_is_awaited() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Working on it."}]}}'
+read release
+"#,
+        );
+        assert!(!fixture.runtime.steer("no-such-chat", "Do this instead"));
+        fixture.wait_for_streamed("Working on it.");
+        fixture
+            .runtime
+            .inner
+            .interactions
+            .lock()
+            .unwrap()
+            .entry(fixture.chat.clone())
+            .or_default()
+            .requests
+            .insert(
+                "request".into(),
+                PendingInteraction {
+                    id: json!(1),
+                    method: "item/tool/requestUserInput".into(),
+                    params: json!({}),
+                    turn_id: 1,
+                    claude: true,
+                },
+            );
+        assert!(!fixture.runtime.steer(&fixture.chat, "Do this instead"));
     }
 
     /// Claude ends a turn while a background agent still runs, then reports

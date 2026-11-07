@@ -79,8 +79,8 @@ use editor::{
     Left as EditorLeft, Newline as EditorNewline, Paste as EditorPaste, Right as EditorRight,
     Save as EditorSave, SelectAll as EditorSelectAll, SelectLeft as EditorSelectLeft,
     SelectRight as EditorSelectRight, SelectWordLeft as EditorSelectWordLeft,
-    SelectWordRight as EditorSelectWordRight, Submit as EditorSubmit, Tab as EditorTab,
-    Up as EditorUp, WordLeft as EditorWordLeft, WordRight as EditorWordRight,
+    SelectWordRight as EditorSelectWordRight, Submit as EditorSubmit, SubmitNow as EditorSubmitNow,
+    Tab as EditorTab, Up as EditorUp, WordLeft as EditorWordLeft, WordRight as EditorWordRight,
 };
 use input::{
     Backspace, ClearScreen as TerminalClearScreen, ComposerEvent, ComposerInput,
@@ -1936,6 +1936,7 @@ impl XdDesktop {
                 this.attach_clipboard_image(*format, bytes.clone(), cx)
             }
             EditorEvent::Submit => this.send_composer(cx),
+            EditorEvent::SubmitNow => this.steer_composer(cx),
             EditorEvent::Save => {}
         })
         .detach();
@@ -1943,7 +1944,7 @@ impl XdDesktop {
         cx.subscribe(&queue_edit_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.queue_edit_changed(text.clone(), cx),
             EditorEvent::PasteImage { .. } => {}
-            EditorEvent::Submit => this.save_queue_edit(cx),
+            EditorEvent::Submit | EditorEvent::SubmitNow => this.save_queue_edit(cx),
             EditorEvent::Save => {}
         })
         .detach();
@@ -2057,7 +2058,7 @@ impl XdDesktop {
                 }
             }
             EditorEvent::Save => this.save_file_tab(cx),
-            EditorEvent::PasteImage { .. } | EditorEvent::Submit => {}
+            EditorEvent::PasteImage { .. } | EditorEvent::SubmitNow | EditorEvent::Submit => {}
         })
         .detach();
         cx.subscribe(&file_editor, |this, _, event, cx| match event {
@@ -2073,7 +2074,7 @@ impl XdDesktop {
                 }
             }
             EditorEvent::PasteImage { .. } => {}
-            EditorEvent::Submit => {}
+            EditorEvent::Submit | EditorEvent::SubmitNow => {}
             EditorEvent::Save => this.save_browse_file(cx),
         })
         .detach();
@@ -8957,6 +8958,15 @@ impl XdDesktop {
     }
 
     fn send_composer(&mut self, cx: &mut Context<Self>) {
+        self.submit_composer(false, cx);
+    }
+
+    /// Sends into the running turn; with none running this is an ordinary send.
+    fn steer_composer(&mut self, cx: &mut Context<Self>) {
+        self.submit_composer(self.model.working, cx);
+    }
+
+    fn submit_composer(&mut self, steer: bool, cx: &mut Context<Self>) {
         if self.sending {
             return;
         }
@@ -8978,6 +8988,7 @@ impl XdDesktop {
             &attachments,
             self.settings.git_writer.backend(),
             self.settings.git_writer_model.as_deref(),
+            steer,
         ) {
             self.model.connection_error = Some(error);
             return;
@@ -9113,6 +9124,7 @@ impl XdDesktop {
             &[],
             self.settings.git_writer.backend(),
             self.settings.git_writer_model.as_deref(),
+            false,
         ) {
             self.model.connection_error = Some(error);
             return false;
@@ -9214,9 +9226,10 @@ impl XdDesktop {
         cx.notify();
     }
 
-    /// Sends a queued message ahead of the rest and stops the running turn, so
-    /// the agent takes it up now. The next turn starts as soon as this one
-    /// ends, so the chat stays working throughout.
+    /// Sends a queued message to the agent now. The host sends it into the
+    /// running turn when the agent can take that; otherwise it stops the turn
+    /// with this message first in line, and the next turn starts as soon as
+    /// that one ends, so the chat stays working throughout.
     fn steer_queued(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
@@ -13760,7 +13773,7 @@ impl XdDesktop {
                                 .text_size(px(12.0))
                                 .tooltip(move |_, cx| {
                                     cx.new(|_| PaneTooltip {
-                                        label: "Stop the running turn and send this now",
+                                        label: "Send this to the agent now",
                                         colors,
                                     })
                                     .into()
@@ -22510,6 +22523,8 @@ fn main() {
                 KeyBinding::new("cmd-x", EditorCut, Some("MessageEditor")),
                 KeyBinding::new("cmd-v", EditorPaste, Some("MessageEditor")),
                 KeyBinding::new("enter", EditorSubmit, Some("MessageEditor")),
+                KeyBinding::new("ctrl-enter", EditorSubmitNow, Some("MessageEditor")),
+                KeyBinding::new("cmd-enter", EditorSubmitNow, Some("MessageEditor")),
                 KeyBinding::new("shift-enter", EditorNewline, Some("MessageEditor")),
                 KeyBinding::new("tab", EditorTab, Some("MessageEditor")),
                 KeyBinding::new("backspace", Backspace, Some("TerminalInput")),

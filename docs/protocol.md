@@ -524,6 +524,10 @@ Needs `text`, `attachments`, or both. `queued` is true when a turn was already
 running and this message was appended to the queue instead of started — one
 turn per chat is enforced by the host.
 
+With `"steer":true`, a message that would have been queued is steered at once,
+as `steer-queue` describes, and the reply adds `steered`. With no turn running
+the member has no effect.
+
 Attachments are PNG only:
 
 ```json
@@ -564,6 +568,24 @@ with the same composer.
 `queue` requires non-empty `text`. `drop-queue` without `index` clears the whole
 queue. All four broadcast a `queued` event carrying the new queue, so every
 attached device sees what is waiting and either can steer it.
+
+`steer-queue` takes `chat`, `index`, and the `text` the client saw at that
+index, and redirects the running turn to that message. The reply adds `steered`:
+
+- `true`: the message went into the running turn. The agent keeps its process
+  and turn, and the message leaves the queue. Claude stops its reply and answers
+  this message, after any running tool finishes. Codex takes it within the turn.
+- `false`: the turn could not take it, because its agent has no process to write
+  to (JCode) or it is waiting on an approval or question. The message moves to
+  the front of the queue and the turn is stopped.
+
+A message the agent turns out to have refused or never read returns to the front
+of the queue.
+
+A steered message is stored as an ordinary `user` row. While the turn runs it
+arrives as a `tool` event and `items` entry whose text is `steer\n` followed by
+the message. Clients show that as the user's message; the marker is only ever
+seen live, never in `messages`.
 
 ### `cancel`
 

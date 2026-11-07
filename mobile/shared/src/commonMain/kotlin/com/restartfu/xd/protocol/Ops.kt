@@ -174,8 +174,10 @@ public object Ops {
     }
 
     /**
-     * Promotes a queued message to the front and stops the running turn, so
-     * the agent takes it up immediately instead of finishing first.
+     * Redirects the running turn to a queued message, so the agent takes it up
+     * immediately instead of finishing first. The host sends it into the turn
+     * when the agent can take that, and otherwise promotes it to the front of
+     * the queue and stops the turn.
      *
      * [text] must be the message currently at [index]; the host refuses the
      * steer otherwise rather than redirecting the agent to the wrong thing.

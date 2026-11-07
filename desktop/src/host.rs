@@ -1499,6 +1499,7 @@ impl HostHandle {
         attachments: &[Attachment],
         worktree_backend: Option<&str>,
         worktree_model: Option<&str>,
+        steer: bool,
     ) -> Result<(), String> {
         let attachments = attachments
             .iter()
@@ -1524,6 +1525,9 @@ impl HostHandle {
         }
         if let Some(model) = worktree_model {
             body["worktree_model"] = Value::String(model.to_owned());
+        }
+        if steer {
+            body["steer"] = Value::Bool(true);
         }
         self.send(
             RequestKind::Send {
@@ -2534,6 +2538,7 @@ mod tests {
             &[],
             Some("claude"),
             Some("claude-sonnet-5"),
+            false,
         )
         .unwrap();
         assert!(matches!(

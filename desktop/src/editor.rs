@@ -39,6 +39,7 @@ actions!(
         Copy,
         Newline,
         Submit,
+        SubmitNow,
         Save,
         Tab,
     ]
@@ -47,8 +48,13 @@ actions!(
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
     Changed(String),
-    PasteImage { format: ImageFormat, bytes: Vec<u8> },
+    PasteImage {
+        format: ImageFormat,
+        bytes: Vec<u8>,
+    },
     Submit,
+    /// Send this into whatever is running now, rather than after it.
+    SubmitNow,
     Save,
 }
 
@@ -323,6 +329,10 @@ impl FileEditor {
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(EditorEvent::Submit);
+    }
+
+    fn submit_now(&mut self, _: &SubmitNow, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(EditorEvent::SubmitNow);
     }
 
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
@@ -946,6 +956,7 @@ impl Render for FileEditor {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::submit_now))
             .on_action(cx.listener(Self::save))
             .on_action(cx.listener(Self::tab))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
