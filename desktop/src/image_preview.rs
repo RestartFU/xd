@@ -1397,6 +1397,34 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    #[gpui::test]
+    fn a_failed_send_gives_back_its_files_beside_those_attached_since(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        desktop.update(cx, |desktop, cx| {
+            let sent = Attachment::from_file("sent.pdf", b"%PDF".to_vec());
+            let since = Attachment::from_file("since.txt", b"later".to_vec());
+            desktop.pending_send = Some(PendingSend {
+                chat_id: "implementation".into(),
+                text: "read it".into(),
+                attachments: vec![sent.clone()],
+                restore: true,
+                optimistic: OptimisticSend::Queued,
+            });
+            desktop.model.draft_attachments = vec![since, sent];
+            desktop.restore_pending_send(cx);
+            let names = desktop
+                .model
+                .draft_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["sent.pdf", "since.txt"]);
+            assert!(desktop.attachments_dirty);
+        });
+    }
+
     #[test]
     fn file_sizes_read_the_way_people_write_them() {
         assert_eq!(file_size_label(812), "812 B");

@@ -9767,7 +9767,14 @@ impl XdDesktop {
             (true, true) => String::new(),
         };
         self.set_composer_text(restored, cx);
-        self.model.draft_attachments = pending.attachments;
+        // What was attached while the send was out stays, after what it sent.
+        let mut attachments = pending.attachments;
+        for attachment in std::mem::take(&mut self.model.draft_attachments) {
+            if !attachments.iter().any(|sent| sent.id == attachment.id) {
+                attachments.push(attachment);
+            }
+        }
+        self.model.draft_attachments = attachments;
         self.draft_dirty = true;
         self.attachments_dirty = true;
         self.attachment_generation = self.attachment_generation.saturating_add(1);
