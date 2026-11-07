@@ -1726,11 +1726,9 @@ struct SettleUndo {
 enum WorkspaceCreateKind {
     #[default]
     Project,
-    /// A folder that holds projects and other folders.
+    /// A folder that holds projects and other folders. Naming a GitHub
+    /// organization for it shows that account's avatar.
     Folder,
-    /// A folder named after a GitHub organization, whose avatar it shows. Its
-    /// repositories are left for the user to add as projects.
-    Organization,
 }
 
 /// The menu a "+" opens to add to the sidebar, at the top level or inside a
@@ -2021,6 +2019,7 @@ struct XdDesktop {
     sidebar_edit_input: Entity<ComposerInput>,
     workspace_create_input: Entity<ComposerInput>,
     workspace_repo_input: Entity<ComposerInput>,
+    workspace_org_input: Entity<ComposerInput>,
     workspace_clone_input: Entity<ComposerInput>,
     chat_create_input: Entity<ComposerInput>,
     workspace_context_input: Entity<ComposerInput>,
@@ -2076,6 +2075,8 @@ struct XdDesktop {
     workspace_create_name: String,
     workspace_create_repo: String,
     workspace_create_clone: String,
+    /// The GitHub organization a new folder shows the avatar of, as typed.
+    workspace_create_org: String,
     workspace_create_submitting: bool,
     workspace_clone_status: Option<String>,
     pending_clone_requests: HashMap<ChatEndpoint, String>,
@@ -2273,6 +2274,14 @@ impl XdDesktop {
             cx.new(|cx| ComposerInput::new(cx, "Git clone URL (optional)…"));
         cx.subscribe(&workspace_clone_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.workspace_clone_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.save_workspace_create(cx),
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
+        })
+        .detach();
+        let workspace_org_input =
+            cx.new(|cx| ComposerInput::new(cx, "GitHub organization (optional), e.g. acme…"));
+        cx.subscribe(&workspace_org_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.workspace_org_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_workspace_create(cx),
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
@@ -2616,6 +2625,7 @@ impl XdDesktop {
             sidebar_edit_input,
             workspace_create_input,
             workspace_repo_input,
+            workspace_org_input,
             workspace_clone_input,
             chat_create_input,
             workspace_context_input,
@@ -2665,6 +2675,7 @@ impl XdDesktop {
             workspace_create_name: String::new(),
             workspace_create_repo: String::new(),
             workspace_create_clone: String::new(),
+            workspace_create_org: String::new(),
             workspace_create_submitting: false,
             workspace_clone_status: None,
             pending_clone_requests: HashMap::new(),
@@ -3153,6 +3164,7 @@ impl XdDesktop {
                         local_model.connection_error = None;
                         // Until its tree says otherwise, this host may be older.
                         local_model.folder_reorder_supported = false;
+                        local_model.folder_groups_supported = false;
                         this.listen_for_host(updates, generation, cx);
                     }
                     Err(error) => {
@@ -3271,6 +3283,7 @@ impl XdDesktop {
         remote_model.connection_error = None;
         // Until its tree says otherwise, this host may be older.
         remote_model.folder_reorder_supported = false;
+        remote_model.folder_groups_supported = false;
         if let Some(panel) = &mut self.remote_panel {
             panel.submitting = false;
             panel.error = None;
@@ -6300,23 +6313,24 @@ impl XdDesktop {
         self.workspace_create_name.clear();
         self.workspace_create_repo.clear();
         self.workspace_create_clone.clear();
+        self.workspace_create_org.clear();
         self.workspace_create_input.update(cx, |input, cx| {
             input.set_placeholder(
                 match kind {
                     WorkspaceCreateKind::Project => "Project name…",
                     WorkspaceCreateKind::Folder => "Folder name…",
-                    WorkspaceCreateKind::Organization => {
-                        "Organization, e.g. acme or github.com/acme…"
-                    }
                 },
                 cx,
             );
             input.set_text(String::new(), cx)
         });
-        self.workspace_repo_input
-            .update(cx, |input, cx| input.set_text(String::new(), cx));
-        self.workspace_clone_input
-            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        for input in [
+            &self.workspace_repo_input,
+            &self.workspace_clone_input,
+            &self.workspace_org_input,
+        ] {
+            input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
         let focus = self.workspace_create_input.read(cx).focus_handle(cx);
         self.focus_minimal_popup(focus, window, cx);
         cx.notify();
@@ -6331,8 +6345,8 @@ impl XdDesktop {
     ) {
         let viewport = window.bounds().size;
         let x = f32::from(position.x).clamp(8.0, (f32::from(viewport.width) - 216.0).max(8.0));
-        // Three two-line rows, plus the "Add to …" heading inside a folder.
-        let height = if parent.is_some() { 216.0 } else { 188.0 };
+        // Two two-line rows, plus the "Add to …" heading inside a folder.
+        let height = if parent.is_some() { 160.0 } else { 132.0 };
         let y = f32::from(position.y).clamp(8.0, (f32::from(viewport.height) - height).max(8.0));
         self.sidebar_context_menu = None;
         self.project_add_menu = Some(ProjectAddMenu {
@@ -6366,6 +6380,13 @@ impl XdDesktop {
     fn workspace_clone_changed(&mut self, text: String, cx: &mut Context<Self>) {
         if self.creating_workspace && !self.workspace_create_submitting {
             self.workspace_create_clone = text;
+            cx.notify();
+        }
+    }
+
+    fn workspace_org_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.creating_workspace && !self.workspace_create_submitting {
+            self.workspace_create_org = text;
             cx.notify();
         }
     }
@@ -6417,10 +6438,18 @@ impl XdDesktop {
             return;
         }
         let kind = self.workspace_create_kind;
-        let typed = self.workspace_create_name.trim();
-        let (name, owner) = match kind {
-            WorkspaceCreateKind::Organization => match organization_login(typed) {
-                Some(login) => (login.clone(), Some(login)),
+        let project = kind == WorkspaceCreateKind::Project;
+        if !project && !self.can_create_folders() {
+            // An older host ignores `group` and would make a project instead.
+            self.model.connection_error =
+                Some("This xd host is too old for folders. Update it, then try again.".into());
+            cx.notify();
+            return;
+        }
+        let owner = match optional_trimmed(&self.workspace_create_org).filter(|_| !project) {
+            None => None,
+            Some(typed) => match organization_login(typed) {
+                Some(login) => Some(login),
                 None => {
                     self.model.connection_error = Some(
                         "Enter a GitHub organization name, such as acme or github.com/acme.".into(),
@@ -6429,7 +6458,11 @@ impl XdDesktop {
                     return;
                 }
             },
-            _ => (typed.to_owned(), None),
+        };
+        // A folder for an organization is named after it unless named otherwise.
+        let name = match (self.workspace_create_name.trim(), &owner) {
+            ("", Some(login)) => login.clone(),
+            (typed, _) => typed.to_owned(),
         };
         if name.is_empty() {
             self.model.connection_error = Some(match kind {
@@ -6439,7 +6472,6 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        let project = kind == WorkspaceCreateKind::Project;
         let repo = optional_trimmed(&self.workspace_create_repo)
             .filter(|_| project)
             .map(str::to_owned);
@@ -6489,6 +6521,7 @@ impl XdDesktop {
                 self.workspace_create_name = name;
                 self.workspace_create_repo = repo.unwrap_or_default();
                 self.workspace_create_clone = repo_url.unwrap_or_default();
+                self.workspace_create_org = owner.unwrap_or_default();
                 self.workspace_create_submitting = true;
             }
             Err(error) => self.model.connection_error = Some(error),
@@ -6504,12 +6537,15 @@ impl XdDesktop {
         self.workspace_create_name.clear();
         self.workspace_create_repo.clear();
         self.workspace_create_clone.clear();
-        self.workspace_create_input
-            .update(cx, |input, cx| input.set_text(String::new(), cx));
-        self.workspace_repo_input
-            .update(cx, |input, cx| input.set_text(String::new(), cx));
-        self.workspace_clone_input
-            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        self.workspace_create_org.clear();
+        for input in [
+            &self.workspace_create_input,
+            &self.workspace_repo_input,
+            &self.workspace_clone_input,
+            &self.workspace_org_input,
+        ] {
+            input.update(cx, |input, cx| input.set_text(String::new(), cx));
+        }
         cx.notify();
     }
 
@@ -8854,8 +8890,9 @@ impl XdDesktop {
         cx.notify();
     }
 
-    /// Sends the placement the drop line showed, as long as the two projects
-    /// are still siblings in the latest tree.
+    /// Sends the placement the drop line showed, as long as the latest tree
+    /// still places it the same way: a reorder among siblings stays one, and
+    /// a move into another folder stays one.
     fn reorder_project_from_drop(&mut self, reorder: ProjectReorder, cx: &mut Context<Self>) {
         if !self.model.folder_reorder_supported
             || project_reorder_for_drop(
@@ -8863,7 +8900,9 @@ impl XdDesktop {
                 &reorder.project_id,
                 &reorder.anchor_id,
             )
-            .is_none()
+            .is_none_or(|current| current.moves != reorder.moves || current.parent != reorder.parent)
+            // Only a host that checks `expect_parent` is sent a move.
+            || (reorder.moves && !self.model.folder_groups_supported)
         {
             return;
         }
@@ -8871,9 +8910,20 @@ impl XdDesktop {
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|host| {
-                host.reorder_folder(&reorder.project_id, &reorder.anchor_id, reorder.after)
+                if reorder.moves {
+                    host.move_folder_beside(
+                        &reorder.project_id,
+                        &reorder.anchor_id,
+                        reorder.after,
+                        reorder.parent.as_deref(),
+                    )
+                } else {
+                    host.reorder_folder(&reorder.project_id, &reorder.anchor_id, reorder.after)
+                }
             });
         match result {
+            // A move changes the project's parent, which the next tree reports.
+            Ok(()) if reorder.moves => {}
             Ok(()) => {
                 reorder_around_anchor(
                     &mut self.model.folders,
@@ -8882,6 +8932,56 @@ impl XdDesktop {
                     &reorder.anchor_id,
                     reorder.after,
                 );
+            }
+            Err(error) => self.model.connection_error = Some(error),
+        }
+        cx.notify();
+    }
+
+    /// Whether the host keeps folders of projects. One that predates the
+    /// `folder_groups` flag but already lists a folder keeps them too.
+    fn can_create_folders(&self) -> bool {
+        self.model.folder_groups_supported || self.model.folders.iter().any(|folder| folder.group)
+    }
+
+    /// Moves a project dropped below the list to the end of the top level.
+    /// The host picks the end when it moves it, so a row added meanwhile
+    /// does not end up after it.
+    fn move_project_to_top_level_end(&mut self, project_id: &str, cx: &mut Context<Self>) {
+        if !self.model.folder_reorder_supported
+            || !self.model.folder_groups_supported
+            || project_to_top_level_end(&self.model.folders, project_id).is_none()
+        {
+            return;
+        }
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.move_folder_to_end(project_id, None));
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
+    /// Moves a dropped project or folder into the folder it was dropped on,
+    /// and opens that folder so it stays in view.
+    fn move_project_into_from_drop(&mut self, drop: ProjectMoveInto, cx: &mut Context<Self>) {
+        if !self.model.folder_reorder_supported
+            || project_move_into_for_drop(&self.model.folders, &drop.project_id, &drop.folder_id)
+                .is_none()
+        {
+            return;
+        }
+        let result = self
+            .active_host()
+            .ok_or_else(|| "xd is not connected to a host.".to_owned())
+            .and_then(|host| host.move_folder(&drop.project_id, Some(&drop.folder_id)));
+        match result {
+            Ok(()) => {
+                if self.collapsed_folders.remove(&drop.folder_id) {
+                    self.persist_collapsed_folders();
+                }
             }
             Err(error) => self.model.connection_error = Some(error),
         }
@@ -12017,16 +12117,15 @@ impl XdDesktop {
             project_id: folder.id.clone(),
             title: folder.name.clone(),
         };
-        let (can_drop_folders, line_folders, drop_folders) =
-            (folders.clone(), folders.clone(), folders);
-        let (can_drop_target, line_target, drop_target) =
-            (folder.id.clone(), folder.id.clone(), folder.id.clone());
         let mark = match self.owner_avatar(folder.owner.as_deref()) {
             Some(avatar) => workspace_icon(Some(avatar), 13.0, colors.faint),
             None => icon(FOLDERS_ICON, 13.0, colors.faint),
         };
+        let drop_zones =
+            self.render_folder_drop_zones(colors, &folder.id, index, open, folders, cx);
         let header = div()
             .id(("catalog-folder-header", index))
+            .relative()
             .h(px(30.0))
             .w_full()
             .pl(px(4.0))
@@ -12119,7 +12218,8 @@ impl XdDesktop {
                         );
                     }))
                     .child(plus_icon(colors.faint)),
-            );
+            )
+            .children(drop_zones);
         div()
             .id(("catalog-folder", index))
             .relative()
@@ -12136,46 +12236,144 @@ impl XdDesktop {
                             .py_2()
                             .text_size(px(12.0))
                             .text_color(rgb(colors.muted))
-                            .child("No projects yet."),
+                            .child("Empty. Drag a project here."),
                     ),
                 )
             })
+            .into_any_element()
+    }
+
+    /// Where a project dragged over a folder's header lands: before the folder
+    /// on its top edge, after it on the bottom edge while it is closed, and
+    /// inside it everywhere else.
+    fn render_folder_drop_zones(
+        &self,
+        colors: ThemeColors,
+        folder_id: &str,
+        index: usize,
+        open: bool,
+        folders: Rc<[Folder]>,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        const EDGE: f32 = 8.0;
+        let moves_supported = self.model.folder_groups_supported;
+        let edge = |after: bool| {
+            let (can_drop_folders, drop_folders) = (folders.clone(), folders.clone());
+            let (can_drop_target, drop_target) = (folder_id.to_owned(), folder_id.to_owned());
+            let place = move |folders: &[Folder], project_id: &str, target: &str| {
+                project_placement_for_drop(folders, project_id, target, moves_supported)
+                    .map(|reorder| ProjectReorder { after, ..reorder })
+            };
+            div()
+                .id((
+                    if after {
+                        "catalog-folder-drop-after"
+                    } else {
+                        "catalog-folder-drop-before"
+                    },
+                    index,
+                ))
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(EDGE))
+                .when(after, |zone| zone.bottom_0())
+                .when(!after, |zone| zone.top_0())
+                .can_drop(move |value, _, _| {
+                    value
+                        .downcast_ref::<ProjectDragPayload>()
+                        .is_some_and(|drag| {
+                            place(&can_drop_folders, &drag.project_id, &can_drop_target).is_some()
+                        })
+                })
+                .drag_over::<ProjectDragPayload>(move |style, _, _, _| {
+                    let style = if after {
+                        style.border_b_2()
+                    } else {
+                        style.border_t_2()
+                    };
+                    style.border_color(rgb(colors.accent))
+                })
+                .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
+                    if let Some(reorder) = place(&drop_folders, &drag.project_id, &drop_target) {
+                        this.reorder_project_from_drop(reorder, cx);
+                    }
+                }))
+                .into_any_element()
+        };
+        let into_group = SharedString::from(format!("catalog-folder-into-{index}"));
+        let (can_drop_folders, outline_folders, drop_folders) =
+            (folders.clone(), folders.clone(), folders.clone());
+        let (can_drop_target, outline_target, drop_target) = (
+            folder_id.to_owned(),
+            folder_id.to_owned(),
+            folder_id.to_owned(),
+        );
+        let bottom_edge = if open { 0.0 } else { EDGE };
+        let into = div()
+            .id(("catalog-folder-drop-into", index))
+            .group(into_group.clone())
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(EDGE))
+            .bottom(px(bottom_edge))
+            .can_drop(move |value, _, _| {
+                value
+                    .downcast_ref::<ProjectDragPayload>()
+                    .is_some_and(|drag| {
+                        project_move_into_for_drop(
+                            &can_drop_folders,
+                            &drag.project_id,
+                            &can_drop_target,
+                        )
+                        .is_some()
+                    })
+            })
+            // Repaints as the drag enters and leaves, for the outline below.
+            .drag_over::<ProjectDragPayload>(|style, _, _, _| style)
+            .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
+                if let Some(drop) =
+                    project_move_into_for_drop(&drop_folders, &drag.project_id, &drop_target)
+                {
+                    this.move_project_into_from_drop(drop, cx);
+                }
+            }))
+            // Outlines the whole header, past this zone's edges, so it reads
+            // as dropping onto the folder.
             .child(
                 div()
                     .absolute()
-                    .inset_0()
+                    // Drag styles only apply to an element with a hitbox; the
+                    // header shows this cursor already.
+                    .cursor_pointer()
+                    .left_0()
+                    .right_0()
+                    .top(px(-EDGE))
+                    .bottom(px(-bottom_edge))
+                    .rounded(px(7.0))
                     .can_drop(move |value, _, _| {
                         value
                             .downcast_ref::<ProjectDragPayload>()
                             .is_some_and(|drag| {
-                                project_reorder_for_drop(
-                                    &can_drop_folders,
+                                project_move_into_for_drop(
+                                    &outline_folders,
                                     &drag.project_id,
-                                    &can_drop_target,
+                                    &outline_target,
                                 )
                                 .is_some()
                             })
                     })
-                    .drag_over::<ProjectDragPayload>(move |style, drag, _, _| {
-                        let after =
-                            project_reorder_for_drop(&line_folders, &drag.project_id, &line_target)
-                                .is_some_and(|reorder| reorder.after);
-                        let style = if after {
-                            style.border_b_2()
-                        } else {
-                            style.border_t_2()
-                        };
-                        style.border_color(rgb(colors.accent))
-                    })
-                    .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
-                        if let Some(reorder) =
-                            project_reorder_for_drop(&drop_folders, &drag.project_id, &drop_target)
-                        {
-                            this.reorder_project_from_drop(reorder, cx);
-                        }
-                    })),
+                    .group_drag_over::<ProjectDragPayload>(into_group, move |style| {
+                        style.border_2().border_color(rgb(colors.accent))
+                    }),
             )
-            .into_any_element()
+            .into_any_element();
+        let mut zones = vec![edge(false), into];
+        if !open {
+            zones.push(edge(true));
+        }
+        zones
     }
 
     /// The catalog: one drawer per project, each holding its session cards.
@@ -12333,6 +12531,7 @@ impl XdDesktop {
             let can_drop_folders = folders.clone();
             let line_project = project.id.clone();
             let line_folders = folders.clone();
+            let moves_supported = self.model.folder_groups_supported;
             let drop_folders = folders.clone();
             let name = truncating_label(project.name.clone())
                 .flex_shrink()
@@ -12481,19 +12680,21 @@ impl XdDesktop {
                                 value
                                     .downcast_ref::<ProjectDragPayload>()
                                     .is_some_and(|drag| {
-                                        project_reorder_for_drop(
+                                        project_placement_for_drop(
                                             &can_drop_folders,
                                             &drag.project_id,
                                             &can_drop_project,
+                                            moves_supported,
                                         )
                                         .is_some()
                                     })
                             })
                             .drag_over::<ProjectDragPayload>(move |style, drag, _, _| {
-                                let after = project_reorder_for_drop(
+                                let after = project_placement_for_drop(
                                     &line_folders,
                                     &drag.project_id,
                                     &line_project,
+                                    moves_supported,
                                 )
                                 .is_some_and(|reorder| reorder.after);
                                 let style = if after {
@@ -12504,10 +12705,11 @@ impl XdDesktop {
                                 style.border_color(rgb(colors.accent))
                             })
                             .on_drop(cx.listener(move |this, drag: &ProjectDragPayload, _, cx| {
-                                if let Some(reorder) = project_reorder_for_drop(
+                                if let Some(reorder) = project_placement_for_drop(
                                     &drop_folders,
                                     &drag.project_id,
                                     &drop_project,
+                                    moves_supported,
                                 ) {
                                     this.reorder_project_from_drop(reorder, cx);
                                 }
@@ -12647,7 +12849,50 @@ impl XdDesktop {
                                     "Nothing matches \u{201c}{query}\u{201d}. Press Esc to clear."
                                 )),
                         )
-                    }),
+                    })
+                    .when(
+                        self.model.folder_reorder_supported && self.model.folder_groups_supported,
+                        |list| {
+                            let (can_drop_folders, drop_folders) =
+                                (folders.clone(), folders.clone());
+                            // Below the last row: back out to the top level.
+                            list.child(
+                                div()
+                                    .id("catalog-drop-end")
+                                    .flex_1()
+                                    .min_h(px(24.0))
+                                    .can_drop(move |value, _, _| {
+                                        value.downcast_ref::<ProjectDragPayload>().is_some_and(
+                                            |drag| {
+                                                project_to_top_level_end(
+                                                    &can_drop_folders,
+                                                    &drag.project_id,
+                                                )
+                                                .is_some()
+                                            },
+                                        )
+                                    })
+                                    .drag_over::<ProjectDragPayload>(move |style, _, _, _| {
+                                        style.border_t_2().border_color(rgb(colors.accent))
+                                    })
+                                    .on_drop(cx.listener(
+                                        move |this, drag: &ProjectDragPayload, _, cx| {
+                                            if project_to_top_level_end(
+                                                &drop_folders,
+                                                &drag.project_id,
+                                            )
+                                            .is_some()
+                                            {
+                                                this.move_project_to_top_level_end(
+                                                    &drag.project_id,
+                                                    cx,
+                                                );
+                                            }
+                                        },
+                                    )),
+                            )
+                        },
+                    ),
             )
             .children(settled_shelf)
             .child(
@@ -16036,6 +16281,7 @@ impl XdDesktop {
             self.workspace_create_input.clone(),
             self.workspace_repo_input.clone(),
             self.workspace_clone_input.clone(),
+            self.workspace_org_input.clone(),
             self.chat_create_input.clone(),
             self.workspace_context_input.clone(),
             self.workspace_workdir_input.clone(),
@@ -16349,10 +16595,12 @@ impl XdDesktop {
                     .find(|folder| folder.id == parent)
                     .map(|folder| folder.name.clone())
             });
+            let folders_supported = self.can_create_folders();
             let row = |id: &'static str,
                        label: &'static str,
                        detail: &'static str,
-                       kind: WorkspaceCreateKind| {
+                       kind: WorkspaceCreateKind,
+                       enabled: bool| {
                 let parent = menu.parent.clone();
                 div()
                     .id(id)
@@ -16363,16 +16611,23 @@ impl XdDesktop {
                     .flex_col()
                     .gap(px(1.0))
                     .rounded_md()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.begin_workspace_create_in(kind, parent.clone(), window, cx);
-                    }))
-                    .child(div().text_sm().text_color(rgb(colors.text)).child(label))
+                    .when(enabled, |row| {
+                        row.cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_workspace_create_in(kind, parent.clone(), window, cx);
+                            }))
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(if enabled { colors.text } else { colors.faint }))
+                            .child(label),
+                    )
                     .child(
                         div()
                             .text_size(px(11.5))
-                            .text_color(rgb(colors.muted))
+                            .text_color(rgb(if enabled { colors.muted } else { colors.faint }))
                             .child(detail),
                     )
             };
@@ -16421,18 +16676,18 @@ impl XdDesktop {
                             "New project",
                             "A repository to work in",
                             WorkspaceCreateKind::Project,
+                            true,
                         ))
                         .child(row(
                             "catalog-add-folder",
                             "New folder",
-                            "Holds projects and folders",
+                            if folders_supported {
+                                "Holds projects and folders"
+                            } else {
+                                "Needs a newer xd host"
+                            },
                             WorkspaceCreateKind::Folder,
-                        ))
-                        .child(row(
-                            "catalog-add-organization",
-                            "GitHub organization",
-                            "A folder with its avatar",
-                            WorkspaceCreateKind::Organization,
+                            folders_supported,
                         )),
                 )
                 .into_any_element()
@@ -17020,10 +17275,12 @@ impl XdDesktop {
                 .into_any_element()
         });
         let workspace_overlay = self.creating_workspace.then(|| {
-            let can_save =
-                !self.workspace_create_submitting && !self.workspace_create_name.trim().is_empty();
             let kind = self.workspace_create_kind;
             let project = kind == WorkspaceCreateKind::Project;
+            // A folder for an organization takes its name when left unnamed.
+            let can_save = !self.workspace_create_submitting
+                && (!self.workspace_create_name.trim().is_empty()
+                    || (!project && !self.workspace_create_org.trim().is_empty()));
             let inside = self.workspace_create_parent.as_deref().and_then(|parent| {
                 self.model
                     .folders
@@ -17034,7 +17291,6 @@ impl XdDesktop {
             let (heading, action) = match kind {
                 WorkspaceCreateKind::Project => ("New project", "Create project"),
                 WorkspaceCreateKind::Folder => ("New folder", "Create folder"),
-                WorkspaceCreateKind::Organization => ("Add GitHub organization", "Add organization"),
             };
             div()
                 .occlude()
@@ -17115,6 +17371,20 @@ impl XdDesktop {
                                     .child(self.workspace_clone_input.clone()),
                             )
                         })
+                        .when(!project, |card| {
+                            card.child(
+                                div()
+                                    .h(px(36.0))
+                                    .px_3()
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(rgb(colors.border))
+                                    .bg(rgb(colors.background))
+                                    .child(self.workspace_org_input.clone()),
+                            )
+                        })
                         .child(div().text_xs().text_color(rgb(colors.muted)).child(
                             match kind {
                                 WorkspaceCreateKind::Project
@@ -17127,10 +17397,7 @@ impl XdDesktop {
                                     "Use either an existing repository path or a clone URL."
                                 }
                                 WorkspaceCreateKind::Folder => {
-                                    "Folders hold projects and other folders. Add them with the folder's + button."
-                                }
-                                WorkspaceCreateKind::Organization => {
-                                    "Shows the organization's avatar. Add its repositories as projects inside it when you want them."
+                                    "Folders hold projects and other folders; drag them in or use the folder's +. Name a GitHub organization to show its avatar."
                                 }
                             },
                         ))
@@ -19029,15 +19296,48 @@ struct ProjectReorder {
     project_id: String,
     anchor_id: String,
     after: bool,
+    /// The anchor sits in another folder, so the project moves into that
+    /// folder on disk to land beside it.
+    moves: bool,
+    /// The folder the anchor was in when the drop showed, `None` for the top
+    /// level. A move is refused once the anchor is elsewhere.
+    parent: Option<String>,
 }
 
-/// Where a dropped project goes in this order. The drop line and the drop both
-/// read it from the order on screen, so a project lands where the line showed.
+/// A project or folder dropped onto a folder, to go inside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectMoveInto {
+    project_id: String,
+    folder_id: String,
+}
+
+/// Whether `folder_id` is `ancestor_id` or sits somewhere inside it.
+fn folder_within(folders: &[Folder], folder_id: &str, ancestor_id: &str) -> bool {
+    let mut current = Some(folder_id);
+    // A parent loop in a stale tree must not spin forever.
+    for _ in 0..=folders.len() {
+        let Some(id) = current else {
+            return false;
+        };
+        if id == ancestor_id {
+            return true;
+        }
+        current = folders
+            .iter()
+            .find(|folder| folder.id == id)
+            .and_then(|folder| folder.parent.as_deref());
+    }
+    false
+}
+
+/// Where a dropped project goes beside `target_id`. The drop line and the drop
+/// both read it from the order on screen, so a project lands where the line
+/// showed.
 ///
-/// Only siblings can be reordered, since the sidebar lists every project in one
-/// flat column and a drop should not move a folder on disk by surprise. The host
-/// has the final say, because this tree can be stale: see `keep_parent` in
-/// `HostHandle::reorder_folder`.
+/// A sibling is only reordered. A row in another folder takes the project into
+/// that folder, which moves it on disk, so a project can be dragged in and out
+/// of folders. The host has the final say, because this tree can be stale: see
+/// `keep_parent` in `HostHandle::reorder_folder`.
 fn project_reorder_for_drop(
     folders: &[Folder],
     project_id: &str,
@@ -19046,16 +19346,69 @@ fn project_reorder_for_drop(
     if project_id == target_id {
         return None;
     }
-    let position = |id: &str| folders.iter().position(|folder| folder.id == id);
-    let source_index = position(project_id)?;
-    let target_index = position(target_id)?;
-    if folders[source_index].parent != folders[target_index].parent {
+    let source = folders.iter().find(|folder| folder.id == project_id)?;
+    let target = folders.iter().find(|folder| folder.id == target_id)?;
+    // Beside something inside itself would be inside itself.
+    if folder_within(folders, target_id, project_id) {
         return None;
     }
+    let order = folder_tree(folders);
+    let position = |index: usize| order.iter().position(|row| row.index == index);
+    let index = |id: &str| folders.iter().position(|folder| folder.id == id);
+    let source_position = position(index(project_id)?)?;
+    let target_position = position(index(target_id)?)?;
     Some(ProjectReorder {
         project_id: project_id.to_owned(),
         anchor_id: target_id.to_owned(),
-        after: source_index < target_index,
+        after: source_position < target_position,
+        moves: source.parent != target.parent,
+        parent: target.parent.clone(),
+    })
+}
+
+/// [`project_reorder_for_drop`], limited to what the host can do safely: a
+/// move into another folder needs a host that checks `expect_parent`, so an
+/// older one is offered sibling reorders only.
+fn project_placement_for_drop(
+    folders: &[Folder],
+    project_id: &str,
+    target_id: &str,
+    moves_supported: bool,
+) -> Option<ProjectReorder> {
+    project_reorder_for_drop(folders, project_id, target_id)
+        .filter(|reorder| moves_supported || !reorder.moves)
+}
+
+/// A project or folder dropped onto a folder of projects goes inside it,
+/// unless it is already there or the folder is inside what is being dragged.
+fn project_move_into_for_drop(
+    folders: &[Folder],
+    project_id: &str,
+    folder_id: &str,
+) -> Option<ProjectMoveInto> {
+    let source = folders.iter().find(|folder| folder.id == project_id)?;
+    let target = folders.iter().find(|folder| folder.id == folder_id)?;
+    if !target.group
+        || source.parent.as_deref() == Some(folder_id)
+        || folder_within(folders, folder_id, project_id)
+    {
+        return None;
+    }
+    Some(ProjectMoveInto {
+        project_id: project_id.to_owned(),
+        folder_id: folder_id.to_owned(),
+    })
+}
+
+/// A project dropped below the list goes last at the top level, coming out of
+/// any folder it was in.
+fn project_to_top_level_end(folders: &[Folder], project_id: &str) -> Option<ProjectReorder> {
+    let last = folder_tree(folders)
+        .into_iter()
+        .rfind(|row| row.depth == 0)?;
+    project_reorder_for_drop(folders, project_id, &folders[last.index].id).map(|mut reorder| {
+        reorder.after = true;
+        reorder
     })
 }
 
@@ -23181,6 +23534,8 @@ Binary files /dev/null and b/image.png differ\n";
                 project_id: "b".into(),
                 anchor_id: "a".into(),
                 after: false,
+                moves: false,
+                parent: None,
             })
         );
         assert_eq!(
@@ -23189,6 +23544,8 @@ Binary files /dev/null and b/image.png differ\n";
                 project_id: "b".into(),
                 anchor_id: "c".into(),
                 after: true,
+                moves: false,
+                parent: None,
             })
         );
         assert_eq!(project_reorder_for_drop(&folders, "b", "b"), None);
@@ -23196,23 +23553,139 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(project_reorder_for_drop(&folders, "gone", "b"), None);
     }
 
+    fn folder(id: &str, parent: Option<&str>) -> Folder {
+        Folder {
+            group: true,
+            ..project(id, parent)
+        }
+    }
+
     #[test]
-    fn project_drop_never_moves_a_project_to_another_parent() {
+    fn project_drop_beside_a_row_in_another_folder_moves_it_there() {
         let folders = [
-            project("root", None),
-            project("parent", None),
+            folder("root", None),
+            folder("parent", None),
             project("child", Some("parent")),
             project("sibling", Some("parent")),
             project("elsewhere", Some("root")),
         ];
+        let placed = |project: &str, anchor: &str| {
+            project_reorder_for_drop(&folders, project, anchor)
+                .map(|reorder| (reorder.after, reorder.moves))
+        };
 
-        assert_eq!(project_reorder_for_drop(&folders, "root", "child"), None);
-        assert_eq!(project_reorder_for_drop(&folders, "child", "root"), None);
+        // Siblings only reorder; the host keeps them where they are on disk.
+        assert_eq!(placed("child", "sibling"), Some((true, false)));
+        assert_eq!(placed("root", "parent"), Some((true, false)));
+        // On screen: root, elsewhere, parent, child, sibling.
+        assert_eq!(placed("child", "root"), Some((false, true)));
+        assert_eq!(placed("child", "elsewhere"), Some((false, true)));
+        assert_eq!(placed("elsewhere", "sibling"), Some((true, true)));
         assert_eq!(
-            project_reorder_for_drop(&folders, "child", "elsewhere"),
-            None
+            project_reorder_for_drop(&folders, "child", "elsewhere")
+                .and_then(|reorder| reorder.parent)
+                .as_deref(),
+            Some("root"),
+            "the move names the folder it expects the anchor in"
         );
-        assert!(project_reorder_for_drop(&folders, "child", "sibling").is_some());
+        // A folder cannot land beside what it holds: that is inside itself.
+        assert_eq!(placed("parent", "child"), None);
+        assert_eq!(placed("root", "elsewhere"), None);
+    }
+
+    #[test]
+    fn an_older_host_is_offered_sibling_reorders_only() {
+        let folders = [
+            folder("org", None),
+            project("web", Some("org")),
+            project("api", Some("org")),
+            project("notes", None),
+        ];
+
+        assert!(project_placement_for_drop(&folders, "web", "api", false).is_some());
+        assert!(project_placement_for_drop(&folders, "notes", "web", false).is_none());
+        assert!(project_placement_for_drop(&folders, "notes", "web", true).is_some());
+    }
+
+    #[test]
+    fn project_drop_onto_a_folder_puts_it_inside() {
+        let folders = [
+            folder("org", None),
+            folder("team", Some("org")),
+            project("web", Some("team")),
+            project("notes", None),
+        ];
+        let into = |project: &str, target: &str| {
+            project_move_into_for_drop(&folders, project, target).map(|drop| drop.folder_id)
+        };
+
+        assert_eq!(into("notes", "team").as_deref(), Some("team"));
+        assert_eq!(into("web", "org").as_deref(), Some("org"));
+        assert_eq!(into("team", "org"), None, "already there");
+        assert_eq!(into("org", "team"), None, "inside itself");
+        assert_eq!(into("org", "org"), None);
+        assert_eq!(into("team", "notes"), None, "a project holds no folders");
+        assert_eq!(into("gone", "org"), None);
+    }
+
+    #[test]
+    fn project_drop_below_the_list_brings_it_out_to_the_top_level() {
+        let folders = [
+            project("notes", None),
+            folder("org", None),
+            project("web", Some("org")),
+        ];
+
+        assert_eq!(
+            project_to_top_level_end(&folders, "web"),
+            Some(ProjectReorder {
+                project_id: "web".into(),
+                anchor_id: "org".into(),
+                after: true,
+                moves: true,
+                parent: None,
+            })
+        );
+        assert_eq!(
+            project_to_top_level_end(&folders, "notes").map(|reorder| reorder.moves),
+            Some(false)
+        );
+        assert_eq!(
+            project_to_top_level_end(&folders, "org"),
+            None,
+            "already last"
+        );
+    }
+
+    #[test]
+    fn a_parent_loop_in_a_stale_tree_does_not_hang_the_drop() {
+        let folders = [
+            folder("a", Some("b")),
+            folder("b", Some("a")),
+            project("c", None),
+        ];
+        assert!(!folder_within(&folders, "a", "c"));
+        assert!(folder_within(&folders, "a", "b"));
+    }
+
+    #[gpui::test]
+    fn folders_can_be_made_on_a_host_that_says_so_or_already_lists_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model.folders = vec![project("notes", None)];
+            desktop.model.folder_groups_supported = false;
+            assert!(!desktop.can_create_folders(), "a host from before folders");
+            desktop.model.folders.push(folder("Clients", None));
+            assert!(
+                desktop.can_create_folders(),
+                "a host that already keeps one"
+            );
+            desktop.model.folders.pop();
+            desktop.model.folder_groups_supported = true;
+            assert!(desktop.can_create_folders());
+        });
     }
 
     #[gpui::test]
@@ -23239,6 +23712,8 @@ Binary files /dev/null and b/image.png differ\n";
                 project_id: project.into(),
                 anchor_id: anchor.into(),
                 after: false,
+                moves: false,
+                parent: None,
             };
 
             // An older host could move the folder on disk, so nothing is sent.
@@ -23253,6 +23728,67 @@ Binary files /dev/null and b/image.png differ\n";
             desktop.reorder_project_from_drop(reorder("c", "a"), cx);
             assert_eq!(order(desktop), ["a", "b", "c"]);
             assert!(desktop.model.connection_error.is_some());
+
+            // A move into another folder: c goes beside b inside folder f.
+            desktop.model.folders = vec![
+                project("a", None),
+                Folder {
+                    group: true,
+                    ..project("f", None)
+                },
+                project("b", Some("f")),
+                project("c", None),
+            ];
+            let into_f = ProjectReorder {
+                project_id: "c".into(),
+                anchor_id: "b".into(),
+                after: true,
+                moves: true,
+                parent: Some("f".into()),
+            };
+            assert_eq!(
+                project_reorder_for_drop(&desktop.model.folders, "c", "b"),
+                Some(ProjectReorder {
+                    after: false,
+                    ..into_f.clone()
+                })
+            );
+            desktop.model.connection_error = None;
+            // An older host would not check where the anchor is now.
+            desktop.model.folder_groups_supported = false;
+            desktop.reorder_project_from_drop(into_f.clone(), cx);
+            assert!(desktop.model.connection_error.is_none());
+            desktop.model.folder_groups_supported = true;
+            // b left f after the drop line showed: nothing is sent.
+            desktop.model.folders[2].parent = None;
+            desktop.reorder_project_from_drop(into_f.clone(), cx);
+            assert!(desktop.model.connection_error.is_none());
+            desktop.model.folders[2].parent = Some("f".into());
+            desktop.reorder_project_from_drop(into_f, cx);
+            assert!(
+                desktop.model.connection_error.is_some(),
+                "sent, with no host"
+            );
+
+            // Below the list: b comes out to the end of the top level.
+            desktop.model.connection_error = None;
+            desktop.model.folder_groups_supported = false;
+            desktop.move_project_to_top_level_end("b", cx);
+            assert!(
+                desktop.model.connection_error.is_none(),
+                "older host: not sent"
+            );
+            desktop.model.folder_groups_supported = true;
+            desktop.move_project_to_top_level_end("c", cx);
+            assert!(
+                desktop.model.connection_error.is_none(),
+                "already last: not sent"
+            );
+            desktop.move_project_to_top_level_end("b", cx);
+            assert!(
+                desktop.model.connection_error.is_some(),
+                "end move sent, with no host"
+            );
         });
     }
 

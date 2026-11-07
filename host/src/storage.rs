@@ -754,6 +754,9 @@ impl StateStore {
             "sessions": sessions,
             "settlement": true,
             "folder_reorder": true,
+            // The host keeps folders of projects; older hosts ignore `group`
+            // and `owner` and would make a project instead.
+            "folder_groups": true,
         }))
     }
 
@@ -3426,9 +3429,35 @@ impl StateStore {
                 StorageError::InvalidRequest("keep_parent must be true or false".into())
             })?,
         };
+        // The parent the client saw the anchor in, null for the top level.
+        // A drop beside a row that has since moved elsewhere is refused rather
+        // than landing somewhere the client never showed.
+        let expected_parent = match request.get("expect_parent") {
+            None => None,
+            Some(Value::Null) => Some(None),
+            Some(Value::String(parent)) => Some(Some(parent.as_str())),
+            Some(_) => {
+                return Err(StorageError::InvalidRequest(
+                    "expect_parent must be a folder or null".into(),
+                ));
+            }
+        };
+        // Last among its new siblings, decided here so a folder another
+        // client adds meanwhile cannot end up after it.
+        let to_end = match request.get("end") {
+            None | Some(Value::Null) => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| StorageError::InvalidRequest("end must be true or false".into()))?,
+        };
         if before_id.is_some() && after_id.is_some() {
             return Err(StorageError::InvalidRequest(
                 "Choose either a workspace before or after which to move.".into(),
+            ));
+        }
+        if to_end && (before_id.is_some() || after_id.is_some()) {
+            return Err(StorageError::InvalidRequest(
+                "Choose either the end or an ordering anchor.".into(),
             ));
         }
         if requested_parent_id.is_some() && (before_id.is_some() || after_id.is_some()) {
@@ -3472,6 +3501,11 @@ impl StateStore {
         } else {
             requested_parent_id.map(str::to_owned)
         };
+        if expected_parent.is_some_and(|expected| parent_id.as_deref() != expected) {
+            return Err(StorageError::InvalidRequest(
+                "That spot has moved since. Drag it there again.".into(),
+            ));
+        }
         let parent_relative = match parent_id.as_deref() {
             Some(parent_id) => workspace_relative(&database, root.as_ref(), parent_id)?,
             None => String::new(),
@@ -3526,6 +3560,8 @@ impl StateStore {
                 anchor_id,
                 place_after,
             )?;
+        } else if to_end {
+            move_workspace_to_end(&database, root.as_ref(), folder_id)?;
         }
         Ok(json!({"ok": true}))
     }
@@ -5478,6 +5514,22 @@ fn relocate_workspace_subtree(
         )?;
     }
     transaction.commit()?;
+    Ok(())
+}
+
+/// Sorts a folder after every other one, which puts it last among its
+/// siblings: the sidebar orders siblings by their place in this one list.
+fn move_workspace_to_end(
+    database: &Connection,
+    root: &str,
+    folder_id: &str,
+) -> Result<(), StorageError> {
+    database.execute(
+        "UPDATE workspace_folders SET updated_at = ?, sort_order = \
+           (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM workspace_folders WHERE root_path = ?) \
+         WHERE root_path = ? AND id = ?",
+        params![now_seconds(), root, root, folder_id],
+    )?;
     Ok(())
 }
 
@@ -9730,6 +9782,7 @@ mod tests {
         );
 
         let tree = store.tree().unwrap();
+        assert_eq!(tree["folder_groups"], true);
         let folder = |wanted: &str| {
             tree["folders"]
                 .as_array()
@@ -10013,6 +10066,75 @@ mod tests {
             .move_folder(&json!({"folder": top, "before": sibling, "keep_parent": true}))
             .unwrap();
         assert_eq!(ids()[..2], [top, sibling]);
+    }
+
+    #[test]
+    fn a_move_beside_an_anchor_that_has_since_moved_is_refused() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let id = |reply: Value| reply["id"].as_str().unwrap().to_owned();
+        let notes = id(store.new_folder(&json!({"name": "notes"})).unwrap());
+        let clients = id(store
+            .new_folder(&json!({"name": "Clients", "group": true}))
+            .unwrap());
+        let web = id(store
+            .new_folder(&json!({"name": "web", "parent": clients}))
+            .unwrap());
+
+        // The client saw web at the top level; it is inside Clients now.
+        let error = store
+            .move_folder(&json!({"folder": notes, "after": web, "expect_parent": null}))
+            .unwrap_err();
+        assert!(error.to_string().contains("moved since"), "{error}");
+        assert!(fixture.workspaces.join("notes").is_dir());
+        store
+            .move_folder(&json!({"folder": notes, "after": web, "expect_parent": 7}))
+            .unwrap_err();
+
+        store
+            .move_folder(&json!({"folder": notes, "after": web, "expect_parent": clients}))
+            .unwrap();
+        assert!(fixture.workspaces.join("Clients/notes").is_dir());
+        // And back out beside a top-level row.
+        store
+            .move_folder(&json!({"folder": notes, "before": clients, "expect_parent": null}))
+            .unwrap();
+        assert!(fixture.workspaces.join("notes").is_dir());
+    }
+
+    #[test]
+    fn a_move_to_the_end_lands_after_every_sibling_the_host_has() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let id = |reply: Value| reply["id"].as_str().unwrap().to_owned();
+        let clients = id(store
+            .new_folder(&json!({"name": "Clients", "group": true}))
+            .unwrap());
+        let web = id(store
+            .new_folder(&json!({"name": "web", "parent": clients}))
+            .unwrap());
+        // Added by another client after the drop line showed Clients last.
+        let late = id(store.new_folder(&json!({"name": "late"})).unwrap());
+
+        store
+            .move_folder(&json!({"folder": web, "end": true}))
+            .unwrap();
+        assert!(fixture.workspaces.join("web").is_dir());
+        let tops = store.tree().unwrap()["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|folder| folder.get("parent").is_none())
+            .map(|folder| folder["id"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(tops, vec![clients.clone(), late.clone(), web.clone()]);
+
+        for request in [
+            json!({"folder": late, "end": true, "after": clients}),
+            json!({"folder": late, "end": "yes"}),
+        ] {
+            store.move_folder(&request).unwrap_err();
+        }
     }
 
     #[test]
