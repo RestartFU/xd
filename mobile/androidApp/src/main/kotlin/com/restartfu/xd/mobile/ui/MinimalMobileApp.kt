@@ -1450,7 +1450,7 @@ private fun EmptyCard(text: String) {
 }
 
 @Composable
-private fun NewSessionDialog(
+internal fun NewSessionDialog(
     projectName: String,
     chatTab: Boolean = false,
     /** Where a new session can work; null for a chat joining an existing session. */
