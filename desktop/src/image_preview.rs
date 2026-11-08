@@ -723,20 +723,31 @@ impl XdDesktop {
     }
 
     pub(super) fn close_image_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let owner = self.image_preview.take().map(|preview| preview.owner);
-        if matches!(owner, Some(PreviewOwner::NewChat(_))) && self.creating_chat_folder.is_some() {
-            // A new chat counts as a popup itself, which would keep the focus
-            // on the viewer that just closed. Hand it back to the editor.
-            self.minimal_popup_focus_captured = false;
-            if let Some(focus) = self
-                .minimal_popup_previous_focus
-                .take()
-                .and_then(|focus| focus.upgrade())
-            {
-                window.focus(&focus);
+        match self.image_preview.take().map(|preview| preview.owner) {
+            Some(PreviewOwner::NewChat(generation)) => {
+                // A new chat counts as a popup itself, which would keep the
+                // focus on the viewer that just closed, so it is handed back
+                // here rather than by the general restore.
+                self.minimal_popup_focus_captured = false;
+                let editor = self
+                    .minimal_popup_previous_focus
+                    .take()
+                    .and_then(|focus| focus.upgrade());
+                if self.creating_chat_folder.is_some() && self.new_chat_generation == generation {
+                    if let Some(editor) = editor {
+                        window.focus(&editor);
+                    }
+                } else if self.model.selected_chat.is_some() {
+                    // The new chat was created or abandoned under the viewer,
+                    // and its editor is gone with it. The chat on screen now
+                    // types into the chat composer.
+                    let composer = self.composer_input.read(cx).focus_handle(cx);
+                    window.focus(&composer);
+                } else {
+                    window.blur();
+                }
             }
-        } else {
-            self.restore_minimal_popup_focus(window);
+            _ => self.restore_minimal_popup_focus(window),
         }
         cx.notify();
     }
@@ -2173,6 +2184,8 @@ mod tests {
             assert!(desktop.image_preview.is_none());
             assert!(!desktop.minimal_popup_is_open());
         });
+        // Not the new chat's editor, which went with it.
+        assert!(composer_is_focused(&desktop, cx));
     }
 
     #[gpui::test]
