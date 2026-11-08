@@ -667,26 +667,37 @@ impl XdDesktop {
         cx.spawn(async move |this, cx| {
             let read = read.await;
             let _ = this.update(cx, |this, cx| {
-                if this.new_chat_generation != generation
-                    || this.attachment_connection() != connection
-                    || this.creating_chat_folder.is_none()
-                {
-                    return;
-                }
-                this.new_chat_reading = this.new_chat_reading.saturating_sub(1);
-                for attachment in read {
-                    match attachment.and_then(|a| {
-                        attachment_fits(&this.new_chat_attachments, &a)?;
-                        Ok(a)
-                    }) {
-                        Ok(a) => this.new_chat_attachments.push(a),
-                        Err(error) => this.model.connection_error = Some(error),
-                    }
-                }
-                cx.notify();
+                this.finish_new_chat_file_read(generation, connection, read, cx);
             });
         })
         .detach();
+    }
+
+    fn finish_new_chat_file_read(
+        &mut self,
+        generation: u64,
+        connection: (ChatEndpoint, u64, u64),
+        read: Vec<Result<Attachment, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.new_chat_generation != generation {
+            return;
+        }
+        self.new_chat_reading = self.new_chat_reading.saturating_sub(1);
+        if self.attachment_connection() != connection || self.creating_chat_folder.is_none() {
+            cx.notify();
+            return;
+        }
+        for attachment in read {
+            match attachment.and_then(|a| {
+                attachment_fits(&self.new_chat_attachments, &a)?;
+                Ok(a)
+            }) {
+                Ok(a) => self.new_chat_attachments.push(a),
+                Err(error) => self.model.connection_error = Some(error),
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn attach_new_chat_image(
@@ -794,6 +805,65 @@ impl XdDesktop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn disconnect_and_endpoint_switch_release_chat_creation(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.chat_create_submitting = true;
+            desktop.new_chat_submitted_prompt = Some("Build a footer".into());
+            assert!(desktop.switch_active_endpoint(ChatEndpoint::Remote, cx));
+            assert!(!desktop.chat_create_submitting);
+            assert!(desktop.new_chat_submitted_prompt.is_none());
+            desktop.creating_chat_folder = Some("project".into());
+            desktop.new_chat_prompt = "Keep this prompt".into();
+            desktop.chat_create_submitting = true;
+            desktop.new_chat_submitted_prompt = Some(desktop.new_chat_prompt.clone());
+            let generation = desktop.remote_generation;
+            desktop.handle_remote_update(
+                HostUpdate::Disconnected {
+                    message: "test disconnect".into(),
+                },
+                generation,
+                cx,
+            );
+            assert!(!desktop.chat_create_submitting);
+            assert!(desktop.new_chat_submitted_prompt.is_none());
+            assert_eq!(desktop.new_chat_prompt, "Keep this prompt");
+            assert_eq!(desktop.creating_chat_folder.as_deref(), Some("project"));
+        });
+    }
+
+    #[gpui::test]
+    fn reconnect_discards_file_results_without_leaving_send_blocked(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.creating_chat_folder = Some("project".into());
+            desktop.new_chat_reading = 1;
+            let connection = desktop.attachment_connection();
+            desktop.connection_generation += 1;
+            desktop.finish_new_chat_file_read(
+                desktop.new_chat_generation,
+                connection,
+                vec![Err("stale read must be discarded".into())],
+                cx,
+            );
+            assert_eq!(desktop.new_chat_reading, 0);
+            assert!(desktop.model.connection_error.is_none());
+            desktop.new_chat_generation += 1;
+            desktop.new_chat_reading = 1;
+            desktop.finish_new_chat_file_read(
+                desktop.new_chat_generation - 1,
+                connection,
+                vec![],
+                cx,
+            );
+            assert_eq!(
+                desktop.new_chat_reading, 1,
+                "an old draft cannot consume a new draft's read count"
+            );
+        });
+    }
 
     #[gpui::test]
     fn draft_defaults_to_repository_base_and_failed_creation_keeps_prompt(

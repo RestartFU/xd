@@ -3195,6 +3195,8 @@ impl XdDesktop {
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
         self.new_chat_submitted_prompt = None;
+        self.new_chat_submitted_attachments.clear();
+        self.chat_create_submitting = false;
         self.workspace_context_folder = None;
         self.workspace_defaults = None;
         self.workspace_clone_status = None;
@@ -3453,6 +3455,9 @@ impl XdDesktop {
                 remote_model.connected = false;
                 remote_model.connection_error = Some(format!("{message} Reconnecting…"));
                 if self.active_endpoint == ChatEndpoint::Remote {
+                    self.chat_create_submitting = false;
+                    self.new_chat_submitted_prompt = None;
+                    self.new_chat_submitted_attachments.clear();
                     self.sending = false;
                     self.transcript_loading = false;
                     self.transcript_page_loading = false;
@@ -3806,6 +3811,8 @@ impl XdDesktop {
                 self.transcript_refresh_pending = false;
                 self.workspace_create_submitting = false;
                 self.chat_create_submitting = false;
+                self.new_chat_submitted_prompt = None;
+                self.new_chat_submitted_attachments.clear();
                 self.workspace_context_loading = false;
                 self.workspace_context_submitting = false;
                 self.workspace_clone_status = None;
