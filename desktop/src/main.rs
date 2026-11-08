@@ -69,6 +69,7 @@ mod files;
 mod image_preview;
 mod input;
 mod minimal;
+mod new_chat;
 mod selection;
 mod settings;
 mod source_build;
@@ -2129,6 +2130,16 @@ struct XdDesktop {
     workspace_clone_outcomes: HashMap<(ChatEndpoint, String), Option<String>>,
     creating_chat_folder: Option<String>,
     creating_chat_session: Option<String>,
+    new_chat_input: Entity<FileEditor>,
+    new_chat_prompt: String,
+    new_chat_submitted_prompt: Option<String>,
+    new_chat_remote: bool,
+    new_chat_default_branch: Option<String>,
+    new_chat_search: Entity<ComposerInput>,
+    new_chat_query: String,
+    new_chat_model: Option<String>,
+    new_chat_menu: Option<&'static str>,
+    first_chat_prompt: Option<(String, String)>,
     chat_create_title: String,
     chat_create_submitting: bool,
     chat_create_worktree: Option<NewSessionWorktree>,
@@ -2262,6 +2273,24 @@ impl XdDesktop {
             let _ = desktop.update(cx, |desktop, cx| desktop.shutdown_browsers(cx));
             true
         });
+        let new_chat_search = cx.new(|cx| ComposerInput::new(cx, "Search…"));
+        cx.subscribe(&new_chat_search, |this, _, event, cx| {
+            if let ComposerEvent::Changed(text) = event {
+                this.new_chat_query = text.to_lowercase();
+                cx.notify();
+            }
+        })
+        .detach();
+        let new_chat_input = cx.new(FileEditor::composer);
+        cx.subscribe(&new_chat_input, |this, _, event, cx| match event {
+            EditorEvent::Changed(text) => {
+                this.new_chat_prompt = text.clone();
+                cx.notify();
+            }
+            EditorEvent::Submit => this.save_minimal_chat_create(cx),
+            _ => {}
+        })
+        .detach();
         let composer_input = cx.new(FileEditor::composer);
         cx.subscribe(&composer_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => this.composer_changed(text.clone(), cx),
@@ -2731,6 +2760,16 @@ impl XdDesktop {
             workspace_clone_outcomes: HashMap::new(),
             creating_chat_folder: None,
             creating_chat_session: None,
+            new_chat_input,
+            new_chat_prompt: String::new(),
+            new_chat_submitted_prompt: None,
+            new_chat_remote: false,
+            new_chat_default_branch: None,
+            new_chat_search,
+            new_chat_query: String::new(),
+            new_chat_model: None,
+            new_chat_menu: None,
+            first_chat_prompt: None,
             chat_create_title: String::new(),
             chat_create_submitting: false,
             chat_create_worktree: None,
@@ -3144,6 +3183,7 @@ impl XdDesktop {
         self.project_add_menu = None;
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
+        self.new_chat_submitted_prompt = None;
         self.workspace_context_folder = None;
         self.workspace_defaults = None;
         self.workspace_clone_status = None;
@@ -3848,6 +3888,7 @@ impl XdDesktop {
             if !matches!(
                 &kind,
                 RequestKind::DiffRead { .. }
+                    | RequestKind::NewChatSources { .. }
                     | RequestKind::GitStatus { .. }
                     | RequestKind::GitState { .. }
                     | RequestKind::GitDraft { .. }
@@ -5078,6 +5119,10 @@ impl XdDesktop {
             }
             RequestKind::NewChatSources { folder_id } => {
                 if self.creating_chat_folder.as_deref() == Some(folder_id.as_str()) {
+                    self.new_chat_default_branch = value
+                        .get("default_branch")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
                     self.chat_create_branches = value
                         .get("branches")
                         .cloned()
@@ -5093,6 +5138,9 @@ impl XdDesktop {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                     self.chat_create_sources_loading = false;
+                    if matches!(self.chat_create_worktree, Some(NewSessionWorktree::New)) {
+                        self.chat_create_worktree = self.default_new_chat_base();
+                    }
                 }
             }
             RequestKind::SetFolderSettings { folder_id } => {
@@ -5115,7 +5163,12 @@ impl XdDesktop {
                 };
                 if self.creating_chat_folder.as_deref() == Some(folder_id.as_str())
                     && self.chat_create_title.trim() == title
+                    && self.chat_create_submitting
                 {
+                    self.first_chat_prompt = Some((
+                        chat_id.to_owned(),
+                        self.new_chat_submitted_prompt.take().unwrap_or_default(),
+                    ));
                     self.cancel_chat_create(cx);
                 }
                 // The tree supplies session_mode. Opening from the creation
@@ -5162,6 +5215,16 @@ impl XdDesktop {
                 if !self.draft_dirty {
                     let draft = self.model.draft.clone();
                     self.set_composer_text(draft, cx);
+                }
+                if self
+                    .first_chat_prompt
+                    .as_ref()
+                    .is_some_and(|(id, _)| id == &chat_id)
+                {
+                    let (_, prompt) = self.first_chat_prompt.take().unwrap();
+                    self.set_composer_text(prompt, cx);
+                    self.draft_dirty = true;
+                    self.send_composer(cx);
                 }
                 if self.model.working || !self.model.queue.is_empty() {
                     self.clear_question(cx);
@@ -6935,6 +6998,17 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.chat_create_submitting || !self.flush_draft_before_navigation() {
+            return;
+        }
+        self.new_chat_prompt.clear();
+        self.new_chat_remote = false;
+        self.new_chat_default_branch = None;
+        self.new_chat_query.clear();
+        self.new_chat_model = None;
+        self.new_chat_menu = None;
+        self.new_chat_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.creating_chat_session = None;
         self.creating_chat_folder = Some(folder_id.clone());
         // Naming a chat up front is busywork: the title is renamed later or
@@ -6967,8 +7041,8 @@ impl XdDesktop {
             self.chat_create_sources_loading = false;
             self.model.connection_error = Some("xd is not connected to a host.".into());
         }
-        let focus = self.chat_create_input.read(cx).focus_handle(cx);
-        self.focus_minimal_popup(focus, window, cx);
+        let focus = self.new_chat_input.read(cx).focus_handle(cx);
+        window.focus(&focus);
         cx.notify();
     }
 
@@ -6982,6 +7056,7 @@ impl XdDesktop {
     fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
+        self.new_chat_submitted_prompt = None;
         self.chat_create_title.clear();
         self.chat_create_submitting = false;
         self.chat_create_worktree = None;
@@ -10630,6 +10705,12 @@ impl XdDesktop {
         if !self.flush_draft_before_navigation() {
             return;
         }
+        if self.chat_create_submitting {
+            return;
+        }
+        if self.creating_chat_folder.is_some() {
+            self.cancel_chat_create(cx);
+        }
         self.select_minimal_session(project_id, chat_id, agent, cx);
         let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
@@ -10750,6 +10831,9 @@ impl XdDesktop {
         let Some(folder_id) = self.creating_chat_folder.clone() else {
             return;
         };
+        if self.new_chat_prompt.trim().is_empty() {
+            return;
+        }
         if self.chat_create_submitting
             || (self.creating_chat_session.is_none() && self.chat_create_worktrees_loading)
         {
@@ -10769,20 +10853,20 @@ impl XdDesktop {
             .active_host()
             .ok_or_else(|| "xd is not connected to a host.".to_owned())
             .and_then(|host| {
-                if let Some(session) = &self.creating_chat_session {
-                    host.new_chat_in_session(&folder_id, session, &title, agent)
-                } else {
-                    host.new_chat_with_backend_in_worktree(
-                        &folder_id,
-                        &title,
-                        agent,
-                        worktree.as_ref().expect("worktree checked"),
-                    )
-                }
+                host.create_draft_chat(
+                    &folder_id,
+                    self.creating_chat_session.as_deref(),
+                    &title,
+                    agent,
+                    self.new_chat_model.as_deref(),
+                    worktree.as_ref(),
+                    self.new_chat_remote,
+                )
             });
         match result {
             Ok(()) => {
                 self.chat_create_title = title;
+                self.new_chat_submitted_prompt = Some(self.new_chat_prompt.clone());
                 self.chat_create_submitting = true;
             }
             Err(error) => self.model.connection_error = Some(error),
@@ -16679,16 +16763,22 @@ impl XdDesktop {
         });
         let toolbar = matches!(&route, MinimalRoute::Cli { .. })
             .then(|| self.render_minimal_context_toolbar(colors, cx));
-        let content = match route {
-            MinimalRoute::Projects { .. } | MinimalRoute::Sessions { .. } => {
-                self.render_minimal_home(colors, window, cx)
+        let content = if self.creating_chat_folder.is_some() {
+            self.render_new_chat(colors, window, cx)
+        } else {
+            match route {
+                MinimalRoute::Projects { .. } | MinimalRoute::Sessions { .. } => {
+                    self.render_minimal_home(colors, window, cx)
+                }
+                MinimalRoute::Terminal => {
+                    self.render_minimal_standalone_terminal(colors, window, cx)
+                }
+                MinimalRoute::Cli {
+                    project_id,
+                    chat_id,
+                    agent,
+                } => self.render_minimal_cli(colors, project_id, chat_id, agent, window, cx),
             }
-            MinimalRoute::Terminal => self.render_minimal_standalone_terminal(colors, window, cx),
-            MinimalRoute::Cli {
-                project_id,
-                chat_id,
-                agent,
-            } => self.render_minimal_cli(colors, project_id, chat_id, agent, window, cx),
         };
         let titlebar = self.render_minimal_titlebar(colors, custom_titlebar, cx);
         let session_context_overlay = self.sidebar_context_menu.clone().map(|menu| {
@@ -18152,452 +18242,6 @@ impl XdDesktop {
                     .into_any_element(),
             )
         });
-        let chat_overlay = self.creating_chat_folder.is_some().then(|| {
-            let can_save = !self.chat_create_submitting
-                && (self.creating_chat_session.is_some() || (!self.chat_create_worktrees_loading && self.chat_create_worktree.is_some()));
-            let selected_worktree = self.chat_create_worktree.clone();
-            let can_create_worktree = self.chat_create_can_new_worktree;
-            div()
-                .occlude()
-                .absolute()
-                .inset_0()
-                .track_focus(&minimal_popup_focus)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(colors.backdrop))
-                .child(
-                    div()
-                        .w(px(520.0))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded(px(10.0))
-                        .border_1()
-                        .border_color(rgb(colors.border))
-                        .bg(rgb(colors.surface))
-                        .shadow_lg()
-                        .child(
-                            div()
-                                .text_size(px(16.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(colors.text))
-                                .child(if self.creating_chat_session.is_some() { "New chat" } else { "New agent session" }),
-                        )
-                        .child(
-                            div()
-                                .h(px(36.0))
-                                .px_3()
-                                .flex()
-                                .items_center()
-                                .rounded(px(6.0))
-                                .border_1()
-                                .border_color(rgb(colors.border))
-                                .bg(rgb(colors.background))
-                                .child(self.chat_create_input.clone()),
-                        )
-                        .child(
-                            div().flex().gap_2().children(
-                                [
-                                    AgentCli::Codex,
-                                    AgentCli::Claude,
-                                    AgentCli::Jcode,
-                                ]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, agent)| {
-                                    let selected = self.minimal_new_session_agent == agent;
-                                    div()
-                                        .id(("minimal-session-agent", index))
-                                        .flex_1()
-                                        .px_3()
-                                        .py_2()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap_2()
-                                        .rounded(px(6.0))
-                                        .border_1()
-                                        .border_color(rgb(if selected {
-                                            colors.accent
-                                        } else {
-                                            colors.border
-                                        }))
-                                        .bg(rgb(if selected {
-                                            colors.surface_high
-                                        } else {
-                                            colors.background
-                                        }))
-                                        .text_sm()
-                                        .text_color(rgb(colors.text))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.minimal_new_session_agent = agent;
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            svg()
-                                                .path(match agent {
-                                                    AgentCli::Codex => CODEX_ICON,
-                                                    AgentCli::Claude => CLAUDE_ICON,
-                                                    AgentCli::Jcode => JCODE_ICON,
-                                                })
-                                                .size(px(18.0))
-                                                .text_color(rgb(colors.text)),
-                                        )
-                                        .child(agent.label())
-                                }),
-                            ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(colors.muted))
-                                .child("Start a chat with the selected assistant."),
-                        )
-                        .when(self.creating_chat_session.is_some(), |card| card.child(div().text_size(px(12.0)).text_color(rgb(colors.muted)).child("Shares this session's project directory, files, and terminal.")))
-                        .when(self.creating_chat_session.is_none(), |card| card
-                        .child(
-                            div()
-                                .mt_1()
-                                .text_sm()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(colors.text))
-                                .child("Start from"),
-                        )
-                        .child(
-                            div()
-                                .id("minimal-session-worktrees")
-                                .max_h(px(340.0))
-                                .overflow_y_scroll()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .when(self.chat_create_worktrees_loading, |list| {
-                                    list.child(
-                                        div()
-                                            .px_3()
-                                            .py_3()
-                                            .text_sm()
-                                            .text_color(rgb(colors.muted))
-                                            .child("Loading worktrees…"),
-                                    )
-                                })
-                                .when(!self.chat_create_worktrees_loading, |list| {
-                                    let selected =
-                                        matches!(selected_worktree, Some(NewSessionWorktree::New));
-                                    list.child(
-                                        div()
-                                            .id("minimal-session-new-worktree")
-                                            .px_3()
-                                            .py_2()
-                                            .rounded(px(6.0))
-                                            .border_1()
-                                            .border_color(rgb(if selected {
-                                                colors.accent
-                                            } else {
-                                                colors.border
-                                            }))
-                                            .bg(rgb(if selected {
-                                                colors.surface_high
-                                            } else {
-                                                colors.background
-                                            }))
-                                            .text_sm()
-                                            .text_color(rgb(if can_create_worktree {
-                                                colors.text
-                                            } else {
-                                                colors.muted
-                                            }))
-                                            .when(can_create_worktree, |row| {
-                                                row.cursor_pointer()
-                                                    .hover(|style| {
-                                                        style.bg(rgb(colors.surface_high))
-                                                    })
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.chat_create_worktree =
-                                                            Some(NewSessionWorktree::New);
-                                                        cx.notify();
-                                                    }))
-                                            })
-                                            .child("Create new worktree"),
-                                    )
-                                })
-                                .when(!self.chat_create_worktrees_loading, |list| {
-                                    list.child(
-                                        div()
-                                            .mt_1()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(colors.muted))
-                                            .child("Existing worktrees"),
-                                    )
-                                })
-                                .when(!self.chat_create_worktrees_loading, |list| {
-                                    list.children(
-                                        self.chat_create_worktrees.iter().enumerate().map(
-                                            |(index, worktree)| {
-                                                let path = worktree.path.clone();
-                                                let selected = matches!(
-                                                    &selected_worktree,
-                                                    Some(NewSessionWorktree::Existing(selected))
-                                                        if selected == &path
-                                                );
-                                                let label =
-                                                    worktree.branch.clone().unwrap_or_else(|| {
-                                                        Path::new(&path)
-                                                            .file_name()
-                                                            .and_then(|name| name.to_str())
-                                                            .unwrap_or("Project directory")
-                                                            .to_owned()
-                                                    });
-                                                let selected_path = path.clone();
-                                                div()
-                                                    .id(("minimal-session-worktree", index))
-                                                    .px_3()
-                                                    .py_2()
-                                                    .rounded(px(6.0))
-                                                    .border_1()
-                                                    .border_color(rgb(if selected {
-                                                        colors.accent
-                                                    } else {
-                                                        colors.border
-                                                    }))
-                                                    .bg(rgb(if selected {
-                                                        colors.surface_high
-                                                    } else {
-                                                        colors.background
-                                                    }))
-                                                    .cursor_pointer()
-                                                    .hover(|style| {
-                                                        style.bg(rgb(colors.surface_high))
-                                                    })
-                                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                                        this.chat_create_worktree =
-                                                            Some(NewSessionWorktree::Existing(
-                                                                selected_path.clone(),
-                                                            ));
-                                                        cx.notify();
-                                                    }))
-                                                    .child(
-                                                        div()
-                                                            .text_sm()
-                                                            .text_color(rgb(colors.text))
-                                                            .child(label),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(rgb(colors.muted))
-                                                            .child(path),
-                                                    )
-                                            },
-                                        ),
-                                    )
-                                })
-                                .when(self.chat_create_sources_loading, |list| {
-                                    list.child(
-                                        div()
-                                            .mt_1()
-                                            .px_3()
-                                            .py_2()
-                                            .text_sm()
-                                            .text_color(rgb(colors.muted))
-                                            .child("Loading branches and pull requests…"),
-                                    )
-                                })
-                                .when(!self.chat_create_branches.is_empty(), |list| {
-                                    list.child(
-                                        div()
-                                            .mt_1()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(colors.muted))
-                                            .child("Branches"),
-                                    )
-                                    .children(self.chat_create_branches.iter().enumerate().map(
-                                        |(index, branch)| {
-                                            let reference = branch.reference.clone();
-                                            let oid = branch.oid.clone();
-                                            let selected = matches!(
-                                                &selected_worktree,
-                                                Some(NewSessionWorktree::Branch {
-                                                    reference: selected_reference,
-                                                    oid: selected_oid,
-                                                }) if selected_reference == &reference && selected_oid == &oid
-                                            );
-                                            div()
-                                                .id(("minimal-session-branch", index))
-                                                .px_3()
-                                                .py_2()
-                                                .rounded(px(6.0))
-                                                .border_1()
-                                                .border_color(rgb(if selected { colors.accent } else { colors.border }))
-                                                .bg(rgb(if selected { colors.surface_high } else { colors.background }))
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.chat_create_worktree = Some(NewSessionWorktree::Branch {
-                                                        reference: reference.clone(),
-                                                        oid: oid.clone(),
-                                                    });
-                                                    cx.notify();
-                                                }))
-                                                .child(div().text_sm().text_color(rgb(colors.text)).child(branch.name.clone()))
-                                        },
-                                    ))
-                                })
-                                .when(!self.chat_create_pull_requests.is_empty(), |list| {
-                                    list.child(
-                                        div()
-                                            .mt_1()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(rgb(colors.muted))
-                                            .child("Pull requests"),
-                                    )
-                                    .children(self.chat_create_pull_requests.iter().enumerate().map(
-                                        |(index, pull_request)| {
-                                            let number = pull_request.number;
-                                            let oid = pull_request.oid.clone();
-                                            let selected = matches!(
-                                                &selected_worktree,
-                                                Some(NewSessionWorktree::PullRequest {
-                                                    number: selected_number,
-                                                    oid: selected_oid,
-                                                }) if *selected_number == number && selected_oid == &oid
-                                            );
-                                            div()
-                                                .id(("minimal-session-pull-request", index))
-                                                .px_3()
-                                                .py_2()
-                                                .rounded(px(6.0))
-                                                .border_1()
-                                                .border_color(rgb(if selected { colors.accent } else { colors.border }))
-                                                .bg(rgb(if selected { colors.surface_high } else { colors.background }))
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(colors.surface_high)))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.chat_create_worktree = Some(NewSessionWorktree::PullRequest {
-                                                        number,
-                                                        oid: oid.clone(),
-                                                    });
-                                                    cx.notify();
-                                                }))
-                                                .child(div().text_sm().text_color(rgb(colors.text)).child(format!("#{} {}", pull_request.number, pull_request.title)))
-                                        },
-                                    ))
-                                })
-                                .when_some(self.chat_create_sources_error.clone(), |list, error| {
-                                    list.child(div().px_3().py_2().text_xs().text_color(rgb(colors.muted)).child(error))
-                                }),
-                        )
-)
-                        .child(
-                            div()
-                                .mt_2()
-                                .flex()
-                                .justify_end()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id("minimal-cancel-session")
-                                        .h(px(30.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .text_sm()
-                                        .text_color(rgb(colors.muted))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.surface_high)))
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.cancel_chat_create(cx)
-                                            }),
-                                        )
-                                        .child("Cancel"),
-                                )
-                                .child(
-                                    div()
-                                        .id("minimal-save-session")
-                                        .h(px(30.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(6.0))
-                                        .bg(rgb(if can_save {
-                                            colors.accent
-                                        } else {
-                                            colors.surface_high
-                                        }))
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(rgb(if can_save {
-                                            colors.accent_text
-                                        } else {
-                                            colors.muted
-                                        }))
-                                        .when(can_save, |button| {
-                                            button
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(colors.accent_hover)))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_save {
-                                                this.save_minimal_chat_create(cx)
-                                            }
-                                        }))
-                                        .child(if self.chat_create_submitting {
-                                            "Creating…"
-                                        } else if self.creating_chat_session.is_some() {
-                                            "Create chat"
-                                        } else {
-                                            "Create session"
-                                        }),
-                                ),
-                        ),
-                )
-                .into_any_element()
-        });
-        let viewport = window.viewport_size();
-        let image_viewer_overlay = self.image_viewer.as_ref().and_then(|path| {
-            let image = match self.message_images.get(path) {
-                Some(MessageImageState::Ready(ready)) => img(ready.image.image.clone()),
-                _ => return None,
-            };
-            Some(
-                div()
-                    .occlude()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .track_focus(&minimal_popup_focus)
-                    .bg(rgba(colors.backdrop))
-                    .cursor_pointer()
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, _, cx| {
-                            this.image_viewer = None;
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        // In exact pixels: an image lays itself out by its own
-                        // proportions, which outvote a percentage and overflow.
-                        image
-                            .debug_selector(|| "image-viewer-image".into())
-                            .w(viewport.width - px(IMAGE_VIEWER_MARGIN * 2.0))
-                            .h(viewport.height - px(IMAGE_VIEWER_MARGIN * 2.0))
-                            .object_fit(gpui::ObjectFit::Contain),
-                    )
-                    .into_any_element(),
-            )
-        });
         let error_banner = self.model.connection_error.clone().map(|error| {
             div()
                 .absolute()
@@ -18733,6 +18377,15 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if this.new_chat_menu.take().is_some() {
+                    let focus = this.new_chat_input.read(cx).focus_handle(cx);
+                    window.focus(&focus);
+                    cx.notify();
+                    return;
+                }
+                if this.chat_create_submitting {
+                    return;
+                }
                 if this.image_preview.is_some() {
                     this.close_image_preview(window, cx);
                     return;
@@ -18894,7 +18547,6 @@ impl XdDesktop {
                 root.child(overlay)
             })
             .when_some(chat_delete_overlay, |root, overlay| root.child(overlay))
-            .when_some(chat_overlay, |root, overlay| root.child(overlay))
             .when_some(image_preview_overlay, |root, overlay| root.child(overlay))
             .when_some(image_viewer_overlay, |root, overlay| root.child(overlay))
             .when_some(error_banner, |root, banner| root.child(banner))
@@ -21830,8 +21482,7 @@ Binary files /dev/null and b/image.png differ\n";
                 "let workspace_delete_overlay =",
                 "let chat_delete_overlay =",
             ),
-            ("let chat_delete_overlay =", "let chat_overlay ="),
-            ("let chat_overlay =", "let image_viewer_overlay ="),
+            ("let chat_delete_overlay =", "let image_viewer_overlay ="),
             ("let image_viewer_overlay =", "let error_banner ="),
         ];
 
@@ -21863,7 +21514,6 @@ Binary files /dev/null and b/image.png differ\n";
 
         for (start, end) in [
             ("fn begin_workspace_create(", "fn workspace_create_changed("),
-            ("fn begin_chat_create(", "fn chat_create_changed("),
             ("fn begin_sidebar_delete(", "fn cancel_sidebar_delete("),
             (
                 "fn open_sidebar_context_menu(",
@@ -25566,32 +25216,6 @@ Binary files /dev/null and b/image.png differ\n";
             subscription.contains("ComposerEvent::Submit => this.save_minimal_chat_create(cx)")
         );
         assert!(!subscription.contains("this.save_chat_create(cx)"));
-    }
-
-    #[test]
-    fn new_session_flow_chooses_a_worktree_branch_or_pull_request_before_creation() {
-        let source = include_str!("main.rs");
-        let production = source
-            .split_once("#[cfg(test)]")
-            .expect("desktop production source")
-            .0;
-
-        for behavior in [
-            "chat_create_worktrees_loading",
-            "NewSessionWorktree::New",
-            "NewSessionWorktree::Existing",
-            "NewSessionWorktree::Branch",
-            "NewSessionWorktree::PullRequest",
-            "Create new worktree",
-            "Existing worktrees",
-            "Branches",
-            "Pull requests",
-            "host.folder_settings(&folder_id)",
-            "host.new_chat_sources(&folder_id)",
-            "new_chat_with_backend_in_worktree",
-        ] {
-            assert!(production.contains(behavior), "missing {behavior}");
-        }
     }
 
     #[test]

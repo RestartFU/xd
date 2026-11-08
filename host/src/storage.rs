@@ -1270,6 +1270,23 @@ impl StateStore {
             })
             .collect::<Vec<_>>();
 
+        let symbolic = run_git(
+            &root,
+            &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        )?;
+        let remote_default = symbolic.0.success().then(|| {
+            String::from_utf8_lossy(&symbolic.1)
+                .trim()
+                .strip_prefix("refs/remotes/origin/")
+                .unwrap_or_default()
+                .to_owned()
+        });
+        let default_branch = remote_default.or_else(|| {
+            ["main", "master"]
+                .into_iter()
+                .find(|name| branches.iter().any(|b| b["name"] == *name))
+                .map(str::to_owned)
+        });
         let pull_request_output = run_gh(
             &root,
             &[
@@ -1313,6 +1330,7 @@ impl StateStore {
         Ok(json!({
             "ok": true,
             "branches": branches,
+            "default_branch": default_branch,
             "pull_requests": pull_requests,
             "pull_request_error": pull_request_error,
         }))
@@ -3700,6 +3718,7 @@ impl StateStore {
                 "Choose either a legacy working directory or a worktree.".into(),
             ));
         }
+        let requested_model = optional_string(request, "model")?;
         let backend_override = optional_string(request, "backend")?;
         if let Some(backend) = backend_override {
             validate_backend(backend)?;
@@ -3791,9 +3810,14 @@ impl StateStore {
         let (model, effort) = new_chat_model_and_effort(
             &transaction,
             &backend,
-            folder_values.model.filter(|model| {
-                backend_override.is_none() && validate_model(&backend, model).is_ok()
-            }),
+            if let Some(model) = requested_model {
+                validate_model(&backend, model)?;
+                Some(model.to_owned())
+            } else {
+                folder_values.model.filter(|model| {
+                    backend_override.is_none() && validate_model(&backend, model).is_ok()
+                })
+            },
         )?;
         let id = Uuid::new_v4().to_string();
         let now = now_seconds();
@@ -3844,8 +3868,17 @@ impl StateStore {
                                 .into(),
                         ));
                     }
+                    let base = if request
+                        .get("start_from_remote")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        fetch_worktree_base(&root, reference, oid)?
+                    } else {
+                        oid.to_owned()
+                    };
                     let created =
-                        create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
+                        create_worktree(&transaction, &source, &id, Some(title), Some(&base))?;
                     (Some(created), Some(source))
                 }
                 RequestedNewChatWorktree::PullRequest { number, oid } => {
@@ -8354,6 +8387,68 @@ fn optional_string<'a>(request: &'a Value, key: &str) -> Result<Option<&'a str>,
     }
 }
 
+/// Match the base picker's remote mode: tracked upstream, then origin, then local.
+fn fetch_worktree_base(
+    root: &Path,
+    reference: &str,
+    local_oid: &str,
+) -> Result<String, StorageError> {
+    let (remote, remote_ref) = if let Some(branch) = reference.strip_prefix("refs/heads/") {
+        let config = |key: &str| -> Result<Option<String>, StorageError> {
+            let output = run_git(root, &["config", "--get", key])?;
+            Ok(output
+                .0
+                .success()
+                .then(|| String::from_utf8_lossy(&output.1).trim().to_owned()))
+        };
+        match (
+            config(&format!("branch.{branch}.remote"))?,
+            config(&format!("branch.{branch}.merge"))?,
+        ) {
+            (Some(remote), Some(remote_ref)) => (remote, remote_ref),
+            _ => ("origin".to_owned(), format!("refs/heads/{branch}")),
+        }
+    } else if let Some(rest) = reference.strip_prefix("refs/remotes/") {
+        let (remote, branch) = rest
+            .split_once('/')
+            .ok_or_else(|| StorageError::InvalidRequest("Invalid remote branch.".into()))?;
+        (remote.to_owned(), format!("refs/heads/{branch}"))
+    } else {
+        return Ok(local_oid.to_owned());
+    };
+    if remote == "." {
+        return git_resolve_commit(root, &remote_ref);
+    }
+    let remotes = run_git(root, &["remote"])?;
+    if !String::from_utf8_lossy(&remotes.1)
+        .lines()
+        .any(|name| name == remote)
+    {
+        return Ok(local_oid.to_owned());
+    }
+    let exists = run_git(
+        root,
+        &["ls-remote", "--exit-code", "--heads", &remote, &remote_ref],
+    )?;
+    if exists.0.code() == Some(2) {
+        return Ok(local_oid.to_owned());
+    }
+    if !exists.0.success() {
+        return Err(StorageError::InvalidRequest(command_error(
+            &exists.2,
+            "Could not read remote base branch",
+        )));
+    }
+    let fetched = run_git(root, &["fetch", "--", &remote, &remote_ref])?;
+    if !fetched.0.success() {
+        return Err(StorageError::InvalidRequest(command_error(
+            &fetched.2,
+            "Could not fetch remote base branch",
+        )));
+    }
+    git_resolve_commit(root, "FETCH_HEAD")
+}
+
 fn requested_new_chat_worktree(
     request: &Value,
 ) -> Result<RequestedNewChatWorktree<'_>, StorageError> {
@@ -8767,6 +8862,96 @@ mod tests {
     };
 
     static NEXT_TEST: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn draft_creation_uses_the_selected_provider_model_and_rejects_invalid_models() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name":"Draft"})).unwrap()["id"].clone();
+        for backend in ["claude", "codex"] {
+            let model = backend_models(backend)[0].0;
+            let chat = store
+                .new_chat(&json!({"folder":folder,"backend":backend,"model":model}))
+                .unwrap();
+            let snapshot = store.chat(chat["id"].as_str().unwrap()).unwrap();
+            assert_eq!(snapshot["backend"], backend);
+            assert_eq!(snapshot["model"], model);
+        }
+        assert!(
+            store
+                .new_chat(&json!({"folder":folder,"backend":"claude","model":"unknown-model"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_worktree_base_fetches_a_differently_named_upstream_and_falls_back_locally() {
+        let fixture = Fixture::new();
+        let root = fixture.workspaces.join("source");
+        fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ]);
+        let local = git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            fetch_worktree_base(&root, "refs/heads/main", &local).unwrap(),
+            local
+        );
+        let remote = fixture.root.join("remote.git");
+        git(&[
+            "clone",
+            "--bare",
+            root.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ]);
+        git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&[
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "remote tip",
+        ]);
+        let tip = git(&["rev-parse", "HEAD"]);
+        git(&["push", "origin", "HEAD:refs/heads/upstream-base"]);
+        git(&["reset", "--hard", &local]);
+        git(&["config", "branch.main.remote", "origin"]);
+        git(&["config", "branch.main.merge", "refs/heads/upstream-base"]);
+        assert_eq!(
+            fetch_worktree_base(&root, "refs/heads/main", &local).unwrap(),
+            tip
+        );
+        assert_eq!(git(&["rev-parse", "HEAD"]), local);
+        git(&["config", "branch.main.merge", "refs/heads/missing"]);
+        assert_eq!(
+            fetch_worktree_base(&root, "refs/heads/main", &local).unwrap(),
+            local
+        );
+    }
 
     #[test]
     fn workspace_sessions_migrate_legacy_chats_without_touching_agent_state() {
