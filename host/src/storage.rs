@@ -1943,16 +1943,23 @@ impl StateStore {
         // Names xd's branch, not whatever is checked out, so it never touches
         // one of the user's.
         let moved = run_git(path, &["branch", "-m", &recorded, &renamed]);
-        // Git can rename the reference and still fail afterwards, so the
-        // branch the worktree is on now, not the exit status, says what
-        // happened. What deletion removes must name that branch.
-        let on_branch = |path: &Path| {
-            run_git(path, &["branch", "--show-current"])
-                .ok()
-                .filter(|output| output.0.success())
-                .map(|output| String::from_utf8_lossy(&output.1).trim().to_owned())
+        // Git can rename the reference and still fail afterwards, and the
+        // worktree may have switched branches meanwhile, so which of the two
+        // branches exists now, not the exit status or the checkout, says what
+        // happened. What deletion removes must name xd's branch.
+        let exists = |branch: &str| {
+            run_git(
+                path,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .is_ok_and(|output| output.0.success())
         };
-        if on_branch(path).as_deref() != Some(renamed.as_str()) {
+        if !exists(&renamed) || exists(&recorded) {
             let moved = moved?;
             return if moved.0.success() {
                 Ok(None)
@@ -1983,9 +1990,9 @@ impl StateStore {
             // worktree alone.
             other => {
                 let restored = run_git(path, &["branch", "-m", &renamed, &recorded]);
-                if on_branch(path).as_deref() != Some(recorded.as_str()) {
+                if !exists(&recorded) {
                     eprintln!(
-                        "xd: worktree {workdir} is on {renamed}, but xd recorded {recorded}: {}",
+                        "xd: worktree {workdir} has branch {renamed}, but xd recorded {recorded}: {}",
                         restored
                             .map(|output| String::from_utf8_lossy(&output.2).trim().to_owned())
                             .unwrap_or_else(|error| error.to_string())
