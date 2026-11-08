@@ -542,8 +542,9 @@ private fun MinimalProjectsHome(
     // Saved by project id, so an open editor survives recreating the activity.
     var contextForId by rememberSaveable { mutableStateOf<String?>(null) }
     var secretsForId by rememberSaveable { mutableStateOf<String?>(null) }
-    val contextFor = projects.firstOrNull { it.id == contextForId }
-    val secretsFor = projects.firstOrNull { it.id == secretsForId }
+    // Folders of projects have context and secrets too, which reach every project inside.
+    val contextFor = tree.folders.firstOrNull { it.id == contextForId }
+    val secretsFor = tree.folders.firstOrNull { it.id == secretsForId }
     val settled = if (actions.settlement) tree.settledSessions() else emptyList()
     val operationError by model.error.collectAsStateWithLifecycle()
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -651,6 +652,8 @@ private fun MinimalProjectsHome(
                                         onShortcuts = {
                                             model.openShortcutEditor(row.folder.id, "${row.folder.name} shortcuts")
                                         },
+                                        onContext = { contextForId = row.folder.id },
+                                        onSecrets = { secretsForId = row.folder.id },
                                         onDelete = { deletingFolderId = row.folder.id },
                                     )
                                 },
@@ -1415,8 +1418,10 @@ private fun FolderMenu(
     /** Null when there is no other folder to move it into or out of. */
     onMove: (() -> Unit)?,
     onRename: () -> Unit,
-    /** Shortcuts set here reach every project inside. */
+    /** Shortcuts, context, and secrets set here reach every project inside. */
     onShortcuts: () -> Unit,
+    onContext: () -> Unit,
+    onSecrets: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -1452,6 +1457,14 @@ private fun FolderMenu(
             DropdownMenuItem(
                 text = { Text("Prompt shortcuts") },
                 onClick = { open = false; onShortcuts() },
+            )
+            DropdownMenuItem(
+                text = { Text("Folder context") },
+                onClick = { open = false; onContext() },
+            )
+            DropdownMenuItem(
+                text = { Text("Agent secrets") },
+                onClick = { open = false; onSecrets() },
             )
             HorizontalDivider()
             DropdownMenuItem(

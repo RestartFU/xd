@@ -24,7 +24,6 @@ import androidx.compose.ui.test.junit4.AndroidComposeTestRule
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.performClick
-import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.credentials.CredentialStore
@@ -34,12 +33,15 @@ import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.StoredCredentials
 import com.restartfu.xd.mobile.MainViewModel
 import com.restartfu.xd.mobile.MobileSettings
-import com.restartfu.xd.mobile.XdApplication
+import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.net.PlatformSocket
 import com.restartfu.xd.net.PlatformSocketListener
 import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -62,7 +64,7 @@ import org.robolectric.shadows.ShadowLooper
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [35], qualifiers = "w412dp-h915dp-420dpi", application = ProjectsScreenshotTest.ScriptedApplication::class)
+@Config(sdk = [35], qualifiers = "w412dp-h915dp-420dpi")
 class ProjectsScreenshotTest {
     private val out = System.getProperty("xd.shots")?.let(::File)
 
@@ -86,7 +88,8 @@ class ProjectsScreenshotTest {
     @Test fun folderMenu() = shoot("folder-menu-dark", MinimalThemePreset.DARK) {
         // A top-level folder with no other folder to go into cannot move.
         click("acme actions")
-        check(shows("New project here") && shows("Prompt shortcuts") && shows("Delete folder") && !shows("Move to…"))
+        check(shows("New project here") && shows("Prompt shortcuts") && shows("Folder context") &&
+            shows("Agent secrets") && shows("Delete folder") && !shows("Move to…"))
         pressBack()
         click("Clients actions")
         check(shows("New project here") && shows("Move to…") && shows("Delete folder"))
@@ -124,8 +127,10 @@ class ProjectsScreenshotTest {
     /** Opens the page, lets [steps] act on it, and captures the result. */
     private fun shoot(name: String, theme: MinimalThemePreset, steps: Screen.() -> Unit = {}) {
         val activity = compose.activity
-        val model = ViewModelProvider(activity)[MainViewModel::class.java]
-        runBlocking { model.client.connect(connection) }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
+        val connected = runBlocking { model.client.connect(connection) }
+        check(connected is ConnectResult.Success) { "Could not reach the scripted host: $connected" }
         val settings = MobileSettings(activity)
         // Time moves only when the test says, so running animations cannot keep Compose busy.
         compose.mainClock.autoAdvance = false
@@ -159,6 +164,7 @@ class ProjectsScreenshotTest {
             dir.mkdirs()
             File(dir, "$name.png").outputStream().use { screen.capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
         }
+        scope.cancel()
     }
 
     /** Drives the page as a person would by touch. */
@@ -243,10 +249,6 @@ class ProjectsScreenshotTest {
             }
             return bitmap
         }
-    }
-
-    class ScriptedApplication : XdApplication() {
-        override fun createClient(scope: CoroutineScope): XdClient = XdClient({ ScriptedSocket() }, NoCredentials, scope)
     }
 
     private object NoCredentials : CredentialStore {

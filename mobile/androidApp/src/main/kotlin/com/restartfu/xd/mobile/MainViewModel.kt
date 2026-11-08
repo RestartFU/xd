@@ -106,8 +106,11 @@ data class PendingHostKeyConfirmation(
     val username: String,
 )
 
-class MainViewModel(application: Application) : AndroidViewModel(application) {
-    val client: XdClient = (application as XdApplication).client
+class MainViewModel @JvmOverloads constructor(
+    application: Application,
+    /** The app's host connection; screen tests pass one answering from a script. */
+    val client: XdClient = (application as XdApplication).client,
+) : AndroidViewModel(application) {
     private val _connecting = MutableStateFlow(false)
     private val _pendingHostKey = MutableStateFlow<PendingHostKeyConfirmation?>(null)
     private val _privateKeyName = MutableStateFlow<String?>(null)
