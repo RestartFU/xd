@@ -26,6 +26,8 @@ mod codex_app;
 mod deletion;
 mod git_draft;
 mod local_socket;
+#[cfg(target_os = "linux")]
+mod memory_guard;
 mod model_catalog;
 mod owner_icon;
 mod pairing;
@@ -1225,6 +1227,88 @@ impl Engine {
                     }),
                 )
             });
+        }
+    }
+
+    /// Starts the memory guard; see [`memory_guard`]. It does nothing unless
+    /// the daemon runs in a cgroup that running out of memory kills as a whole.
+    #[cfg(target_os = "linux")]
+    pub fn start_memory_guard(self: &Arc<Self>) {
+        let setting = std::env::var(memory_guard::PERCENT_VARIABLE).ok();
+        let Some(percent) = memory_guard::threshold_percent(setting.as_deref()) else {
+            return;
+        };
+        let Some(cgroup) = memory_guard::Cgroup::discover() else {
+            return;
+        };
+        let mut trigger = memory_guard::Trigger::new(cgroup.max(), percent);
+        eprintln!(
+            "xd-host: running out of memory would stop every process in this container, so xd stops the largest build or tool once {:.1} of its {:.1} GiB cannot be freed.",
+            trigger.threshold() as f64 / (1u64 << 30) as f64,
+            cgroup.max() as f64 / (1u64 << 30) as f64,
+        );
+        // Weak, since the engine owns nothing that would stop this thread.
+        let engine = Arc::downgrade(self);
+        let spawned = thread::Builder::new()
+            .name("xd-memory-guard".into())
+            .spawn(move || {
+                while engine.strong_count() > 0 {
+                    thread::sleep(memory_guard::SAMPLE_EVERY);
+                    let Some(usage) = cgroup.unreclaimable() else {
+                        continue;
+                    };
+                    let now = std::time::Instant::now();
+                    if !trigger.due(usage, now) {
+                        continue;
+                    }
+                    trigger.fired(now);
+                    let Some(engine) = engine.upgrade() else {
+                        return;
+                    };
+                    engine.relieve_memory(&cgroup, usage);
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("xd-host: cannot start the memory guard: {error}");
+        }
+    }
+
+    /// Stops the largest process tree xd may stop, and says so in the host log
+    /// and in the chat whose agent or terminal it ran under.
+    #[cfg(target_os = "linux")]
+    fn relieve_memory(&self, cgroup: &memory_guard::Cgroup, usage: u64) {
+        let mut chats: HashMap<u32, String> =
+            self.terminals.session_leaders().into_iter().collect();
+        if let Some(runtime) = &self.runtime {
+            chats.extend(runtime.agent_processes());
+        }
+        let owners = chats.keys().copied().collect();
+        let scope = memory_guard::Scope {
+            me: std::process::id(),
+            // SAFETY: getuid has no preconditions.
+            uid: unsafe { libc::getuid() },
+            cgroup: cgroup.path(),
+            owners: &owners,
+        };
+        let Some(victim) = memory_guard::choose_victim(&memory_guard::read_processes(), &scope)
+        else {
+            eprintln!(
+                "xd-host: the container is about to run out of memory, but nothing is running that xd may stop."
+            );
+            return;
+        };
+        let message = memory_guard::notice(&victim, usage, cgroup.max());
+        eprintln!("xd-host: {message}");
+        memory_guard::stop(&victim);
+        if let Some(chat) = victim.owner.and_then(|owner| chats.get(&owner))
+            && let Some(store) = &self.store
+            && store.chat(chat).is_ok()
+            && store
+                .append_turn_message(chat, "error", &message, None)
+                .is_ok()
+        {
+            self.events
+                .publish(json!({"event": "changed", "chat": chat}));
         }
     }
 

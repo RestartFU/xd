@@ -66,6 +66,18 @@ branch holds. Using a session's terminal counts as activity. Sessions you've kep
 deleted, and neither is one you brought back from the **Settled** shelf, until
 it sees new activity.
 
+## Memory limits
+
+On Linux, a container's memory limit can be set to stop every process in it at
+once when it runs out (cgroup v2 `memory.oom.group`). There, a single heavy
+build would take down the daemon, every chat and every terminal. When the host
+runs in such a container, it watches the memory the kernel cannot reclaim (page
+cache does not count) and, once that reaches 92% of the limit, stops the
+largest process tree it started work in, such as a compiler or build tool, and
+never an agent, a terminal shell or xd itself. The host log and the chat the
+work belonged to say what was stopped. Set `XD_MEMORY_GUARD_PERCENT` to a
+value from 50 to 99 to change the threshold, or to `off` to turn this off.
+
 ## Install
 
 Linux x86_64:

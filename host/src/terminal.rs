@@ -544,6 +544,21 @@ impl TerminalManager {
             .unwrap_or_default()
     }
 
+    /// The shell leading each open terminal's session, with the chat that owns
+    /// the terminal.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn session_leaders(&self) -> Vec<(u32, String)> {
+        self.sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .values()
+                    .filter_map(|session| Some((u32::try_from(session.pid).ok()?, session.owner())))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn has_sessions(&self) -> bool {
         self.sessions
             .lock()

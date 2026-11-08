@@ -398,6 +398,8 @@ struct PendingInteraction {
 /// has something running; see [`TurnRuntime::release_idle_agents`].
 struct AgentSession {
     child: Arc<Mutex<Child>>,
+    /// The child's pid, readable without waiting on `child`.
+    pid: u32,
     stdin: ChildStdin,
     /// Where the process's output goes; see [`Router`].
     router: Arc<Mutex<Router>>,
@@ -437,6 +439,8 @@ struct ActiveProcess {
     message_boundary: i64,
     turn_id: u64,
     child: Arc<Mutex<Child>>,
+    /// The child's pid, readable without waiting on `child`.
+    pid: u32,
     cancelled: Arc<AtomicBool>,
     started: Instant,
     label: String,
@@ -509,6 +513,28 @@ impl TurnRuntime {
             .active
             .lock()
             .map_or(true, |active| !active.is_empty())
+    }
+
+    /// The agent processes this runtime started and has not let go of, each
+    /// with the chat it works for.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn agent_processes(&self) -> Vec<(u32, String)> {
+        let mut found = Vec::new();
+        if let Ok(active) = self.inner.active.lock() {
+            found.extend(
+                active
+                    .iter()
+                    .map(|(chat_id, process)| (process.pid, chat_id.clone())),
+            );
+        }
+        if let Ok(sessions) = self.inner.sessions.lock() {
+            found.extend(
+                sessions
+                    .iter()
+                    .map(|(chat_id, session)| (session.pid, chat_id.clone())),
+            );
+        }
+        found
     }
 
     /// Whether a kept process between turns is still running a background
@@ -926,6 +952,7 @@ impl TurnRuntime {
         let turn_id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed) + 1;
         let cancelled = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(TurnProgress::default());
+        let pid = child.lock().map_or(0, |child| child.id());
         {
             let mut active = self
                 .inner
@@ -944,6 +971,7 @@ impl TurnRuntime {
                     message_boundary,
                     turn_id,
                     child: child.clone(),
+                    pid,
                     cancelled: cancelled.clone(),
                     started: Instant::now(),
                     label: turn.label.clone(),
@@ -1349,6 +1377,7 @@ impl TurnRuntime {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Cannot start {backend}: {error}"))?;
+        let pid = child.id();
         let mut stdin = child
             .stdin
             .take()
@@ -1399,6 +1428,7 @@ impl TurnRuntime {
             chat_id.to_owned(),
             AgentSession {
                 child: child.clone(),
+                pid,
                 stdin,
                 router,
                 fingerprint: fingerprint.to_owned(),
@@ -2766,6 +2796,7 @@ mod tests {
             ActiveProcess {
                 message_boundary: 0,
                 turn_id: 1,
+                pid: child.id(),
                 child: Arc::new(Mutex::new(child)),
                 cancelled: Arc::new(AtomicBool::new(false)),
                 started: Instant::now(),
