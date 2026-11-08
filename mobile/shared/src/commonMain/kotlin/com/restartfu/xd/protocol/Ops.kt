@@ -588,6 +588,10 @@ public object Ops {
         parentId: String? = null,
         repository: String? = null,
         repositoryUrl: String? = null,
+        /** A folder of projects rather than a project. */
+        group: Boolean = false,
+        /** The GitHub account the folder shows the avatar of; implies [group]. */
+        owner: String? = null,
     ): JsonObject = buildJsonObject {
         require(
             name.isNotBlank() &&
@@ -596,13 +600,26 @@ public object Ops {
                 '\\' !in name
         ) { "A folder name cannot be empty or hidden, or contain a path separator" }
         require(parentId == null || parentId.isNotBlank()) { "Parent id must not be blank" }
+        val folder = group || owner != null
+        require(!folder || (repository.isNullOrBlank() && repositoryUrl.isNullOrBlank())) {
+            "A folder holds projects, not a repository"
+        }
         put("op", "new-folder")
         put("name", name)
         if (parentId != null) put("parent", parentId)
+        if (folder) put("group", true)
+        if (owner != null) put("owner", owner)
         if (!repository.isNullOrBlank()) put("repo", repository)
         // The host clones this into the folder it makes, and checks the
         // address itself: only it knows what its Git can reach.
         if (!repositoryUrl.isNullOrBlank()) put("repo_url", repositoryUrl)
+    }
+
+    /** The avatar of a GitHub account a folder names as its `owner`. */
+    public fun ownerIcon(owner: String): JsonObject = buildJsonObject {
+        require(owner.isNotBlank()) { "An owner is required" }
+        put("op", "owner-icon")
+        put("owner", owner)
     }
 
     public fun listDirectories(path: String? = null): JsonObject = buildJsonObject {

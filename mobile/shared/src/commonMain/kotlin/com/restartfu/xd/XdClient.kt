@@ -31,6 +31,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.longOrNull
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
@@ -90,6 +92,18 @@ public class XdClient(
     private val _sessionGeneration = MutableStateFlow(0L)
     /** Changes when forgetting a remote invalidates all retained chat handles. */
     public val sessionGeneration: StateFlow<Long> = _sessionGeneration.asStateFlow()
+
+    private val _ownerIcons = MutableStateFlow<Map<String, ByteArray?>>(emptyMap())
+
+    /**
+     * Avatars of the GitHub accounts folders name as their `owner`, as PNG or
+     * JPEG bytes. An account the host answered for without an avatar maps to
+     * null; one not answered for yet is absent.
+     */
+    public val ownerIcons: StateFlow<Map<String, ByteArray?>> = _ownerIcons.asStateFlow()
+
+    /** Owners asked about and not answered for yet. */
+    private val ownerIconsRequested = MutableStateFlow<Set<String>>(emptySet())
 
     private val pendingInteractions = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     private val _waitingChats = MutableStateFlow<Set<String>>(emptySet())
@@ -290,8 +304,15 @@ public class XdClient(
             for (ignored in treeRefreshRequests) treeStore.refresh()
         }
         scope.launch {
+            treeStore.state.collect { requestOwnerIcons(it) }
+        }
+        scope.launch {
             actor.link.collect { value ->
                 if (value is Link.Up) {
+                    // A pending avatar's event may have been lost with the
+                    // connection, so anything unanswered is asked for again.
+                    ownerIconsRequested.value = emptySet()
+                    requestOwnerIcons(treeStore.state.value)
                     // Broadcasts sent while disconnected were missed.
                     if (autoSettleWanted.value) rereadAutoSettle()
                     // A failure is not dropped: what is shown may be out of
@@ -324,6 +345,11 @@ public class XdClient(
                 if (eventName == "auto-settle-settings") {
                     autoSettleLock.withLock { autoSettleBroadcasts.update { it + 1 } }
                     rereadAutoSettle()
+                }
+                if (eventName == "owner-icon") {
+                    (event.value["owner"] as? JsonPrimitive)?.contentOrNull?.let { owner ->
+                        recordOwnerIcon(owner, event.value)
+                    }
                 }
                 if (eventName == "tree") {
                     requestTreeRefresh()
@@ -370,6 +396,8 @@ public class XdClient(
     public suspend fun forget() {
         actor.forget()
         treeStore.clear()
+        _ownerIcons.value = emptyMap()
+        ownerIconsRequested.value = emptySet()
         takeSessions().values.forEach { it.core.invalidate() }
         pendingInteractions.value = emptyMap()
         _waitingChats.value = emptySet()
@@ -804,9 +832,11 @@ public class XdClient(
         parentId: String? = null,
         repository: String? = null,
         repositoryUrl: String? = null,
+        group: Boolean = false,
+        owner: String? = null,
     ): String {
         val value = actor.call(
-            Ops.newFolder(name, parentId, repository, repositoryUrl),
+            Ops.newFolder(name, parentId, repository, repositoryUrl, group, owner),
         )
         val id = actor.decodeReply(value) {
             val reply = it.decodeReply<DoneReply>()
@@ -817,6 +847,55 @@ public class XdClient(
         // soon as the creation dialog closes.
         requestTreeRefresh()
         return id
+    }
+
+    /** Asks the host for the avatar of each owner in [snapshot] not asked about yet. */
+    private fun requestOwnerIcons(snapshot: TreeSnapshot) {
+        val generation = _sessionGeneration.value
+        val owners = snapshot.folders.mapNotNullTo(mutableSetOf()) { it.owner }
+        for (owner in owners) {
+            var claimed = false
+            ownerIconsRequested.update { asked ->
+                claimed = owner !in asked && owner !in _ownerIcons.value
+                if (claimed) asked + owner else asked
+            }
+            if (!claimed) continue
+            scope.launch {
+                val reply = try {
+                    actor.call(Ops.ownerIcon(owner))
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Throwable) {
+                    // The folder keeps its icon; the next tree asks again.
+                    ownerIconsRequested.update { it - owner }
+                    return@launch
+                }
+                // An answer from a host this client has since forgotten is dropped.
+                if (generation == _sessionGeneration.value) recordOwnerIcon(owner, reply)
+            }
+        }
+    }
+
+    /**
+     * Records the host's answer about [owner]'s avatar, from a reply or an
+     * `owner-icon` event. A pending answer waits for the event; a failed fetch
+     * is asked about again with the next tree, and the host's own cooldown
+     * keeps that from reaching GitHub every time.
+     */
+    @OptIn(ExperimentalEncodingApi::class)
+    private fun recordOwnerIcon(owner: String, body: kotlinx.serialization.json.JsonObject) {
+        if ((body["pending"] as? JsonPrimitive)?.booleanOrNull == true) return
+        if ((body["retry"] as? JsonPrimitive)?.booleanOrNull == true) {
+            ownerIconsRequested.update { it - owner }
+            return
+        }
+        val mime = (body["mime"] as? JsonPrimitive)?.contentOrNull
+        val data = (body["data"] as? JsonPrimitive)?.contentOrNull
+        val icon = data?.takeIf { mime == "image/png" || mime == "image/jpeg" }
+            ?.let { runCatching { Base64.decode(it) }.getOrNull() }
+            ?.takeIf(ByteArray::isNotEmpty)
+        _ownerIcons.update { it + (owner to icon) }
+        ownerIconsRequested.update { it - owner }
     }
 
     public suspend fun listDirectories(path: String? = null): DirectoryListReply {

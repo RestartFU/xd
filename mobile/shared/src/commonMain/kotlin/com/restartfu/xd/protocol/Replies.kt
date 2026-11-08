@@ -9,6 +9,10 @@ public data class FolderReply(
     val id: String,
     val name: String,
     val parent: String? = null,
+    /** A folder of projects, which holds no repository and starts no sessions. */
+    val group: Boolean = false,
+    /** The GitHub account whose avatar stands in for the folder icon. */
+    val owner: String? = null,
 )
 
 @Serializable
@@ -48,6 +52,8 @@ public data class TreeReply(
     val sessions: List<SessionSummaryReply> = emptyList(),
     /** True when the host can settle sessions; hide settling otherwise. */
     val settlement: Boolean = false,
+    /** True when the host keeps folders of projects; older hosts make a project instead. */
+    @SerialName("folder_groups") val folderGroups: Boolean = false,
 )
 
 /** A chat checkout's Git state, as `git-status` and `git-commit` answer. */

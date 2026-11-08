@@ -268,6 +268,36 @@ class OpsTest {
         assertFailsWith<IllegalArgumentException> { Ops.newFolder(".hidden") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile/App") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder("Mobile\\App") }
+        assertFalse("group" in workspace)
+        assertFalse("owner" in workspace)
+    }
+
+    @Test
+    fun newFolderMarksAFolderOfProjectsAndItsOrganization() {
+        val folder = Ops.newFolder("Clients", "workspace", group = true)
+        assertEquals(true, folder.getValue("group").jsonPrimitive.content.toBoolean())
+        assertFalse("owner" in folder)
+        assertEquals("workspace", folder.getValue("parent").jsonPrimitive.content)
+
+        // An organization is always a folder, even if the caller forgets to say so.
+        val organization = Ops.newFolder("acme", owner = "acme")
+        assertEquals(true, organization.getValue("group").jsonPrimitive.content.toBoolean())
+        assertEquals("acme", organization.getValue("owner").jsonPrimitive.content)
+
+        assertFailsWith<IllegalArgumentException> {
+            Ops.newFolder("Clients", repository = "/home/user/project", group = true)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            Ops.newFolder("acme", repositoryUrl = "https://github.com/acme/web.git", owner = "acme")
+        }
+    }
+
+    @Test
+    fun ownerIconNamesTheAccount() {
+        val request = Ops.ownerIcon("RestartFU")
+        assertEquals("owner-icon", request.getValue("op").jsonPrimitive.content)
+        assertEquals("RestartFU", request.getValue("owner").jsonPrimitive.content)
+        assertFailsWith<IllegalArgumentException> { Ops.ownerIcon(" ") }
         assertFailsWith<IllegalArgumentException> { Ops.newFolder("App", " ") }
     }
 

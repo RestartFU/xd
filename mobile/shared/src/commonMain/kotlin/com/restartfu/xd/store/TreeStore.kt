@@ -115,7 +115,13 @@ internal class TreeStore(
                     val authoritativeSequence = snapshotSequence
                     _state.value = TreeSnapshot(
                         folders = reply.folders.map {
-                            Folder(id = it.id, name = it.name, parentId = it.parent)
+                            Folder(
+                                id = it.id,
+                                name = it.name,
+                                parentId = it.parent,
+                                group = it.group,
+                                owner = it.owner?.takeIf(String::isNotBlank),
+                            )
                         },
                         sessions = reply.sessions.map {
                             WorkspaceSession(it.id, it.folder, it.title, it.chats,
@@ -124,6 +130,7 @@ internal class TreeStore(
                                 autoSettleDisabled = it.autoSettleDisabled)
                         },
                         settlement = reply.settlement,
+                        folderGroups = reply.folderGroups,
                         chats = reply.chats.map {
                             ChatSummary(
                                 id = it.id,

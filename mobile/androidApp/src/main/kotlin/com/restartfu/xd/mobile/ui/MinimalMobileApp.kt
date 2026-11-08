@@ -101,6 +101,17 @@ import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.model.MinimalProject
 import com.restartfu.xd.model.MinimalSession
 import com.restartfu.xd.model.minimalProjects
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import com.restartfu.xd.model.FolderDestination
+import com.restartfu.xd.model.MinimalFolder
+import com.restartfu.xd.model.ProjectTreeRow
+import com.restartfu.xd.model.ancestors
+import com.restartfu.xd.model.moveDestinations
+import com.restartfu.xd.model.organizationLogin
+import com.restartfu.xd.model.projectTree
 import com.restartfu.xd.model.minimalSessions
 import com.restartfu.xd.net.Link
 import androidx.compose.material3.SnackbarDuration
@@ -531,17 +542,39 @@ private fun MinimalProjectsHome(
     // Saved by project id, so an open editor survives recreating the activity.
     var contextForId by rememberSaveable { mutableStateOf<String?>(null) }
     var secretsForId by rememberSaveable { mutableStateOf<String?>(null) }
-    val contextFor = projects.firstOrNull { it.id == contextForId }
-    val secretsFor = projects.firstOrNull { it.id == secretsForId }
+    // Folders of projects have context and secrets too, which reach every project inside.
+    val contextFor = tree.folders.firstOrNull { it.id == contextForId }
+    val secretsFor = tree.folders.firstOrNull { it.id == secretsForId }
     val settled = if (actions.settlement) tree.settledSessions() else emptyList()
     val operationError by model.error.collectAsStateWithLifecycle()
     var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
-    var createProject by rememberSaveable { mutableStateOf(false) }
+    // What the New menu or a folder's menu is making ("project" or "folder"), and in which folder.
+    var creating by rememberSaveable { mutableStateOf<String?>(null) }
+    var createParentId by rememberSaveable { mutableStateOf<String?>(null) }
+    var renamingFolderId by rememberSaveable { mutableStateOf<String?>(null) }
+    var deletingFolderId by rememberSaveable { mutableStateOf<String?>(null) }
+    var movingId by rememberSaveable { mutableStateOf<String?>(null) }
+    val collapsed by settings.collapsedFolders.collectAsStateWithLifecycle()
+    // An earlier project or folder is still being made; another waits rather than being dropped.
+    val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
+    val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
+    val rows = tree.projectTree(collapsed)
+    val folders = tree.projectTree().mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
+    val shownProjects = rows.mapNotNull { (it as? ProjectTreeRow.ProjectRow)?.project }
+    // Opens the folders [id] sits in, and [id] itself, so what lands there is in view.
+    val reveal = { id: String? ->
+        if (id != null) (tree.ancestors(id) + id).forEach { settings.setFolderOpen(it, true) }
+    }
+    val newProjectIn = { parentId: String? -> createParentId = parentId; creating = "project" }
+    val newFolderIn = { parentId: String? -> createParentId = parentId; creating = "folder" }
+    val canMove = { id: String, parentId: String? -> parentId != null || tree.moveDestinations(id).isNotEmpty() }
     // The project the dialog was opened for; it closes if that project goes away.
     var createSessionIn by rememberSaveable { mutableStateOf<String?>(null) }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
 
-    val selected = projects.firstOrNull { it.id == selectedId } ?: projects.firstOrNull()
+    // A project closed away in a folder stays chosen, but shows nothing until its folder opens.
+    val chosen = projects.firstOrNull { it.id == selectedId }
+    val selected = if (chosen != null) chosen.takeIf { it in shownProjects } else shownProjects.firstOrNull()
     val sessions = selected?.let { tree.activeSessions(it.id) }.orEmpty()
     val waiting by model.client.waitingChats.collectAsStateWithLifecycle()
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
@@ -554,8 +587,8 @@ private fun MinimalProjectsHome(
         }
     }
 
-    LaunchedEffect(selected?.id) {
-        if (selectedId != selected?.id) selectedId = selected?.id
+    LaunchedEffect(selected?.id, chosen == null) {
+        if (chosen == null && selectedId != selected?.id) selectedId = selected?.id
     }
 
     Column(
@@ -565,12 +598,12 @@ private fun MinimalProjectsHome(
             .navigationBarsPadding(),
     ) {
         ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true })
-        ContextBar(title = "${projects.size} project${if (projects.size == 1) "" else "s"}") {
-            TextButton(onClick = { createProject = true }) {
-                Icon(painterResource(R.drawable.ic_add), contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("New project")
-            }
+        ContextBar(title = countLabel(projects.size, folders.size)) {
+            NewMenu(
+                canCreateFolders = tree.canCreateFolders,
+                onProject = { newProjectIn(null) },
+                onFolder = { newFolderIn(null) },
+            )
         }
 
         when {
@@ -593,39 +626,73 @@ private fun MinimalProjectsHome(
                         )
                     }
                 }
-                if (projects.isEmpty()) {
+                if (rows.isEmpty()) {
                     item("empty-projects") {
                         EmptyCard("Create a workspace, then start a Codex, Claude, or JCode session.")
                     }
                 } else {
-                    items(projects, key = MinimalProject::id) { project ->
-                        if (project.id == selected?.id) {
-                            OpenDrawer(
-                                project = project,
-                                sessions = sessions,
-                                signalOf = signalOf,
-                                open = { session -> open(project, session) },
-                                actions = actions,
+                    items(rows, key = ProjectTreeRow::id) { row ->
+                        val indent = Modifier.padding(start = (row.depth * FOLDER_INDENT).dp)
+                        when (row) {
+                            is ProjectTreeRow.FolderRow -> FolderRow(
+                                folder = row.folder,
+                                open = row.open,
+                                icon = ownerIcons[row.folder.owner],
+                                modifier = indent,
+                                toggle = { settings.setFolderOpen(row.folder.id, !row.open) },
                                 menu = {
-                                    ProjectMenu(
-                                        project = project,
+                                    FolderMenu(
+                                        folder = row.folder,
+                                        canCreateFolders = tree.canCreateFolders,
+                                        onNewProject = { newProjectIn(row.folder.id) },
+                                        onNewFolder = { newFolderIn(row.folder.id) },
+                                        onMove = { movingId = row.folder.id }
+                                            .takeIf { canMove(row.folder.id, row.folder.parentId) },
+                                        onRename = { renamingFolderId = row.folder.id },
                                         onShortcuts = {
-                                            model.openShortcutEditor(project.id, "${project.name} shortcuts")
+                                            model.openShortcutEditor(row.folder.id, "${row.folder.name} shortcuts")
                                         },
-                                        onRename = { onRenameProject(project) },
-                                        onDelete = { onDeleteProject(project) },
-                                        onContext = { contextForId = project.id },
-                                        onSecrets = { secretsForId = project.id },
+                                        onContext = { contextForId = row.folder.id },
+                                        onSecrets = { secretsForId = row.folder.id },
+                                        onDelete = { deletingFolderId = row.folder.id },
                                     )
                                 },
                             )
-                        } else {
-                            DrawerRow(
-                                project = project,
-                                selected = false,
-                                signals = tree.activeSessions(project.id).map(signalOf),
-                                onClick = { selectedId = project.id },
-                            )
+                            is ProjectTreeRow.ProjectRow -> Box(indent) {
+                                val project = row.project
+                                if (project.id == selected?.id) {
+                                    OpenDrawer(
+                                        project = project,
+                                        icon = ownerIcons[project.owner],
+                                        sessions = sessions,
+                                        signalOf = signalOf,
+                                        open = { session -> open(project, session) },
+                                        actions = actions,
+                                        menu = {
+                                            ProjectMenu(
+                                                project = project,
+                                                onShortcuts = {
+                                                    model.openShortcutEditor(project.id, "${project.name} shortcuts")
+                                                },
+                                                onRename = { onRenameProject(project) },
+                                                onMove = { movingId = project.id }
+                                                    .takeIf { canMove(project.id, project.parentId) },
+                                                onDelete = { onDeleteProject(project) },
+                                                onContext = { contextForId = project.id },
+                                                onSecrets = { secretsForId = project.id },
+                                            )
+                                        },
+                                    )
+                                } else {
+                                    DrawerRow(
+                                        project = project,
+                                        selected = false,
+                                        icon = ownerIcons[project.owner],
+                                        signals = tree.activeSessions(project.id).map(signalOf),
+                                        onClick = { selectedId = project.id },
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -657,15 +724,75 @@ private fun MinimalProjectsHome(
         }
     }
 
-    if (createProject) {
-        NewProjectDialog(
+    val createParent = folders.firstOrNull { it.id == createParentId }
+    LaunchedEffect(creating, createParentId, createParent == null, loading) {
+        // The folder it was opened in went away; nothing is made anywhere else instead.
+        if (creating != null && createParentId != null && createParent == null && !loading) creating = null
+    }
+    when (creating) {
+        "project" -> NewProjectDialog(
             model = model,
-            onDismiss = { createProject = false },
+            parentName = createParent?.name,
+            busy = creatingWorkspace,
+            onDismiss = { creating = null },
             onCreate = { name, repository ->
-                createProject = false
-                model.createWorkspace(name, repository)
+                creating = null
+                reveal(createParentId)
+                model.createWorkspace(name, repository, createParentId)
             },
         )
+        "folder" -> NewFolderDialog(
+            parentName = createParent?.name,
+            busy = creatingWorkspace,
+            onDismiss = { creating = null },
+            onCreate = { name, owner ->
+                creating = null
+                reveal(createParentId)
+                model.createProjectFolder(name, createParentId, owner)
+            },
+        )
+    }
+    folders.firstOrNull { it.id == renamingFolderId }?.let { folder ->
+        NameDialog(
+            title = "Rename folder",
+            target = "folder:${folder.id}",
+            initial = folder.name,
+            validate = ::folderNameError,
+            onDismiss = { renamingFolderId = null },
+            onConfirm = { name ->
+                renamingFolderId = null
+                if (name != folder.name) model.renameProjectFolder(folder.id, name)
+            },
+        )
+    }
+    folders.firstOrNull { it.id == deletingFolderId }?.let { folder ->
+        ConfirmDeleteDialog(
+            title = "Delete folder?",
+            text = "This removes ${folder.name}, every project and folder in it, and all their sessions from xd. " +
+                "Its files will be moved to the workspace trash.",
+            confirm = "Delete folder",
+            onDismiss = { deletingFolderId = null },
+            onConfirm = {
+                deletingFolderId = null
+                model.deleteProjectFolder(folder.id)
+            },
+        )
+    }
+    tree.folders.firstOrNull { it.id == movingId }?.let { item ->
+        key(item.id) {
+            MoveDialog(
+                name = item.name,
+                current = item.parentId?.takeIf { parent -> tree.folders.any { it.id == parent } },
+                destinations = tree.moveDestinations(item.id),
+                icons = ownerIcons,
+                onDismiss = { movingId = null },
+                onMove = { parentId ->
+                    movingId = null
+                    reveal(parentId)
+                    model.moveIntoFolder(item.id, parentId)
+                },
+            )
+        }
     }
     contextFor?.let { project ->
         key(project.id) {
@@ -1059,6 +1186,8 @@ private fun DrawerRow(
     selected: Boolean,
     signals: List<SessionSignal>,
     onClick: () -> Unit,
+    /** The avatar of the account behind the project, in place of the folder icon. */
+    icon: ByteArray? = null,
     menu: (@Composable () -> Unit)? = null,
 ) {
     val faint = LocalXdSignals.current.faint
@@ -1078,11 +1207,10 @@ private fun DrawerRow(
             tint = faint,
             modifier = Modifier.size(14.dp),
         )
-        Icon(
-            painterResource(R.drawable.ic_folder),
-            contentDescription = null,
+        OwnerAvatar(
+            icon = icon,
+            fallback = R.drawable.ic_folder,
             tint = if (selected) MaterialTheme.colorScheme.onSurfaceVariant else faint,
-            modifier = Modifier.size(15.dp),
         )
         Text(
             project.name,
@@ -1125,6 +1253,8 @@ private fun ProjectMenu(
     project: MinimalProject,
     onShortcuts: () -> Unit,
     onRename: () -> Unit,
+    /** Null when there is no folder to move it into or out of. */
+    onMove: (() -> Unit)?,
     onDelete: () -> Unit,
     onContext: () -> Unit,
     onSecrets: () -> Unit,
@@ -1144,6 +1274,12 @@ private fun ProjectMenu(
                 text = { Text("Rename project") },
                 onClick = { open = false; onRename() },
             )
+            onMove?.let { move ->
+                DropdownMenuItem(
+                    text = { Text("Move to…") },
+                    onClick = { open = false; move() },
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Prompt shortcuts") },
                 onClick = { open = false; onShortcuts() },
@@ -1165,10 +1301,337 @@ private fun ProjectMenu(
     }
 }
 
+/** Indent per folder level on the Projects page, in dp. */
+private const val FOLDER_INDENT = 16
+
+/** Told when New folder is offered by a host that would make a project instead. */
+private const val NEEDS_NEWER_HOST = "Needs a newer xd host"
+
+private fun countLabel(projects: Int, folders: Int): String {
+    val projectCount = "$projects project${if (projects == 1) "" else "s"}"
+    return if (folders == 0) projectCount else "$projectCount · $folders folder${if (folders == 1) "" else "s"}"
+}
+
+/** An account's avatar, or [fallback] until the host has one to show. */
+@Composable
+private fun OwnerAvatar(icon: ByteArray?, fallback: Int, tint: Color, size: Dp = 16.dp) {
+    val bitmap = remember(icon) {
+        icon?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = null,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.size(size).clip(RoundedCornerShape(4.dp)),
+        )
+    } else {
+        Icon(painterResource(fallback), contentDescription = null, tint = tint, modifier = Modifier.size(size))
+    }
+}
+
+/** A menu entry, with a line saying why it cannot be used when it cannot. */
+@Composable
+private fun MenuLabel(label: String, detail: String? = null) {
+    Column {
+        Text(label)
+        detail?.let {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** The page's New button: a project or a folder, as the desktop's + offers. */
+@Composable
+private fun NewMenu(canCreateFolders: Boolean, onProject: () -> Unit, onFolder: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        TextButton(onClick = { open = true }) {
+            Icon(painterResource(R.drawable.ic_add), contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("New")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("New project") },
+                onClick = { open = false; onProject() },
+            )
+            DropdownMenuItem(
+                text = { MenuLabel("New folder", NEEDS_NEWER_HOST.takeUnless { canCreateFolders }) },
+                enabled = canCreateFolders,
+                onClick = { open = false; onFolder() },
+            )
+        }
+    }
+}
+
+/** A folder of projects: one line that opens and closes what it holds. */
+@Composable
+private fun FolderRow(
+    folder: MinimalFolder,
+    open: Boolean,
+    icon: ByteArray?,
+    toggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    menu: @Composable () -> Unit,
+) {
+    val faint = LocalXdSignals.current.faint
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClickLabel = if (open) "Close folder" else "Open folder", onClick = toggle)
+            .padding(start = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            painterResource(if (open) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = faint,
+            modifier = Modifier.size(14.dp),
+        )
+        OwnerAvatar(icon = icon, fallback = R.drawable.ic_folders, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            folder.name,
+            modifier = Modifier.weight(1f, fill = false),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(folder.items.toString(), fontSize = 12.sp, color = faint)
+        Spacer(Modifier.weight(1f))
+        menu()
+    }
+}
+
+/** What can be done with a folder, as its right-click menu offers on the desktop. */
+@Composable
+private fun FolderMenu(
+    folder: MinimalFolder,
+    canCreateFolders: Boolean,
+    onNewProject: () -> Unit,
+    onNewFolder: () -> Unit,
+    /** Null when there is no other folder to move it into or out of. */
+    onMove: (() -> Unit)?,
+    onRename: () -> Unit,
+    /** Shortcuts, context, and secrets set here reach every project inside. */
+    onShortcuts: () -> Unit,
+    onContext: () -> Unit,
+    onSecrets: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }, modifier = Modifier.size(48.dp)) {
+            Icon(
+                painterResource(R.drawable.ic_more),
+                contentDescription = "${folder.name} actions",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp),
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("New project here") },
+                onClick = { open = false; onNewProject() },
+            )
+            DropdownMenuItem(
+                text = { MenuLabel("New folder here", NEEDS_NEWER_HOST.takeUnless { canCreateFolders }) },
+                enabled = canCreateFolders,
+                onClick = { open = false; onNewFolder() },
+            )
+            onMove?.let { move ->
+                DropdownMenuItem(
+                    text = { Text("Move to…") },
+                    onClick = { open = false; move() },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("Rename folder") },
+                onClick = { open = false; onRename() },
+            )
+            DropdownMenuItem(
+                text = { Text("Prompt shortcuts") },
+                onClick = { open = false; onShortcuts() },
+            )
+            DropdownMenuItem(
+                text = { Text("Folder context") },
+                onClick = { open = false; onContext() },
+            )
+            DropdownMenuItem(
+                text = { Text("Agent secrets") },
+                onClick = { open = false; onSecrets() },
+            )
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Delete folder", color = MaterialTheme.colorScheme.error) },
+                onClick = { open = false; onDelete() },
+            )
+        }
+    }
+}
+
+/** Names a new folder of projects, optionally after a GitHub organization whose avatar it shows. */
+@Composable
+private fun NewFolderDialog(
+    /** The folder it is made in; null for the top level. */
+    parentName: String?,
+    /** An earlier creation is still out; Create waits for it. */
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onCreate: (name: String, owner: String?) -> Unit,
+) {
+    var name by rememberSaveable { mutableStateOf("") }
+    var organization by rememberSaveable { mutableStateOf("") }
+    val login = organizationLogin(organization)
+    val organizationError = organization.isNotBlank() && login == null
+    // A folder for an organization is named after it unless named otherwise.
+    val folderName = name.trim().ifEmpty { login.orEmpty() }
+    val nameError = folderNameError(folderName)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New folder") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                parentName?.let { Text("In $it", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true,
+                    isError = nameError != null,
+                    supportingText = nameError?.let { { Text(it) } },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = organization,
+                    onValueChange = { organization = it },
+                    label = { Text("GitHub organization (optional)") },
+                    placeholder = { Text("acme or github.com/acme") },
+                    singleLine = true,
+                    isError = organizationError,
+                    supportingText = {
+                        Text(
+                            if (organizationError) "Enter a GitHub organization name, such as acme or github.com/acme."
+                            else "Shows its avatar. Leave the name empty to use the organization's.",
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Folders hold projects and other folders. Use Move to on a project to put it in one.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onCreate(folderName, login) },
+                enabled = folderName.isNotEmpty() && nameError == null && !organizationError && !busy,
+            ) { Text("Create folder") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Picks the folder a project or folder moves into, or the top level. */
+@Composable
+private fun MoveDialog(
+    name: String,
+    /** The folder it is in now; null at the top level. */
+    current: String?,
+    destinations: List<FolderDestination>,
+    icons: Map<String, ByteArray?>,
+    onDismiss: () -> Unit,
+    onMove: (parentId: String?) -> Unit,
+) {
+    // Saved as "" for the top level, which a saved null could not tell from nothing restored.
+    var choice by rememberSaveable { mutableStateOf(current.orEmpty()) }
+    val chosen = choice.ifEmpty { null }
+    val offered = chosen == null || destinations.any { it.folder.id == chosen }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Move $name", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                MoveRow(
+                    label = "Top level",
+                    depth = 0,
+                    icon = null,
+                    fallback = R.drawable.ic_projects,
+                    chosen = chosen == null,
+                    here = current == null,
+                    onClick = { choice = "" },
+                )
+                destinations.forEach { destination ->
+                    MoveRow(
+                        label = destination.folder.name,
+                        depth = destination.depth + 1,
+                        icon = icons[destination.folder.owner],
+                        fallback = R.drawable.ic_folders,
+                        chosen = chosen == destination.folder.id,
+                        here = current == destination.folder.id,
+                        onClick = { choice = destination.folder.id },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onMove(chosen) }, enabled = offered && chosen != current) { Text("Move") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+private fun MoveRow(
+    label: String,
+    depth: Int,
+    icon: ByteArray?,
+    fallback: Int,
+    chosen: Boolean,
+    /** It is already here. */
+    here: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(start = (depth * 12).dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        RadioButton(selected = chosen, onClick = null)
+        OwnerAvatar(icon = icon, fallback = fallback, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        if (here) {
+            Text("Here now", color = LocalXdSignals.current.faint, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
 /** The current project, open, with one row per session beneath it. */
 @Composable
 private fun OpenDrawer(
     project: MinimalProject,
+    icon: ByteArray?,
     sessions: List<MinimalSession>,
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
@@ -1181,7 +1644,7 @@ private fun OpenDrawer(
             .padding(vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {}, menu = menu)
+        DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {}, icon = icon, menu = menu)
         if (sessions.isEmpty()) {
             Text(
                 "No sessions yet. Start one with Codex, Claude, or JCode.",
@@ -1780,6 +2243,10 @@ private fun PlaceRow(label: String, detail: String, chosen: Boolean, onClick: ()
 @Composable
 private fun NewProjectDialog(
     model: MainViewModel,
+    /** The folder it is made in; null for the top level. */
+    parentName: String? = null,
+    /** An earlier creation is still out; Create waits for it. */
+    busy: Boolean = false,
     onDismiss: () -> Unit,
     onCreate: (String, String?) -> Unit,
 ) {
@@ -1791,6 +2258,7 @@ private fun NewProjectDialog(
         title = { Text("New project") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                parentName?.let { Text("In $it", color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -1820,7 +2288,7 @@ private fun NewProjectDialog(
             Button(
                 // Sent exactly as chosen: a Unix folder name can end in a space.
                 onClick = { onCreate(name.trim(), repository.takeIf(String::isNotBlank)) },
-                enabled = name.isNotBlank(),
+                enabled = name.isNotBlank() && !busy,
             ) { Text("Create project") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -2166,9 +2634,14 @@ private fun ConfirmDeleteDialog(
 }
 
 /** The host names a project's folder after it, so the same rules apply. */
-private fun projectNameError(name: String): String? = when {
-    name.startsWith('.') -> "A project name cannot begin with a period."
-    '/' in name || '\\' in name -> "A project name cannot contain a path separator."
+private fun projectNameError(name: String): String? = nameError("project", name)
+
+/** A folder of projects is a directory on the host too. */
+private fun folderNameError(name: String): String? = nameError("folder", name)
+
+private fun nameError(kind: String, name: String): String? = when {
+    name.startsWith('.') -> "A $kind name cannot begin with a period."
+    '/' in name || '\\' in name -> "A $kind name cannot contain a path separator."
     else -> null
 }
 
