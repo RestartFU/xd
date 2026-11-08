@@ -60,6 +60,7 @@ pub enum EditorEvent {
 
 pub struct FileEditor {
     focus_handle: FocusHandle,
+    clipboard_generation: u64,
     content: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
@@ -108,6 +109,7 @@ impl FileEditor {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            clipboard_generation: 0,
             content: "".into(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -169,6 +171,7 @@ impl FileEditor {
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
         self.content = text.into();
         self.refresh_document();
         let end = self.content.len();
@@ -345,8 +348,49 @@ impl FileEditor {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let item = cx.read_from_clipboard();
-        match preferred_clipboard_content(item.as_ref(), self.allow_images, platform_clipboard_png)
-        {
+        if self.allow_images {
+            // Clipboard reads and PNG compression can take seconds for large images.
+            // Snapshot the GPUI item now, then do image work away from the UI thread.
+            let generation = self.clipboard_generation;
+            let selection = self.selected_range.clone();
+            let original = self.content.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let content = cx
+                    .background_spawn(async move {
+                        preferred_clipboard_content(item.as_ref(), true, platform_clipboard_png)
+                    })
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.clipboard_generation != generation {
+                        return;
+                    }
+                    // An image is independent of the caret. A text fallback must
+                    // not be inserted into a different edit made while we waited.
+                    if matches!(content, Some(ClipboardContent::Text(_)))
+                        && (this.content != original || this.selected_range != selection)
+                    {
+                        return;
+                    }
+                    this.apply_clipboard_content(content, window, cx);
+                });
+            })
+            .detach();
+        } else {
+            self.apply_clipboard_content(
+                preferred_clipboard_content(item.as_ref(), false, || None),
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn apply_clipboard_content(
+        &mut self,
+        content: Option<ClipboardContent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match content {
             Some(ClipboardContent::Text(text)) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 self.replace_text_in_range(None, &text, window, cx);
@@ -1351,6 +1395,39 @@ mod tests {
     fn an_empty_message_editor_styles_its_whole_placeholder() {
         assert_eq!(display_run_len(&(0..0), Some("Message xd…".len())), 13);
         assert_eq!(display_run_len(&(4..9), None), 5);
+    }
+
+    #[gpui::test]
+    fn pending_image_paste_does_not_follow_a_chat_change(cx: &mut gpui::TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+        let (editor, cx) = cx.add_window_view(|_, cx| FileEditor::composer(cx));
+        let images = Rc::new(Cell::new(0));
+        let received = images.clone();
+        let _subscription = editor.update(cx, |_, cx| {
+            cx.subscribe(&editor, move |_, _, event, _| {
+                if matches!(event, EditorEvent::PasteImage { .. }) {
+                    received.set(received.get() + 1);
+                }
+            })
+        });
+        let image = ClipboardItem::new_image(&gpui::Image::from_bytes(
+            ImageFormat::Png,
+            vec![137, 80, 78, 71, 13, 10, 26, 10],
+        ));
+        editor.update_in(cx, |editor, window, cx| {
+            cx.write_to_clipboard(image.clone());
+            editor.paste(&Paste, window, cx);
+            // Navigation replaces the composer even when both chats are empty.
+            editor.set_text("", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(images.get(), 0);
+        editor.update_in(cx, |editor, window, cx| {
+            cx.write_to_clipboard(image);
+            editor.paste(&Paste, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(images.get(), 1);
     }
 
     #[test]

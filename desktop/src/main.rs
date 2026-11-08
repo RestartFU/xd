@@ -8057,7 +8057,12 @@ impl XdDesktop {
             .as_ref()
             .and_then(TerminalPanel::selected)
             .is_some_and(|session| session.screen.bracketed_paste());
+        let target = self
+            .terminal_panel
+            .as_ref()
+            .and_then(|panel| panel.selected.clone());
         self.terminal_input.update(cx, |input, _| {
+            input.set_clipboard_target(target);
             input.set_terminal_bracketed_paste(bracketed_paste);
         });
     }

@@ -128,6 +128,8 @@ pub enum ComposerEvent {
 
 pub struct ComposerInput {
     focus_handle: FocusHandle,
+    clipboard_generation: u64,
+    clipboard_target: Option<String>,
     content: SharedString,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -153,6 +155,8 @@ impl ComposerInput {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            clipboard_generation: 0,
+            clipboard_target: None,
             content: "".into(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -192,6 +196,13 @@ impl ComposerInput {
         input
     }
 
+    pub fn set_clipboard_target(&mut self, target: Option<String>) {
+        if self.clipboard_target != target {
+            self.clipboard_target = target;
+            self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
+        }
+    }
+
     pub fn set_terminal_bracketed_paste(&mut self, enabled: bool) {
         self.terminal_bracketed_paste = enabled;
     }
@@ -223,6 +234,7 @@ impl ComposerInput {
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
         let content = text.into();
         if self.content == content {
             return;
@@ -531,7 +543,49 @@ impl ComposerInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let item = cx.read_from_clipboard();
-        match preferred_clipboard_content(item.as_ref(), self.terminal, platform_clipboard_png) {
+        if self.terminal {
+            // Clipboard reads and PNG compression can take seconds for large images.
+            // Snapshot the GPUI item now, then do image work away from the UI thread.
+            let generation = self.clipboard_generation;
+            let selection = self.selected_range.clone();
+            let original = self.content.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let content = cx
+                    .background_spawn(async move {
+                        preferred_clipboard_content(item.as_ref(), true, platform_clipboard_png)
+                    })
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.clipboard_generation != generation {
+                        return;
+                    }
+                    // An image is independent of the caret. A text fallback must
+                    // not be inserted into a different edit made while we waited.
+                    if matches!(content, Some(ClipboardContent::Text(_)))
+                        && (this.content != original || this.selected_range != selection)
+                    {
+                        return;
+                    }
+                    this.apply_clipboard_content(content, window, cx);
+                });
+            })
+            .detach();
+        } else {
+            self.apply_clipboard_content(
+                preferred_clipboard_content(item.as_ref(), false, || None),
+                window,
+                cx,
+            );
+        }
+    }
+
+    fn apply_clipboard_content(
+        &mut self,
+        content: Option<ClipboardContent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match content {
             Some(ClipboardContent::Text(text)) => {
                 if self.terminal_bytes(
                     terminal_paste_bytes(&text, self.terminal_bracketed_paste),
