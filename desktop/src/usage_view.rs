@@ -695,7 +695,7 @@ fn flyout_heading(
         .text_size(px(12.0))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(colors.muted))
-        .children(icon_path.map(|path| icon(path, 14.0, colors.muted)))
+        .children(icon_path.map(|path| assistant_icon(path, 14.0, colors.muted, colors)))
         .child(label.into())
 }
 
@@ -2060,7 +2060,12 @@ impl XdDesktop {
                                     .flex()
                                     .items_center()
                                     .gap_2()
-                                    .child(icon(provider_icon(&model.provider), 14.0, colors.muted))
+                                    .child(assistant_icon(
+                                        provider_icon(&model.provider),
+                                        14.0,
+                                        colors.muted,
+                                        colors,
+                                    ))
                                     .child(div().min_w_0().truncate().child(model.model.clone())),
                             )
                             .child(div().flex_none().text_size(px(12.0)).child(match metric {
@@ -2563,7 +2568,12 @@ impl XdDesktop {
                         this.usage_save_preferences();
                         cx.notify();
                     }))
-                    .child(icon(provider_icon(provider), 14.0, colors.muted))
+                    .child(assistant_icon(
+                        provider_icon(provider),
+                        14.0,
+                        colors.muted,
+                        colors,
+                    ))
                     .child(provider_label(provider))
                 }))
         });
@@ -2797,7 +2807,12 @@ impl XdDesktop {
                                         .rounded_full()
                                         .bg(rgb(provider_color(provider, colors))),
                                 )
-                                .child(icon(provider_icon(provider), 16.0, colors.muted))
+                                .child(assistant_icon(
+                                    provider_icon(provider),
+                                    16.0,
+                                    colors.muted,
+                                    colors,
+                                ))
                                 .child(div().truncate().child(provider_label(provider).to_owned()))
                                 .when(!awaiting_data, |row| {
                                     row.child(figures(
@@ -3130,7 +3145,12 @@ impl XdDesktop {
                                     .items_center()
                                     .gap_2()
                                     .text_color(rgb(colors.text))
-                                    .child(icon(provider_icon(&model.provider), 14.0, colors.muted))
+                                    .child(assistant_icon(
+                                        provider_icon(&model.provider),
+                                        14.0,
+                                        colors.muted,
+                                        colors,
+                                    ))
                                     .child(div().truncate().child(model.model.clone())),
                             )
                             .children(bar),
@@ -3394,7 +3414,12 @@ impl XdDesktop {
                             .gap(px(6.0))
                             .text_color(rgb(colors.muted))
                             .when_some(mark, |row, mark| {
-                                row.child(icon(provider_icon(mark), 12.0, colors.muted))
+                                row.child(assistant_icon(
+                                    provider_icon(mark),
+                                    12.0,
+                                    colors.muted,
+                                    colors,
+                                ))
                             })
                             .child(label),
                     )
@@ -3643,7 +3668,12 @@ impl XdDesktop {
                                     .text_size(px(16.0))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(colors.text))
-                                    .child(icon(provider_icon(&model.provider), 20.0, colors.muted))
+                                    .child(assistant_icon(
+                                        provider_icon(&model.provider),
+                                        20.0,
+                                        colors.muted,
+                                        colors,
+                                    ))
                                     .child(div().truncate().child(model.model.clone())),
                             )
                             .child(small_muted(description, colors)),
@@ -4478,7 +4508,12 @@ impl XdDesktop {
                                 .text_size(px(13.5))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(rgb(colors.text))
-                                .child(icon(provider_icon(&account.provider), 16.0, colors.muted))
+                                .child(assistant_icon(
+                                    provider_icon(&account.provider),
+                                    16.0,
+                                    colors.muted,
+                                    colors,
+                                ))
                                 .child(provider_label(&account.provider).to_owned()),
                         )
                         .child(
