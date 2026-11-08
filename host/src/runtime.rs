@@ -661,6 +661,7 @@ impl TurnRuntime {
     /// Tell the agent why its command disappeared. Use the normal steering
     /// acknowledgement/requeue path so a turn ending concurrently cannot lose
     /// the notice. Agents that cannot take input now read it on their next turn.
+    #[cfg(target_os = "linux")]
     pub(crate) fn notify_memory_guard(&self, chat_id: &str, message: &str) {
         let prompt = format!(
             "[xd host notice: memory guard]\n{message}\n\nThe command was stopped by xd's memory guard, so its output may end abruptly without a normal tool error. Do not retry the same workload unchanged or move it into the background. Reduce memory use first (for example, run fewer build jobs or one test at a time), or explain that validation is blocked by the available memory limit."
@@ -3273,7 +3274,7 @@ read second
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn memory_guard_notice_reaches_the_running_agent() {
         let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
@@ -3304,7 +3305,7 @@ read next
         assert!(prompt.contains("Do not retry the same workload unchanged"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn memory_guard_notice_waits_when_no_turn_can_take_it() {
         let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
