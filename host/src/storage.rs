@@ -5679,6 +5679,44 @@ fn relocate_workspace_subtree(
             params![format!("{new_relative}{suffix}"), now, id, root],
         )?;
     }
+    // Absolute settings can refer to the moved directory even from another
+    // folder (for example a session using this repository). Rebase only whole
+    // path components, preserving external repositories and worktrees.
+    let old_path = Path::new(root).join(old_relative);
+    let new_path = Path::new(root).join(new_relative);
+    for (table, columns, scope) in [
+        (
+            "workspace_folders",
+            &["repo", "workdir"][..],
+            "root_path = ?",
+        ),
+        (
+            "chats",
+            &["workdir", "original_workdir"][..],
+            "folder_id IN (SELECT id FROM workspace_folders WHERE root_path = ?)",
+        ),
+    ] {
+        for column in columns {
+            let paths = {
+                let mut statement = transaction.prepare(&format!(
+                    "SELECT id, {column} FROM {table} WHERE {scope} AND {column} IS NOT NULL"
+                ))?;
+                statement
+                    .query_map([root], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            for (id, path) in paths {
+                if let Ok(suffix) = Path::new(&path).strip_prefix(&old_path) {
+                    transaction.execute(
+                        &format!("UPDATE {table} SET {column} = ? WHERE id = ?"),
+                        params![new_path.join(suffix).to_string_lossy(), id],
+                    )?;
+                }
+            }
+        }
+    }
     transaction.commit()?;
     Ok(())
 }
@@ -10529,6 +10567,110 @@ mod tests {
             .unwrap();
         assert!(child_relative.starts_with(".Trash/"));
         assert!(child_relative.ends_with("/Child"));
+    }
+
+    #[test]
+    fn moving_and_renaming_workspaces_rebases_saved_repository_paths() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let project = store.new_folder(&json!({"name": "Project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let group = store.new_folder(&json!({"name": "Group"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let source = fixture.workspaces.join("Project");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        let external = fixture.workspaces.join("Project-other");
+        fs::create_dir_all(&external).unwrap();
+        let chat = store
+            .new_chat(&json!({"folder": project, "backend": "codex"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let database = Connection::open(&fixture.database).unwrap();
+        database
+            .execute(
+                "UPDATE workspace_folders SET repo = ?, workdir = ? WHERE id = ?",
+                params![
+                    source.to_string_lossy(),
+                    source.join("nested").to_string_lossy(),
+                    project
+                ],
+            )
+            .unwrap();
+        database
+            .execute(
+                "UPDATE workspace_folders SET repo = ? WHERE id = ?",
+                params![external.to_string_lossy(), group],
+            )
+            .unwrap();
+        database
+            .execute(
+                "UPDATE chats SET workdir = ?, original_workdir = ? WHERE id = ?",
+                params![
+                    source.join("nested").to_string_lossy(),
+                    source.to_string_lossy(),
+                    chat
+                ],
+            )
+            .unwrap();
+
+        store
+            .move_folder(&json!({"folder": project, "parent": group}))
+            .unwrap();
+        // Reusing the old path must not redirect icon lookup or new sessions.
+        fs::create_dir_all(&source).unwrap();
+        assert_eq!(
+            store.folder_workdir(&project).unwrap(),
+            fixture
+                .workspaces
+                .join("Group/Project/nested")
+                .to_string_lossy()
+        );
+        store
+            .rename_folder(&json!({"folder": group, "name": "Renamed"}))
+            .unwrap();
+        let destination = fixture.workspaces.join("Renamed/Project");
+        let saved: (String, String) = database
+            .query_row(
+                "SELECT repo, workdir FROM workspace_folders WHERE id = ?",
+                [&project],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            saved,
+            (
+                destination.to_string_lossy().into_owned(),
+                destination.join("nested").to_string_lossy().into_owned()
+            )
+        );
+        let saved: (String, String) = database
+            .query_row(
+                "SELECT workdir, original_workdir FROM chats WHERE id = ?",
+                [&chat],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            saved,
+            (
+                destination.join("nested").to_string_lossy().into_owned(),
+                destination.to_string_lossy().into_owned()
+            )
+        );
+        let saved: String = database
+            .query_row(
+                "SELECT repo FROM workspace_folders WHERE id = ?",
+                [&group],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(saved, external.to_string_lossy());
     }
 
     #[test]
