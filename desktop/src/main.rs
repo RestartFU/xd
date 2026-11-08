@@ -2139,7 +2139,9 @@ struct XdDesktop {
     new_chat_query: String,
     new_chat_model: Option<String>,
     new_chat_menu: Option<&'static str>,
-    first_chat_prompt: Option<(String, String)>,
+    first_chat_prompt: Option<(String, String, Vec<Attachment>)>,
+    new_chat_attachments: Vec<Attachment>,
+    new_chat_submitted_attachments: Vec<Attachment>,
     chat_create_title: String,
     chat_create_submitting: bool,
     chat_create_worktree: Option<NewSessionWorktree>,
@@ -2287,8 +2289,11 @@ impl XdDesktop {
                 this.new_chat_prompt = text.clone();
                 cx.notify();
             }
-            EditorEvent::Submit => this.save_minimal_chat_create(cx),
-            _ => {}
+            EditorEvent::Submit | EditorEvent::SubmitNow => this.save_minimal_chat_create(cx),
+            EditorEvent::PasteImage { format, bytes } => {
+                this.attach_new_chat_image(*format, bytes.clone(), cx)
+            }
+            EditorEvent::Save => {}
         })
         .detach();
         let composer_input = cx.new(FileEditor::composer);
@@ -2770,6 +2775,8 @@ impl XdDesktop {
             new_chat_model: None,
             new_chat_menu: None,
             first_chat_prompt: None,
+            new_chat_attachments: Vec::new(),
+            new_chat_submitted_attachments: Vec::new(),
             chat_create_title: String::new(),
             chat_create_submitting: false,
             chat_create_worktree: None,
@@ -5165,9 +5172,22 @@ impl XdDesktop {
                     && self.chat_create_title.trim() == title
                     && self.chat_create_submitting
                 {
+                    if let Some(host) = self.active_host() {
+                        if let Err(error) = host.set_draft(
+                            chat_id,
+                            self.new_chat_submitted_prompt
+                                .as_deref()
+                                .unwrap_or_default(),
+                            Some(&self.new_chat_submitted_attachments),
+                            None,
+                        ) {
+                            self.model.connection_error = Some(error);
+                        }
+                    }
                     self.first_chat_prompt = Some((
                         chat_id.to_owned(),
                         self.new_chat_submitted_prompt.take().unwrap_or_default(),
+                        std::mem::take(&mut self.new_chat_submitted_attachments),
                     ));
                     self.cancel_chat_create(cx);
                 }
@@ -5219,9 +5239,11 @@ impl XdDesktop {
                 if self
                     .first_chat_prompt
                     .as_ref()
-                    .is_some_and(|(id, _)| id == &chat_id)
+                    .is_some_and(|(id, _, _)| id == &chat_id)
                 {
-                    let (_, prompt) = self.first_chat_prompt.take().unwrap();
+                    let (_, prompt, attachments) = self.first_chat_prompt.take().unwrap();
+                    self.model.draft_attachments = attachments;
+                    self.attachments_dirty = true;
                     self.set_composer_text(prompt, cx);
                     self.draft_dirty = true;
                     self.send_composer(cx);
@@ -7002,6 +7024,7 @@ impl XdDesktop {
             return;
         }
         self.new_chat_prompt.clear();
+        self.new_chat_attachments.clear();
         self.new_chat_remote = false;
         self.new_chat_default_branch = None;
         self.new_chat_query.clear();
@@ -10831,7 +10854,15 @@ impl XdDesktop {
         let Some(folder_id) = self.creating_chat_folder.clone() else {
             return;
         };
-        if self.new_chat_prompt.trim().is_empty() {
+        if self.new_chat_prompt.trim().is_empty() && self.new_chat_attachments.is_empty() {
+            return;
+        }
+        if self.chat_create_sources_loading
+            && matches!(
+                self.chat_create_worktree,
+                Some(NewSessionWorktree::New | NewSessionWorktree::Branch { .. })
+            )
+        {
             return;
         }
         if self.chat_create_submitting
@@ -10867,6 +10898,7 @@ impl XdDesktop {
             Ok(()) => {
                 self.chat_create_title = title;
                 self.new_chat_submitted_prompt = Some(self.new_chat_prompt.clone());
+                self.new_chat_submitted_attachments = self.new_chat_attachments.clone();
                 self.chat_create_submitting = true;
             }
             Err(error) => self.model.connection_error = Some(error),
@@ -16667,6 +16699,7 @@ impl XdDesktop {
     /// and placeholders follow the theme instead of a fixed dark scheme.
     fn sync_input_colors(&mut self, colors: ThemeColors, cx: &mut Context<Self>) {
         for editor in [
+            self.new_chat_input.clone(),
             self.composer_input.clone(),
             self.queue_edit_input.clone(),
             self.file_editor.clone(),
@@ -16675,6 +16708,7 @@ impl XdDesktop {
             editor.update(cx, |editor, cx| editor.set_colors(colors, cx));
         }
         for input in [
+            self.new_chat_search.clone(),
             self.catalog_find_input.clone(),
             self.sidebar_edit_input.clone(),
             self.workspace_create_input.clone(),
@@ -18238,6 +18272,42 @@ impl XdDesktop {
                                             }),
                                     ),
                             ),
+                    )
+                    .into_any_element(),
+            )
+        });
+        let viewport = window.viewport_size();
+        let image_viewer_overlay = self.image_viewer.as_ref().and_then(|path| {
+            let image = match self.message_images.get(path) {
+                Some(MessageImageState::Ready(ready)) => img(ready.image.image.clone()),
+                _ => return None,
+            };
+            Some(
+                div()
+                    .occlude()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .track_focus(&minimal_popup_focus)
+                    .bg(rgba(colors.backdrop))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.image_viewer = None;
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        // In exact pixels: an image lays itself out by its own
+                        // proportions, which outvote a percentage and overflow.
+                        image
+                            .debug_selector(|| "image-viewer-image".into())
+                            .w(viewport.width - px(IMAGE_VIEWER_MARGIN * 2.0))
+                            .h(viewport.height - px(IMAGE_VIEWER_MARGIN * 2.0))
+                            .object_fit(gpui::ObjectFit::Contain),
                     )
                     .into_any_element(),
             )

@@ -41,7 +41,7 @@ impl XdDesktop {
             .unwrap_or_else(|| format!("{} · Default", self.minimal_new_session_agent.label()));
         let ready = (!new_worktree || !self.chat_create_sources_loading)
             && !self.chat_create_submitting
-            && !self.new_chat_prompt.trim().is_empty()
+            && (!self.new_chat_prompt.trim().is_empty() || !self.new_chat_attachments.is_empty())
             && (shared
                 || (!self.chat_create_worktrees_loading && self.chat_create_worktree.is_some()));
         let menu = self.new_chat_menu;
@@ -254,6 +254,14 @@ impl XdDesktop {
             .map(|f| f.name.clone())
             .unwrap_or_default();
         div()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.new_chat_menu.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .size_full()
             .flex()
             .flex_col()
@@ -284,6 +292,22 @@ impl XdDesktop {
                             .border_1()
                             .border_color(rgb(colors.border))
                             .bg(rgb(colors.composer))
+                            .children(self.new_chat_attachments.iter().enumerate().map(
+                                |(index, attachment)| {
+                                    ui_button(
+                                        ("draft-attachment", index),
+                                        ButtonKind::Secondary,
+                                        colors,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.chat_create_submitting {
+                                            this.new_chat_attachments.remove(index);
+                                            cx.notify();
+                                        }
+                                    }))
+                                    .child(format!("{} · Remove", attachment.name))
+                                },
+                            ))
                             .child(
                                 div()
                                     .id("draft-composer")
@@ -373,6 +397,36 @@ impl XdDesktop {
             .into_any_element()
     }
 
+    pub(super) fn attach_new_chat_image(
+        &mut self,
+        format: gpui::ImageFormat,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.chat_create_submitting {
+            return;
+        }
+        let result = if format != gpui::ImageFormat::Png {
+            Err("Paste a PNG image into the chat.".to_owned())
+        } else if bytes.len() > MAX_ATTACHMENT_BYTES {
+            Err("That image is larger than 10 MiB.".to_owned())
+        } else {
+            Attachment::from_png(
+                format!("paste-{}.png", self.new_chat_attachments.len() + 1),
+                bytes,
+            )
+            .and_then(|attachment| {
+                attachment_fits(&self.new_chat_attachments, &attachment)?;
+                self.new_chat_attachments.push(attachment);
+                Ok(())
+            })
+        };
+        if let Err(error) = result {
+            self.model.connection_error = Some(error);
+        }
+        cx.notify();
+    }
+
     fn draft_picker_button(
         &self,
         menu: &'static str,
@@ -415,6 +469,13 @@ impl XdDesktop {
             .iter()
             .find(|b| Some(b.name.as_str()) == self.new_chat_default_branch.as_deref())
             .or_else(|| {
+                self.new_chat_default_branch.as_ref().and_then(|name| {
+                    self.chat_create_branches
+                        .iter()
+                        .find(|b| b.reference == format!("refs/remotes/origin/{name}"))
+                })
+            })
+            .or_else(|| {
                 self.chat_create_branches
                     .iter()
                     .find(|b| Some(b.name.as_str()) == current)
@@ -443,15 +504,61 @@ mod tests {
                 {"name":"feature", "reference":"refs/heads/feature", "oid":"def"}
             ])).unwrap();
             assert!(matches!(desktop.default_new_chat_base(), Some(NewSessionWorktree::Branch {reference, ..}) if reference == "refs/heads/main"));
+            desktop.chat_create_branches[0].name = "origin/main".into();
+            desktop.chat_create_branches[0].reference = "refs/remotes/origin/main".into();
+            assert!(matches!(desktop.default_new_chat_base(), Some(NewSessionWorktree::Branch {reference, ..}) if reference == "refs/remotes/origin/main"));
             desktop.creating_chat_folder = Some("project".into());
             desktop.new_chat_prompt = "Build a footer".into();
             desktop.chat_create_worktrees_loading = false;
             desktop.chat_create_worktree = Some(NewSessionWorktree::New);
+            desktop.chat_create_sources_loading = true;
+            desktop.save_minimal_chat_create(cx);
+            assert!(desktop.model.connection_error.is_none(), "Enter must wait for base branches");
+            desktop.chat_create_sources_loading = false;
             desktop.save_minimal_chat_create(cx);
             assert!(!desktop.chat_create_submitting);
             assert_eq!(desktop.new_chat_prompt, "Build a footer");
             assert_eq!(desktop.creating_chat_folder.as_deref(), Some("project"));
             assert!(desktop.model.chats.is_empty());
+        });
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    #[gpui::test]
+    fn first_message_carries_images_through_chat_creation(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgba8(1, 1)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .unwrap();
+            desktop.attach_new_chat_image(gpui::ImageFormat::Png, png.into_inner(), cx);
+            assert_eq!(desktop.new_chat_attachments.len(), 1);
+            desktop.creating_chat_folder = Some("project".into());
+            desktop.chat_create_title = "New Chat".into();
+            desktop.chat_create_submitting = true;
+            desktop.new_chat_submitted_prompt = Some(String::new());
+            desktop.new_chat_submitted_attachments = desktop.new_chat_attachments.clone();
+            desktop.handle_reply(
+                RequestKind::NewChat {
+                    folder_id: "project".into(),
+                    title: "New Chat".into(),
+                    workdir: None,
+                },
+                serde_json::json!({"ok":true,"id":"image-chat"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            let (id, text, attachments) = desktop.first_chat_prompt.as_ref().unwrap();
+            assert_eq!(id, "image-chat");
+            assert!(text.is_empty());
+            assert_eq!(attachments.len(), 1);
         });
     }
 }
