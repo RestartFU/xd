@@ -531,7 +531,8 @@ fn classify(segment: &Segment, depth: usize) -> Option<Delegation> {
             "timeout" => {
                 words = &words[1..];
                 while words.first().is_some_and(|word| word.starts_with('-')) {
-                    let takes_value = matches!(words[0].as_str(), "-k" | "-s");
+                    let takes_value =
+                        matches!(words[0].as_str(), "-k" | "-s" | "--kill-after" | "--signal");
                     words = words
                         .get(if takes_value { 2 } else { 1 }..)
                         .unwrap_or_default();
@@ -790,13 +791,38 @@ const CLAUDE_VALUED: &[&str] = &[
 
 /// `claude -p`, Claude's headless run.
 fn claude(args: &[String], stdin: Option<&str>) -> Option<Delegation> {
-    if !args
+    // Claude's own options end at `--`; what follows belongs to someone else,
+    // such as the server command `claude mcp add` stores.
+    let own = args
+        .iter()
+        .position(|arg| arg == "--")
+        .map_or(args, |end| &args[..end]);
+    if !own
         .iter()
         .any(|arg| matches!(arg.as_str(), "-p" | "--print"))
     {
         return None;
     }
     let (positional, model, _) = scan(args, CLAUDE_VALUED, &["--model"])?;
+    // Its admin commands are not a run, whatever flags they pass on.
+    if positional.first().is_some_and(|first| {
+        matches!(
+            *first,
+            "mcp"
+                | "config"
+                | "plugin"
+                | "plugins"
+                | "auth"
+                | "doctor"
+                | "update"
+                | "install"
+                | "setup-token"
+                | "migrate-installer"
+                | "agents"
+        )
+    }) {
+        return None;
+    }
     let agent = args
         .iter()
         .position(|arg| arg == "--agent")
@@ -904,6 +930,12 @@ mod tests {
         let last = detect("codex exec resume --last 'Keep going'").unwrap();
         assert_eq!(last.prompt.as_deref(), Some("Keep going"));
 
+        let waited =
+            detect("timeout --signal TERM --kill-after 5 600 codex exec 'Review the diff'")
+                .unwrap();
+        assert_eq!(waited.prompt.as_deref(), Some("Review the diff"));
+        assert!(detect("claude -p -- 'Review the diff'").is_some());
+
         let after =
             detect("echo start; CODEX_HOME=/x codex e 'fix the build' 2>&1 | tail -n 5").unwrap();
         assert_eq!(after.prompt.as_deref(), Some("fix the build"));
@@ -917,6 +949,8 @@ mod tests {
             "codex exec --help",
             "claude --version",
             "claude mcp list",
+            "claude mcp add my-server -- npx -y -p some-package server",
+            "claude config set -p theme dark",
             "claude 'interactive prompt'",
             "~/.claude/skills/codex-opussy/bin/codex-agent --print-config",
             "cat ~/.claude/skills/codex-opussy/bin/codex-agent",
