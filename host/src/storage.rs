@@ -1883,30 +1883,44 @@ impl StateStore {
         chat_id: &str,
         name: &str,
     ) -> Result<Option<String>, StorageError> {
-        let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        let transaction = database.transaction()?;
-        let Some(workdir) = transaction
-            .query_row("SELECT workdir FROM chats WHERE id = ?", [chat_id], |row| {
-                row.get::<_, Option<String>>(0)
-            })
-            .optional()?
-            .flatten()
-        else {
-            return Ok(None);
+        // Read under the lock, then let it go: Git can run hooks, and nothing
+        // else waits on the database while they do.
+        let (workdir, recorded, identity) = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let Some(workdir) = database
+                .query_row("SELECT workdir FROM chats WHERE id = ?", [chat_id], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
+                .optional()?
+                .flatten()
+            else {
+                return Ok(None);
+            };
+            let workdir = normalize_existing_path(Path::new(&workdir));
+            let Some((Some(recorded), Some(identity))) = database
+                .query_row(
+                    "SELECT branch, identity FROM generated_worktrees WHERE path = ?",
+                    [&workdir],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            (workdir, recorded, identity)
         };
-        let workdir = normalize_existing_path(Path::new(&workdir));
-        let Some(recorded) = transaction
-            .query_row(
-                "SELECT branch FROM generated_worktrees WHERE path = ?",
-                [&workdir],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten()
-        else {
+        let path = Path::new(&workdir);
+        // Still the checkout xd made, as cleanup checks: one made again at
+        // the same path is the user's.
+        if worktree_identity(path).as_deref() != Some(identity.as_str()) {
             return Ok(None);
-        };
-        let current = run_git(Path::new(&workdir), &["branch", "--show-current"])?;
+        }
+        let current = run_git(path, &["branch", "--show-current"])?;
         if !current.0.success() || String::from_utf8_lossy(&current.1).trim() != recorded {
             return Ok(None);
         }
@@ -1915,7 +1929,7 @@ impl StateStore {
             return Ok(None);
         }
         let taken = run_git(
-            Path::new(&workdir),
+            path,
             &[
                 "show-ref",
                 "--verify",
@@ -1926,26 +1940,41 @@ impl StateStore {
         if taken.0.success() {
             return Ok(None);
         }
-        // Recorded first, so a write that fails leaves Git alone, and undone
-        // in Git if the record cannot be kept: what deletion removes always
-        // names the branch the worktree has. The rename names xd's branch,
-        // not whatever is checked out, so it never touches one of the user's.
-        transaction.execute(
-            "UPDATE generated_worktrees SET branch = ? WHERE path = ?",
-            params![renamed, workdir],
-        )?;
-        let moved = run_git(Path::new(&workdir), &["branch", "-m", &recorded, &renamed])?;
+        // Names xd's branch, not whatever is checked out, so it never touches
+        // one of the user's.
+        let moved = run_git(path, &["branch", "-m", &recorded, &renamed])?;
         if !moved.0.success() {
             return Err(StorageError::InvalidRequest(command_error(
                 &moved.2,
                 "git could not rename the worktree's branch",
             )));
         }
-        if let Err(error) = transaction.commit() {
-            let _ = run_git(Path::new(&workdir), &["branch", "-m", &renamed, &recorded]);
-            return Err(error.into());
+        // What deletion removes must name the branch the worktree has: the
+        // record follows only if it still names the old branch, and Git is
+        // put back if it cannot.
+        let recorded_now = self
+            .database
+            .lock()
+            .map_err(|_| StorageError::Poisoned)
+            .and_then(|database| {
+                database
+                    .execute(
+                        "UPDATE generated_worktrees SET branch = ? WHERE path = ? AND branch = ?",
+                        params![renamed, workdir, recorded],
+                    )
+                    .map_err(StorageError::from)
+            });
+        match recorded_now {
+            Ok(1) => Ok(Some(renamed)),
+            Ok(_) => {
+                let _ = run_git(path, &["branch", "-m", &renamed, &recorded]);
+                Ok(None)
+            }
+            Err(error) => {
+                let _ = run_git(path, &["branch", "-m", &renamed, &recorded]);
+                Err(error)
+            }
         }
-        Ok(Some(renamed))
     }
 
     fn worktree_name_spec(
@@ -13041,6 +13070,20 @@ mod tests {
                 .unwrap(),
             None
         );
+        // Not a checkout made again at the same path, which no longer carries
+        // the identity xd marked its worktree with.
+        let marker = worktree_git_directory(Path::new(&named_path))
+            .unwrap()
+            .join(WORKTREE_IDENTITY_FILE);
+        let identity = fs::read_to_string(&marker).unwrap();
+        fs::write(&marker, "someone else's").unwrap();
+        assert_eq!(
+            store
+                .rename_generated_worktree_branch(&named_id, "something else")
+                .unwrap(),
+            None
+        );
+        fs::write(&marker, identity).unwrap();
         let switched = run_git(Path::new(&named_path), &["checkout", "-q", "-b", "mine"]).unwrap();
         assert!(switched.0.success());
         assert_eq!(
