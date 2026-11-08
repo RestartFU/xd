@@ -627,7 +627,9 @@ a message's limits, and a draft's files and images each keep to their own: at
 most 10 files with no byte cap, and at most 4 images and 20 MiB of those, so
 files kept beside a client's images never refuse them; a message sent from it
 must still fit a message's limits. A
-client that shows only images skips the other files. The `chat` snapshot returns `draft`,
+client that shows only images skips the other files. Large attachment drafts are
+stored in bounded SQLite chunks (schema 26) so no single SQLite value contains
+the full file payload. The `chat` snapshot returns `draft`,
 `draft_revision`, `draft_attachments`, and `draft_files` so a newly connected
 device starts with the same composer. `draft_attachments` holds only the draft's
 PNG images and `draft_files` its other files, so a client that knows only images

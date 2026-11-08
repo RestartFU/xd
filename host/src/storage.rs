@@ -867,7 +867,7 @@ impl StateStore {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let queue = queue_from_column(row.9.as_deref());
-        let attachments = serde_json::from_str::<Value>(&row.13).unwrap_or_else(|_| json!([]));
+        let attachments = decode_draft_attachments(&database, chat_id, &row.13)?;
         let has_messages: bool = database.query_row(
             "SELECT EXISTS(SELECT 1 FROM messages WHERE chat_id = ? AND role = 'user')",
             [chat_id],
@@ -1684,7 +1684,10 @@ impl StateStore {
                 transaction.execute(
                     "UPDATE chats SET draft_attachments = ?, draft_revision = draft_revision + 1 \
                      WHERE id = ?",
-                    params![left.to_string(), chat_id],
+                    params![
+                        encode_draft_attachments(&transaction, chat_id, &left.to_string())?,
+                        chat_id
+                    ],
                 )?;
             }
             transaction.commit()?;
@@ -1730,7 +1733,11 @@ impl StateStore {
             transaction.execute(
                 "UPDATE chats SET host_working = 1, draft = '', draft_attachments = ?, \
                  draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
-                params![left.to_string(), now_seconds(), chat_id],
+                params![
+                    encode_draft_attachments(&transaction, chat_id, &left.to_string())?,
+                    now_seconds(),
+                    chat_id
+                ],
             )?;
         }
         transaction.commit()?;
@@ -3197,6 +3204,7 @@ impl StateStore {
             ));
         }
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let database = database.unchecked_transaction()?;
         let supplied = match request.get("attachments") {
             Some(value) if !shows_files(request) => {
                 // Its own images keep to a message's limits; the files kept
@@ -3228,6 +3236,10 @@ impl StateStore {
             })
             .transpose()
             .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
+        let attachments_json = attachments_json
+            .as_deref()
+            .map(|json| encode_draft_attachments(&database, chat_id, json))
+            .transpose()?;
         let state = database
             .query_row(
                 "UPDATE chats SET draft = ?, draft_attachments = COALESCE(?, draft_attachments), \
@@ -3255,13 +3267,14 @@ impl StateStore {
             "draft": state.0,
             "draft_revision": state.2,
         });
-        let stored = serde_json::from_str::<Value>(&state.1).unwrap_or_else(|_| json!([]));
+        let stored = decode_draft_attachments(&database, chat_id, &state.1)?;
         if attachments.is_some() {
             for body in [&mut reply, &mut event] {
                 body["draft_attachments"] = draft_images(&stored);
                 body["draft_files"] = Value::Array(kept_draft_files(&stored));
             }
         }
+        database.commit()?;
         Ok((reply, event))
     }
 
@@ -5062,7 +5075,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             .optional()?
             .and_then(|version| version.parse::<u32>().ok())
             .unwrap_or(0);
-        if version > 25 {
+        if version > 26 {
             return Err(StorageError::InvalidRequest(format!(
                 "The chat database requires a newer xd version (schema {version})."
             )));
@@ -5080,6 +5093,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             remove_terminal_chats(database)?;
             ensure_workspace_sessions(database)?;
             ensure_backend_choices(database)?;
+            ensure_draft_chunks(database)?;
             return Ok(());
         }
     }
@@ -5175,6 +5189,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     remove_terminal_chats(database)?;
     ensure_workspace_sessions(database)?;
     ensure_backend_choices(database)?;
+    ensure_draft_chunks(database)?;
     Ok(())
 }
 
@@ -8619,6 +8634,61 @@ fn shows_files(request: &Value) -> bool {
     request.get("files").and_then(Value::as_bool) == Some(true)
 }
 
+// Keep each SQLite value small without imposing a total attachment size limit.
+const DRAFT_CHUNK_BYTES: usize = 1024 * 1024;
+const CHUNKED_DRAFT: &str = "{\"xd_chunked_draft\":true}";
+
+fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
+    database.execute_batch(
+        "CREATE TABLE IF NOT EXISTS draft_attachment_chunks (
+            chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL, data BLOB NOT NULL,
+            PRIMARY KEY(chat_id, ordinal));
+         UPDATE meta SET value = '26' WHERE key = 'schema_version';",
+    )?;
+    Ok(())
+}
+
+/// Must run in the same transaction as the chats row update.
+fn encode_draft_attachments(
+    database: &Connection,
+    chat_id: &str,
+    json: &str,
+) -> Result<String, StorageError> {
+    database.execute(
+        "DELETE FROM draft_attachment_chunks WHERE chat_id = ?",
+        [chat_id],
+    )?;
+    if json.len() <= DRAFT_CHUNK_BYTES {
+        return Ok(json.to_owned());
+    }
+    let mut insert = database
+        .prepare("INSERT INTO draft_attachment_chunks (chat_id, ordinal, data) VALUES (?, ?, ?)")?;
+    for (ordinal, chunk) in json.as_bytes().chunks(DRAFT_CHUNK_BYTES).enumerate() {
+        insert.execute(params![chat_id, ordinal as i64, chunk])?;
+    }
+    Ok(CHUNKED_DRAFT.to_owned())
+}
+
+fn decode_draft_attachments(
+    database: &Connection,
+    chat_id: &str,
+    stored: &str,
+) -> Result<Value, StorageError> {
+    if stored != CHUNKED_DRAFT {
+        return Ok(serde_json::from_str(stored).unwrap_or_else(|_| json!([])));
+    }
+    let mut query = database
+        .prepare("SELECT data FROM draft_attachment_chunks WHERE chat_id = ? ORDER BY ordinal")?;
+    let mut json = Vec::new();
+    for chunk in query.query_map([chat_id], |row| row.get::<_, Vec<u8>>(0))? {
+        json.extend_from_slice(&chunk?);
+    }
+    serde_json::from_slice(&json).map_err(|error| {
+        StorageError::InvalidRequest(format!("Cannot read attachment draft: {error}"))
+    })
+}
+
 fn stored_draft_attachments(database: &Connection, chat_id: &str) -> Result<Value, StorageError> {
     let stored = database
         .query_row(
@@ -8628,7 +8698,7 @@ fn stored_draft_attachments(database: &Connection, chat_id: &str) -> Result<Valu
         )
         .optional()?
         .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
-    Ok(serde_json::from_str(&stored).unwrap_or_else(|_| json!([])))
+    decode_draft_attachments(database, chat_id, &stored)
 }
 
 /// A stored draft without the attachments a message took from it: each one
@@ -9556,7 +9626,7 @@ mod tests {
                     |row| row.get::<_, String>(0)
                 )
                 .unwrap(),
-            "25"
+            "26"
         );
         let fts_exists: bool = database
             .query_row(
@@ -12835,6 +12905,67 @@ mod tests {
             store
                 .image_read(&json!({"path": report.to_string_lossy()}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn chunked_attachment_drafts_survive_reopen_and_clear_atomically() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Files"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store.new_chat(&json!({"folder": folder})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let file = json!({"name": "archive.zip", "mime": "application/zip",
+            "data": STANDARD.encode(vec![7; DRAFT_CHUNK_BYTES + 1])});
+        store
+            .set_draft(
+                &json!({"chat": chat, "text": "", "files": true, "attachments": [file.clone()]}),
+            )
+            .unwrap();
+        drop(store);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        assert_eq!(
+            store.chat(&chat).unwrap()["draft_files"],
+            json!([file.clone()])
+        );
+        let mut database = store.database.lock().unwrap();
+        let chunks: i64 = database
+            .query_row(
+                "SELECT count(*) FROM draft_attachment_chunks WHERE chat_id = ?",
+                [&chat],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(chunks > 1);
+        {
+            let transaction = database.transaction().unwrap();
+            encode_draft_attachments(&transaction, &chat, "[]").unwrap();
+            // Drop without committing: the old draft and all its chunks survive.
+        }
+        assert_eq!(
+            stored_draft_attachments(&database, &chat).unwrap(),
+            json!([file])
+        );
+        drop(database);
+        store
+            .set_draft(&json!({"chat": chat, "text": "", "files": true, "attachments": []}))
+            .unwrap();
+        assert_eq!(store.chat(&chat).unwrap()["draft_files"], json!([]));
+        let database = store.database.lock().unwrap();
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT count(*) FROM draft_attachment_chunks WHERE chat_id = ?",
+                    [&chat],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
         );
     }
 
