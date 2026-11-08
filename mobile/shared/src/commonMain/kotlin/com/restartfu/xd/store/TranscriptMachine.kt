@@ -8,6 +8,7 @@ import com.restartfu.xd.model.TodoStatus
 import com.restartfu.xd.protocol.toModel
 import com.restartfu.xd.protocol.ChatReply
 import com.restartfu.xd.protocol.MessagesReply
+import com.restartfu.xd.protocol.Limits
 import com.restartfu.xd.protocol.PngAttachment
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -342,9 +343,10 @@ public object TranscriptMachine {
                 queueRevision = if (isOlderQueue(chat.queueRevision, state.queueRevision)) state.queueRevision else chat.queueRevision,
                 draft = chat.draft,
                 draftRevision = chat.draftRevision,
-                draftAttachments = chat.draftAttachments.map {
-                    PngAttachment(Base64.Default.decode(it.data))
-                },
+                // Files attached on a desktop are its to show; this app shows images.
+                draftAttachments = chat.draftAttachments
+                    .filter { it.mime == Limits.PNG_MIME }
+                    .map { PngAttachment(Base64.Default.decode(it.data)) },
                 working = chat.working,
                 resumable = chat.resumable,
                 label = chat.label,

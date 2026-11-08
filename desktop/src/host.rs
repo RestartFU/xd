@@ -1619,6 +1619,8 @@ impl HostHandle {
             "text": text,
             "generate_worktree_name": true,
         });
+        // The host takes exactly these from the draft, so a message sent
+        // without them, such as a shortcut, leaves the draft as it is.
         if !attachments.is_empty() {
             body["attachments"] = Value::Array(attachments);
         }
@@ -1745,7 +1747,8 @@ impl HostHandle {
         attachments: Option<&[Attachment]>,
         attachment_generation: Option<u64>,
     ) -> Result<(), String> {
-        let mut body = json!({"op": "set-draft", "chat": chat_id, "text": text});
+        // `files`: the list sent replaces the files in the draft too.
+        let mut body = json!({"op": "set-draft", "chat": chat_id, "text": text, "files": true});
         if let Some(attachments) = attachments {
             body["attachments"] = Value::Array(
                 attachments
@@ -2068,9 +2071,13 @@ fn with_process_errors(message: &str, errors: Option<&Arc<Mutex<Vec<u8>>>>) -> S
 }
 
 fn take_draft_attachments(body: &mut Map<String, Value>) -> Option<Vec<Attachment>> {
-    let value = body.remove("draft_attachments")?;
-    let values = value.as_array()?;
-    Some(values.iter().filter_map(Attachment::from_value).collect())
+    let mut taken = Map::new();
+    for key in ["draft_attachments", "draft_files"] {
+        if let Some(value) = body.remove(key) {
+            taken.insert(key.to_owned(), value);
+        }
+    }
+    crate::model::draft_attachments(&Value::Object(taken))
 }
 
 fn disconnect(updates: &Sender<HostUpdate>, message: String) {
@@ -2212,6 +2219,51 @@ mod tests {
         ));
 
         server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_send_names_only_what_it_takes_from_the_draft() {
+        let directory = env::temp_dir().join(format!("xd-send-files-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut seen = Vec::new();
+            for _ in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(stream, "{{\"ok\":true,\"_xd_request\":{request_id}}}").unwrap();
+                seen.push(request);
+            }
+            seen
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        let report = Attachment::from_file("Report.pdf", b"%PDF".to_vec());
+        host.send_message("chat-1", "read it", &[report], None, None, false)
+            .unwrap();
+        host.send_message("chat-1", "a shortcut", &[], None, None, false)
+            .unwrap();
+        // The clear after a send claims the whole list, files included.
+        host.set_draft("chat-1", "", Some(&[]), Some(7)).unwrap();
+
+        let seen = server.join().unwrap();
+        assert_eq!(seen[0]["attachments"][0]["mime"], "application/pdf");
+        assert!(seen[1].get("attachments").is_none());
+        assert_eq!(seen[2]["op"], "set-draft");
+        assert_eq!(seen[2]["files"], true);
+        assert_eq!(seen[2]["attachments"], serde_json::json!([]));
         let _ = fs::remove_dir_all(directory);
     }
 
@@ -3320,7 +3372,10 @@ mod tests {
 
         let attachments = take_draft_attachments(&mut body).unwrap();
         assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].preview.bytes, b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            attachments[0].preview.as_ref().unwrap().bytes,
+            b"\x89PNG\r\n\x1a\n"
+        );
         assert!(!body.contains_key("draft_attachments"));
     }
 }

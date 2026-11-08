@@ -15,8 +15,9 @@ use std::{
     borrow::Cow,
     cell::Cell,
     collections::{HashMap, HashSet, VecDeque, hash_map::DefaultHasher},
-    env,
+    env, fs,
     hash::{Hash, Hasher},
+    io::Read as _,
     ops::Range,
     path::{Path, PathBuf},
     rc::Rc,
@@ -33,9 +34,9 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gpui::{
     App, Application, AssetSource, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle,
-    Decorations, Entity, FocusHandle, Focusable, FontWeight, HighlightStyle, Image, KeyBinding,
-    ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point, Render,
-    ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
+    Decorations, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight, HighlightStyle, Image,
+    KeyBinding, ListAlignment, ListOffset, ListState, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, ResizeEdge, ScrollHandle, ScrollWheelEvent, SharedString, StyledText, TextRun, Timer,
     TitlebarOptions, WeakFocusHandle, Window, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowDecorations, WindowOptions, canvas, div, img, list, point, prelude::*,
     px, relative, rgb, rgba, size, svg,
@@ -145,6 +146,7 @@ const PLAY_ICON: &str = "icons/play.svg";
 const FOLDER_ICON: &str = "icons/folder.svg";
 const FOLDERS_ICON: &str = "icons/folders.svg";
 const FILE_ICON: &str = "icons/file.svg";
+const PAPERCLIP_ICON: &str = "icons/paperclip.svg";
 const GIT_BRANCH_ICON: &str = "icons/git-branch.svg";
 const GIT_PULL_REQUEST_ICON: &str = "icons/git-pull-request.svg";
 const TRASH_ICON: &str = "icons/trash.svg";
@@ -170,7 +172,10 @@ const MINIMIZE_ICON: &str = "icons/minimize.svg";
 const MAXIMIZE_ICON: &str = "icons/maximize.svg";
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
-const MAX_ATTACHMENTS: usize = 4;
+/// The host's limits: ten attachments, of which at most four images, each up
+/// to 10 MiB and 20 MiB together.
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_IMAGE_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SOURCE_BUILD_OUTPUT_BYTES: usize = 8 * 1024;
@@ -2124,6 +2129,9 @@ struct XdDesktop {
     draft_dirty: bool,
     attachments_dirty: bool,
     attachment_generation: u64,
+    /// Batches of chosen files still being read. Sending waits for them, so a
+    /// message never leaves without a file the user saw themselves choose.
+    attachments_reading: usize,
     composer_thumbnails: image_preview::ComposerThumbnails,
     image_preview: Option<image_preview::ImagePreview>,
     sending: bool,
@@ -2719,6 +2727,7 @@ impl XdDesktop {
             draft_dirty: false,
             attachments_dirty: false,
             attachment_generation: 0,
+            attachments_reading: 0,
             composer_thumbnails: HashMap::new(),
             image_preview: None,
             sending: false,
@@ -5277,10 +5286,16 @@ impl XdDesktop {
                     .is_some_and(|generation| generation == self.attachment_generation);
                 let local_attachments = (!attachment_reply_is_current && self.attachments_dirty)
                     .then(|| self.model.draft_attachments.clone());
+                let revision = self.model.draft_revision;
                 self.model.apply_draft_snapshot(&value);
+                // An older draft than the one shown brings older attachments.
+                let accepted = self.model.draft_revision != revision;
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
-                } else if attachment_reply_is_current && let Some(attachments) = attachments {
+                } else if attachment_reply_is_current
+                    && accepted
+                    && let Some(attachments) = attachments
+                {
                     self.model.draft_attachments = attachments;
                 }
                 if self.composer == text {
@@ -5837,10 +5852,13 @@ impl XdDesktop {
                 let local_attachments = self
                     .attachments_dirty
                     .then(|| self.model.draft_attachments.clone());
+                let revision = self.model.draft_revision;
                 self.model.apply_event(name, &body);
+                // An older draft than the one shown brings older attachments.
+                let accepted = self.model.draft_revision != revision;
                 if let Some(local_attachments) = local_attachments {
                     self.model.draft_attachments = local_attachments;
-                } else if let Some(attachments) = attachments {
+                } else if accepted && let Some(attachments) = attachments {
                     self.model.draft_attachments = attachments;
                 }
                 if !self.draft_dirty {
@@ -9624,11 +9642,20 @@ impl XdDesktop {
     }
 
     fn submit_composer(&mut self, steer: bool, cx: &mut Context<Self>) {
-        if self.sending {
+        if self.sending || self.attachments_reading > 0 {
             return;
         }
         let text = self.composer.trim().to_owned();
         let attachments = self.model.draft_attachments.clone();
+        // A draft can hold more than one message can send, when another
+        // device added to it; say so rather than let the host refuse it.
+        if let Err(error) = message_fits(&attachments) {
+            self.model.connection_error = Some(format!(
+                "{error} Remove some attachments and send them in another message."
+            ));
+            cx.notify();
+            return;
+        }
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -9666,6 +9693,8 @@ impl XdDesktop {
         self.attachments_dirty = true;
         self.attachment_generation = self.attachment_generation.saturating_add(1);
         self.draft_generation = self.draft_generation.saturating_add(1);
+        // Drafts are last-writer-wins between devices: the sent draft is
+        // cleared whole, as before files could be attached.
         let _ = host.set_draft(&chat_id, "", Some(&[]), Some(self.attachment_generation));
         cx.notify();
     }
@@ -9758,7 +9787,27 @@ impl XdDesktop {
             (true, true) => String::new(),
         };
         self.set_composer_text(restored, cx);
-        self.model.draft_attachments = pending.attachments;
+        // What reached the draft while the send was out, such as from another
+        // device, stays after what it sent, as far as the limits allow.
+        let mut attachments = pending.attachments;
+        let mut refused = None;
+        for attachment in std::mem::take(&mut self.model.draft_attachments) {
+            if attachments.iter().any(|sent| sent.same_as(&attachment)) {
+                continue;
+            }
+            match attachment_fits(&attachments, &attachment) {
+                Ok(()) => attachments.push(attachment),
+                Err(_) => {
+                    refused.get_or_insert(attachment.name);
+                }
+            }
+        }
+        if let Some(name) = refused {
+            self.model.connection_error = Some(format!(
+                "The unsent message's attachments are back, so {name} no longer fits and was removed."
+            ));
+        }
+        self.model.draft_attachments = attachments;
         self.draft_dirty = true;
         self.attachments_dirty = true;
         self.attachment_generation = self.attachment_generation.saturating_add(1);
@@ -9810,7 +9859,7 @@ impl XdDesktop {
     }
 
     fn resume_turn(&mut self, cx: &mut Context<Self>) {
-        if self.sending {
+        if self.sending || self.attachments_reading > 0 {
             return;
         }
         let Some(chat_id) = self.model.selected_chat.clone() else {
@@ -9843,7 +9892,11 @@ impl XdDesktop {
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
-        if text.is_empty() || !self.model.draft_attachments.is_empty() {
+        // A file still being read would be left behind for the next message.
+        if text.is_empty()
+            || !self.model.draft_attachments.is_empty()
+            || self.attachments_reading > 0
+        {
             return;
         }
         let Some(host) = self.active_host().cloned() else {
@@ -10081,29 +10134,6 @@ impl XdDesktop {
             cx.notify();
             return;
         }
-        if self.model.draft_attachments.len() >= MAX_ATTACHMENTS {
-            self.model.connection_error = Some(format!(
-                "A message can contain at most {MAX_ATTACHMENTS} images."
-            ));
-            cx.notify();
-            return;
-        }
-        if bytes.len() > MAX_ATTACHMENT_BYTES {
-            self.model.connection_error = Some("That image is larger than 10 MiB.".into());
-            cx.notify();
-            return;
-        }
-        let total = self
-            .model
-            .draft_attachments
-            .iter()
-            .map(|attachment| attachment.preview.bytes.len())
-            .sum::<usize>();
-        if total.saturating_add(bytes.len()) > MAX_TOTAL_ATTACHMENT_BYTES {
-            self.model.connection_error = Some("Attached images exceed the 20 MiB limit.".into());
-            cx.notify();
-            return;
-        }
         let name = format!(
             "paste-{}.png",
             SystemTime::now()
@@ -10111,16 +10141,136 @@ impl XdDesktop {
                 .unwrap_or_default()
                 .as_millis()
         );
-        match Attachment::from_png(name, bytes) {
-            Ok(attachment) => {
-                self.model.draft_attachments.push(attachment);
-                self.attachments_dirty = true;
-                self.attachment_generation = self.attachment_generation.saturating_add(1);
-                self.schedule_draft_sync(cx);
-            }
-            Err(error) => self.model.connection_error = Some(error),
+        let added = if bytes.len() > MAX_ATTACHMENT_BYTES {
+            Err("That image is larger than 10 MiB.".to_owned())
+        } else {
+            Attachment::from_png(name, bytes).and_then(|attachment| self.add_attachment(attachment))
+        };
+        self.finish_adding_attachments(added.err(), cx);
+    }
+
+    /// Adds one attachment to the draft if the host would take the message.
+    /// While a send is out the draft may yet get its attachments back, so
+    /// nothing joins it until that settles.
+    fn add_attachment(&mut self, attachment: Attachment) -> Result<(), String> {
+        if self.sending {
+            return Err("Wait for the message to send before attaching more.".into());
+        }
+        attachment_fits(&self.model.draft_attachments, &attachment)?;
+        self.model.draft_attachments.push(attachment);
+        self.attachments_dirty = true;
+        self.attachment_generation = self.attachment_generation.saturating_add(1);
+        Ok(())
+    }
+
+    fn finish_adding_attachments(&mut self, error: Option<String>, cx: &mut Context<Self>) {
+        if self.attachments_dirty {
+            self.schedule_draft_sync(cx);
+        }
+        if let Some(error) = error {
+            self.model.connection_error = Some(error);
         }
         cx.notify();
+    }
+
+    /// The host connection and chat visit now in use. Files chosen during
+    /// another one are not added, even to a chat of the same name, or to the
+    /// same chat opened again.
+    fn attachment_connection(&self) -> (ChatEndpoint, u64, u64) {
+        let generation = match self.active_endpoint {
+            ChatEndpoint::Local => self.connection_generation,
+            ChatEndpoint::Remote => self.remote_generation,
+        };
+        (self.active_endpoint, generation, self.model.chat_visits)
+    }
+
+    /// Opens the system file picker and attaches what the user chooses.
+    fn pick_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // What is chosen belongs to this chat, wherever the user goes meanwhile.
+        let Some(chat) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let connection = self.attachment_connection();
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        let composer = self.composer_input.read(cx).focus_handle(cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let paths = match chosen.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.model.connection_error =
+                            Some(format!(
+                            "The file picker could not open ({error}). Drop the files on the chat instead."
+                        ));
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.attachment_connection() == connection
+                    && this.model.selected_chat.as_deref() == Some(chat.as_str())
+                {
+                    window.focus(&composer);
+                    this.attach_paths(chat, paths, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Reads files picked or dropped onto `chat`, away from the UI thread, and
+    /// attaches each one the host would take. Only as many files and bytes as
+    /// the draft still has room for are read, however many were chosen.
+    fn attach_paths(&mut self, chat: String, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let draft = &self.model.draft_attachments;
+        let room = DraftRoom {
+            slots: MAX_ATTACHMENTS.saturating_sub(draft.len()),
+            images: MAX_IMAGE_ATTACHMENTS.saturating_sub(
+                draft
+                    .iter()
+                    .filter(|attachment| attachment.preview.is_some())
+                    .count(),
+            ),
+            bytes: MAX_TOTAL_ATTACHMENT_BYTES
+                .saturating_sub(draft.iter().map(|attachment| attachment.bytes).sum()),
+        };
+        let connection = self.attachment_connection();
+        let read = cx.background_spawn(async move { read_attachments(paths, room) });
+        self.attachments_reading += 1;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let read = read.await;
+            let _ = this.update(cx, |this, cx| {
+                this.attachments_reading = this.attachments_reading.saturating_sub(1);
+                cx.notify();
+                // The files belong to the draft they were chosen for, on the
+                // host it was chosen on.
+                if this.attachment_connection() != connection
+                    || this.model.selected_chat.as_deref() != Some(chat.as_str())
+                {
+                    return;
+                }
+                let mut error = None;
+                for attachment in read {
+                    let added = attachment.and_then(|attachment| this.add_attachment(attachment));
+                    if let Err(message) = added {
+                        error.get_or_insert(message);
+                    }
+                }
+                this.finish_adding_attachments(error, cx);
+            });
+        })
+        .detach();
     }
 
     fn composer_changed(&mut self, text: String, cx: &mut Context<Self>) {
@@ -14357,6 +14507,11 @@ impl XdDesktop {
         } else {
             Default::default()
         };
+        let files = message
+            .file_paths()
+            .iter()
+            .map(|path| Self::render_message_file(colors, path))
+            .collect::<Vec<_>>();
         let body = div()
             .w_full()
             .flex()
@@ -14393,7 +14548,10 @@ impl XdDesktop {
                         )
                     })
                     .collect::<Vec<_>>(),
-            );
+            )
+            .when(!files.is_empty(), |body| {
+                body.child(div().flex().flex_wrap().gap_2().children(files))
+            });
         // Prose sits on the page; only what the user wrote and host errors are
         // set apart, the way a conversation reads.
         let card = div()
@@ -14465,6 +14623,33 @@ impl XdDesktop {
             .child(card)
             .children(copy)
             .child(div().h(px(if user { 10.0 } else { 6.0 })))
+            .into_any_element()
+    }
+
+    /// A file the user sent, by name. It lives on the host, which may be
+    /// another machine, so the chip names it rather than opening it.
+    fn render_message_file(colors: ThemeColors, path: &str) -> gpui::AnyElement {
+        div()
+            .h(px(30.0))
+            .max_w(px(280.0))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .px(px(10.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.background))
+            .child(icon(FILE_ICON, 14.0, colors.muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.5))
+                    .text_color(rgb(colors.text))
+                    .child(xd_desktop::model::attached_file_name(path).to_owned()),
+            )
             .into_any_element()
     }
 
@@ -15146,13 +15331,19 @@ impl XdDesktop {
         let can_send = self.model.connected
             && metadata_ready
             && !self.sending
+            && self.attachments_reading == 0
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
         let can_queue = self.model.connected
             && !self.composer.trim().is_empty()
-            && self.model.draft_attachments.is_empty();
+            && self.model.draft_attachments.is_empty()
+            && self.attachments_reading == 0;
         let working = self.model.working;
         let shows_resume = self.shows_resume();
-        let can_resume = shows_resume && self.model.connected && metadata_ready && !self.sending;
+        let can_resume = shows_resume
+            && self.model.connected
+            && metadata_ready
+            && !self.sending
+            && self.attachments_reading == 0;
         let can_submit = can_send || can_resume;
         let agent = AgentCli::from_backend(&self.model.backend);
 
@@ -15215,6 +15406,7 @@ impl XdDesktop {
         })
         .collect::<Vec<_>>();
         div()
+            .id("native-chat")
             .size_full()
             .flex()
             .flex_col()
@@ -15222,6 +15414,15 @@ impl XdDesktop {
             .when(empty_ready, |chat| chat.justify_center())
             .px(px(24.0))
             .bg(rgb(colors.background))
+            // Files dropped anywhere on the chat join the draft.
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                let Some(chat) = this.model.selected_chat.clone() else {
+                    return;
+                };
+                let focus = this.composer_input.read(cx).focus_handle(cx);
+                window.focus(&focus);
+                this.attach_paths(chat, paths.paths().to_vec(), cx);
+            }))
             .child(
                 div()
                     .id("native-transcript")
@@ -15420,6 +15621,9 @@ impl XdDesktop {
                     }))
                     .bg(rgb(colors.composer))
                     .shadow_md()
+                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
+                        style.border_color(rgb(colors.accent))
+                    })
                     .on_click(cx.listener(|this, _, window, cx| {
                         let focus = this.composer_input.read(cx).focus_handle(cx);
                         window.focus(&focus);
@@ -15453,6 +15657,31 @@ impl XdDesktop {
                             .flex_wrap()
                             .items_center()
                             .gap_1()
+                            .child(
+                                div()
+                                    .id("native-attach")
+                                    .debug_selector(|| "native-attach".into())
+                                    .size(px(28.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(8.0))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                                    .tooltip(move |_, cx| {
+                                        cx.new(|_| PaneTooltip {
+                                            label: "Attach files",
+                                            colors,
+                                        })
+                                        .into()
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.pick_attachments(window, cx);
+                                    }))
+                                    .child(icon(PAPERCLIP_ICON, 15.0, colors.muted)),
+                            )
                             .children(options)
                             .child(div().flex_1())
                             .when_some(context_meter, |controls, meter| controls.child(meter))
@@ -18834,6 +19063,148 @@ fn decode_git_path(value: &str) -> Result<String, String> {
     String::from_utf8(output).map_err(|_| "Git returned an invalid UTF-8 file path.".into())
 }
 
+/// Whether the host would take a message with all of `attachments`.
+fn message_fits(attachments: &[Attachment]) -> Result<(), String> {
+    attachments
+        .iter()
+        .enumerate()
+        .try_for_each(|(index, attachment)| attachment_fits(&attachments[..index], attachment))
+}
+
+/// Whether the host would take a message with `attachment` added to `draft`.
+fn attachment_fits(draft: &[Attachment], attachment: &Attachment) -> Result<(), String> {
+    if draft.len() >= MAX_ATTACHMENTS {
+        return Err(format!(
+            "A message can contain at most {MAX_ATTACHMENTS} attachments."
+        ));
+    }
+    let images = draft.iter().filter(|added| added.preview.is_some()).count();
+    if attachment.preview.is_some() && images >= MAX_IMAGE_ATTACHMENTS {
+        return Err(format!(
+            "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
+        ));
+    }
+    if attachment.bytes > MAX_ATTACHMENT_BYTES {
+        return Err(format!("{} is larger than 10 MiB.", attachment.name));
+    }
+    let total = draft.iter().map(|added| added.bytes).sum::<usize>();
+    if total.saturating_add(attachment.bytes) > MAX_TOTAL_ATTACHMENT_BYTES {
+        return Err("Attachments can add up to at most 20 MiB.".into());
+    }
+    Ok(())
+}
+
+/// What a draft still has room for.
+#[derive(Clone, Copy)]
+struct DraftRoom {
+    slots: usize,
+    images: usize,
+    bytes: usize,
+}
+
+/// The files the user chose, read in order until the draft would be full.
+/// What is left unread is refused, so a thousand chosen files cost no more
+/// than ten, and a file refused takes none of the room.
+fn read_attachments(paths: Vec<PathBuf>, mut room: DraftRoom) -> Vec<Result<Attachment, String>> {
+    let mut read = Vec::new();
+    for path in paths {
+        if room.slots == 0 {
+            read.push(Err(format!(
+                "A message can contain at most {MAX_ATTACHMENTS} attachments."
+            )));
+            break;
+        }
+        // With no image slot left a PNG is refused from its first bytes, so
+        // refused pictures cost no more to choose than accepted files.
+        if room.images == 0 && starts_like_png(&path) {
+            read.push(Err(format!(
+                "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
+            )));
+            continue;
+        }
+        let attachment = read_attachment(&path, room.bytes).and_then(|attachment| {
+            let image = attachment.preview.is_some();
+            if image && room.images == 0 {
+                return Err(format!(
+                    "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
+                ));
+            }
+            room.slots -= 1;
+            room.images -= usize::from(image);
+            room.bytes = room.bytes.saturating_sub(attachment.bytes);
+            Ok(attachment)
+        });
+        read.push(attachment);
+    }
+    read
+}
+
+/// Whether a file begins as a PNG does, which is what makes an attachment an
+/// image. Only its first bytes are read.
+fn starts_like_png(path: &Path) -> bool {
+    let mut signature = [0; 8];
+    open_without_waiting(path)
+        .and_then(|mut file| file.read_exact(&mut signature))
+        .is_ok_and(|()| signature == *b"\x89PNG\r\n\x1a\n")
+}
+
+/// Opens a file without waiting on it: a FIFO put where the file was opens at
+/// once instead of blocking until a writer appears.
+fn open_without_waiting(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
+/// One file the user chose to attach, read whole if it is at most `room`
+/// bytes. What was opened is checked, not the path, so a FIFO or device that
+/// takes the file's place cannot stall the read.
+fn read_attachment(path: &Path, room: usize) -> Result<Attachment, String> {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    if fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(format!("{name} is a folder. Attach the files inside it."));
+    }
+    let file = open_without_waiting(path).map_err(|_| format!("{name} could not be read."))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| format!("{name} could not be read."))?;
+    if metadata.is_dir() {
+        return Err(format!("{name} is a folder. Attach the files inside it."));
+    }
+    if !metadata.is_file() {
+        return Err(format!("{name} is not a file."));
+    }
+    let too_large = || format!("{name} is larger than 10 MiB.");
+    let over_total = || "Attachments can add up to at most 20 MiB.".to_owned();
+    if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
+        return Err(too_large());
+    }
+    if metadata.len() > room as u64 {
+        return Err(over_total());
+    }
+    // The file may have grown since it was measured.
+    let limit = room.min(MAX_ATTACHMENT_BYTES);
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| format!("{name} could not be read."))?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(too_large());
+    }
+    if bytes.len() > limit {
+        return Err(over_total());
+    }
+    Ok(Attachment::from_file(name, bytes))
+}
+
 /// Serves the agent marks compiled into the binary, so a bundle needs no icon
 /// theme on the host.
 struct EmbeddedIcons;
@@ -18873,6 +19244,9 @@ impl AssetSource for EmbeddedIcons {
             )),
             FILE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/file.svg").as_slice(),
+            )),
+            PAPERCLIP_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/paperclip.svg").as_slice(),
             )),
             GIT_BRANCH_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/git-branch.svg").as_slice(),

@@ -110,10 +110,15 @@ pub struct Attachment {
     pub name: String,
     pub mime: String,
     pub data: String,
-    pub preview: Arc<Image>,
+    /// The picture a PNG shows. Any other file is sent as a file, and has none.
+    pub preview: Option<Arc<Image>>,
     /// Pixel size from the PNG's header, when it has a readable one and the
     /// picture is small enough to be worth decoding.
     pub size: Option<(u32, u32)>,
+    /// The decoded size, which is what the limits count.
+    pub bytes: usize,
+    /// The same for the same content, so a row drawn earlier finds it again.
+    pub id: u64,
 }
 
 impl Attachment {
@@ -125,26 +130,110 @@ impl Attachment {
             .into_dimensions()
             .ok()
             .filter(|&(width, height)| worth_decoding(width, height));
+        let length = bytes.len();
+        let preview = Arc::new(Image::from_bytes(ImageFormat::Png, bytes));
+        let name = name.into();
+        // The name is part of it, so the same picture attached twice under
+        // two names is two attachments.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&(&name, preview.id()), &mut hasher);
         Ok(Self {
-            name: name.into(),
+            name,
             mime: "image/png".into(),
-            data: STANDARD.encode(&bytes),
-            preview: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
+            data: STANDARD.encode(&preview.bytes),
+            id: std::hash::Hasher::finish(&hasher),
+            preview: Some(preview),
             size,
+            bytes: length,
         })
+    }
+
+    /// Any file from disk: a PNG becomes an image the agent sees, anything
+    /// else a file it reads from the host.
+    pub fn from_file(name: impl Into<String>, bytes: Vec<u8>) -> Self {
+        let name = name.into();
+        if bytes.starts_with(PNG_SIGNATURE)
+            && let Ok(image) = Self::from_png(name.clone(), bytes.clone())
+        {
+            return image;
+        }
+        let mime = file_mime(&name).to_owned();
+        Self::file(name, mime, STANDARD.encode(&bytes), bytes.len())
+    }
+
+    /// The same attachment as the host counts it: name, type, and content.
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.name == other.name && self.mime == other.mime && self.data == other.data
+    }
+
+    fn file(name: String, mime: String, data: String, bytes: usize) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&(&name, &data), &mut hasher);
+        Self {
+            name,
+            mime,
+            data,
+            preview: None,
+            size: None,
+            bytes,
+            id: std::hash::Hasher::finish(&hasher),
+        }
     }
 
     pub(crate) fn from_value(value: &Value) -> Option<Self> {
         let name = value.get("name").and_then(Value::as_str)?;
         let mime = value.get("mime").and_then(Value::as_str)?;
         let data = value.get("data").and_then(Value::as_str)?;
-        if mime != "image/png" {
-            return None;
-        }
         let bytes = STANDARD.decode(data).ok()?;
+        if mime != "image/png" {
+            return Some(Self::file(
+                name.to_owned(),
+                mime.to_owned(),
+                data.to_owned(),
+                bytes.len(),
+            ));
+        }
         let mut attachment = Self::from_png(name, bytes).ok()?;
         attachment.data = data.to_owned();
         Some(attachment)
+    }
+}
+
+/// A synchronized draft's images, then its files, when it carries them. The
+/// host sends the two apart so clients that know only images never see files.
+pub fn draft_attachments(body: &Value) -> Option<Vec<Attachment>> {
+    let images = body.get("draft_attachments")?.as_array()?;
+    let files = body.get("draft_files").and_then(Value::as_array);
+    Some(
+        images
+            .iter()
+            .chain(files.into_iter().flatten())
+            .filter_map(Attachment::from_value)
+            .collect(),
+    )
+}
+
+/// A media type for a file the user attached, from its extension. Only
+/// whether it is a PNG changes how the host passes it on; the rest is a label.
+fn file_mime(name: &str) -> &'static str {
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "md" | "markdown" => "text/markdown",
+        "txt" | "log" | "rs" | "py" | "js" | "ts" | "tsx" | "go" | "c" | "h" | "cpp" | "java"
+        | "kt" | "toml" | "yaml" | "yml" | "xml" | "sh" | "sql" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 
@@ -278,6 +367,9 @@ pub struct Message {
     markdown: Option<Arc<Document>>,
     #[serde(skip)]
     image_paths: Vec<String>,
+    /// Files the user attached, by their path on the host.
+    #[serde(skip)]
+    file_paths: Vec<String>,
     /// A tool row's card, parsed once when the row arrives rather than on
     /// every frame it is drawn.
     #[serde(skip)]
@@ -323,7 +415,7 @@ impl Message {
     ) -> Self {
         let content = content.into();
         let role = role.into();
-        let (shown, mut image_paths) = message_content(&role, &content);
+        let (shown, mut image_paths, file_paths) = message_content(&role, &content);
         // A tool row draws its card, not its text as markdown; a patch can be
         // large, so its document is only built if something asks for it.
         let tool = (role == "tool").then(|| Arc::new(ToolView::parse(&content)));
@@ -343,6 +435,7 @@ impl Message {
             label,
             markdown,
             image_paths,
+            file_paths,
             tool,
         }
     }
@@ -366,6 +459,7 @@ impl Message {
             label,
             markdown,
             image_paths,
+            file_paths: Vec::new(),
             tool: None,
         }
     }
@@ -378,7 +472,7 @@ impl Message {
     ) -> Self {
         let content = content.into();
         let role = role.into();
-        let (shown, image_paths) = message_content(&role, &content);
+        let (shown, image_paths, file_paths) = message_content(&role, &content);
         let markdown = Some(Arc::new(markdown::plain_document(&shown)));
         let tool = (role == "tool").then(|| Arc::new(ToolView::parse(&content)));
         Self {
@@ -388,6 +482,7 @@ impl Message {
             label,
             markdown,
             image_paths,
+            file_paths,
             tool,
         }
     }
@@ -402,13 +497,17 @@ impl Message {
         &self.image_paths
     }
 
+    pub fn file_paths(&self) -> &[String] {
+        &self.file_paths
+    }
+
     /// The card a tool row draws; `None` for every other role.
     pub fn tool_view(&self) -> Option<&ToolView> {
         self.tool.as_deref()
     }
 
     fn cache_markdown(&mut self) {
-        let (shown, mut image_paths) = message_content(&self.role, &self.content);
+        let (shown, mut image_paths, file_paths) = message_content(&self.role, &self.content);
         if self.role == "tool" {
             self.tool = Some(Arc::new(ToolView::parse(&self.content)));
             self.markdown = None;
@@ -422,32 +521,45 @@ impl Message {
             }));
         }
         self.image_paths = image_paths;
+        self.file_paths = file_paths;
     }
 }
 
-fn message_content(role: &str, content: &str) -> (String, Vec<String>) {
+/// What a message shows as text, and the images and files sent with it, each
+/// named on a line of its own. An assistant's images sit among its blocks.
+fn message_content(role: &str, content: &str) -> (String, Vec<String>, Vec<String>) {
     if role == "assistant" {
-        return (content.to_owned(), Vec::new());
+        return (content.to_owned(), Vec::new(), Vec::new());
     }
     let mut shown = Vec::new();
     let mut images = Vec::new();
+    let mut files = Vec::new();
     for raw_line in content.lines() {
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        if let Some(path) = line
-            .strip_prefix("[image: ")
-            .and_then(|line| line.strip_suffix(']'))
-            .filter(|path| !path.is_empty())
-        {
+        if let Some(path) = attached_path(line, "[image: ") {
             images.push(path.to_owned());
+        } else if let Some(path) = attached_path(line, "[file: ") {
+            files.push(path.to_owned());
         } else {
             shown.push(line);
         }
     }
-    if images.is_empty() {
-        (content.to_owned(), images)
+    if images.is_empty() && files.is_empty() {
+        (content.to_owned(), images, files)
     } else {
-        (shown.join("\n").trim().to_owned(), images)
+        (shown.join("\n").trim().to_owned(), images, files)
     }
+}
+
+fn attached_path<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    line.strip_prefix(marker)
+        .and_then(|line| line.strip_suffix(']'))
+        .filter(|path| !path.is_empty())
+}
+
+/// The name a host path ends in, for a file sent from either kind of system.
+pub fn attached_file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,6 +602,9 @@ pub struct AppModel {
     pub terminal_activity_epoch: Option<String>,
     pub terminal_activity_by_chat: HashMap<String, TerminalActivityStamp>,
     pub selected_chat: Option<String>,
+    /// Counts chat selections, so work begun for one visit to a chat can tell
+    /// it from a later visit to the same chat.
+    pub chat_visits: u64,
     pub unread_chats: HashSet<String>,
     /// Pending approval or question request ids per chat, for every chat the
     /// daemon reports on, so the sidebar can flag sessions waiting on the user.
@@ -859,6 +974,7 @@ impl AppModel {
         let chat_id = chat_id.into();
         self.unread_chats.remove(&chat_id);
         self.selected_chat = Some(chat_id);
+        self.chat_visits = self.chat_visits.wrapping_add(1);
         self.messages.clear();
         self.queue.clear();
         self.resumable = false;
@@ -1589,11 +1705,8 @@ impl AppModel {
         };
         self.draft_revision = revision;
         self.draft = text.to_owned();
-        if let Some(attachments) = body.get("draft_attachments").and_then(Value::as_array) {
-            self.draft_attachments = attachments
-                .iter()
-                .filter_map(Attachment::from_value)
-                .collect();
+        if let Some(attachments) = draft_attachments(body) {
+            self.draft_attachments = attachments;
         }
     }
 
@@ -1641,6 +1754,7 @@ impl AppModel {
             terminal_activity_epoch: None,
             terminal_activity_by_chat: HashMap::new(),
             selected_chat: Some("chat-gpui".into()),
+            chat_visits: 0,
             unread_chats: HashSet::new(),
             waiting_chats: HashMap::new(),
             messages: vec![
@@ -3016,7 +3130,10 @@ mod tests {
         }));
         assert_eq!(model.draft_attachments.len(), 1);
         assert_eq!(model.draft_attachments[0].name, "screen.png");
-        assert_eq!(model.draft_attachments[0].preview.bytes, PNG_SIGNATURE);
+        assert_eq!(
+            model.draft_attachments[0].preview.as_ref().unwrap().bytes,
+            PNG_SIGNATURE
+        );
 
         model.apply_draft_snapshot(&json!({"draft":"typing", "draft_revision":2}));
         assert_eq!(model.draft_attachments.len(), 1);
@@ -3031,17 +3148,76 @@ mod tests {
 
     #[test]
     fn persisted_image_references_are_hidden_from_user_text() {
-        let (shown, paths) = message_content(
+        let (shown, paths, files) = message_content(
             "user",
             "before\n[image: /private/paste-one.png]\nafter\n[image: /private/paste-two.png]",
         );
         assert_eq!(paths, ["/private/paste-one.png", "/private/paste-two.png"]);
+        assert!(files.is_empty());
         assert_eq!(shown, "before\nafter");
 
-        let (shown, paths) =
+        let (shown, paths, files) =
             message_content("assistant", "Keep [image: /not/a/reference.png] literal");
-        assert!(paths.is_empty());
+        assert!(paths.is_empty() && files.is_empty());
         assert_eq!(shown, "Keep [image: /not/a/reference.png] literal");
+    }
+
+    #[test]
+    fn attached_files_are_listed_apart_from_user_text() {
+        let message = Message::new(
+            Some(1),
+            "user",
+            "read these\r\n[file: /host/files/1/Quarterly Report.pdf]\n[file: ]\nsee [file: /x] here",
+            None,
+        );
+        assert_eq!(message.file_paths(), ["/host/files/1/Quarterly Report.pdf"]);
+        assert_eq!(
+            attached_file_name(&message.file_paths()[0]),
+            "Quarterly Report.pdf"
+        );
+        assert_eq!(attached_file_name("C:\\files\\a.txt"), "a.txt");
+        let shown = message.markdown();
+        assert_eq!(shown.blocks.len(), 1);
+    }
+
+    #[test]
+    fn a_file_from_disk_is_an_image_only_when_it_is_a_png() {
+        let png = Attachment::from_file("shot.png", PNG_SIGNATURE.to_vec());
+        assert_eq!(png.mime, "image/png");
+        assert!(png.preview.is_some());
+
+        let renamed = Attachment::from_file("shot.png", b"%PDF-1.7".to_vec());
+        assert_eq!(renamed.mime, "application/octet-stream");
+        assert!(renamed.preview.is_none());
+
+        let report = Attachment::from_file("Report.PDF", b"%PDF-1.7".to_vec());
+        assert_eq!(report.mime, "application/pdf");
+        assert_eq!(report.bytes, 8);
+        assert_eq!(report.data, STANDARD.encode(b"%PDF-1.7"));
+        assert_eq!(
+            report.id,
+            Attachment::from_file("Report.PDF", b"%PDF-1.7".to_vec()).id
+        );
+
+        let body = serde_json::json!({
+            "draft_attachments": [{"name": "shot.png", "mime": "image/png", "data": png.data}],
+            "draft_files": [{"name": "Report.PDF", "mime": "application/pdf", "data": report.data}],
+        });
+        let names = draft_attachments(&body)
+            .unwrap()
+            .into_iter()
+            .map(|attachment| attachment.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["shot.png", "Report.PDF"]);
+        assert!(draft_attachments(&serde_json::json!({"draft_files": []})).is_none());
+
+        let synced = Attachment::from_value(&serde_json::json!({
+            "name": "Report.PDF",
+            "mime": "application/pdf",
+            "data": report.data,
+        }))
+        .unwrap();
+        assert_eq!(synced, report);
     }
 
     #[test]

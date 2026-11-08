@@ -565,13 +565,29 @@ With `"steer":true`, a message that would have been queued is steered at once,
 as `steer-queue` describes, and the reply adds `steered`. With no turn running
 the member has no effect.
 
-Attachments are PNG only:
+Each attachment is a file with a `name`, a media type in `mime`, and base64
+`data`:
 
 ```json
-{"attachments":[{"mime":"image/png","data":"base64…"}]}
+{"attachments":[
+  {"name":"screen.png","mime":"image/png","data":"base64…"},
+  {"name":"Report.pdf","mime":"application/pdf","data":"base64…"}
+]}
 ```
 
-At most 4 images, each at most 10 MiB, 20 MiB in total.
+At most 10 attachments, of which at most 4 are images, each at most 10 MiB and
+20 MiB in total. An `image/png` attachment must be a PNG and is passed to the
+agent as an image, on a line `[image: <host path>]`. Any other media type is a
+file: the host writes it under its sent name, the last component of `name`, in
+a private directory of its own and appends `[file: <host path>]`, which the
+agent reads from disk. An unusable name becomes `file`.
+
+A message takes from the chat's draft exactly the attachments it carries: each
+one removes one equal entry (same `mime` and `data`, and for a file the same
+kept name). Anything else in the draft
+stays, such as a file another device added meanwhile, or the files an image-only
+client never saw. A message sent apart from the draft, such as a shortcut,
+leaves the draft's attachments alone.
 
 Desktop clients may provide `worktree_name`, `worktree_backend`, and
 `worktree_model` when the chat is configured to create a new worktree. The
@@ -589,11 +605,22 @@ a prompt slug.
 
 The host persists one composer draft per chat and broadcasts a `draft` event
 after every update. `text` is required but may be empty and is limited to 1
-MiB. Optional `attachments` replaces the synchronized PNG preview list; omit it
-for ordinary text edits so large image payloads are not resent on every
-keystroke. An empty array clears previews. The `chat` snapshot returns `draft`,
-`draft_revision`, and `draft_attachments` so a newly connected device starts
-with the same composer.
+MiB. Optional `attachments` replaces the synchronized attachment list, in the
+same form and limits as `send`; omit it for ordinary text edits so large payloads
+are not resent on every keystroke. An empty array clears them. A draft is shared
+last-writer-wins: each list a client sends replaces the one before it. Without
+`"files":true`, which a client that shows files as well as images sends, the
+list replaces only the draft's images: the files the client cannot see are kept
+after them. The client's own list keeps to
+a message's limits, and a draft's files and images each keep to their own: at
+most 10 files and 20 MiB of them, and at most 4 images and 20 MiB of those, so
+files kept beside a client's images never refuse them; a message sent from it
+must still fit a message's limits. A
+client that shows only images skips the other files. The `chat` snapshot returns `draft`,
+`draft_revision`, `draft_attachments`, and `draft_files` so a newly connected
+device starts with the same composer. `draft_attachments` holds only the draft's
+PNG images and `draft_files` its other files, so a client that knows only images
+never sees a file; a client that shows files reads both.
 
 ### `queue`, `drop-queue`, `edit-queue`, `steer-queue`
 
@@ -891,7 +918,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `worktrees-changed` | — | A Git worktree changed; refetch chat state and worktree lists. |
 | `shortcuts-changed` | optional `folder` | Global or workspace prompt shortcuts changed; refetch chat state. |
 | `queued` | `chat`, `queue`, `text` | Queue replaced. `text` is the first item. |
-| `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` | Composer text changed; attachments are present only when replaced. |
+| `draft` | `chat`, `draft`, `draft_revision`, optional `draft_attachments` and `draft_files` | Composer text changed; attachments are present only when replaced, images in `draft_attachments` and other files in `draft_files`. |
 | `commands` | `chat`, `backend`, `commands` | Slash-command list for a backend. |
 | `turn-started` | `chat`, `label`, `turn_id`, `turn_sequence` | A turn began. |
 | `text` | `chat`, `text`, `turn_id`, `turn_sequence` | Assistant text delta. |
@@ -928,8 +955,9 @@ client ever sees the original path:
 
 A client draws a marker line where it stands in the reply, and leaves one in a
 code fence, or with anything else on its line, as text. A user's message carries
-the same marker for each attachment, after any text, and there every such line is
-an image, because what a user types is not Markdown. Markers in subagent reports
+the same marker for each image it attached, after any text, and there every such
+line is an image, because what a user types is not Markdown. Each other file it
+attached is a line `[file: <host path>]`, which clients show by its name. Markers in subagent reports
 are not handled and stay text.
 
 ### Tagged questions

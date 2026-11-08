@@ -46,7 +46,9 @@ Speech is played as each block closes, not at the end of the turn, so a <speak> 
 
 To show the user an image file from this machine, such as a screenshot or chart you made, put it on a line of its own in your reply, outside any code block, in exactly this form:
 [image: /absolute/path/to/image.png]
-The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files."#;
+The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files.
+
+A line of the form [file: /absolute/path] in the user's message is a file they attached; read it from that path when you need it."#;
 /// Long enough for any typed request; a pasted log does not need to repeat whole.
 const MAX_CUT_OFF_REQUEST_CHARS: usize = 4_000;
 /// Twice the above, so the newest request always survives older ones in full.
@@ -62,7 +64,16 @@ const MAX_SHORTCUTS: usize = 24;
 const MAX_SHORTCUT_BYTES: usize = 4_096;
 const MAX_IMAGES: usize = 4;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_TOTAL_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+/// Images and other files together. Each file has the image's size limit, and
+/// all of a message's attachments share one total.
+const MAX_ATTACHMENTS: usize = 10;
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+/// A draft can hold a client's images on top of the files only other clients
+/// show it, so it has room for both; a message keeps to the limits above.
+const MAX_DRAFT_ATTACHMENTS: usize = MAX_ATTACHMENTS + MAX_IMAGES;
+const MAX_DRAFT_ATTACHMENT_BYTES: usize = 2 * MAX_TOTAL_ATTACHMENT_BYTES;
+const MAX_ATTACHMENT_MIME_BYTES: usize = 255;
+const PNG_MIME: &str = "image/png";
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPAT_REPOSITORY_FILES: usize = 5_000;
 const MAX_COMPAT_REPOSITORY_PREVIEW_BYTES: usize = 128 * 1024;
@@ -138,13 +149,23 @@ pub struct StateStore {
 
 struct ValidatedAttachment {
     name: String,
+    mime: String,
     encoded: String,
     data: Vec<u8>,
+}
+
+impl ValidatedAttachment {
+    /// A PNG goes to the agent as an image; anything else as a file it reads.
+    fn is_image(&self) -> bool {
+        self.mime == PNG_MIME
+    }
 }
 
 struct MaterializedMessage {
     prompt: String,
     paths: Vec<PathBuf>,
+    /// The directory each attached file sits alone in, removed after `paths`.
+    directories: Vec<PathBuf>,
     keep: bool,
 }
 
@@ -174,6 +195,9 @@ impl Drop for MaterializedMessage {
         if !self.keep {
             for path in &self.paths {
                 let _ = fs::remove_file(path);
+            }
+            for directory in &self.directories {
+                let _ = fs::remove_dir(directory);
             }
         }
     }
@@ -890,7 +914,8 @@ impl StateStore {
             "queue": queue,
             "queue_revision": row.17,
             "draft": row.12,
-            "draft_attachments": attachments,
+            "draft_attachments": draft_images(&attachments),
+            "draft_files": kept_draft_files(&attachments),
             "draft_revision": row.14,
             "shortcuts": shortcuts,
             "working": row.11,
@@ -1656,6 +1681,14 @@ impl StateStore {
                 ],
             )?;
             let revision = bump_queue_revision(&transaction, chat_id)?;
+            if request.get("attachments").is_some() {
+                let left = without_sent(&stored_draft_attachments(&transaction, chat_id)?, request);
+                transaction.execute(
+                    "UPDATE chats SET draft_attachments = ?, draft_revision = draft_revision + 1 \
+                     WHERE id = ?",
+                    params![left.to_string(), chat_id],
+                )?;
+            }
             transaction.commit()?;
             message.keep();
             let event = queued_event(chat_id, &queue, revision);
@@ -1689,15 +1722,19 @@ impl StateStore {
                 params![user_message_at, chat_id],
             )?;
         }
-        transaction.execute(
-            if continues.is_some() {
-                "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?"
-            } else {
-                "UPDATE chats SET host_working = 1, draft = '', draft_attachments = '[]', \
-                 draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?"
-            },
-            params![now_seconds(), chat_id],
-        )?;
+        if continues.is_some() {
+            transaction.execute(
+                "UPDATE chats SET host_working = 1, updated_at = ? WHERE id = ?",
+                params![now_seconds(), chat_id],
+            )?;
+        } else {
+            let left = without_sent(&stored_draft_attachments(&transaction, chat_id)?, request);
+            transaction.execute(
+                "UPDATE chats SET host_working = 1, draft = '', draft_attachments = ?, \
+                 draft_revision = draft_revision + 1, updated_at = ? WHERE id = ?",
+                params![left.to_string(), now_seconds(), chat_id],
+            )?;
+        }
         transaction.commit()?;
         message.keep();
         Ok(SendDisposition::Start {
@@ -1959,37 +1996,50 @@ impl StateStore {
             return Ok(MaterializedMessage {
                 prompt: text.to_owned(),
                 paths: Vec::new(),
+                directories: Vec::new(),
                 keep: true,
             });
         };
         let attachments = validate_attachments(value, false)?;
+        // A draft may hold more than one message can send; sending is where
+        // the client that shows them all trims it to fit.
         fs::create_dir_all(&self.paste_root).map_err(|source| StorageError::Filesystem {
-            context: "Cannot create the remote image cache".into(),
+            context: "Cannot create the remote attachment cache".into(),
             source,
         })?;
         secure_directory(&self.paste_root).map_err(|source| StorageError::Filesystem {
-            context: "Cannot secure the remote image cache".into(),
+            context: "Cannot secure the remote attachment cache".into(),
             source,
         })?;
 
         let mut materialized = MaterializedMessage {
             prompt: text.to_owned(),
             paths: Vec::with_capacity(attachments.len()),
+            directories: Vec::new(),
             keep: false,
         };
         for attachment in attachments {
-            let path = self
-                .paste_root
-                .join(format!("paste-{}.png", Uuid::new_v4()));
+            let (path, marker) = if attachment.is_image() {
+                let path = self
+                    .paste_root
+                    .join(format!("paste-{}.png", Uuid::new_v4()));
+                (path, "image")
+            } else {
+                // Alone in a directory of its own, a file keeps the name it was
+                // sent with, which is what the agent sees and refers to.
+                let directory = self.attached_file_directory()?;
+                materialized.directories.push(directory.clone());
+                (directory.join(&attachment.name), "file")
+            };
             let mut file =
                 create_private_file(&path).map_err(|source| StorageError::Filesystem {
-                    context: "Cannot create a remote image".into(),
+                    context: "Cannot create a remote attachment".into(),
                     source,
                 })?;
             materialized.paths.push(path.clone());
             file.write_all(&attachment.data)
                 .map_err(|source| StorageError::Filesystem {
-                    context: "Cannot write a remote image".into(),
+                    context: "Cannot write a remote attachment".into(),
                     source,
                 })?;
             if !materialized.prompt.is_empty() {
@@ -1997,9 +2047,28 @@ impl StateStore {
             }
             materialized
                 .prompt
-                .push_str(&format!("[image: {}]", path.display()));
+                .push_str(&format!("[{marker}: {}]", path.display()));
         }
         Ok(materialized)
+    }
+
+    /// A new private directory for one attached file. Image reads look only at
+    /// the paste root itself, so nothing in here can be served as an image.
+    fn attached_file_directory(&self) -> Result<PathBuf, StorageError> {
+        let files = self.paste_root.join("files");
+        let secured = fs::create_dir_all(&files).and_then(|()| secure_directory(&files));
+        secured.map_err(|source| StorageError::Filesystem {
+            context: "Cannot create the remote attachment cache".into(),
+            source,
+        })?;
+        let directory = files.join(Uuid::new_v4().to_string());
+        fs::create_dir(&directory)
+            .and_then(|()| secure_directory(&directory))
+            .map_err(|source| StorageError::Filesystem {
+                context: "Cannot create a remote attachment".into(),
+                source,
+            })?;
+        Ok(directory)
     }
 
     /// Copies an image a reply names into the store `image-read` serves, so the
@@ -2062,7 +2131,10 @@ impl StateStore {
         if request
             .get("attachments")
             .and_then(Value::as_array)
-            .is_none_or(|attachments| attachments.len() != 1)
+            .is_none_or(|attachments| {
+                attachments.len() != 1
+                    || attachments[0].get("mime").and_then(Value::as_str) != Some(PNG_MIME)
+            })
         {
             return Err(StorageError::InvalidRequest(
                 "Terminal image paste needs exactly one PNG image.".into(),
@@ -3126,9 +3198,20 @@ impl StateStore {
                 "A message draft is too large.".into(),
             ));
         }
-        let attachments = request
-            .get("attachments")
-            .map(|value| validate_attachments(value, true))
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let supplied = match request.get("attachments") {
+            Some(value) if !shows_files(request) => {
+                // Its own images keep to a message's limits; the files kept
+                // beside them, which it cannot see or remove, never refuse them.
+                validate_attachments(value, true)?;
+                let stored = stored_draft_attachments(&database, chat_id)?;
+                Some(with_kept_files(value, &stored))
+            }
+            supplied => supplied.cloned(),
+        };
+        let attachments = supplied
+            .as_ref()
+            .map(validate_draft_attachments)
             .transpose()?;
         let attachments_json = attachments
             .as_ref()
@@ -3138,7 +3221,7 @@ impl StateStore {
                     .map(|attachment| {
                         json!({
                             "name": attachment.name,
-                            "mime": "image/png",
+                            "mime": attachment.mime,
                             "data": attachment.encoded,
                         })
                     })
@@ -3147,7 +3230,6 @@ impl StateStore {
             })
             .transpose()
             .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
-        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let state = database
             .query_row(
                 "UPDATE chats SET draft = ?, draft_attachments = COALESCE(?, draft_attachments), \
@@ -3175,10 +3257,12 @@ impl StateStore {
             "draft": state.0,
             "draft_revision": state.2,
         });
+        let stored = serde_json::from_str::<Value>(&state.1).unwrap_or_else(|_| json!([]));
         if attachments.is_some() {
-            let attachments = serde_json::from_str::<Value>(&state.1).unwrap_or_else(|_| json!([]));
-            reply["draft_attachments"] = attachments.clone();
-            event["draft_attachments"] = attachments;
+            for body in [&mut reply, &mut event] {
+                body["draft_attachments"] = draft_images(&stored);
+                body["draft_files"] = Value::Array(kept_draft_files(&stored));
+            }
         }
         Ok((reply, event))
     }
@@ -8424,70 +8508,253 @@ fn invalid_remote_paste() -> StorageError {
     StorageError::InvalidRequest("That image is not a remote paste.".into())
 }
 
+/// A message's attachments, or an image-only client's own draft list.
 fn validate_attachments(
     value: &Value,
     allow_empty: bool,
 ) -> Result<Vec<ValidatedAttachment>, StorageError> {
-    let attachments = value.as_array().ok_or_else(|| {
-        StorageError::InvalidRequest("Message attachments must be an array.".into())
-    })?;
-    if attachments.len() > MAX_IMAGES || (!allow_empty && attachments.is_empty()) {
+    let count = value.as_array().map_or(0, Vec::len);
+    if count > MAX_ATTACHMENTS || (!allow_empty && count == 0) {
         return Err(StorageError::InvalidRequest(
             if allow_empty {
-                "A draft can contain at most 4 images."
+                "A draft can contain at most 10 attachments."
             } else {
-                "A message can contain between 1 and 4 images."
+                "A message can contain between 1 and 10 attachments."
             }
             .into(),
         ));
     }
+    validate_attachment_list(value, MAX_TOTAL_ATTACHMENT_BYTES)
+}
+
+/// A whole stored draft: room for an image-only client's images beside the
+/// files it keeps, within a bound of its own.
+fn validate_draft_attachments(value: &Value) -> Result<Vec<ValidatedAttachment>, StorageError> {
+    if value
+        .as_array()
+        .is_some_and(|list| list.len() > MAX_DRAFT_ATTACHMENTS)
+    {
+        return Err(StorageError::InvalidRequest(
+            "A draft can contain at most 14 attachments.".into(),
+        ));
+    }
+    let attachments = validate_attachment_list(value, MAX_DRAFT_ATTACHMENT_BYTES)?;
+    // Files keep to a message's limits on their own, which leaves room for an
+    // image-only client's four images (20 MiB) whatever files it cannot see.
+    let files = attachments
+        .iter()
+        .filter(|attachment| !attachment.is_image());
+    let (count, bytes) = files.fold((0, 0), |(count, bytes), file| {
+        (count + 1, bytes + file.data.len())
+    });
+    if count > MAX_ATTACHMENTS {
+        return Err(StorageError::InvalidRequest(
+            "A draft can contain at most 10 files besides its images.".into(),
+        ));
+    }
+    if bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+        return Err(StorageError::InvalidRequest(
+            "A draft's files can add up to at most 20 MiB.".into(),
+        ));
+    }
+    Ok(attachments)
+}
+
+fn validate_attachment_list(
+    value: &Value,
+    max_total: usize,
+) -> Result<Vec<ValidatedAttachment>, StorageError> {
+    let attachments = value.as_array().ok_or_else(|| {
+        StorageError::InvalidRequest("Message attachments must be an array.".into())
+    })?;
+    let too_large =
+        || StorageError::InvalidRequest("Each attachment must be 10 MiB or less.".into());
+    let invalid =
+        || StorageError::InvalidRequest("The attached files are invalid or too large.".into());
     let mut total = 0_usize;
+    let mut images = 0_usize;
+    let mut image_total = 0_usize;
     attachments
         .iter()
         .map(|attachment| {
-            let object = attachment.as_object().ok_or_else(|| {
-                StorageError::InvalidRequest("Only PNG images up to 10 MiB can be sent.".into())
-            })?;
-            let mime = object.get("mime").and_then(Value::as_str);
-            let encoded = object.get("data").and_then(Value::as_str).ok_or_else(|| {
-                StorageError::InvalidRequest("Only PNG images up to 10 MiB can be sent.".into())
-            })?;
-            let encoded_limit = MAX_IMAGE_BYTES.div_ceil(3) * 4;
-            if mime != Some("image/png") || encoded.len() > encoded_limit {
-                return Err(StorageError::InvalidRequest(
-                    "Only PNG images up to 10 MiB can be sent.".into(),
-                ));
+            let object = attachment.as_object().ok_or_else(invalid)?;
+            let mime = object
+                .get("mime")
+                .and_then(Value::as_str)
+                .filter(|mime| valid_attachment_mime(mime))
+                .ok_or_else(invalid)?;
+            let encoded = object
+                .get("data")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            if encoded.len() > MAX_IMAGE_BYTES.div_ceil(3) * 4 {
+                return Err(too_large());
             }
-            let data = STANDARD.decode(encoded).map_err(|_| {
-                StorageError::InvalidRequest("The attached images are invalid or too large.".into())
-            })?;
-            if data.len() > MAX_IMAGE_BYTES
-                || !data.starts_with(PNG_SIGNATURE)
-                || total > MAX_TOTAL_IMAGE_BYTES.saturating_sub(data.len())
-            {
-                return Err(StorageError::InvalidRequest(
-                    "The attached images are invalid or too large.".into(),
-                ));
+            let data = STANDARD.decode(encoded).map_err(|_| invalid())?;
+            if data.len() > MAX_IMAGE_BYTES {
+                return Err(too_large());
+            }
+            if total > max_total.saturating_sub(data.len()) {
+                return Err(StorageError::InvalidRequest(format!(
+                    "Attachments can add up to at most {} MiB.",
+                    max_total / (1024 * 1024)
+                )));
+            }
+            let image = mime == PNG_MIME;
+            if image {
+                // A draft's images alone keep to a message's total, which is
+                // what clients that show only images accept.
+                if image_total > MAX_TOTAL_ATTACHMENT_BYTES.saturating_sub(data.len()) {
+                    return Err(StorageError::InvalidRequest(
+                        "Images can add up to at most 20 MiB.".into(),
+                    ));
+                }
+                image_total += data.len();
+                if !data.starts_with(PNG_SIGNATURE) {
+                    return Err(StorageError::InvalidRequest(
+                        "An attached image is not a valid PNG.".into(),
+                    ));
+                }
+                images += 1;
+                if images > MAX_IMAGES {
+                    return Err(StorageError::InvalidRequest(
+                        "A message can contain at most 4 images.".into(),
+                    ));
+                }
             }
             total += data.len();
-            let supplied = object
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("image.png");
-            let mut name = Path::new(supplied)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("image.png");
-            if name.is_empty() || name.len() > 255 {
-                name = "image.png";
-            }
             Ok(ValidatedAttachment {
-                name: name.to_owned(),
+                name: stored_attachment_name(attachment).to_owned(),
+                mime: mime.to_owned(),
                 encoded: encoded.to_owned(),
                 data,
             })
         })
         .collect()
+}
+
+/// Whether the client shows files as well as images, and so means its draft
+/// list to replace the files too. Clients from before files could be
+/// attached, and the Android app, show only images.
+fn shows_files(request: &Value) -> bool {
+    request.get("files").and_then(Value::as_bool) == Some(true)
+}
+
+fn stored_draft_attachments(database: &Connection, chat_id: &str) -> Result<Value, StorageError> {
+    let stored = database
+        .query_row(
+            "SELECT draft_attachments FROM chats WHERE id = ?",
+            [chat_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+    Ok(serde_json::from_str(&stored).unwrap_or_else(|_| json!([])))
+}
+
+/// A stored draft without the attachments a message took from it: each one
+/// sent removes one entry with the same type and content, and for a file the
+/// same name. What reached the draft from elsewhere while
+/// the message was written stays, so no client clears what it never saw.
+fn without_sent(stored: &Value, request: &Value) -> Value {
+    let mut left = stored.as_array().cloned().unwrap_or_default();
+    let sent = request
+        .get("attachments")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    for attachment in sent {
+        // A file is known by its name, which the agent sees; an image is
+        // saved under a name of the host's own, and image-only clients such as
+        // the Android app do not keep the one it came with.
+        let name = (attachment["mime"] != PNG_MIME).then(|| stored_attachment_name(attachment));
+        let same = |entry: &Value| {
+            entry["mime"] == attachment["mime"]
+                && entry["data"] == attachment["data"]
+                && name.is_none_or(|name| entry["name"].as_str() == Some(name))
+        };
+        if let Some(index) = left.iter().position(same) {
+            left.remove(index);
+        }
+    }
+    Value::Array(left)
+}
+
+/// The images in a stored draft. They alone go out as `draft_attachments`,
+/// which clients from before files could be attached decode as PNGs; files go
+/// out as `draft_files`, which those clients never read.
+fn draft_images(stored: &Value) -> Value {
+    Value::Array(
+        stored
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|attachment| attachment.get("mime").and_then(Value::as_str) == Some(PNG_MIME))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// The files, not images, in a stored draft.
+fn kept_draft_files(stored: &Value) -> Vec<Value> {
+    stored
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|attachment| attachment.get("mime").and_then(Value::as_str) != Some(PNG_MIME))
+        .cloned()
+        .collect()
+}
+
+/// An image-only client's new images, followed by the files it cannot see.
+fn with_kept_files(supplied: &Value, stored: &Value) -> Value {
+    let Some(images) = supplied.as_array() else {
+        return supplied.clone();
+    };
+    let mut merged = images.clone();
+    merged.extend(kept_draft_files(stored));
+    Value::Array(merged)
+}
+
+/// A media type such as `application/pdf`: printable ASCII with one slash.
+fn valid_attachment_mime(mime: &str) -> bool {
+    mime.len() <= MAX_ATTACHMENT_MIME_BYTES
+        && mime.split_once('/').is_some_and(|(kind, subtype)| {
+            !kind.is_empty() && !subtype.is_empty() && !subtype.contains('/')
+        })
+        && mime.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// The name an attachment is kept under: its sent name made safe, or a
+/// stand-in when nothing of it is.
+fn stored_attachment_name(attachment: &Value) -> &str {
+    let fallback = if attachment["mime"] == PNG_MIME {
+        "image.png"
+    } else {
+        "file"
+    };
+    match attachment["name"].as_str().map(attachment_file_name) {
+        Some(name) if !name.is_empty() => name,
+        _ => fallback,
+    }
+}
+
+/// The last component of a sent name, safe to create as a file of that name,
+/// or empty when nothing of it is. A client's own paths never reach the host's
+/// file system, and nothing in the name can break the marker's single line.
+fn attachment_file_name(supplied: &str) -> &str {
+    let name = supplied
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    // One plain component on this host: nothing a join could take as a root,
+    // a drive, or a parent.
+    let mut components = Path::new(name).components();
+    let single =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+    let usable = single && name.len() <= 255 && !name.chars().any(char::is_control);
+    if usable { name } else { "" }
 }
 
 #[cfg(test)]
@@ -9707,7 +9974,7 @@ mod tests {
                 }]
             }))
             .unwrap_err();
-        assert!(error.to_string().contains("invalid or too large"));
+        assert!(error.to_string().contains("not a valid PNG"));
         assert_eq!(store.chat("chat-1").unwrap()["draft"], "");
     }
 
@@ -12524,6 +12791,385 @@ mod tests {
             .next
             .expect("queued image turn");
         assert_eq!(next.prompt, event["queue"][0]);
+    }
+
+    #[test]
+    fn materializes_attached_files_under_their_own_names() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({
+                "chat": "chat-1",
+                "text": "summarize these",
+                "attachments": [
+                    {
+                        "name": "C:\\Users\\me\\Quarterly Report.pdf",
+                        "mime": "application/pdf",
+                        "data": STANDARD.encode(b"%PDF-1.7"),
+                    },
+                    {"name": "screen.png", "mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)},
+                    {"name": "../..", "mime": "text/plain", "data": STANDARD.encode(b"notes")},
+                ],
+            }))
+            .unwrap()
+        else {
+            panic!("idle send should start");
+        };
+        let lines = turn.prompt.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0], "summarize these");
+        let marked = |line: &str, marker: &str| {
+            line.strip_prefix(marker)
+                .and_then(|line| line.strip_suffix(']'))
+                .map(PathBuf::from)
+                .expect("a materialized attachment")
+        };
+        let report = marked(lines[1], "[file: ");
+        assert_eq!(report.file_name().unwrap(), "Quarterly Report.pdf");
+        assert!(report.starts_with(fixture.root.join("remote-pasted").join("files")));
+        assert_eq!(fs::read(&report).unwrap(), b"%PDF-1.7");
+        assert_eq!(
+            fs::metadata(&report).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(report.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let image = marked(lines[2], "[image: ");
+        assert_eq!(image.parent().unwrap(), fixture.root.join("remote-pasted"));
+        let notes = marked(lines[3], "[file: ");
+        assert_eq!(notes.file_name().unwrap(), "file");
+        assert_eq!(fs::read(&notes).unwrap(), b"notes");
+        // A file is never served as an image, whatever it holds.
+        assert!(
+            store
+                .image_read(&json!({"path": report.to_string_lossy()}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_attachments_beyond_the_limits_and_cleans_up() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let send = |attachments: Value| {
+            store
+                .prepare_send(&json!({"chat": "chat-1", "attachments": attachments}))
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default()
+        };
+        let file = json!({"name": "a.txt", "mime": "text/plain", "data": STANDARD.encode(b"a")});
+        let png =
+            json!({"name": "a.png", "mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)});
+
+        assert!(send(Value::Array(vec![file.clone(); 11])).contains("between 1 and 10"));
+        assert!(send(Value::Array(vec![png.clone(); 5])).contains("at most 4 images"));
+        let large = STANDARD.encode(vec![0_u8; MAX_IMAGE_BYTES]);
+        let large = json!({"name": "big.bin", "mime": "application/octet-stream", "data": large});
+        assert!(send(json!([large.clone(), large.clone(), file.clone()])).contains("20 MiB"));
+        for mime in ["", "text", "text/", "a/b/c", "text/plain\n", "text/pl ain"] {
+            let bad = json!([{"name": "a.txt", "mime": mime, "data": "YQ=="}]);
+            assert!(send(bad).contains("invalid"), "{mime:?} was accepted");
+        }
+        assert!(
+            store
+                .materialize_terminal_image(&json!({"attachments": [file]}))
+                .is_err()
+        );
+
+        // A file that cannot be written takes the image written before it along.
+        let paste_root = fixture.root.join("remote-pasted");
+        fs::create_dir_all(&paste_root).unwrap();
+        fs::write(paste_root.join("files"), b"in the way").unwrap();
+        assert!(send(json!([png, file])).contains("remote attachment cache"));
+        let left = fs::read_dir(&paste_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(left, ["files"]);
+    }
+
+    #[test]
+    fn a_client_that_shows_only_images_leaves_the_drafts_files_alone() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat-1", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let png = |name: &str| json!({"name": name, "mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)});
+        let pdf = json!({"name": "Report.pdf", "mime": "application/pdf", "data": STANDARD.encode(b"%PDF")});
+        let notes_file =
+            || json!({"name": "n.txt", "mime": "text/plain", "data": STANDARD.encode(b"n")});
+        let names = |attachments: &Value| {
+            attachments
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|attachment| attachment["name"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [png("a.png"), pdf.clone()],
+            }))
+            .unwrap();
+        // An image-only client replaces the images it shows, and only those.
+        let (reply, event) = store
+            .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": [png("b.png")]}))
+            .unwrap();
+        // Images and files go out apart, so such a client never sees a file.
+        assert_eq!(names(&reply["draft_attachments"]), ["b.png"]);
+        assert_eq!(names(&reply["draft_files"]), ["Report.pdf"]);
+        assert_eq!(event["draft_attachments"], reply["draft_attachments"]);
+        assert_eq!(event["draft_files"], reply["draft_files"]);
+        let (reply, _) = store
+            .set_draft(&json!({"chat": "chat-1", "text": "", "attachments": []}))
+            .unwrap();
+        assert_eq!(reply["draft_attachments"], json!([]));
+        assert_eq!(names(&reply["draft_files"]), ["Report.pdf"]);
+
+        // A send takes from the draft only what it carried.
+        let SendDisposition::Start { turn, .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "text": "hi", "attachments": [png("c.png")]}))
+            .unwrap()
+        else {
+            panic!("idle send should start");
+        };
+        assert!(!turn.prompt.contains("[file: "));
+        let snapshot = store.chat("chat-1").unwrap();
+        assert_eq!(snapshot["draft_attachments"], json!([]));
+        assert_eq!(names(&snapshot["draft_files"]), ["Report.pdf"]);
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+
+        // Another device added a file while this one wrote: only what was
+        // sent leaves, while a turn runs as well as when one starts.
+        let notes =
+            json!({"name": "notes.txt", "mime": "text/plain", "data": STANDARD.encode(b"n")});
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [png("f.png"), pdf.clone(), notes.clone()],
+            }))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "files": true, "attachments": [png("f.png"), pdf.clone()]}))
+            .unwrap();
+        assert_eq!(
+            names(&store.chat("chat-1").unwrap()["draft_files"]),
+            ["notes.txt"]
+        );
+        let SendDisposition::Queued { .. } = store
+            .prepare_send(&json!({"chat": "chat-1", "files": true, "attachments": [notes]}))
+            .unwrap()
+        else {
+            panic!("a send during a turn should queue");
+        };
+        let snapshot = store.chat("chat-1").unwrap();
+        assert_eq!(snapshot["draft_files"], json!([]));
+        // The same content under another name is another attachment.
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        let named = |name: &str| json!({"name": name, "mime": "application/json", "data": STANDARD.encode(b"{}")});
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [named("config.dev.json")],
+            }))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "attachments": [named("../config.prod.json")]}))
+            .unwrap();
+        assert_eq!(
+            names(&store.chat("chat-1").unwrap()["draft_files"]),
+            ["config.dev.json"]
+        );
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .prepare_send(
+                &json!({"chat": "chat-1", "attachments": [named("/elsewhere/config.dev.json")]}),
+            )
+            .unwrap();
+        assert_eq!(store.chat("chat-1").unwrap()["draft_files"], json!([]));
+        // An image goes by its content alone, as image-only clients send it
+        // without the name it was synchronized with.
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .set_draft(&json!({"chat": "chat-1", "text": "", "files": true, "attachments": [png("screen.png")]}))
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "attachments": [{"mime": "image/png", "data": STANDARD.encode(PNG_SIGNATURE)}]}))
+            .unwrap();
+        assert_eq!(
+            store.chat("chat-1").unwrap()["draft_attachments"],
+            json!([])
+        );
+        // A shortcut sent apart from the draft takes nothing from it.
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+        store
+            .set_draft(
+                &json!({"chat": "chat-1", "text": "", "files": true, "attachments": [pdf.clone()]}),
+            )
+            .unwrap();
+        store
+            .prepare_send(&json!({"chat": "chat-1", "text": "shortcut"}))
+            .unwrap();
+        store.finish_turn("chat-1", true, None, 1, false).unwrap();
+
+        // Files it cannot see never refuse its images, even past a message's
+        // limits; sending is where a client that shows them all trims it.
+        let large = |name: &str| {
+            json!({"name": name, "mime": "application/octet-stream",
+                   "data": STANDARD.encode(vec![0_u8; MAX_IMAGE_BYTES])})
+        };
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [large("one.bin"), large("two.bin")],
+            }))
+            .unwrap();
+        let (reply, _) = store
+            .set_draft(&json!({"chat": "chat-1", "text": "kept", "attachments": [png("d.png")]}))
+            .unwrap();
+        assert_eq!(reply["draft"], "kept");
+        assert_eq!(names(&reply["draft_attachments"]), ["d.png"]);
+        assert_eq!(names(&reply["draft_files"]), ["one.bin", "two.bin"]);
+        let all = json!([png("d.png"), large("one.bin"), large("two.bin")]);
+        assert!(
+            store
+                .prepare_send(&json!({"chat": "chat-1", "files": true, "attachments": all}))
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("20 MiB")
+        );
+        // A draft's images keep to what image-only clients accept, even where
+        // the draft has room for more.
+        let big_png = |name: &str| {
+            let mut data = PNG_SIGNATURE.to_vec();
+            data.resize(MAX_IMAGE_BYTES, 0);
+            json!({"name": name, "mime": "image/png", "data": STANDARD.encode(data)})
+        };
+        let refused = store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [big_png("a.png"), big_png("b.png"), big_png("c.png")],
+            }))
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("Images can add up to at most 20 MiB")
+        );
+        // Files alone keep to a message's limits, so they always leave an
+        // image-only client room for its images.
+        let refused = store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": [large("a.bin"), large("b.bin"), large("c.bin")],
+            }))
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("files can add up to at most 20 MiB")
+        );
+        let refused = store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": vec![notes_file(); MAX_ATTACHMENTS + 1],
+            }))
+            .unwrap_err();
+        assert!(refused.to_string().contains("10 files"));
+        store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "", "files": true,
+                "attachments": vec![notes_file(); MAX_ATTACHMENTS],
+            }))
+            .unwrap();
+        let (reply, _) = store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "",
+                "attachments": vec![png("g.png"); MAX_IMAGES],
+            }))
+            .unwrap();
+        assert_eq!(
+            reply["draft_attachments"].as_array().unwrap().len(),
+            MAX_IMAGES
+        );
+        assert_eq!(
+            reply["draft_files"].as_array().unwrap().len(),
+            MAX_ATTACHMENTS
+        );
+        // Its own list still keeps to a message's limits.
+        let refused = store
+            .set_draft(&json!({
+                "chat": "chat-1", "text": "",
+                "attachments": vec![png("e.png"); MAX_IMAGES + 1],
+            }))
+            .unwrap_err();
+        assert!(refused.to_string().contains("4 images"));
+    }
+
+    #[test]
+    fn attached_file_names_are_one_plain_component() {
+        assert_eq!(attachment_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(attachment_file_name("C:\\Users\\me\\a.txt"), "a.txt");
+        assert_eq!(
+            attachment_file_name(" Meeting 10:30.txt "),
+            "Meeting 10:30.txt"
+        );
+        for unusable in ["", ".", "..", "dir/", "a\nb", &"x".repeat(256)] {
+            assert_eq!(attachment_file_name(unusable), "", "{unusable:?}");
+        }
+    }
+
+    #[test]
+    fn an_unkept_message_removes_its_files_and_their_directories() {
+        let root = env::temp_dir().join(format!("xd-materialized-{}", Uuid::new_v4()));
+        let directory = root.join("files").join("one");
+        fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("Report.pdf");
+        fs::write(&file, b"%PDF").unwrap();
+        drop(MaterializedMessage {
+            prompt: String::new(),
+            paths: vec![file.clone()],
+            directories: vec![directory.clone()],
+            keep: false,
+        });
+        assert!(!file.exists() && !directory.exists());
+
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(&file, b"%PDF").unwrap();
+        let mut kept = MaterializedMessage {
+            prompt: String::new(),
+            paths: vec![file.clone()],
+            directories: vec![directory],
+            keep: false,
+        };
+        kept.keep();
+        drop(kept);
+        assert!(file.exists());
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

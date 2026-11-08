@@ -5,6 +5,7 @@ import com.restartfu.xd.model.TranscriptItem
 import com.restartfu.xd.model.TranscriptKind
 import com.restartfu.xd.model.TodoStatus
 import com.restartfu.xd.protocol.ChatReply
+import com.restartfu.xd.protocol.DraftAttachmentReply
 import com.restartfu.xd.protocol.LiveItemReply
 import com.restartfu.xd.protocol.MessageReply
 import com.restartfu.xd.protocol.MessagesReply
@@ -146,6 +147,28 @@ class TranscriptMachineTest {
         state = reduce(state, TranscriptInput.Draft("stale", 2, emptyList())).state
         assertEquals("new", state.draft)
         assertEquals(listOf(png), state.draftAttachments)
+    }
+
+    @Test
+    fun loadedDraftKeepsItsImagesAndLeavesDesktopFilesAlone() {
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+        val result = reduce(
+            ChatState("chat"),
+            TranscriptInput.Loaded(
+                chat = chat().copy(
+                    draftRevision = 1,
+                    draftAttachments = listOf(
+                        DraftAttachmentReply("Report.pdf", "application/pdf", "JVBERi0xLjc="),
+                        DraftAttachmentReply("shot.png", "image/png", "iVBORw0KGgo="),
+                    ),
+                ),
+                messages = messages(),
+                nowMillis = 0,
+            ),
+        ).state
+
+        assertEquals(1, result.draftAttachments.size)
+        assertTrue(result.draftAttachments[0].bytes.contentEquals(png))
     }
 
     @Test
