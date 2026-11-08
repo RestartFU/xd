@@ -1837,9 +1837,182 @@ impl StateStore {
         if !eligible {
             return Ok(None);
         }
-        validate_backend(&chat_backend)?;
+        self.worktree_name_spec(&chat_backend, chat_model, prompt, request)
+    }
+
+    /// How to name the worktree made with a new chat, from the chat's first
+    /// message in the request that created it. The worktree already has a
+    /// name from that message's first line; this one replaces it in the
+    /// background. As for a message that makes a worktree, the client asks
+    /// for it with `generate_worktree_name`. Discovery can take seconds, so
+    /// this is not for the request's own thread.
+    pub(crate) fn prepare_new_chat_worktree_name(
+        &self,
+        request: &Value,
+    ) -> Result<Option<WorktreeNameSpec>, StorageError> {
+        let makes_worktree = request
+            .get("worktree")
+            .and_then(|worktree| worktree.get("kind"))
+            .and_then(Value::as_str)
+            .is_some_and(|kind| matches!(kind, "new" | "branch" | "pull-request"));
+        if !makes_worktree
+            || request.get("session").is_some()
+            || request
+                .get("generate_worktree_name")
+                .and_then(Value::as_bool)
+                != Some(true)
+        {
+            return Ok(None);
+        }
+        let prompt = optional_string(request, "prompt")?.unwrap_or("");
+        let Some(backend) = optional_string(request, "backend")? else {
+            return Ok(None);
+        };
+        if prompt.trim().is_empty() {
+            return Ok(None);
+        }
+        let model = optional_string(request, "model")?.map(str::to_owned);
+        self.worktree_name_spec(backend, model, prompt, request)
+    }
+
+    /// Give a worktree xd made for a chat the branch a generated name calls
+    /// for. Only while the branch is still the one xd made: one the user
+    /// renamed or switched away from is theirs. Returns the new branch.
+    pub(crate) fn rename_generated_worktree_branch(
+        &self,
+        chat_id: &str,
+        name: &str,
+    ) -> Result<Option<String>, StorageError> {
+        // Read under the lock, then let it go: Git can run hooks, and nothing
+        // else waits on the database while they do.
+        let (workdir, recorded, identity) = {
+            let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+            let Some(workdir) = database
+                .query_row("SELECT workdir FROM chats WHERE id = ?", [chat_id], |row| {
+                    row.get::<_, Option<String>>(0)
+                })
+                .optional()?
+                .flatten()
+            else {
+                return Ok(None);
+            };
+            let workdir = normalize_existing_path(Path::new(&workdir));
+            let Some((Some(recorded), Some(identity))) = database
+                .query_row(
+                    "SELECT branch, identity FROM generated_worktrees WHERE path = ?",
+                    [&workdir],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            (workdir, recorded, identity)
+        };
+        let path = Path::new(&workdir);
+        // Still the checkout xd made, as cleanup checks: one made again at
+        // the same path is the user's.
+        if worktree_identity(path).as_deref() != Some(identity.as_str()) {
+            return Ok(None);
+        }
+        let current = run_git(path, &["branch", "--show-current"])?;
+        if !current.0.success() || String::from_utf8_lossy(&current.1).trim() != recorded {
+            return Ok(None);
+        }
+        let renamed = format!("xd/{}-{}", worktree_slug(Some(name)), glib_hash(chat_id));
+        if renamed == recorded {
+            return Ok(None);
+        }
+        let taken = run_git(
+            path,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{renamed}"),
+            ],
+        )?;
+        if taken.0.success() {
+            return Ok(None);
+        }
+        // Names xd's branch, not whatever is checked out, so it never touches
+        // one of the user's.
+        let moved = run_git(path, &["branch", "-m", &recorded, &renamed]);
+        // Git can rename the reference and still fail afterwards, and the
+        // worktree may have switched branches meanwhile, so which of the two
+        // branches exists now, not the exit status or the checkout, says what
+        // happened. What deletion removes must name xd's branch.
+        let exists = |branch: &str| {
+            run_git(
+                path,
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .is_ok_and(|output| output.0.success())
+        };
+        if !exists(&renamed) || exists(&recorded) {
+            let moved = moved?;
+            return if moved.0.success() {
+                Ok(None)
+            } else {
+                Err(StorageError::InvalidRequest(command_error(
+                    &moved.2,
+                    "git could not rename the worktree's branch",
+                )))
+            };
+        }
+        let record = |database: &Mutex<Connection>| {
+            database
+                .lock()
+                .map_err(|_| StorageError::Poisoned)
+                .and_then(|database| {
+                    database
+                        .execute(
+                            "UPDATE generated_worktrees SET branch = ? WHERE path = ? AND branch = ?",
+                            params![renamed, workdir, recorded],
+                        )
+                        .map_err(StorageError::from)
+                })
+        };
+        match record(&self.database) {
+            Ok(1) => Ok(Some(renamed)),
+            // The record moved on, or cannot be written: put Git back, and say
+            // so if even that fails, since cleanup will then leave the
+            // worktree alone.
+            other => {
+                let restored = run_git(path, &["branch", "-m", &renamed, &recorded]);
+                if !exists(&recorded) {
+                    eprintln!(
+                        "xd: worktree {workdir} has branch {renamed}, but xd recorded {recorded}: {}",
+                        restored
+                            .map(|output| String::from_utf8_lossy(&output.2).trim().to_owned())
+                            .unwrap_or_else(|error| error.to_string())
+                    );
+                }
+                other.map(|_| None)
+            }
+        }
+    }
+
+    fn worktree_name_spec(
+        &self,
+        chat_backend: &str,
+        chat_model: Option<String>,
+        prompt: &str,
+        request: &Value,
+    ) -> Result<Option<WorktreeNameSpec>, StorageError> {
+        validate_backend(chat_backend)?;
         let requested_backend = optional_string(request, "worktree_backend")?;
-        let backend = requested_backend.unwrap_or(&chat_backend).to_owned();
+        let backend = requested_backend.unwrap_or(chat_backend).to_owned();
         validate_backend(&backend)?;
         // A name is a few words, so it goes to the low-cost model that titles
         // chats unless the user chose a Git writer model. When the CLI offers
@@ -12882,6 +13055,78 @@ mod tests {
             "{}",
             branch(&named_id)
         );
+
+        // The generated name arrives later and renames the branch, keeping
+        // the chat's suffix, and what deletion will remove follows it.
+        let renamed = format!("xd/footer-links-new-tab-{}", glib_hash(&named_id));
+        assert_eq!(
+            store
+                .rename_generated_worktree_branch(&named_id, "footer links new tab")
+                .unwrap(),
+            Some(renamed.clone())
+        );
+        let named_path = store.chat(&named_id).unwrap()["workdir"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let current = run_git(Path::new(&named_path), &["branch", "--show-current"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&current.1).trim(), renamed);
+        let recorded = store
+            .database
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT branch FROM generated_worktrees WHERE path = ?",
+                [&named_path],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, renamed);
+        assert!(
+            store.tree().unwrap()["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|chat| chat["id"] == named_id.as_str() && chat["branch"] == renamed.as_str())
+        );
+        // Once only, and never a branch the user moved the worktree to.
+        assert_eq!(
+            store
+                .rename_generated_worktree_branch(&named_id, "footer links new tab")
+                .unwrap(),
+            None
+        );
+        // Not a checkout made again at the same path, which no longer carries
+        // the identity xd marked its worktree with.
+        let marker = worktree_git_directory(Path::new(&named_path))
+            .unwrap()
+            .join(WORKTREE_IDENTITY_FILE);
+        let identity = fs::read_to_string(&marker).unwrap();
+        fs::write(&marker, "someone else's").unwrap();
+        assert_eq!(
+            store
+                .rename_generated_worktree_branch(&named_id, "something else")
+                .unwrap(),
+            None
+        );
+        fs::write(&marker, identity).unwrap();
+        let switched = run_git(Path::new(&named_path), &["checkout", "-q", "-b", "mine"]).unwrap();
+        assert!(switched.0.success());
+        assert_eq!(
+            store
+                .rename_generated_worktree_branch(&named_id, "something else")
+                .unwrap(),
+            None
+        );
+        let current = run_git(Path::new(&named_path), &["branch", "--show-current"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&current.1).trim(), "mine");
+        // Nor a chat in a checkout xd did not make.
+        assert_eq!(
+            store
+                .rename_generated_worktree_branch(&selected_id, "anything")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -13090,6 +13335,44 @@ mod tests {
         // The run needs nothing from the repository, so it loads none of it.
         assert_eq!(naming.workdir, store.chat_title_root.to_string_lossy());
         assert!(store.chat_title_root.is_dir());
+
+        // A new chat that makes a worktree names it from its first message
+        // the same way, from the request that creates the chat.
+        let new_chat = json!({
+            "folder": "repo",
+            "backend": "codex",
+            "worktree": {"kind": "branch", "ref": "refs/heads/main", "oid": "abc"},
+            "prompt": "review it",
+            "generate_worktree_name": true,
+            "worktree_backend": "claude",
+            "worktree_model": "claude-sonnet-5"
+        });
+        let naming = store
+            .prepare_new_chat_worktree_name(&new_chat)
+            .unwrap()
+            .unwrap();
+        assert_eq!(naming.backend, "claude");
+        assert_eq!(naming.model, "claude-sonnet-5");
+        assert_eq!(naming.prompt, "review it");
+        // Not without a worktree to make, a message, or the client asking.
+        for change in [
+            json!({"worktree": {"kind": "existing", "path": "/repo"}}),
+            json!({"session": "shared"}),
+            json!({"prompt": "  "}),
+            json!({"generate_worktree_name": false}),
+        ] {
+            let mut request = new_chat.clone();
+            for (key, value) in change.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            assert!(
+                store
+                    .prepare_new_chat_worktree_name(&request)
+                    .unwrap()
+                    .is_none(),
+                "{change}"
+            );
+        }
 
         // Nothing confirms the low-cost model yet, so naming is left to the message.
         assert!(

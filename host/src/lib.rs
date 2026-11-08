@@ -98,10 +98,11 @@ pub struct Engine {
     owner_icons: Arc<OwnerIcons>,
     terminals: TerminalManager,
     chat_execution: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    session_resources: Mutex<()>,
+    session_resources: Arc<Mutex<()>>,
     secrets: Arc<SecretsStore>,
     git_drafts: GitDraftService,
     chat_titles: ChatTitleService,
+    worktree_names: worktree_name::WorktreeNameService,
     git_actions: Arc<Mutex<()>>,
     repository_monitor: RepositoryMonitor,
     self_update: SelfUpdate,
@@ -162,10 +163,15 @@ impl Engine {
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
-            session_resources: Mutex::new(()),
+            session_resources: Arc::new(Mutex::new(())),
             secrets,
             git_drafts: GitDraftService::new(None, events.clone()),
             chat_titles: ChatTitleService::new(None, events.clone()),
+            worktree_names: worktree_name::WorktreeNameService::new(
+                None,
+                events.clone(),
+                Arc::new(Mutex::new(())),
+            ),
             git_actions: Arc::new(Mutex::new(())),
             repository_monitor: RepositoryMonitor::disabled(),
             self_update,
@@ -195,6 +201,14 @@ impl Engine {
         // must not reach a real CLI. The daemon tests cover titles end to end.
         let chat_titles =
             ChatTitleService::new(cfg!(not(test)).then(|| store.clone()), events.clone());
+        // Renames wait their turn with what creates, deletes, or settles a
+        // chat's worktree, as everything that changes one does.
+        let session_resources = Arc::new(Mutex::new(()));
+        let worktree_names = worktree_name::WorktreeNameService::new(
+            cfg!(not(test)).then(|| store.clone()),
+            events.clone(),
+            session_resources.clone(),
+        );
         let self_update = SelfUpdate::new(events.clone());
         let repository_monitor = RepositoryMonitor::new(store.clone(), events.clone());
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
@@ -214,10 +228,11 @@ impl Engine {
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
-            session_resources: Mutex::new(()),
+            session_resources,
             secrets,
             git_drafts,
             chat_titles,
+            worktree_names,
             git_actions: Arc::new(Mutex::new(())),
             repository_monitor,
             self_update,
@@ -417,11 +432,21 @@ impl Engine {
             Some("move-folder") => self.tree_mutation(|store| store.move_folder(&request)),
             Some("trash-folder") => self.tree_mutation(|store| store.trash_folder(&request)),
             Some("new-chat") => {
-                let _resources = self
-                    .session_resources
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                self.tree_mutation(|store| store.new_chat(&request))
+                let reply = {
+                    let _resources = self
+                        .session_resources
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    self.tree_mutation(|store| store.new_chat(&request))
+                };
+                // Named afterwards, so creating the chat never waits on a model.
+                if reply.get("ok").and_then(Value::as_bool) == Some(true)
+                    && let Some(chat_id) = reply.get("id").and_then(Value::as_str)
+                {
+                    self.worktree_names
+                        .start(chat_id.to_owned(), request.clone());
+                }
+                reply
             }
             Some("rename-session") => self.tree_mutation(|store| store.rename_session(&request)),
             Some("move-session") => self.tree_mutation(|store| store.move_session(&request)),
@@ -1799,6 +1824,10 @@ impl Engine {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
+        let _resources = self
+            .session_resources
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         match store.remove_worktree(request) {
             Ok(reply) => {
                 if let Some(chat_id) = request.get("chat").and_then(Value::as_str) {
