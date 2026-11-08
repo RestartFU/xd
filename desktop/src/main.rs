@@ -1995,6 +1995,14 @@ struct NewSessionBranch {
     oid: String,
 }
 
+/// A created chat's first message, sent when the chat's state arrives.
+struct FirstChatPrompt {
+    /// The host the chat is on.
+    endpoint: ChatEndpoint,
+    text: String,
+    attachments: Vec<Attachment>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 struct NewSessionPullRequest {
     number: u64,
@@ -2163,7 +2171,7 @@ struct XdDesktop {
     new_chat_menu: Option<&'static str>,
     /// Created chats' first messages, sent when each chat's state arrives,
     /// by chat id: another chat can be started before one is sent.
-    first_chat_prompts: HashMap<String, (String, Vec<Attachment>)>,
+    first_chat_prompts: HashMap<String, FirstChatPrompt>,
     new_chat_attachments: Vec<Attachment>,
     new_chat_submitted_attachments: Vec<Attachment>,
     /// The chat the new chat view created, which it stays on screen for
@@ -5271,10 +5279,11 @@ impl XdDesktop {
                     }
                     self.first_chat_prompts.insert(
                         chat_id.to_owned(),
-                        (
-                            self.new_chat_submitted_prompt.clone().unwrap_or_default(),
-                            self.new_chat_submitted_attachments.clone(),
-                        ),
+                        FirstChatPrompt {
+                            endpoint: self.active_endpoint,
+                            text: self.new_chat_submitted_prompt.clone().unwrap_or_default(),
+                            attachments: self.new_chat_submitted_attachments.clone(),
+                        },
                     );
                     // The view stays, showing the message, until the chat
                     // opens in its place.
@@ -5333,10 +5342,15 @@ impl XdDesktop {
                     let draft = self.model.draft.clone();
                     self.set_composer_text(draft, cx);
                 }
-                if let Some((prompt, attachments)) = self.first_chat_prompts.remove(&chat_id) {
-                    self.model.draft_attachments = attachments;
+                if self
+                    .first_chat_prompts
+                    .get(&chat_id)
+                    .is_some_and(|prompt| prompt.endpoint == self.active_endpoint)
+                    && let Some(prompt) = self.first_chat_prompts.remove(&chat_id)
+                {
+                    self.model.draft_attachments = prompt.attachments;
                     self.attachments_dirty = true;
-                    self.set_composer_text(prompt, cx);
+                    self.set_composer_text(prompt.text, cx);
                     self.draft_dirty = true;
                     self.send_composer(cx);
                 }
@@ -7181,11 +7195,6 @@ impl XdDesktop {
         }
     }
 
-    /// Send a created chat's first message without opening the chat, when
-    /// another one was picked before it opened. Otherwise it would wait in
-    /// the chat's draft until that chat was opened. The host empties that
-    /// draft when it starts the turn, as for any message; if the send fails,
-    /// the message is still in the draft to send from there.
     /// Send the first messages of created chats other than `keep` without
     /// opening those chats.
     fn send_first_messages_aside(&mut self, keep: Option<&str>) {
@@ -7200,18 +7209,31 @@ impl XdDesktop {
         }
     }
 
+    /// Send a created chat's first message without opening the chat, when
+    /// the chat was left before its state arrived. Otherwise it would wait in
+    /// the chat's draft until that chat was opened. It goes to the host the
+    /// chat is on, whichever is shown. The host empties that draft when it
+    /// starts the turn, as for any message; if the send fails, the message is
+    /// still in the draft to send from there.
     fn send_first_message_aside(&mut self, chat_id: &str) {
-        // Without a host it stays, to go out when the chat opens.
-        let Some(host) = self.active_host().cloned() else {
+        let Some(endpoint) = self
+            .first_chat_prompts
+            .get(chat_id)
+            .map(|prompt| prompt.endpoint)
+        else {
             return;
         };
-        let Some((text, attachments)) = self.first_chat_prompts.remove(chat_id) else {
+        // Without that host it stays, to go out when the chat opens.
+        let Some(host) = self.endpoint_host(endpoint).cloned() else {
+            return;
+        };
+        let Some(prompt) = self.first_chat_prompts.remove(chat_id) else {
             return;
         };
         if let Err(error) = host.send_message(
             chat_id,
-            &text,
-            &attachments,
+            &prompt.text,
+            &prompt.attachments,
             self.settings.git_writer.backend(),
             self.settings.git_writer_model.as_deref(),
             false,

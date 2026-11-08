@@ -1365,8 +1365,9 @@ mod start_tests {
             assert_eq!(desktop.creating_chat_folder.as_deref(), Some("atlas"));
             assert!(desktop.chat_create_submitting);
             assert_eq!(desktop.new_chat_status(), "Opening the chat");
-            let (text, _) = &desktop.first_chat_prompts["implementation"];
-            assert_eq!(text, "Fix the footer links");
+            let prompt = &desktop.first_chat_prompts["implementation"];
+            assert_eq!(prompt.text, "Fix the footer links");
+            assert_eq!(prompt.endpoint, ChatEndpoint::Local);
 
             // Nothing waits on it any more: another chat can open, or
             // another new chat start.
@@ -1458,8 +1459,8 @@ mod start_tests {
                     None,
                     cx,
                 );
-                assert_eq!(desktop.first_chat_prompts["implementation"].0, "First");
-                assert_eq!(desktop.first_chat_prompts["second"].0, "Second");
+                assert_eq!(desktop.first_chat_prompts["implementation"].text, "First");
+                assert_eq!(desktop.first_chat_prompts["second"].text, "Second");
             });
         });
     }
@@ -1606,6 +1607,59 @@ mod start_tests {
         leave_a_created_chat(cx, Leave::ForNoChat);
     }
 
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_waiting_first_message_goes_only_to_its_chats_host(cx: &mut gpui::TestAppContext) {
+        use std::io::{BufRead, BufReader, Write};
+        let (client, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = server_end;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return None;
+                }
+                let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(id) = request["_xd_request"].as_u64() {
+                    writeln!(stream, "{{\"ok\":true,\"_xd_request\":{id}}}").unwrap();
+                }
+                if request["op"] == "send" {
+                    return request["chat"].as_str().map(str::to_owned);
+                }
+            }
+        });
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            std::env::temp_dir().join("xd-first-host-identity"),
+        );
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.host = Some(host);
+            for (chat, endpoint) in [
+                ("on-remote", ChatEndpoint::Remote),
+                ("on-local", ChatEndpoint::Local),
+            ] {
+                desktop.first_chat_prompts.insert(
+                    chat.into(),
+                    FirstChatPrompt {
+                        endpoint,
+                        text: "First".into(),
+                        attachments: Vec::new(),
+                    },
+                );
+            }
+            desktop.send_first_messages_aside(None);
+            // The remote chat's host is not connected: its message waits.
+            assert!(desktop.first_chat_prompts.contains_key("on-remote"));
+            assert!(!desktop.first_chat_prompts.contains_key("on-local"));
+        });
+        assert_eq!(server.join().unwrap().as_deref(), Some("on-local"));
+    }
+
     #[gpui::test]
     fn a_created_chat_is_not_offered_again_after_a_disconnect(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -1660,7 +1714,8 @@ mod image_tests {
                 None,
                 cx,
             );
-            let (text, attachments) = &desktop.first_chat_prompts["image-chat"];
+            let prompt = &desktop.first_chat_prompts["image-chat"];
+            let (text, attachments) = (&prompt.text, &prompt.attachments);
             assert!(text.is_empty());
             assert_eq!(attachments.len(), 1);
         });
