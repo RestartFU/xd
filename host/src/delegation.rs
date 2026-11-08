@@ -62,6 +62,7 @@ fn detect_within(script: &str, depth: usize) -> Option<Delegation> {
     }
     segments(script)
         .iter()
+        .filter(|segment| !segment.defined)
         .find_map(|segment| classify(segment, depth))
 }
 
@@ -103,8 +104,12 @@ pub fn report(output: &str) -> Report {
 }
 
 /// The end of a backgrounded command's output file, where its report is.
+/// Only a regular file is read: opening a pipe would wait for a writer.
 pub fn read_output(path: &str) -> Option<String> {
     const LIMIT: u64 = 64 * 1024;
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let mut file = File::open(path).ok()?;
     let length = file.metadata().ok()?.len();
     let start = length.saturating_sub(LIMIT);
@@ -126,6 +131,8 @@ pub fn read_output(path: &str) -> Option<String> {
 struct Segment {
     words: Vec<String>,
     stdin: Option<String>,
+    /// Part of a function's body, which defining the function does not run.
+    defined: bool,
 }
 
 struct PendingHeredoc {
@@ -153,6 +160,11 @@ fn segments(script: &str) -> Vec<Segment> {
     let mut in_word = false;
     let mut redirect = Redirect::None;
     let mut heredocs: Vec<PendingHeredoc> = Vec::new();
+    // `name()` or `function name` was just read; its body is the next `{`.
+    let mut function_pending = false;
+    let mut braces = 0usize;
+    // The brace depth at which the function body being read ends.
+    let mut function_body: Option<usize> = None;
     let mut index = 0;
 
     macro_rules! finish_word {
@@ -160,7 +172,23 @@ fn segments(script: &str) -> Vec<Segment> {
             if in_word {
                 let finished = std::mem::take(&mut word);
                 match std::mem::replace(&mut redirect, Redirect::None) {
-                    Redirect::None => current.words.push(finished),
+                    Redirect::None => {
+                        if finished == "{" {
+                            braces += 1;
+                            if function_pending && function_body.is_none() {
+                                function_body = Some(braces);
+                            }
+                            function_pending = false;
+                        } else if finished == "}" {
+                            if function_body == Some(braces) {
+                                function_body = None;
+                            }
+                            braces = braces.saturating_sub(1);
+                        } else if finished == "function" && current.words.is_empty() {
+                            function_pending = true;
+                        }
+                        current.words.push(finished);
+                    }
                     Redirect::File => {}
                     Redirect::Heredoc(strip_tabs) => heredocs.push(PendingHeredoc {
                         delimiter: finished,
@@ -177,7 +205,8 @@ fn segments(script: &str) -> Vec<Segment> {
         () => {
             finish_word!();
             redirect = Redirect::None;
-            let segment = std::mem::take(&mut current);
+            let mut segment = std::mem::take(&mut current);
+            segment.defined = function_body.is_some();
             if !segment.words.is_empty() || segment.stdin.is_some() {
                 done.push(segment);
             } else {
@@ -269,6 +298,16 @@ fn segments(script: &str) -> Vec<Segment> {
                 finish_word!();
                 index += 1;
             }
+            '(' if chars[index + 1..].iter().find(|c| !matches!(c, ' ' | '\t')) == Some(&')') => {
+                // `name()` defines a function rather than running anything.
+                finish_segment!();
+                function_pending = true;
+                index += 1;
+                while index < chars.len() && chars[index] != ')' {
+                    index += 1;
+                }
+                index += 1;
+            }
             ';' | '&' | '|' | '(' | ')' | '`' => {
                 finish_segment!();
                 index += 1;
@@ -350,14 +389,18 @@ fn classify(segment: &Segment, depth: usize) -> Option<Delegation> {
                     .is_some_and(|word| word.starts_with('-') || is_assignment(word))
                 {
                     let takes_value = matches!(words[0].as_str(), "-u" | "-n" | "-C" | "-S");
-                    words = &words[if takes_value { 2 } else { 1 }.min(words.len())..];
+                    words = words
+                        .get(if takes_value { 2 } else { 1 }..)
+                        .unwrap_or_default();
                 }
             }
             "timeout" => {
                 words = &words[1..];
                 while words.first().is_some_and(|word| word.starts_with('-')) {
                     let takes_value = matches!(words[0].as_str(), "-k" | "-s");
-                    words = &words[if takes_value { 2 } else { 1 }.min(words.len())..];
+                    words = words
+                        .get(if takes_value { 2 } else { 1 }..)
+                        .unwrap_or_default();
                 }
                 // The duration.
                 words = words.get(1..)?;
@@ -370,9 +413,14 @@ fn classify(segment: &Segment, depth: usize) -> Option<Delegation> {
     let stdin = segment.stdin.as_deref();
     match program {
         "bash" | "sh" | "zsh" | "dash" => {
-            let flag = args.iter().position(|arg| {
-                arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c')
-            })?;
+            let short_flags = |arg: &&String| arg.starts_with('-') && !arg.starts_with("--");
+            // `-n` reads the script without running it.
+            if args.iter().filter(short_flags).any(|arg| arg.contains('n')) {
+                return None;
+            }
+            let flag = args
+                .iter()
+                .position(|arg| short_flags(&arg) && arg.contains('c'))?;
             detect_within(args.get(flag + 1)?, depth + 1)
         }
         "codex-agent" => codex_agent(args, stdin),
@@ -520,15 +568,20 @@ fn codex(args: &[String], stdin: Option<&str>) -> Option<Delegation> {
     if !matches!(*command, "exec" | "e") {
         return None;
     }
+    // `codex exec [PROMPT]`, or `codex exec resume (SESSION_ID | --last) [PROMPT]`.
     let rest = match rest.split_first() {
-        Some((&"resume", rest)) => rest,
+        Some((&"resume", rest)) if args.iter().any(|arg| arg == "--last") => rest,
+        Some((&"resume", rest)) => rest.get(1..).unwrap_or_default(),
         _ => rest,
     };
-    let prompt = longest(rest).or_else(|| {
-        (dash || rest.is_empty())
-            .then(|| stdin.and_then(prompt_text))
-            .flatten()
-    });
+    let prompt = rest
+        .first()
+        .and_then(|prompt| prompt_text(prompt))
+        .or_else(|| {
+            (dash || rest.is_empty())
+                .then(|| stdin.and_then(prompt_text))
+                .flatten()
+        });
     Some(Delegation {
         provider: "Codex",
         agent: "Codex agent".into(),
@@ -650,6 +703,18 @@ mod tests {
         assert_eq!(here.model.as_deref(), Some("o5"));
         assert_eq!(here.prompt.as_deref(), Some("list the crates"));
 
+        // Calling a function is not followed into its body, so it stays a
+        // command; running the assistant outside the definition still counts.
+        let called = detect("review() { codex exec \"$1\"; }; review 'Check it'");
+        assert_eq!(called, None);
+        assert!(detect("f() { ls; }\ncodex exec 'after the function'").is_some());
+
+        let resumed =
+            detect("codex exec resume 019aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 'Continue'").unwrap();
+        assert_eq!(resumed.prompt.as_deref(), Some("Continue"));
+        let last = detect("codex exec resume --last 'Keep going'").unwrap();
+        assert_eq!(last.prompt.as_deref(), Some("Keep going"));
+
         let after =
             detect("echo start; CODEX_HOME=/x codex e 'fix the build' 2>&1 | tail -n 5").unwrap();
         assert_eq!(after.prompt.as_deref(), Some("fix the build"));
@@ -668,8 +733,14 @@ mod tests {
             "cat ~/.claude/skills/codex-opussy/bin/codex-agent",
             "grep -rn 'codex exec' host/src",
             "echo \"claude -p hi\"",
+            "env -u",
+            "timeout -k",
+            "nice -n",
             "git commit -m 'run codex exec from claude -p'",
             "cat <<'EOF' > notes.md\ncodex exec do things\nEOF",
+            "review() { codex exec 'Review the diff'; }",
+            "function review {\n  claude -p 'Review the diff'\n}\necho defined",
+            "bash -n -c 'codex exec \"Review\"'",
         ] {
             assert_eq!(detect(command), None, "{command}");
         }
@@ -712,5 +783,6 @@ mod tests {
         assert!(read.ends_with("The report.\n"));
         let _ = std::fs::remove_file(&path);
         assert_eq!(read_output("/nonexistent/xd/output"), None);
+        assert_eq!(read_output(std::env::temp_dir().to_str().unwrap()), None);
     }
 }

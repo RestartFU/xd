@@ -1311,7 +1311,9 @@ fn claude_task_event(root: &Value) -> Option<SubagentPatch> {
         "task_notification" => {
             patch.status = text_field(root, "status").and_then(SubagentStatus::from_wire);
             patch.summary = text_field(root, "summary").map(str::to_owned);
-            patch.output_file = text_field(root, "output_file").map(str::to_owned);
+            // The output is only a report for an agent run as a command, which
+            // only the record knows; this parser may not have seen it start.
+            patch.output = text_field(root, "output_file").and_then(crate::delegation::read_output);
             patch.tokens = usage_field("total_tokens");
             patch.tool_uses = usage_field("tool_uses");
             patch.duration_ms = usage_field("duration_ms");
@@ -2757,10 +2759,14 @@ mod tests {
         ));
         assert_eq!(launched[0].background, Some(true));
         assert_eq!(launched[0].status, None);
+        // A parser that never saw it start, as between turns, reads its output.
+        let output = std::env::temp_dir().join(format!("xd-agent-{}.output", uuid::Uuid::new_v4()));
+        std::fs::write(&output, "Fixed.\n").unwrap();
         let done = subagent_patches(ClaudeParser::default().feed(
-            r#"{"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_y","status":"completed","output_file":"/tmp/b1.output","summary":"Background command completed"}"#,
+            &serde_json::json!({"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_y","status":"completed","output_file":output,"summary":"Background command completed"}).to_string(),
         ));
-        assert_eq!(done[0].output_file.as_deref(), Some("/tmp/b1.output"));
+        let _ = std::fs::remove_file(&output);
+        assert_eq!(done[0].output.as_deref(), Some("Fixed.\n"));
 
         // Ordinary commands stay commands.
         let mut parser = ClaudeParser::default();

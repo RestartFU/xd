@@ -109,8 +109,8 @@ pub struct SubagentPatch {
     pub duration_ms: Option<u64>,
     pub latest: Option<String>,
     pub summary: Option<String>,
-    /// Where a backgrounded command wrote its output, once it has finished.
-    pub output_file: Option<String>,
+    /// The end of what a backgrounded command printed, once it has finished.
+    pub output: Option<String>,
     /// A task the agent says to keep out of the transcript.
     pub hidden: bool,
 }
@@ -158,17 +158,13 @@ impl SubagentRun {
         if !self.launcher.is_empty() {
             // The command's output is the agent's report, plus whatever the
             // command adds around it.
-            if let Some(output) = patch
-                .output_file
-                .as_deref()
-                .and_then(crate::delegation::read_output)
-                .filter(|output| !output.trim().is_empty())
-            {
+            if let Some(output) = patch.output.filter(|output| !output.trim().is_empty()) {
                 summary = Some(output);
             }
             if let Some(output) = summary.take() {
                 let report = crate::delegation::report(&output);
-                if report.failed && status.is_some_and(|status| status != SubagentStatus::Running) {
+                // A stopped agent stays stopped, whatever its output says.
+                if report.failed && status == Some(SubagentStatus::Completed) {
                     status = Some(SubagentStatus::Failed);
                 }
                 set(&mut self.model, report.model, 80);
@@ -443,24 +439,26 @@ mod tests {
         assert_eq!(run.agent, "auth-audit");
         assert_eq!(run.description, "Audit token checks");
 
-        let path =
-            std::env::temp_dir().join(format!("xd-subagent-{}.output", uuid::Uuid::new_v4()));
-        std::fs::write(
-            &path,
-            "Nothing checks expiry.\n\n---\n[codex-opussy] FAILED (exit 1) · model=gpt-6.1-sol effort=low · 9s · full log: /l\n",
-        )
-        .unwrap();
+        let output = "Nothing checks expiry.\n\n---\n[codex-opussy] FAILED (exit 1) · model=gpt-6.1-sol effort=low · 9s · full log: /l\n";
+        let mut stopped = run.clone();
         run.apply(SubagentPatch {
             status: Some(SubagentStatus::Completed),
             summary: Some("Background command \"Audit\" completed (exit code 1)".into()),
-            output_file: Some(path.to_string_lossy().into_owned()),
+            output: Some(output.into()),
             ..SubagentPatch::new("toolu_bash")
         });
-        let _ = std::fs::remove_file(&path);
         assert_eq!(run.status, SubagentStatus::Failed);
         assert_eq!(run.summary, "Nothing checks expiry.");
         assert_eq!(run.model, "gpt-6.1-sol");
         assert_eq!(decode(&run.encode()).unwrap()["launcher"], "Claude");
+        // Stopping it is not a failure, whatever its output says.
+        stopped.apply(SubagentPatch {
+            status: Some(SubagentStatus::Stopped),
+            output: Some(output.into()),
+            ..SubagentPatch::new("toolu_bash")
+        });
+        assert_eq!(stopped.status, SubagentStatus::Stopped);
+        assert_eq!(stopped.summary, "Nothing checks expiry.");
 
         // An ordinary background command is still a shell.
         let mut shell = SubagentRun::new("toolu_ls");
