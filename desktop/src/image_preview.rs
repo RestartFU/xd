@@ -724,19 +724,16 @@ impl XdDesktop {
 
     pub(super) fn close_image_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match self.image_preview.take().map(|preview| preview.owner) {
-            Some(PreviewOwner::NewChat(generation)) => {
+            Some(PreviewOwner::NewChat(_)) => {
                 // A new chat counts as a popup itself, which would keep the
                 // focus on the viewer that just closed, so it is handed back
-                // here rather than by the general restore.
+                // here rather than by the general restore: to the new chat on
+                // screen, which may have replaced the one the viewer was for.
                 self.minimal_popup_focus_captured = false;
-                let editor = self
-                    .minimal_popup_previous_focus
-                    .take()
-                    .and_then(|focus| focus.upgrade());
-                if self.creating_chat_folder.is_some() && self.new_chat_generation == generation {
-                    if let Some(editor) = editor {
-                        window.focus(&editor);
-                    }
+                self.minimal_popup_previous_focus = None;
+                if self.creating_chat_folder.is_some() {
+                    let editor = self.new_chat_input.read(cx).focus_handle(cx);
+                    window.focus(&editor);
                 } else if self.model.selected_chat.is_some() {
                     // The new chat was created or abandoned under the viewer,
                     // and its editor is gone with it. The chat on screen now
@@ -2186,6 +2183,31 @@ mod tests {
         });
         // Not the new chat's editor, which went with it.
         assert!(composer_is_focused(&desktop, cx));
+
+        // A new chat that replaces the one the viewer was for keeps the focus.
+        desktop.update(cx, |desktop, cx| {
+            desktop.creating_chat_folder = Some("atlas".into());
+            let bytes = png(300, 200, |_, _| [0, 80, 160, 255]);
+            desktop.attach_new_chat_image(ImageFormat::Png, bytes, cx);
+        });
+        cx.run_until_parked();
+        click(cx, "draft-image-0");
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.begin_chat_create("atlas".into(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let new_chat_focused = cx.update(|window, cx| {
+            let desktop = desktop.read(cx);
+            assert!(desktop.image_preview.is_none());
+            desktop
+                .new_chat_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        });
+        assert!(new_chat_focused);
     }
 
     #[gpui::test]
