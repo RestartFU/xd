@@ -185,7 +185,14 @@ pub(crate) fn keep_the_run_minimal(
             ]);
         }
         "codex" => {
-            command.args(["--ephemeral", "-c", "mcp_servers={}"]);
+            command.args([
+                "--ephemeral",
+                "-c",
+                "mcp_servers={}",
+                // Web search is a setting of its own, not a feature.
+                "-c",
+                "web_search=\"disabled\"",
+            ]);
             // Codex has no switch for all tools, so each built-in goes off by
             // name; a CLI that lacks one ignores it. The schemas are most of
             // what a one-line reply would otherwise send.
@@ -341,6 +348,7 @@ mod tests {
         assert!(codex.contains(&"project_doc_max_bytes=0".to_owned()));
         assert!(codex.contains(&"features.shell_tool=false".to_owned()));
         assert!(codex.contains(&"features.unified_exec=false".to_owned()));
+        assert!(codex.contains(&"web_search=\"disabled\"".to_owned()));
         assert!(codex.contains(&"features.hooks=false".to_owned()));
         assert!(args("jcode", false).is_empty());
     }
