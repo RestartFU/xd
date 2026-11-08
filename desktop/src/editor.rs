@@ -348,40 +348,42 @@ impl FileEditor {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let item = cx.read_from_clipboard();
-        if self.allow_images {
-            // Clipboard reads and PNG compression can take seconds for large images.
-            // Snapshot the GPUI item now, then do image work away from the UI thread.
-            let generation = self.clipboard_generation;
-            let selection = self.selected_range.clone();
-            let original = self.content.clone();
-            cx.spawn_in(window, async move |this, cx| {
-                let content = cx
-                    .background_spawn(async move {
-                        preferred_clipboard_content(item.as_ref(), true, platform_clipboard_png)
-                    })
-                    .await;
-                let _ = this.update_in(cx, |this, window, cx| {
-                    if this.clipboard_generation != generation {
-                        return;
-                    }
-                    // An image is independent of the caret. A text fallback must
-                    // not be inserted into a different edit made while we waited.
-                    if matches!(content, Some(ClipboardContent::Text(_)))
-                        && (this.content != original || this.selected_range != selection)
-                    {
-                        return;
-                    }
-                    this.apply_clipboard_content(content, window, cx);
-                });
-            })
-            .detach();
+        let mut pixels = None;
+        let content = preferred_clipboard_content(item.as_ref(), self.allow_images, || {
+            pixels = platform_clipboard_image();
+            None
+        });
+        if let Some(pixels) = pixels {
+            self.prepare_clipboard_pixels(pixels, window, cx);
         } else {
-            self.apply_clipboard_content(
-                preferred_clipboard_content(item.as_ref(), false, || None),
-                window,
-                cx,
-            );
+            self.apply_clipboard_content(content, window, cx);
         }
+    }
+
+    fn prepare_clipboard_pixels(
+        &mut self,
+        pixels: arboard::ImageData<'static>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.clipboard_generation;
+        cx.spawn_in(window, async move |this, cx| {
+            let png = cx
+                .background_spawn(async move {
+                    encode_clipboard_rgba_as_png(pixels.width, pixels.height, &pixels.bytes).ok()
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.clipboard_generation == generation {
+                    this.apply_clipboard_content(
+                        png.map(|bytes| ClipboardContent::Image(gpui::ImageFormat::Png, bytes)),
+                        window,
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
     }
 
     fn apply_clipboard_content(
@@ -1136,7 +1138,7 @@ fn syntax_color(kind: CodeKind, light: bool) -> u32 {
     }
 }
 
-fn encode_clipboard_rgba_as_png(
+pub(crate) fn encode_clipboard_rgba_as_png(
     width: usize,
     height: usize,
     rgba: &[u8],
@@ -1161,10 +1163,12 @@ fn encode_clipboard_rgba_as_png(
     Ok(png)
 }
 
-pub(crate) fn platform_clipboard_png() -> Option<Vec<u8>> {
+// Snapshot native pixels before returning to the event loop. Keep text paste
+// synchronous so following keystrokes cannot overtake it; PNG compression runs
+// separately on the background executor.
+pub(crate) fn platform_clipboard_image() -> Option<arboard::ImageData<'static>> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
-    let image = clipboard.get_image().ok()?;
-    encode_clipboard_rgba_as_png(image.width, image.height, image.bytes.as_ref()).ok()
+    Some(clipboard.get_image().ok()?.to_owned())
 }
 
 impl Focusable for FileEditor {
@@ -1398,6 +1402,18 @@ mod tests {
     }
 
     #[gpui::test]
+    fn text_paste_completes_before_following_edits(cx: &mut gpui::TestAppContext) {
+        let (editor, cx) = cx.add_window_view(|_, cx| FileEditor::composer(cx));
+        editor.update_in(cx, |editor, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("first".into()));
+            editor.paste(&Paste, window, cx);
+            assert_eq!(editor.content.as_ref(), "first");
+            editor.replace_text_in_range(None, " second", window, cx);
+            assert_eq!(editor.content.as_ref(), "first second");
+        });
+    }
+
+    #[gpui::test]
     fn pending_image_paste_does_not_follow_a_chat_change(cx: &mut gpui::TestAppContext) {
         use std::{cell::Cell, rc::Rc};
         let (editor, cx) = cx.add_window_view(|_, cx| FileEditor::composer(cx));
@@ -1410,21 +1426,20 @@ mod tests {
                 }
             })
         });
-        let image = ClipboardItem::new_image(&gpui::Image::from_bytes(
-            ImageFormat::Png,
-            vec![137, 80, 78, 71, 13, 10, 26, 10],
-        ));
+        let pixels = || arboard::ImageData {
+            width: 1,
+            height: 1,
+            bytes: std::borrow::Cow::Owned(vec![0, 0, 0, 255]),
+        };
         editor.update_in(cx, |editor, window, cx| {
-            cx.write_to_clipboard(image.clone());
-            editor.paste(&Paste, window, cx);
+            editor.prepare_clipboard_pixels(pixels(), window, cx);
             // Navigation replaces the composer even when both chats are empty.
             editor.set_text("", cx);
         });
         cx.run_until_parked();
         assert_eq!(images.get(), 0);
         editor.update_in(cx, |editor, window, cx| {
-            cx.write_to_clipboard(image);
-            editor.paste(&Paste, window, cx);
+            editor.prepare_clipboard_pixels(pixels(), window, cx);
         });
         cx.run_until_parked();
         assert_eq!(images.get(), 1);

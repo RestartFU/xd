@@ -12,8 +12,8 @@ use xd_desktop::theme::ThemeColors;
 
 use crate::{
     editor::{
-        ClipboardContent, next_word_boundary, platform_clipboard_png, preferred_clipboard_content,
-        previous_word_boundary,
+        ClipboardContent, encode_clipboard_rgba_as_png, next_word_boundary,
+        platform_clipboard_image, preferred_clipboard_content, previous_word_boundary,
     },
     selection::TextSelection,
 };
@@ -543,40 +543,42 @@ impl ComposerInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let item = cx.read_from_clipboard();
-        if self.terminal {
-            // Clipboard reads and PNG compression can take seconds for large images.
-            // Snapshot the GPUI item now, then do image work away from the UI thread.
-            let generation = self.clipboard_generation;
-            let selection = self.selected_range.clone();
-            let original = self.content.clone();
-            cx.spawn_in(window, async move |this, cx| {
-                let content = cx
-                    .background_spawn(async move {
-                        preferred_clipboard_content(item.as_ref(), true, platform_clipboard_png)
-                    })
-                    .await;
-                let _ = this.update_in(cx, |this, window, cx| {
-                    if this.clipboard_generation != generation {
-                        return;
-                    }
-                    // An image is independent of the caret. A text fallback must
-                    // not be inserted into a different edit made while we waited.
-                    if matches!(content, Some(ClipboardContent::Text(_)))
-                        && (this.content != original || this.selected_range != selection)
-                    {
-                        return;
-                    }
-                    this.apply_clipboard_content(content, window, cx);
-                });
-            })
-            .detach();
+        let mut pixels = None;
+        let content = preferred_clipboard_content(item.as_ref(), self.terminal, || {
+            pixels = platform_clipboard_image();
+            None
+        });
+        if let Some(pixels) = pixels {
+            self.prepare_clipboard_pixels(pixels, window, cx);
         } else {
-            self.apply_clipboard_content(
-                preferred_clipboard_content(item.as_ref(), false, || None),
-                window,
-                cx,
-            );
+            self.apply_clipboard_content(content, window, cx);
         }
+    }
+
+    fn prepare_clipboard_pixels(
+        &mut self,
+        pixels: arboard::ImageData<'static>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.clipboard_generation;
+        cx.spawn_in(window, async move |this, cx| {
+            let png = cx
+                .background_spawn(async move {
+                    encode_clipboard_rgba_as_png(pixels.width, pixels.height, &pixels.bytes).ok()
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.clipboard_generation == generation {
+                    this.apply_clipboard_content(
+                        png.map(|bytes| ClipboardContent::Image(gpui::ImageFormat::Png, bytes)),
+                        window,
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
     }
 
     fn apply_clipboard_content(
