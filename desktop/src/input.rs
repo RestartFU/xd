@@ -12,8 +12,8 @@ use xd_desktop::theme::ThemeColors;
 
 use crate::{
     editor::{
-        ClipboardContent, next_word_boundary, platform_clipboard_png, preferred_clipboard_content,
-        previous_word_boundary,
+        ClipboardContent, encode_clipboard_rgba_as_png, next_word_boundary,
+        platform_clipboard_image, preferred_clipboard_content, previous_word_boundary,
     },
     selection::TextSelection,
 };
@@ -128,6 +128,8 @@ pub enum ComposerEvent {
 
 pub struct ComposerInput {
     focus_handle: FocusHandle,
+    clipboard_generation: u64,
+    clipboard_target: Option<String>,
     content: SharedString,
     placeholder: SharedString,
     selected_range: Range<usize>,
@@ -153,6 +155,8 @@ impl ComposerInput {
     pub fn new(cx: &mut Context<Self>, placeholder: impl Into<SharedString>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            clipboard_generation: 0,
+            clipboard_target: None,
             content: "".into(),
             placeholder: placeholder.into(),
             selected_range: 0..0,
@@ -192,6 +196,13 @@ impl ComposerInput {
         input
     }
 
+    pub fn set_clipboard_target(&mut self, target: Option<String>) {
+        if self.clipboard_target != target {
+            self.clipboard_target = target;
+            self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
+        }
+    }
+
     pub fn set_terminal_bracketed_paste(&mut self, enabled: bool) {
         self.terminal_bracketed_paste = enabled;
     }
@@ -223,6 +234,7 @@ impl ComposerInput {
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
         let content = text.into();
         if self.content == content {
             return;
@@ -531,7 +543,51 @@ impl ComposerInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let item = cx.read_from_clipboard();
-        match preferred_clipboard_content(item.as_ref(), self.terminal, platform_clipboard_png) {
+        let mut pixels = None;
+        let content = preferred_clipboard_content(item.as_ref(), self.terminal, || {
+            pixels = platform_clipboard_image();
+            None
+        });
+        if let Some(pixels) = pixels {
+            self.prepare_clipboard_pixels(pixels, window, cx);
+        } else {
+            self.apply_clipboard_content(content, window, cx);
+        }
+    }
+
+    fn prepare_clipboard_pixels(
+        &mut self,
+        pixels: arboard::ImageData<'static>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.clipboard_generation;
+        cx.spawn_in(window, async move |this, cx| {
+            let png = cx
+                .background_spawn(async move {
+                    encode_clipboard_rgba_as_png(pixels.width, pixels.height, &pixels.bytes).ok()
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if this.clipboard_generation == generation {
+                    this.apply_clipboard_content(
+                        png.map(|bytes| ClipboardContent::Image(gpui::ImageFormat::Png, bytes)),
+                        window,
+                        cx,
+                    );
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_clipboard_content(
+        &mut self,
+        content: Option<ClipboardContent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match content {
             Some(ClipboardContent::Text(text)) => {
                 if self.terminal_bytes(
                     terminal_paste_bytes(&text, self.terminal_bracketed_paste),
