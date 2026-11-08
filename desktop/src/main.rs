@@ -19508,15 +19508,54 @@ fn notify_turn_finished(title: &str) {
         .replace('<', "&lt;")
         .replace('>', "&gt;");
     let body = format!("{title} finished");
-    if let Ok(mut child) = Command::new("notify-send")
-        .args(["--app-name=xd", "--", "xd", &body])
+    if let Ok(child) = Command::new("notify-send")
+        // Avoid keeping completion alerts in notification history. Also close
+        // them explicitly below: GNOME ignores expire-time while locked.
+        .args([
+            "--app-name=xd",
+            "--transient",
+            "--expire-time=10000",
+            "--print-id",
+            "--",
+            "xd",
+            &body,
+        ])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
     {
         thread::spawn(move || {
-            let _ = child.wait();
+            use gtk::gio;
+            use gtk::glib::variant::ToVariant;
+
+            let Ok(output) = child.wait_with_output() else {
+                return;
+            };
+            if !output.status.success() {
+                return;
+            }
+            let Some(id) = std::str::from_utf8(&output.stdout)
+                .ok()
+                .and_then(|id| id.trim().parse::<u32>().ok())
+                .filter(|id| *id != 0)
+            else {
+                return;
+            };
+            thread::sleep(Duration::from_secs(10));
+            if let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+                let _ = bus.call_sync(
+                    Some("org.freedesktop.Notifications"),
+                    "/org/freedesktop/Notifications",
+                    "org.freedesktop.Notifications",
+                    "CloseNotification",
+                    Some(&(id,).to_variant()),
+                    None,
+                    gio::DBusCallFlags::NONE,
+                    1000,
+                    gio::Cancellable::NONE,
+                );
+            }
         });
     }
 }
