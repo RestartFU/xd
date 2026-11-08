@@ -61,7 +61,7 @@ public class LineAssembler(
 
     private fun ensureCapacity(required: Int) {
         if (required <= bytes.size) return
-        val grown = (bytes.size.coerceAtLeast(1) * 2).coerceAtMost(maxLineBytes)
+        val grown = (bytes.size.coerceAtLeast(1).toLong() * 2).coerceAtMost(maxLineBytes.toLong()).toInt()
         bytes = bytes.copyOf(grown.coerceAtLeast(required))
     }
 
@@ -76,8 +76,8 @@ public class LineAssembler(
     }
 
     public companion object {
-        /** Mirrors `host::FRAME_LIMIT`. */
-        public const val MAX_LINE_BYTES: Int = 96 * 1024 * 1024
+        /** No configured frame cap; JVM arrays are indexed by Int. */
+        public const val MAX_LINE_BYTES: Int = Int.MAX_VALUE - 8
         private const val INITIAL_CAPACITY: Int = 4096
         private const val LF: Byte = 0x0a
     }
