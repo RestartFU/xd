@@ -31,7 +31,7 @@ RUN rustup component add rustfmt clippy \
       libexpat1 \
       libfontconfig-dev \
       libgbm1 \
-      libglib2.0-0t64 \
+      libglib2.0-dev \
       libnspr4 \
       libnss3 \
       libpango-1.0-0 \

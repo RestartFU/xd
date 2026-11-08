@@ -29,6 +29,11 @@ user's configured Git identity and preserve required license notices and attribu
 
 ## UI screenshot proof
 
+Use an isolated Xvfb display for headless Linux screenshot validation. Missing
+`DISPLAY`, `WAYLAND_DISPLAY`, or screenshot utilities is a setup task, not by
+itself a capture blocker. Start Xvfb and install or configure the capture tools
+needed to obtain actual application screenshots.
+
 Every UI change must include before-and-after screenshot proof in the PR
 description. Capture the affected UI before editing and again after the change,
 using the same viewport, theme, and comparable application state so the difference

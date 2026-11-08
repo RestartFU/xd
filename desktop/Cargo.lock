@@ -8801,6 +8801,7 @@ dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
  "cef",
+ "gio",
  "gpui",
  "iana-time-zone",
  "image",
