@@ -86,6 +86,8 @@ pub(crate) struct SessionCard {
     pub(crate) agent: AgentCli,
     pub(crate) branch: String,
     pub(crate) working: bool,
+    /// Background tasks it is waiting on while no turn runs.
+    pub(crate) background_tasks: u32,
 }
 
 /// A session on the Settled shelf, which lists every project's together.
@@ -252,6 +254,7 @@ pub(crate) fn project_sessions(project_id: &str, chats: &[ChatSummary]) -> Vec<S
                     .clone()
                     .unwrap_or_else(|| "Project directory".into()),
                 working: chat.working || chat.terminal_working,
+                background_tasks: chat.waiting_on(),
             })
         })
         .collect()
@@ -496,6 +499,7 @@ mod tests {
             branch: Some(format!("session/{id}")),
             working,
             terminal_working: false,
+            background_tasks: 0,
             settled_at: None,
             auto_settle_disabled: false,
         }
@@ -545,8 +549,15 @@ mod tests {
     #[test]
     fn project_sessions_keep_the_real_cli_provider() {
         let chats = vec![
-            session("a", "one", "Fix parser", "codex", true),
-            session("b", "one", "Review lexer", "claude", false),
+            ChatSummary {
+                // A turn running hides the tasks: the session is working.
+                background_tasks: 3,
+                ..session("a", "one", "Fix parser", "codex", true)
+            },
+            ChatSummary {
+                background_tasks: 2,
+                ..session("b", "one", "Review lexer", "claude", false)
+            },
             session("c", "two", "Polish home", "codex", false),
         ];
 
@@ -559,6 +570,7 @@ mod tests {
                     agent: AgentCli::Codex,
                     branch: "session/a".into(),
                     working: true,
+                    background_tasks: 0,
                 },
                 SessionCard {
                     id: "b".into(),
@@ -566,6 +578,7 @@ mod tests {
                     agent: AgentCli::Claude,
                     branch: "session/b".into(),
                     working: false,
+                    background_tasks: 2,
                 },
             ]
         );

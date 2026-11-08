@@ -52,6 +52,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.ViewModel
 import com.restartfu.xd.model.ChatSummary
 import androidx.compose.material3.NavigationBar
@@ -100,6 +102,7 @@ import com.restartfu.xd.mobile.UsageViewModel
 import com.restartfu.xd.model.DirectAgent
 import com.restartfu.xd.model.MinimalProject
 import com.restartfu.xd.model.MinimalSession
+import com.restartfu.xd.model.backgroundTasksLabel
 import com.restartfu.xd.model.minimalProjects
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
@@ -348,6 +351,7 @@ internal fun MinimalMobileApp(
                                     sessionTitle = activeSession.title,
                                     branch = activeSession.branch,
                                     sessionWorking = activeSession.working,
+                                    backgroundTasks = activeChat.backgroundTasks,
                                     projectName = activeProject?.name.orEmpty(),
                                     workspaceId = activeSession.id,
                                     terminalChatId = activeSession.terminalChatId,
@@ -582,6 +586,7 @@ private fun MinimalProjectsHome(
         when {
             session.chatIds.any { it in waiting } -> SessionSignal.WAITING
             session.working -> SessionSignal.WORKING
+            session.backgroundTasks > 0 -> SessionSignal.BACKGROUND
             session.chatIds.any { it in unread } -> SessionSignal.DONE
             else -> SessionSignal.IDLE
         }
@@ -1145,6 +1150,8 @@ private enum class SessionSignal(val label: String) {
     IDLE("Idle"),
     WORKING("Working"),
     WAITING("Waiting on you"),
+    /** No turn running, but background agents or shells are. */
+    BACKGROUND("Waiting on background tasks"),
     DONE("Done"),
 }
 
@@ -1153,7 +1160,7 @@ private fun SessionSignal.color(): Color {
     val signals = LocalXdSignals.current
     return when (this) {
         SessionSignal.IDLE -> signals.faint
-        SessionSignal.WORKING -> signals.working
+        SessionSignal.WORKING, SessionSignal.BACKGROUND -> signals.working
         SessionSignal.WAITING -> signals.waiting
         SessionSignal.DONE -> signals.done
     }
@@ -1165,11 +1172,20 @@ private fun SessionSignal.color(): Color {
  * state that also says so in words.
  */
 @Composable
-private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier) {
+private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier, backgroundTasks: Int = 0) {
     when (signal) {
         SessionSignal.IDLE -> Unit
         SessionSignal.WAITING -> StatusPill("Waiting", signal.color(), modifier)
         SessionSignal.WORKING -> PulseDot(signal.color(), modifier)
+        // The count beside a still ring; the words are for screen readers.
+        SessionSignal.BACKGROUND -> Row(
+            modifier.semantics { contentDescription = backgroundTasksLabel(backgroundTasks) },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text("$backgroundTasks", color = signal.color(), fontSize = 11.sp)
+            BackgroundRing(signal.color())
+        }
         SessionSignal.DONE -> Box(
             modifier
                 .size(7.dp)
@@ -1235,12 +1251,16 @@ private fun DrawerRow(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 signals.filter { it != SessionSignal.IDLE }.take(5).forEach { signal ->
-                    Box(
-                        Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(signal.color()),
-                    )
+                    if (signal == SessionSignal.BACKGROUND) {
+                        BackgroundRing(signal.color(), size = 6.dp)
+                    } else {
+                        Box(
+                            Modifier
+                                .size(6.dp)
+                                .clip(CircleShape)
+                                .background(signal.color()),
+                        )
+                    }
                 }
             }
         }
@@ -1713,7 +1733,7 @@ private fun SessionRow(
                 )
             }
         }
-        SignalMark(signal)
+        SignalMark(signal, backgroundTasks = session.backgroundTasks)
         if (session.settled) {
             IconButton(onClick = { actions.unsettle(session) }, modifier = Modifier.size(48.dp)) {
                 Icon(

@@ -267,12 +267,28 @@ pub struct ChatSummary {
     pub working: bool,
     #[serde(default)]
     pub terminal_working: bool,
+    /// Background agents and shells its agent process is still running. With
+    /// no turn running, the chat is waiting on them; see [`Self::waiting_on`].
+    #[serde(default)]
+    pub background_tasks: u32,
     /// When this chat's session settled; absent while it is in the active list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<i64>,
     /// The session is kept out of automatic settling.
     #[serde(default)]
     pub auto_settle_disabled: bool,
+}
+
+impl ChatSummary {
+    /// How many background tasks the chat is waiting on: none while a turn
+    /// runs, since then it is working.
+    pub fn waiting_on(&self) -> u32 {
+        if self.working {
+            0
+        } else {
+            self.background_tasks
+        }
+    }
 }
 
 /// How the connected host settles sessions by itself.
@@ -345,6 +361,9 @@ pub struct SessionSummary {
     pub working: bool,
     #[serde(default)]
     pub terminal_working: bool,
+    /// The sum of its chats' `background_tasks`.
+    #[serde(default)]
+    pub background_tasks: u32,
     #[serde(default)]
     pub terminal_chat: String,
 }
@@ -724,6 +743,7 @@ fn normalize_sessions(snapshot: &mut TreeSnapshot, body: &Value) {
             branch: chat.branch.clone(),
             working: chat.working,
             terminal_working: chat.terminal_working,
+            background_tasks: chat.background_tasks,
             terminal_chat: session_id
                 .map(|id| format!("session:{id}"))
                 .unwrap_or_else(|| chat.id.clone()),
@@ -815,6 +835,12 @@ impl AppModel {
                 .chats
                 .iter()
                 .any(|chat| session.chats.contains(&chat.id) && chat.terminal_working);
+            session.background_tasks = self
+                .chats
+                .iter()
+                .filter(|chat| session.chats.contains(&chat.id))
+                .map(|chat| chat.background_tasks)
+                .sum();
         }
     }
 
@@ -1206,7 +1232,11 @@ impl AppModel {
                 .find(|summary| summary.id == selected_chat)
         {
             summary.working = self.working;
+            if let Some(count) = body.get("background_tasks").and_then(Value::as_u64) {
+                summary.background_tasks = u32::try_from(count).unwrap_or(u32::MAX);
+            }
         }
+        self.refresh_session_activity();
         let now = Instant::now();
         self.working_started_at = if self.working {
             body.get("working_for")
@@ -1483,6 +1513,13 @@ impl AppModel {
                 }
             }
         }
+        if name == "background-tasks"
+            && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
+            && let Some(count) = body.get("background_tasks").and_then(Value::as_u64)
+            && let Some(chat) = self.chats.iter_mut().find(|chat| chat.id == chat_id)
+        {
+            chat.background_tasks = u32::try_from(count).unwrap_or(u32::MAX);
+        }
         let chat_working = match name {
             "turn-started" => Some(true),
             "turn-finished" => Some(false),
@@ -1735,6 +1772,7 @@ impl AppModel {
                     branch: Some("main".into()),
                     working: true,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -1746,6 +1784,7 @@ impl AppModel {
                     branch: Some("xd/smooth-transcript-scrolling".into()),
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -1821,6 +1860,7 @@ impl AppModel {
                 branch: chat.branch.clone(),
                 working: chat.working,
                 terminal_working: chat.terminal_working,
+                background_tasks: chat.background_tasks,
                 terminal_chat: chat.id.clone(),
             })
             .collect();
@@ -2421,6 +2461,47 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_waits_on_its_background_tasks_only_between_turns() {
+        let mut model = AppModel::default();
+        model
+            .apply_tree(&json!({
+                "folders": [{"id": "folder", "name": "Workspace"}],
+                "chats": [
+                    {"id": "a", "folder": "folder", "backend": "claude", "session": "s",
+                     "background_tasks": 2},
+                    {"id": "b", "folder": "folder", "backend": "claude", "session": "s"}
+                ],
+                "sessions": [{"id": "s", "folder": "folder", "title": "Work",
+                              "chats": ["a", "b"], "background_tasks": 2}]
+            }))
+            .unwrap();
+        let waiting = |model: &AppModel| -> Vec<u32> {
+            model.chats.iter().map(ChatSummary::waiting_on).collect()
+        };
+        assert_eq!(waiting(&model), [2, 0]);
+        assert_eq!(model.sessions[0].background_tasks, 2);
+
+        model.apply_event("turn-started", &json!({"chat": "a"}));
+        assert_eq!(waiting(&model), [0, 0], "a running turn is work");
+        model.apply_event(
+            "background-tasks",
+            &json!({"chat": "b", "background_tasks": 1}),
+        );
+        assert_eq!(model.sessions[0].background_tasks, 3);
+        model.apply_event("turn-finished", &json!({"chat": "a"}));
+        assert_eq!(waiting(&model), [2, 1]);
+
+        for chat in ["a", "b"] {
+            model.apply_event(
+                "background-tasks",
+                &json!({"chat": chat, "background_tasks": 0}),
+            );
+        }
+        assert_eq!(waiting(&model), [0, 0]);
+        assert_eq!(model.sessions[0].background_tasks, 0);
+    }
+
+    #[test]
     fn terminal_activity_updates_only_the_matching_chat_summary() {
         let mut model = AppModel::default();
         model
@@ -2978,6 +3059,7 @@ mod tests {
                 branch: None,
                 working: false,
                 terminal_working: false,
+                background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
             }],

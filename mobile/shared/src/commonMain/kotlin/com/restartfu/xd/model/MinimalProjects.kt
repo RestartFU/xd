@@ -32,6 +32,8 @@ public data class MinimalSession(
     val branch: String,
     val working: Boolean,
     val chatIds: List<String> = listOf(id),
+    /** Background tasks the session waits on while none of its chats has a turn running. */
+    val backgroundTasks: Int = 0,
     val terminalChatId: String = id,
     /** Seconds since the epoch when the session was settled; null while it is active. */
     val settledAt: Long? = null,
@@ -46,6 +48,10 @@ public data class MinimalSession(
      */
     val grouped: Boolean get() = terminalChatId.startsWith("session:")
 }
+
+/** What a session or chat waiting on its background tasks says, as on the desktop. */
+public fun backgroundTasksLabel(count: Int): String =
+    "Waiting on $count background task${if (count == 1) "" else "s"}"
 
 /** A settled session on the shelf, with the project it belongs to. */
 public data class SettledSession(
@@ -88,6 +94,7 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
                 ?: "Project directory",
             working = grouped.any { it.working || it.terminalWorking },
             chatIds = orderedIds,
+            backgroundTasks = if (grouped.any { it.working }) 0 else grouped.sumOf { it.waitingOn },
             terminalChatId = workspace?.terminalChatId ?: first.id,
             settledAt = workspace?.settledAt,
             autoSettleDisabled = workspace?.autoSettleDisabled ?: false,

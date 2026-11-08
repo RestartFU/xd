@@ -20,7 +20,15 @@ public data class ChatSummary(
     val terminalWorking: Boolean = false,
     val sessionMode: String = "chat",
     val sessionId: String = id,
-)
+    /** Background agents and shells its agent process is still running. */
+    val backgroundTasks: Int = 0,
+) {
+    /**
+     * How many background tasks the chat is waiting on: none while a turn
+     * runs, since then it is working.
+     */
+    val waitingOn: Int get() = if (working) 0 else backgroundTasks
+}
 
 public data class WorkspaceSession(
     val id: String,

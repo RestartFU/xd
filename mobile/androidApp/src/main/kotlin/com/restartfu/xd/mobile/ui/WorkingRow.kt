@@ -1,8 +1,12 @@
 package com.restartfu.xd.mobile.ui
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -16,8 +20,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.model.TurnTiming
+import com.restartfu.xd.model.backgroundTasksLabel
 import kotlinx.coroutines.delay
 
 /** Frames per second of the dots, matching the desktop's `Dots`. */
@@ -47,6 +53,40 @@ internal fun WorkingRow(startedAtMillis: Long?) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Dots(MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * The mark for work still running in the background, as on the desktop: a ring
+ * in the working color that holds still, where a working dot is filled and
+ * pulses.
+ */
+@Composable
+internal fun BackgroundRing(color: Color, modifier: Modifier = Modifier, size: Dp = 8.dp) {
+    Box(
+        modifier
+            .size(size)
+            .border(1.5.dp, color, CircleShape),
+    )
+}
+
+/**
+ * A chat with no turn running whose agent still runs background agents or
+ * shells, at the foot of the transcript where the working row would be.
+ */
+@Composable
+internal fun BackgroundTasksRow(count: Int) {
+    Row(
+        modifier = Modifier.padding(start = 2.dp, top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        BackgroundRing(LocalXdSignals.current.working, size = 7.dp)
+        Text(
+            backgroundTasksLabel(count),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

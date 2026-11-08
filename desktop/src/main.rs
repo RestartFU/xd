@@ -336,16 +336,23 @@ enum SessionSignal {
     Working,
     /// An approval or question is waiting on the user. The only amber state.
     Waiting,
+    /// No turn is running, but the agent's background agents and shells are:
+    /// it is waiting on that many of them.
+    Background(u32),
     /// A finished turn the user has not opened yet.
     Done,
 }
 
 impl SessionSignal {
-    fn of(working: bool, waiting: bool, unread: bool) -> Self {
+    /// `background` counts the tasks the session is waiting on, which only
+    /// matters while no turn runs.
+    fn of(working: bool, waiting: bool, unread: bool, background: u32) -> Self {
         if waiting {
             Self::Waiting
         } else if working {
             Self::Working
+        } else if background > 0 {
+            Self::Background(background)
         } else if unread {
             Self::Done
         } else {
@@ -356,20 +363,41 @@ impl SessionSignal {
     fn color(self, colors: ThemeColors) -> u32 {
         match self {
             Self::Idle => colors.faint,
-            Self::Working => colors.working,
+            Self::Working | Self::Background(_) => colors.working,
             Self::Waiting => colors.waiting,
             Self::Done => colors.done,
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self) -> SharedString {
         match self {
-            Self::Idle => "Idle",
-            Self::Working => "Working",
-            Self::Waiting => "Waiting on you",
-            Self::Done => "Done",
+            Self::Idle => "Idle".into(),
+            Self::Working => "Working".into(),
+            Self::Waiting => "Waiting on you".into(),
+            Self::Background(count) => background_label(count).into(),
+            Self::Done => "Done".into(),
         }
     }
+}
+
+/// What a chat waiting on its background tasks says, such as "Waiting on 2
+/// background tasks".
+fn background_label(count: u32) -> String {
+    format!(
+        "Waiting on {count} background task{}",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+/// The mark for work still running in the background: a ring in the working
+/// color that holds still, where a working dot is filled and pulses.
+fn background_ring(size: f32, color: u32) -> gpui::Div {
+    div()
+        .size(px(size))
+        .flex_none()
+        .rounded_full()
+        .border(px(1.5))
+        .border_color(rgb(color))
 }
 
 /// The small status mark at the end of a session row: a dot for work and
@@ -388,6 +416,18 @@ fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyEle
         SessionSignal::Idle => None,
         SessionSignal::Working => Some(dot(7.0).opacity(pulse_opacity()).into_any_element()),
         SessionSignal::Waiting => Some(pill("Waiting", color)),
+        SessionSignal::Background(count) => Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .text_size(px(10.5))
+                .text_color(rgb(color))
+                .child(count.to_string())
+                .child(background_ring(8.0, color))
+                .into_any_element(),
+        ),
         SessionSignal::Done => Some(dot(7.0).into_any_element()),
     }
 }
@@ -469,11 +509,12 @@ fn drawer_tabs(signals: &[SessionSignal], colors: ThemeColors) -> gpui::AnyEleme
                 .iter()
                 .filter(|signal| **signal != SessionSignal::Idle)
                 .take(5)
-                .map(|signal| {
-                    div()
+                .map(|signal| match signal {
+                    SessionSignal::Background(_) => background_ring(6.0, signal.color(colors)),
+                    _ => div()
                         .size(px(6.0))
                         .rounded_full()
-                        .bg(rgb(signal.color(colors)))
+                        .bg(rgb(signal.color(colors))),
                 }),
         )
         .into_any_element()
@@ -3033,6 +3074,7 @@ impl XdDesktop {
                 | "auto-delete-settings"
                 | "terminal-opened"
                 | "terminal-activity"
+                | "background-tasks"
                 | "terminal-output"
                 | "terminal-resized"
                 | "terminal-closed"
@@ -5759,6 +5801,7 @@ impl XdDesktop {
                 self.record_terminal_tab_activity(self.active_endpoint, &body);
                 self.model.apply_event(name, &body);
             }
+            "background-tasks" => self.model.apply_event(name, &body),
             "workflow-status" => {
                 if let Some(marker) = body.get("text").and_then(Value::as_str).map(str::to_owned)
                     && self
@@ -6607,6 +6650,7 @@ impl XdDesktop {
                 row.branch = session.branch.clone().or(row.branch);
                 row.working = session.working;
                 row.terminal_working = session.terminal_working;
+                row.background_tasks = session.background_tasks;
                 Some(row)
             })
             .collect()
@@ -11371,6 +11415,7 @@ impl XdDesktop {
                     chat.working || chat.terminal_working,
                     self.model.is_waiting(&chat.id) || !self.model.interactions.is_empty(),
                     false,
+                    chat.waiting_on(),
                 )
             })
             .unwrap_or(SessionSignal::Idle);
@@ -11572,6 +11617,7 @@ impl XdDesktop {
             members
                 .map(|ids| ids.iter().any(|id| self.model.unread_chats.contains(id)))
                 .unwrap_or_else(|| self.model.unread_chats.contains(&session.id)),
+            session.background_tasks,
         )
     }
 
@@ -15338,6 +15384,16 @@ impl XdDesktop {
             && self.model.draft_attachments.is_empty()
             && self.attachments_reading == 0;
         let working = self.model.working;
+        // Between turns, the background agents and shells still running.
+        let waiting_on = if working {
+            0
+        } else {
+            self.model
+                .selected_chat
+                .as_deref()
+                .and_then(|id| self.model.chats.iter().find(|chat| chat.id == id))
+                .map_or(0, |chat| chat.waiting_on())
+        };
         let shows_resume = self.shows_resume();
         let can_resume = shows_resume
             && self.model.connected
@@ -15560,6 +15616,23 @@ impl XdDesktop {
                     )
                 },
             )
+            .when(waiting_on > 0, |chat| {
+                chat.child(
+                    div()
+                        .id("native-background-tasks")
+                        .w_full()
+                        .max_w(px(736.0))
+                        .mb_2()
+                        .px(px(2.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.muted))
+                        .child(background_ring(7.0, colors.working))
+                        .child(background_label(waiting_on)),
+                )
+            })
             .when(working, |chat| {
                 let (status, dot) = turn_status(!self.model.interactions.is_empty(), colors);
                 chat.child(
@@ -22262,13 +22335,43 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[test]
     fn session_signals_put_waiting_ahead_of_work() {
-        assert_eq!(SessionSignal::of(true, true, true), SessionSignal::Waiting);
-        assert_eq!(SessionSignal::of(true, false, true), SessionSignal::Working);
-        assert_eq!(SessionSignal::of(false, false, true), SessionSignal::Done);
-        assert_eq!(SessionSignal::of(false, false, false), SessionSignal::Idle);
+        assert_eq!(
+            SessionSignal::of(true, true, true, 2),
+            SessionSignal::Waiting
+        );
+        assert_eq!(
+            SessionSignal::of(true, false, true, 2),
+            SessionSignal::Working
+        );
+        assert_eq!(
+            SessionSignal::of(false, false, true, 2),
+            SessionSignal::Background(2)
+        );
+        assert_eq!(
+            SessionSignal::of(false, false, true, 0),
+            SessionSignal::Done
+        );
+        assert_eq!(
+            SessionSignal::of(false, false, false, 0),
+            SessionSignal::Idle
+        );
         let colors = ThemePreset::Dark.colors();
         assert!(signal_tab(SessionSignal::Idle, colors).is_none());
+        assert!(signal_tab(SessionSignal::Background(1), colors).is_some());
         assert_eq!(SessionSignal::Waiting.color(colors), colors.waiting);
+        assert_eq!(SessionSignal::Background(1).color(colors), colors.working);
+    }
+
+    #[test]
+    fn a_chat_waiting_on_background_work_says_how_much() {
+        assert_eq!(
+            SessionSignal::Background(1).label().to_string(),
+            "Waiting on 1 background task"
+        );
+        assert_eq!(
+            SessionSignal::Background(2).label().to_string(),
+            "Waiting on 2 background tasks"
+        );
     }
 
     #[test]
@@ -22359,6 +22462,7 @@ Binary files /dev/null and b/image.png differ\n";
                     branch: None,
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: Some(index),
                     auto_settle_disabled: false,
                 })
@@ -22706,6 +22810,7 @@ Binary files /dev/null and b/image.png differ\n";
                 branch: None,
                 working: false,
                 terminal_working: false,
+                background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
             }];
@@ -22986,6 +23091,7 @@ Binary files /dev/null and b/image.png differ\n";
                     branch: None,
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -22997,6 +23103,7 @@ Binary files /dev/null and b/image.png differ\n";
                     branch: None,
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -23158,6 +23265,7 @@ Binary files /dev/null and b/image.png differ\n";
                 branch: None,
                 working: false,
                 terminal_working: false,
+                background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
             }];
@@ -23346,6 +23454,7 @@ Binary files /dev/null and b/image.png differ\n";
                 branch: None,
                 working: false,
                 terminal_working: false,
+                background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
             }];
@@ -23803,6 +23912,7 @@ Binary files /dev/null and b/image.png differ\n";
         assert!(XdDesktop::remote_read_event("terminal-activity"));
         assert!(XdDesktop::remote_read_event("terminal-output"));
         assert!(XdDesktop::remote_read_event("git-draft-finished"));
+        assert!(XdDesktop::remote_read_event("background-tasks"));
         assert!(XdDesktop::remote_read_event("agent-auth-changed"));
         assert!(XdDesktop::remote_read_event("agent-cli-changed"));
         assert!(!XdDesktop::remote_read_event("devices-changed"));
@@ -24197,6 +24307,7 @@ Binary files /dev/null and b/image.png differ\n";
             branch: None,
             working: false,
             terminal_working: false,
+            background_tasks: 0,
             settled_at: None,
             auto_settle_disabled: false,
         };
@@ -24275,6 +24386,7 @@ Binary files /dev/null and b/image.png differ\n";
                     branch: Some("main".into()),
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -24286,6 +24398,7 @@ Binary files /dev/null and b/image.png differ\n";
                     branch: Some("session/background".into()),
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -24325,6 +24438,7 @@ Binary files /dev/null and b/image.png differ\n";
                     branch: Some("main".into()),
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -24336,6 +24450,7 @@ Binary files /dev/null and b/image.png differ\n";
                     branch: Some("session/background".into()),
                     working: false,
                     terminal_working: false,
+                    background_tasks: 0,
                     settled_at: None,
                     auto_settle_disabled: false,
                 },
@@ -24426,6 +24541,7 @@ Binary files /dev/null and b/image.png differ\n";
                 branch: Some("main".into()),
                 working: false,
                 terminal_working: false,
+                background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
             }];
@@ -24478,6 +24594,7 @@ Binary files /dev/null and b/image.png differ\n";
                 branch: Some("main".into()),
                 working: false,
                 terminal_working: false,
+                background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
             }];
@@ -24539,6 +24656,7 @@ Binary files /dev/null and b/image.png differ\n";
                 branch: None,
                 working: false,
                 terminal_working: false,
+                background_tasks: 0,
                 settled_at: None,
                 auto_settle_disabled: false,
             }],

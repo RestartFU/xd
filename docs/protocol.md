@@ -183,6 +183,15 @@ resource. `branch` is present when known. Session `working` and
 `terminal_working` aggregate activity across its members. A session's identity
 and title survive deletion of its first chat while other members remain.
 
+Each chat and session also has `background_tasks`: how many background agents
+and backgrounded shell commands its kept agent process is still running (for a
+session, the sum over its chats). A chat that is not `working` but has
+`background_tasks` above zero is waiting on them; show it as waiting rather than
+idle. Only Claude chats have any. The count follows the agent's own reports, and
+drops to zero when its process exits or is stopped, so after a daemon restart
+nothing is waiting. The `background-tasks` event keeps it current; treat a
+missing member as zero.
+
 The `sessions` array and chat `session` members are additive. Existing chats
 migrate into separate singleton sessions without changing their chat ids,
 transcripts, drafts, options, or backend resume state. Existing clients may
@@ -206,8 +215,9 @@ ignore these members keep listing settled sessions with the active ones.
 ```
 
 Success always includes `ok`, `title`, `backend`, `session_mode`, `auth_state`, `commands`,
-`plan`, `queue` (oldest first), `working`, `resumable`, `effort`, `new_worktree`, and
-`has_messages`. `resumable` is true when the chat's last turn was cut short: stopped,
+`plan`, `queue` (oldest first), `working`, `background_tasks`, `resumable`, `effort`,
+`new_worktree`, and `has_messages`. `background_tasks` is the count described under
+`tree`. `resumable` is true when the chat's last turn was cut short: stopped,
 interrupted by the host going down, or ended by a usage limit. It clears when any
 turn starts. It also includes `session`, `session_title`, and
 `terminal_chat` for its shared workspace session. The chat's `title` belongs to
@@ -925,6 +935,7 @@ Chat-scoped events carry a `chat` member; ignore those for other chats.
 | `tool` | `chat`, `text`, `workdir`, `context`, `turn_id`, `turn_sequence`, optional `record`, `message_id` | Tool row. `record` marks a row the host will rewrite; `message_id` is its stored id. |
 | `record` | `chat`, `text`, `record`, `message_id`, optional `turn_id`, `turn_sequence` | A record row was rewritten, such as a subagent's progress; replace the row with that `message_id`. Arrives without turn members when a background agent reports while no turn is running. |
 | `turn-finished` | `chat`, `turn_id`, `turn_sequence`, `ok`, `waiting`, `silent`, `duration`, `last_message_id`, optional `error`, `question`, `options`, `accepts_input` | The turn ended. |
+| `background-tasks` | `chat`, `background_tasks` | How many background agents and shells the chat's agent process is still running changed. Between turns a chat with any is waiting on them; see `tree`. |
 | `repository-changed` | `chat` | HEAD moved outside the app. |
 | `git-state`, `git-action-finished`, `git-draft-finished` | `chat`, … | Git pane state. |
 | `terminal-output`, `terminal-closed` | `terminal`, … | Shared pty; output is base64. |

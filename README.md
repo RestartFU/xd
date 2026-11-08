@@ -18,6 +18,7 @@ A local-first desktop workspace for user-installed Codex, Claude Code, and JCode
 - Attach files to a message with the paperclip, by dropping them on the chat, or by pasting an image. PNGs go to the agent as images; any other file is saved on the host and the agent reads it from there.
 - Agents can show you images: a screenshot or chart they name in a reply appears in the chat, on desktop and Android, even after the original file is gone.
 - Live subagent cards: each delegated agent shows its model, current step, tools, tokens, and elapsed time, and keeps its task, steps, and report once it finishes. Claude agents can be stopped or sent to the background from the card.
+- A chat whose turn has ended while its Claude agent still runs background agents or shells shows as waiting on them, with how many, until the last one finishes or the agent stops. This shows on desktop and Android.
 - Tool approvals and questions inline in the chat, with the command or diff they would apply, on desktop and Android.
 - One persistent daemon owns local and remote sessions; work continues when clients disconnect.
 - Direct remote connections over pinned TLS, with expiring pairing codes and revocable devices.
