@@ -91,7 +91,16 @@ pub(crate) fn run(
             }
             Err(_) => {}
         }
-        if has_exited(&mut child).map_err(|error| format!("Cannot wait for {backend}: {error}"))? {
+        let exited = match has_exited(&mut child) {
+            Ok(exited) => exited,
+            // A signal cut the poll short; the next one asks again.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => false,
+            Err(error) => {
+                stop(&mut child);
+                return Err(format!("Cannot wait for {backend}: {error}"));
+            }
+        };
+        if exited {
             // Whatever it started goes with it: a hook still holding the pipes
             // would keep running, and keep the threads reading them waiting.
             kill_group(&child);
