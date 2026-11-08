@@ -14,6 +14,8 @@
 //! The guard watches every limit at or above the daemon's cgroup whose breach
 //! would kill a group that includes the daemon, each against its own usage,
 //! since a cgroup higher up also counts what runs beside the daemon.
+//! The limits are looked up again every few seconds, so a container resized or
+//! reconfigured while the daemon runs is guarded as it is now.
 //!
 //! Only in that setup, the guard watches the cgroup's memory that cannot be
 //! reclaimed: anonymous memory, shared memory (tmpfs, shm), and kernel memory
@@ -64,6 +66,9 @@ const DEFAULT_PERCENT: u64 = 92;
 const PERCENT_RANGE: std::ops::RangeInclusive<u64> = 50..=99;
 /// Reading `memory.stat` costs one small file read, so this can be frequent.
 pub(crate) const SAMPLE_EVERY: Duration = Duration::from_secs(1);
+/// How often the limits are looked up again, so a container resized while the
+/// daemon runs is guarded at its new size. A handful of small files.
+pub(crate) const DISCOVER_EVERY: Duration = Duration::from_secs(10);
 /// How far below the threshold, in points of `memory.max`, the measure has to
 /// fall before another crossing counts as a new spike.
 const REARM_POINTS: u64 = 5;
@@ -228,6 +233,8 @@ pub(crate) fn unreclaimable_bytes(stat: &str) -> Option<u64> {
 
 /// Decides when a reading calls for stopping something.
 pub(crate) struct Trigger {
+    /// The limit the thresholds are shares of.
+    max: u64,
     threshold: u64,
     rearm: u64,
     /// No tree has been stopped since the measure was last well below the
@@ -238,17 +245,24 @@ pub(crate) struct Trigger {
 
 impl Trigger {
     pub(crate) fn new(max: u64, percent: u64) -> Self {
-        let share = |percent: u64| (max as u128 * percent as u128 / 100) as u64;
-        Self {
-            threshold: share(percent),
-            rearm: share(percent.saturating_sub(REARM_POINTS)),
+        let mut trigger = Self {
+            max: 0,
+            threshold: 0,
+            rearm: 0,
             armed: true,
             last: None,
-        }
+        };
+        trigger.retarget(max, percent);
+        trigger
     }
 
-    pub(crate) fn threshold(&self) -> u64 {
-        self.threshold
+    /// Moves the thresholds to `percent` of a new limit, keeping what the
+    /// trigger remembers of recent spikes.
+    pub(crate) fn retarget(&mut self, max: u64, percent: u64) {
+        let share = |percent: u64| (max as u128 * percent as u128 / 100) as u64;
+        self.max = max;
+        self.threshold = share(percent);
+        self.rearm = share(percent.saturating_sub(REARM_POINTS));
     }
 
     /// Whether a reading of `usage` at `now` calls for stopping a tree.
@@ -268,6 +282,48 @@ impl Trigger {
         self.armed = false;
         self.last = Some(now);
     }
+}
+
+/// A guarded cgroup with the trigger for its limit.
+pub(crate) struct Guarded {
+    pub(crate) cgroup: Cgroup,
+    pub(crate) trigger: Trigger,
+}
+
+/// The cgroups to guard now, `found`, each keeping its trigger from `previous`
+/// and retargeted if its limit changed. Says in the host log what it starts
+/// guarding or guards at a new size.
+pub(crate) fn retarget(previous: Vec<Guarded>, found: Vec<Cgroup>, percent: u64) -> Vec<Guarded> {
+    let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+    let mut previous: HashMap<String, Trigger> = previous
+        .into_iter()
+        .map(|guarded| (guarded.cgroup.path, guarded.trigger))
+        .collect();
+    found
+        .into_iter()
+        .map(|cgroup| {
+            let trigger = match previous.remove(&cgroup.path) {
+                Some(trigger) if trigger.max == cgroup.max => trigger,
+                known => {
+                    let trigger = match known {
+                        Some(mut trigger) => {
+                            trigger.retarget(cgroup.max, percent);
+                            trigger
+                        }
+                        None => Trigger::new(cgroup.max, percent),
+                    };
+                    eprintln!(
+                        "xd-host: running out of memory in cgroup {} would stop every chat and terminal, so xd stops the largest build or tool once {:.1} of its {:.1} GiB cannot be freed.",
+                        cgroup.path,
+                        gib(trigger.threshold),
+                        gib(cgroup.max),
+                    );
+                    trigger
+                }
+            };
+            Guarded { cgroup, trigger }
+        })
+        .collect()
 }
 
 /// One process, as `/proc` describes it.
@@ -759,6 +815,35 @@ mod tests {
         );
         assert_eq!(ancestors("/"), ["/"]);
         assert_eq!(ancestors("/pod/xd"), ["/pod/xd", "/pod", "/"]);
+    }
+
+    #[test]
+    fn a_resized_limit_moves_the_threshold_and_keeps_the_cooldown() {
+        let cgroup = |path: &str, max: u64| Cgroup {
+            directory: PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/')),
+            path: path.into(),
+            max,
+        };
+        let start = Instant::now();
+        let guarded = retarget(Vec::new(), vec![cgroup("/", 100 * GIB)], 92);
+        let mut guarded = retarget(guarded, vec![cgroup("/", 100 * GIB)], 92);
+        assert_eq!(guarded.len(), 1);
+        assert!(guarded[0].trigger.due(92 * GIB, start));
+        guarded[0].trigger.fired(start);
+
+        // Shrunk: the threshold follows, and the last spike still counts.
+        let mut guarded = retarget(guarded, vec![cgroup("/", 50 * GIB)], 92);
+        assert!(
+            !guarded[0]
+                .trigger
+                .due(47 * GIB, start + Duration::from_secs(1))
+        );
+        assert!(guarded[0].trigger.due(47 * GIB, start + COOLDOWN));
+        // Grown: what was over the old threshold no longer is.
+        let mut guarded = retarget(guarded, vec![cgroup("/", 200 * GIB)], 92);
+        assert!(!guarded[0].trigger.due(95 * GIB, start + COOLDOWN));
+        // A limit that goes away is no longer guarded.
+        assert!(retarget(guarded, Vec::new(), 92).is_empty());
     }
 
     #[test]

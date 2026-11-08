@@ -1230,40 +1230,32 @@ impl Engine {
         }
     }
 
-    /// Starts the memory guard; see [`memory_guard`]. It does nothing unless
-    /// the daemon runs in a cgroup that running out of memory kills as a whole.
+    /// Starts the memory guard; see [`memory_guard`]. It does nothing while the
+    /// daemon runs in no cgroup that running out of memory kills as a whole,
+    /// but looks again now and then, since a container's limits can change.
     #[cfg(target_os = "linux")]
     pub fn start_memory_guard(self: &Arc<Self>) {
         let setting = std::env::var(memory_guard::PERCENT_VARIABLE).ok();
         let Some(percent) = memory_guard::threshold_percent(setting.as_deref()) else {
             return;
         };
-        let cgroups = memory_guard::Cgroup::discover();
-        if cgroups.is_empty() {
-            return;
-        }
-        let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
-        let mut guarded: Vec<_> = cgroups
-            .into_iter()
-            .map(|cgroup| {
-                let trigger = memory_guard::Trigger::new(cgroup.max(), percent);
-                eprintln!(
-                    "xd-host: running out of memory in cgroup {} would stop every chat and terminal, so xd stops the largest build or tool once {:.1} of its {:.1} GiB cannot be freed.",
-                    cgroup.path(),
-                    gib(trigger.threshold()),
-                    gib(cgroup.max()),
-                );
-                (cgroup, trigger)
-            })
-            .collect();
         // Weak, since the engine owns nothing that would stop this thread.
         let engine = Arc::downgrade(self);
         let spawned = thread::Builder::new()
             .name("xd-memory-guard".into())
             .spawn(move || {
+                let mut guarded = Vec::new();
+                let mut discovered: Option<std::time::Instant> = None;
                 while engine.strong_count() > 0 {
-                    thread::sleep(memory_guard::SAMPLE_EVERY);
-                    for (cgroup, trigger) in &mut guarded {
+                    if discovered.is_none_or(|at| at.elapsed() >= memory_guard::DISCOVER_EVERY) {
+                        guarded = memory_guard::retarget(
+                            guarded,
+                            memory_guard::Cgroup::discover(),
+                            percent,
+                        );
+                        discovered = Some(std::time::Instant::now());
+                    }
+                    for memory_guard::Guarded { cgroup, trigger } in &mut guarded {
                         let Some(usage) = cgroup.unreclaimable() else {
                             continue;
                         };
@@ -1277,6 +1269,7 @@ impl Engine {
                         };
                         engine.relieve_memory(cgroup, usage);
                     }
+                    thread::sleep(memory_guard::SAMPLE_EVERY);
                 }
             });
         if let Err(error) = spawned {
