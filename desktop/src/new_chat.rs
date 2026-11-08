@@ -475,6 +475,8 @@ impl XdDesktop {
                             .child(
                                 div()
                                     .id("draft-composer")
+                                    .track_scroll(&self.new_chat_input.read(cx).scroll_handle())
+                                    .track_focus(&self.new_chat_input.read(cx).focus_handle(cx))
                                     .min_h(px(70.0))
                                     .max_h(px(200.0))
                                     .overflow_y_scroll()
