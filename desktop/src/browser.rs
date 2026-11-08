@@ -1853,6 +1853,7 @@ fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEnt
     let popup_events = events.clone();
     let builder = WebViewBuilder::new_with_web_context(&mut context_ref);
     let native = builder
+        .with_back_forward_navigation_gestures(true)
         .with_visible(false)
         .with_focused(false)
         .with_bounds(Rect {
