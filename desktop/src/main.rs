@@ -2170,6 +2170,13 @@ struct XdDesktop {
     chat_create_worktrees_loading: bool,
     chat_create_can_new_worktree: bool,
     chat_create_branches: Vec<NewSessionBranch>,
+    /// What the project's last new chat was set up with, for the replies that
+    /// bring its worktrees and branches to apply once they arrive.
+    new_chat_remembered: settings::NewChatChoices,
+    /// Current (`false`) or New Worktree (`true`), when picked in this new
+    /// chat: a pick made before the worktrees arrive outranks what was
+    /// remembered.
+    new_chat_worktree_picked: Option<bool>,
     chat_create_pull_requests: Vec<NewSessionPullRequest>,
     chat_pull_requests: HashMap<(ChatEndpoint, String), ChatPullRequest>,
     chat_create_sources_loading: bool,
@@ -2807,6 +2814,8 @@ impl XdDesktop {
             chat_create_worktrees_loading: false,
             chat_create_can_new_worktree: false,
             chat_create_branches: Vec::new(),
+            new_chat_remembered: settings::NewChatChoices::default(),
+            new_chat_worktree_picked: None,
             chat_create_pull_requests: Vec::new(),
             chat_pull_requests: HashMap::new(),
             chat_create_sources_loading: false,
@@ -5121,9 +5130,40 @@ impl XdDesktop {
             RequestKind::FolderSettings { folder_id } => {
                 if self.creating_chat_folder.as_deref() == Some(folder_id.as_str()) {
                     let (worktrees, can_create, selected) = new_session_worktree_state(&value);
+                    let remembered = &self.new_chat_remembered;
+                    let checkout = remembered
+                        .checkout
+                        .as_ref()
+                        .filter(|path| worktrees.iter().any(|worktree| &worktree.path == *path))
+                        .map(|path| NewSessionWorktree::Existing(path.clone()));
+                    let new_worktree = self
+                        .new_chat_worktree_picked
+                        .unwrap_or(remembered.new_worktree);
+                    let picked_base = self.new_chat_worktree_picked == Some(true)
+                        && matches!(
+                            self.chat_create_worktree,
+                            Some(NewSessionWorktree::Branch { .. })
+                        );
+                    // Before the base is resolved: without the remembered
+                    // base, it falls back to the current checkout's branch.
                     self.chat_create_worktrees = worktrees;
+                    self.chat_create_worktree = if new_worktree && can_create {
+                        if picked_base {
+                            self.chat_create_worktree.clone()
+                        // The base is chosen once the branches arrive.
+                        } else if self.chat_create_sources_loading {
+                            Some(NewSessionWorktree::New)
+                        } else {
+                            self.default_new_chat_base()
+                        }
+                    } else if self.new_chat_worktree_picked == Some(false) {
+                        // Current Worktree picked here: the checkout the host
+                        // calls current, as the picker would have chosen.
+                        selected
+                    } else {
+                        checkout.or(selected)
+                    };
                     self.chat_create_can_new_worktree = can_create;
-                    self.chat_create_worktree = selected;
                     self.chat_create_worktrees_loading = false;
                 }
                 if self
@@ -7058,11 +7098,10 @@ impl XdDesktop {
         self.new_chat_reading = 0;
         self.new_chat_prompt.clear();
         self.new_chat_attachments.clear();
-        self.new_chat_remote = false;
         self.new_chat_default_branch = None;
         self.new_chat_query.clear();
-        self.new_chat_model = None;
         self.new_chat_menu = None;
+        self.restore_new_chat_choices(&folder_id);
         self.new_chat_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
         self.creating_chat_session = None;
@@ -10942,6 +10981,7 @@ impl XdDesktop {
             });
         match result {
             Ok(()) => {
+                self.remember_new_chat_choices();
                 self.chat_create_title = title;
                 self.new_chat_submitted_prompt = Some(self.new_chat_prompt.clone());
                 self.new_chat_submitted_attachments = self.new_chat_attachments.clone();
