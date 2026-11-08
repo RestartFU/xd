@@ -2163,6 +2163,9 @@ struct XdDesktop {
     first_chat_prompt: Option<(String, String, Vec<Attachment>)>,
     new_chat_attachments: Vec<Attachment>,
     new_chat_submitted_attachments: Vec<Attachment>,
+    /// The chat the new chat view created, which it stays on screen for
+    /// until that chat opens.
+    new_chat_started: Option<String>,
     chat_create_title: String,
     chat_create_submitting: bool,
     chat_create_worktree: Option<NewSessionWorktree>,
@@ -2807,6 +2810,7 @@ impl XdDesktop {
             first_chat_prompt: None,
             new_chat_attachments: Vec::new(),
             new_chat_submitted_attachments: Vec::new(),
+            new_chat_started: None,
             chat_create_title: String::new(),
             chat_create_submitting: false,
             chat_create_worktree: None,
@@ -3483,6 +3487,10 @@ impl XdDesktop {
                 remote_model.connected = false;
                 remote_model.connection_error = Some(format!("{message} Reconnecting…"));
                 if self.active_endpoint == ChatEndpoint::Remote {
+                    // Created already: sending its message again would make another.
+                    if self.new_chat_started.take().is_some() {
+                        self.creating_chat_folder = None;
+                    }
                     self.chat_create_submitting = false;
                     self.new_chat_submitted_prompt = None;
                     self.new_chat_submitted_attachments.clear();
@@ -3838,6 +3846,10 @@ impl XdDesktop {
                 self.transcript_page_loading = false;
                 self.transcript_refresh_pending = false;
                 self.workspace_create_submitting = false;
+                // Created already: sending its message again would make another.
+                if self.new_chat_started.take().is_some() {
+                    self.creating_chat_folder = None;
+                }
                 self.chat_create_submitting = false;
                 self.new_chat_submitted_prompt = None;
                 self.new_chat_submitted_attachments.clear();
@@ -5256,10 +5268,12 @@ impl XdDesktop {
                     }
                     self.first_chat_prompt = Some((
                         chat_id.to_owned(),
-                        self.new_chat_submitted_prompt.take().unwrap_or_default(),
-                        std::mem::take(&mut self.new_chat_submitted_attachments),
+                        self.new_chat_submitted_prompt.clone().unwrap_or_default(),
+                        self.new_chat_submitted_attachments.clone(),
                     ));
-                    self.cancel_chat_create(cx);
+                    // The view stays, showing the message, until the chat
+                    // opens in its place.
+                    self.new_chat_started = Some(chat_id.to_owned());
                 }
                 // The tree supplies session_mode. Opening from the creation
                 // reply alone can route a native chat through terminal setup
@@ -7151,7 +7165,9 @@ impl XdDesktop {
     fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
         self.creating_chat_folder = None;
         self.creating_chat_session = None;
+        self.new_chat_started = None;
         self.new_chat_submitted_prompt = None;
+        self.new_chat_submitted_attachments.clear();
         self.chat_create_title.clear();
         self.chat_create_submitting = false;
         self.chat_create_worktree = None;
@@ -9954,13 +9970,18 @@ impl XdDesktop {
         }
         match pending.optimistic {
             OptimisticSend::Started { message_index } => {
-                if let Some(index) = message_index
-                    && self.model.messages.get(index).is_some_and(|message| {
-                        message.id.is_none()
-                            && message.role == "user"
-                            && message.content == pending.text
-                    })
-                {
+                // Where it was put, unless a page moved it since.
+                let unsent = |message: &Message| {
+                    message.id.is_none()
+                        && message.role == "user"
+                        && message.content == pending.text
+                };
+                let message_index = message_index
+                    .filter(|index| self.model.messages.get(*index).is_some_and(unsent))
+                    .or_else(|| {
+                        message_index.and_then(|_| self.model.messages.iter().rposition(unsent))
+                    });
+                if let Some(index) = message_index {
                     self.model.messages.remove(index);
                     self.transcript_snapshot.sync_messages(&self.model);
                     self.sync_transcript_count(false);
@@ -10626,6 +10647,7 @@ impl XdDesktop {
     /// terminal, or an agent still at work.
     fn anything_working(&self) -> bool {
         self.model.working
+            || self.chat_create_submitting
             || !self.transcript_snapshot.running_agents.is_empty()
             || self
                 .model
@@ -10834,6 +10856,11 @@ impl XdDesktop {
         {
             return;
         }
+        // A new chat that was created, showing its message until now: this
+        // chat, or whichever was picked instead, takes its place.
+        if self.new_chat_started.is_some() {
+            self.cancel_chat_create(cx);
+        }
         if let Some(session) = self
             .model
             .session_for_chat(&chat_id)
@@ -10977,6 +11004,7 @@ impl XdDesktop {
                     self.new_chat_model.as_deref(),
                     worktree.as_ref(),
                     self.new_chat_remote,
+                    Some(&self.new_chat_prompt),
                 )
             });
         match result {
@@ -15747,6 +15775,7 @@ impl XdDesktop {
                 editor,
                 controls: options,
                 actions,
+                show_attachments: true,
             },
             colors,
             window,

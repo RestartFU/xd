@@ -944,9 +944,14 @@ impl HostHandle {
         model: Option<&str>,
         worktree: Option<&NewSessionWorktree>,
         start_from_remote: bool,
+        first_message: Option<&str>,
     ) -> Result<(), String> {
         let mut body = json!({"op":"new-chat", "folder":folder, "title":title, "backend":backend});
         body["start_from_remote"] = json!(start_from_remote);
+        // A worktree made with the chat is named for what the chat is for.
+        if let Some(prompt) = first_message.filter(|prompt| !prompt.trim().is_empty()) {
+            body["prompt"] = json!(prompt);
+        }
         if let Some(session) = session {
             body["session"] = json!(session);
         }
@@ -2830,6 +2835,67 @@ mod tests {
                 ..
             } if chat_id == "chat-1" && text == "fix the queue"
         ));
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_new_chat_sends_its_first_message_to_name_its_worktree() {
+        let directory = env::temp_dir().join(format!("xd-new-chat-name-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let socket = directory.join("host.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for expect_prompt in [true, false] {
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["op"], "new-chat");
+                assert_eq!(request["worktree"]["kind"], "new");
+                if expect_prompt {
+                    assert_eq!(request["prompt"], "fix the footer");
+                } else {
+                    // Only attachments: nothing to name it from.
+                    assert!(request.get("prompt").is_none());
+                }
+                let request_id = request["_xd_request"].as_u64().unwrap();
+                writeln!(
+                    stream,
+                    "{{\"ok\":true,\"id\":\"chat-1\",\"_xd_request\":{request_id}}}"
+                )
+                .unwrap();
+            }
+        });
+
+        let (host, updates) = HostHandle::connect(socket).unwrap();
+        assert!(matches!(
+            updates.recv_blocking().unwrap(),
+            HostUpdate::Connected { .. }
+        ));
+        for text in ["fix the footer", " "] {
+            host.create_draft_chat(
+                "folder-1",
+                None,
+                "New Chat",
+                "codex",
+                None,
+                Some(&NewSessionWorktree::New),
+                false,
+                Some(text),
+            )
+            .unwrap();
+            assert!(matches!(
+                updates.recv_blocking().unwrap(),
+                HostUpdate::Reply {
+                    kind: RequestKind::NewChat { .. },
+                    ..
+                }
+            ));
+        }
 
         server.join().unwrap();
         let _ = fs::remove_dir_all(directory);

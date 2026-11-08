@@ -1355,7 +1355,23 @@ impl AppModel {
             has_newer,
         };
         if direction == MessagePageDirection::Tail {
+            // A message sent from here but not stored yet stays at the end
+            // until a page has it. A chat's first page is often asked for
+            // before its first message is stored, and would otherwise wipe
+            // that message off the screen until the next page.
+            let unsent =
+                self.messages
+                    .iter()
+                    .filter(|message| message.id.is_none() && message.role == "user")
+                    .filter(|message| {
+                        !snapshot.messages.iter().any(|stored| {
+                            stored.role == "user" && stored.content == message.content
+                        })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
             self.messages = snapshot.messages;
+            self.messages.extend(unsent);
             if self.messages.len() > MAX_RETAINED_MESSAGES {
                 change.removed_from_start = self.messages.len() - MAX_RETAINED_MESSAGES;
                 self.messages.drain(0..change.removed_from_start);
@@ -3474,6 +3490,38 @@ mod tests {
             model.messages.last().and_then(|message| message.id),
             Some(600)
         );
+    }
+
+    #[test]
+    fn a_sent_message_stays_until_a_page_has_it() {
+        let mut model = AppModel::default();
+        model.select_chat("chat-1");
+        let sent: Message =
+            serde_json::from_value(json!({"role": "user", "content": "Fix the footer"})).unwrap();
+        model.messages.push(sent);
+        // Asked for before the message was stored.
+        model
+            .apply_message_page(&json!({"messages": []}), MessagePageDirection::Tail)
+            .unwrap();
+        assert_eq!(model.messages.len(), 1);
+        assert_eq!(model.messages[0].content, "Fix the footer");
+        assert!(model.messages[0].id.is_none());
+
+        model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 1, "role": "user", "content": "Fix the footer"},
+                    {"id": 2, "role": "assistant", "content": "On it"}
+                ]}),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
+        let ids = model
+            .messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [Some(1), Some(2)]);
     }
 
     #[test]

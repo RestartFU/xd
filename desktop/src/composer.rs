@@ -27,6 +27,8 @@ pub(super) struct ComposerParts {
     pub controls: Vec<gpui::AnyElement>,
     /// At the right end: the context meter, queue, stop, and send.
     pub actions: Vec<gpui::AnyElement>,
+    /// Whether the draft's tiles show: not once they have been sent.
+    pub show_attachments: bool,
 }
 
 /// A chip in the row under the composer. One that opens a picker reacts to
@@ -134,6 +136,7 @@ impl XdDesktop {
             editor,
             controls,
             actions,
+            show_attachments,
         } = parts;
         let input = match owner {
             DraftOwner::Chat => self.composer_input.clone(),
@@ -144,7 +147,9 @@ impl XdDesktop {
         });
         let focus = input.read(cx).focus_handle(cx);
         let scroll = input.read(cx).scroll_handle();
-        let attachments = self.render_composer_attachments(owner, colors, window, cx);
+        let attachments = self
+            .render_composer_attachments(owner, colors, window, cx)
+            .filter(|_| show_attachments);
         let (shell_id, editor_id, attach_id) = match owner {
             DraftOwner::Chat => ("native-composer-shell", "native-composer", "native-attach"),
             DraftOwner::NewChat => ("draft-composer-shell", "draft-composer", "draft-attach"),
