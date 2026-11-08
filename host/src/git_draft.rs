@@ -1,5 +1,5 @@
 use std::{
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader, Read, Write},
     process::Stdio,
     sync::{
         Arc,
@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::{
     EventBus, StateStore,
     agent::{AgentCommand, AgentEvent, AgentParser},
+    agent_text,
     storage::GitDraftSpec,
 };
 
@@ -68,20 +69,35 @@ impl GitDraftService {
             system_prompt: Some(&spec.system_prompt),
             workdir: &spec.workdir,
             model: &spec.model,
-            effort: &spec.effort,
+            effort: agent_text::LOW_EFFORT,
             access: "read-only",
             fast: false,
             session_id: None,
             environment: &empty_environment,
         }
         .build();
+        // A draft follows the repository's own conventions, so its instructions
+        // stay; nothing else the run would load helps describe a diff.
+        agent_text::keep_the_run_minimal(&mut command, &spec.backend, true);
+        let input = agent_text::turn_input(&spec.backend, &spec.prompt);
         let result = (|| -> Result<(String, String), String> {
             let mut child = command
-                .stdin(Stdio::null())
+                .stdin(if input.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
                 .map_err(|error| format!("Cannot start {}: {error}", spec.backend))?;
+            // Closing stdin once the turn is written is what tells Claude to
+            // finish after replying.
+            if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+                thread::spawn(move || {
+                    let _ = writeln!(stdin, "{input}");
+                });
+            }
             let stdout = child
                 .stdout
                 .take()

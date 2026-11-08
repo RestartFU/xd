@@ -14,23 +14,26 @@ pub(crate) fn generate(spec: WorktreeNameSpec) -> Result<String, String> {
         spec.prompt
     );
     let empty_environment = Vec::new();
-    let command = AgentCommand {
+    let mut command = AgentCommand {
         backend: &spec.backend,
         prompt: &prompt,
         system_prompt: Some(SYSTEM_PROMPT),
         workdir: &spec.workdir,
         model: &spec.model,
-        effort: &spec.effort,
+        effort: agent_text::LOW_EFFORT,
         access: "read-only",
         fast: false,
         session_id: None,
         environment: &empty_environment,
     }
     .build();
+    // The send waits on this, so it loads nothing a name does not need.
+    agent_text::keep_the_run_minimal(&mut command, &spec.backend, false);
+    let input = agent_text::turn_input(&spec.backend, &prompt);
     let output = agent_text::run(
         command,
         &spec.backend,
-        None,
+        input,
         NAME_TIMEOUT,
         "worktree naming",
     )?;

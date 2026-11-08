@@ -7,9 +7,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::agent::{AgentEvent, AgentParser};
+use crate::agent::{AgentCommand, AgentEvent, AgentParser};
 
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+
+/// The lowest effort every assistant accepts. Titles, names and Git messages
+/// need no reasoning, and thinking tokens are most of what a higher one costs.
+pub(crate) const LOW_EFFORT: &str = "low";
 
 struct AgentOutput {
     text: String,
@@ -115,6 +119,51 @@ pub(crate) fn run(
     Ok(output.text)
 }
 
+/// The line to write on stdin, for a backend that takes its turns there. Claude
+/// reads its prompt only from stdin, so without this it exits having done nothing.
+pub(crate) fn turn_input(backend: &str, prompt: &str) -> Option<String> {
+    AgentCommand::keeps_its_process(backend).then(|| AgentCommand::encode_turn(prompt))
+}
+
+/// Drops what a short, unattended run does not need, for cost and speed: tools,
+/// MCP servers and their schemas, slash commands, and a session left behind in
+/// the assistant's own history.
+///
+/// Without `project_instructions` the run also skips CLAUDE.md, AGENTS.md and
+/// Claude's settings, which carry the user's hooks. With it, Claude still loads
+/// the repository's own settings and instructions, and Codex its AGENTS.md, so
+/// conventions written there still apply.
+pub(crate) fn keep_the_run_minimal(
+    command: &mut Command,
+    backend: &str,
+    project_instructions: bool,
+) {
+    match backend {
+        "claude" => {
+            command.args([
+                "--tools",
+                "",
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--setting-sources",
+                if project_instructions {
+                    "project,local"
+                } else {
+                    ""
+                },
+            ]);
+        }
+        "codex" => {
+            command.args(["--ephemeral", "-c", "mcp_servers={}"]);
+            if !project_instructions {
+                command.args(["-c", "project_doc_max_bytes=0"]);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn read_output(stdout: impl Read, backend: &str) -> Result<AgentOutput, String> {
     let mut parser = AgentParser::new(backend)?;
     let mut output = String::new();
@@ -154,4 +203,58 @@ fn read_bounded(mut reader: impl Read) -> String {
         retained.extend_from_slice(&chunk[..count.min(remaining)]);
     }
     String::from_utf8_lossy(&retained).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(backend: &str, project_instructions: bool) -> Vec<String> {
+        let mut command = Command::new("assistant");
+        keep_the_run_minimal(&mut command, backend, project_instructions);
+        command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn keeps_short_runs_out_of_history_and_free_of_tools() {
+        let claude = args("claude", false);
+        assert!(claude.contains(&"--no-session-persistence".to_owned()));
+        assert!(claude.contains(&"--strict-mcp-config".to_owned()));
+        assert!(claude.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert!(
+            claude
+                .windows(2)
+                .any(|pair| pair == ["--setting-sources", ""])
+        );
+        let codex = args("codex", false);
+        assert!(codex.contains(&"--ephemeral".to_owned()));
+        assert!(codex.contains(&"mcp_servers={}".to_owned()));
+        assert!(codex.contains(&"project_doc_max_bytes=0".to_owned()));
+        assert!(args("jcode", false).is_empty());
+    }
+
+    #[test]
+    fn keeps_the_repository_instructions_when_asked() {
+        let claude = args("claude", true);
+        assert!(
+            claude
+                .windows(2)
+                .any(|pair| pair == ["--setting-sources", "project,local"])
+        );
+        assert!(claude.windows(2).any(|pair| pair == ["--tools", ""]));
+        let codex = args("codex", true);
+        assert!(codex.contains(&"--ephemeral".to_owned()));
+        assert!(!codex.contains(&"project_doc_max_bytes=0".to_owned()));
+    }
+
+    #[test]
+    fn writes_the_prompt_on_stdin_only_for_claude() {
+        let line = turn_input("claude", "name it").unwrap();
+        assert!(line.contains("name it"));
+        assert!(turn_input("codex", "name it").is_none());
+        assert!(turn_input("jcode", "name it").is_none());
+    }
 }
