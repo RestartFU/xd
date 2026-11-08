@@ -1799,6 +1799,12 @@ impl StateStore {
         let model = match optional_string(request, "worktree_model")? {
             Some(model) => {
                 validate_model(&backend, model)?;
+                // A choice saved before the CLI dropped the model would only
+                // fail, after holding up the send.
+                let offered = offered_models(&backend);
+                if !offered.is_empty() && !offered.iter().any(|known| known.id == model) {
+                    return Ok(None);
+                }
                 model.to_owned()
             }
             None => match self.offered_side_model(&backend)? {
@@ -1827,10 +1833,7 @@ impl StateStore {
     /// they never hold anything up, but a guess here could delay a send.
     /// Discovery can take seconds, so never call this with the database locked.
     fn offered_side_model(&self, backend: &str) -> Result<Option<String>, StorageError> {
-        let mut offered = crate::model_catalog::cached_models(backend);
-        if offered.is_empty() {
-            offered = crate::model_catalog::models(backend);
-        }
+        let offered = offered_models(backend);
         Ok(chat_title_model(&self.database, backend)?
             .filter(|model| offered.iter().any(|known| known.id == *model)))
     }
@@ -6560,6 +6563,18 @@ fn chat_titles_enabled(database: &Connection) -> Result<bool, StorageError> {
 
 fn chat_title_model_key(backend: &str) -> String {
     format!("chat_title_model_{backend}")
+}
+
+/// The models the assistant's CLI says it offers, waiting for discovery when
+/// none are cached. Empty when discovery fails. Never call this with the
+/// database locked: a probe can take seconds.
+fn offered_models(backend: &str) -> Vec<crate::model_catalog::Model> {
+    let cached = crate::model_catalog::cached_models(backend);
+    if cached.is_empty() {
+        crate::model_catalog::models(backend)
+    } else {
+        cached
+    }
 }
 
 fn chat_title_models(backend: &str) -> &'static [&'static str] {
@@ -12652,6 +12667,19 @@ mod tests {
             .unwrap();
         assert_eq!(default_naming.backend, "codex");
         assert_eq!(default_naming.model, "gpt-6-luna");
+
+        // A chosen model the CLI no longer offers is not tried.
+        assert!(
+            store
+                .prepare_worktree_name(&json!({
+                    "chat": "chat-worktree",
+                    "text": "review it",
+                    "generate_worktree_name": true,
+                    "worktree_model": "gpt-5.6-sol"
+                }))
+                .unwrap()
+                .is_none()
+        );
 
         // A CLI with only older or costlier models leaves naming to the message.
         crate::model_catalog::set_test_models(

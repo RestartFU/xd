@@ -45,8 +45,8 @@ import org.robolectric.shadows.ShadowLooper
 
 /**
  * Renders the host's Titles and names settings against a scripted host, with
- * titles on and off, and checks that each assistant's naming model can be
- * chosen either way. With `-Pxd.shots=<dir>` it writes PNG captures there.
+ * titles on and off, and checks that each assistant's naming model row is
+ * shown either way. With `-Pxd.shots=<dir>` it writes PNG captures there.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -62,7 +62,7 @@ class ChatTitleSettingsScreenshotTest {
         check(shows("Titles Codex chats and names their worktrees."))
     }
 
-    /** Worktrees are still named with titles off, so their models stay choosable. */
+    /** Worktrees are still named with titles off, so their model rows stay shown. */
     @Test fun titlesOff() = shoot("chat-titles-off", enabled = false) {
         check(shows("Codex naming model") && shows("Claude naming model"))
         check(shows("GPT-6 Luna") && shows("Claude Haiku 5.5"))
