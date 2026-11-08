@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -35,14 +35,22 @@ pub(crate) struct WorktreeNameService {
     store: Option<Arc<StateStore>>,
     events: Arc<EventBus>,
     active: Arc<AtomicUsize>,
+    /// Held while renaming, as by what creates, deletes, or settles a chat's
+    /// worktree, so none of them changes it partway through.
+    resources: Arc<Mutex<()>>,
 }
 
 impl WorktreeNameService {
-    pub(crate) fn new(store: Option<Arc<StateStore>>, events: Arc<EventBus>) -> Self {
+    pub(crate) fn new(
+        store: Option<Arc<StateStore>>,
+        events: Arc<EventBus>,
+        resources: Arc<Mutex<()>>,
+    ) -> Self {
         Self {
             store,
             events,
             active: Arc::new(AtomicUsize::new(0)),
+            resources,
         }
     }
 
@@ -72,6 +80,7 @@ impl WorktreeNameService {
         }
         let active = ActiveName(self.active.clone());
         let events = self.events.clone();
+        let resources = self.resources.clone();
         let worker = thread::Builder::new()
             .name("xd-worktree-name".into())
             .spawn(move || {
@@ -91,7 +100,12 @@ impl WorktreeNameService {
                         return;
                     }
                 };
-                match store.rename_generated_worktree_branch(&chat_id, &name) {
+                // Only the rename waits: the model ran without the lock.
+                let renamed = {
+                    let _resources = resources.lock().unwrap_or_else(|error| error.into_inner());
+                    store.rename_generated_worktree_branch(&chat_id, &name)
+                };
+                match renamed {
                     Ok(Some(_)) => {
                         events.publish(json!({"event": "tree"}));
                         events.publish(json!({"event": "changed", "chat": chat_id}));
