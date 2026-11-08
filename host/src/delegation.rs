@@ -73,6 +73,35 @@ fn detect_within(script: &str, depth: usize) -> Option<Delegation> {
         })
 }
 
+/// The commands an expanding heredoc body runs through `$(…)` or backticks.
+fn expansions(text: &str) -> Vec<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                let end = substitution_end(&chars, index + 2);
+                found.push(chars[index + 2..end].iter().collect());
+                index = end + 1;
+            }
+            '`' => {
+                let start = index + 1;
+                let mut end = start;
+                while end < chars.len() && chars[end] != '`' {
+                    end += if chars[end] == '\\' { 2 } else { 1 };
+                }
+                let end = end.min(chars.len());
+                found.push(chars[start..end].iter().collect());
+                index = end + 1;
+            }
+            _ => index += 1,
+        }
+    }
+    found
+}
+
 /// Where the `$(…)` whose body starts at `start` closes. The body is a
 /// script of its own, so its quotes and nested substitutions are its own too.
 fn substitution_end(chars: &[char], start: usize) -> usize {
@@ -187,6 +216,8 @@ struct Segment {
 struct PendingHeredoc {
     delimiter: String,
     strip_tabs: bool,
+    /// An unquoted delimiter lets the body run substitutions.
+    expands: bool,
     segment: usize,
 }
 
@@ -248,6 +279,7 @@ fn segments(script: &str) -> Vec<Segment> {
                     Redirect::Heredoc(strip_tabs) => heredocs.push(PendingHeredoc {
                         delimiter: finished,
                         strip_tabs,
+                        expands: !quoted_word,
                         segment: done.len(),
                     }),
                     Redirect::HereString => current.stdin = Some(finished),
@@ -370,7 +402,11 @@ fn segments(script: &str) -> Vec<Segment> {
                         body.push(line);
                     }
                     if let Some(segment) = done.get_mut(heredoc.segment) {
-                        segment.stdin = Some(body.join("\n"));
+                        let body = body.join("\n");
+                        if heredoc.expands {
+                            segment.substitutions.extend(expansions(&body));
+                        }
+                        segment.stdin = Some(body);
                     }
                 }
             }
@@ -835,6 +871,12 @@ mod tests {
         let quoted = detect("answer=\"$(claude -p 'Review the diff')\"; echo \"$answer\"").unwrap();
         assert_eq!(quoted.prompt.as_deref(), Some("Review the diff"));
         assert!(detect("echo \"`codex exec 'old style'`\"").is_some());
+        // An unquoted heredoc runs its substitutions; a quoted one is text.
+        let heredoc = detect("cat <<EOF\nSummary: $(claude -p 'Summarize the diff')\nEOF").unwrap();
+        assert_eq!(heredoc.prompt.as_deref(), Some("Summarize the diff"));
+        assert_eq!(detect("cat <<'EOF'\n$(claude -p 'Summarize')\nEOF"), None);
+        assert_eq!(detect("cat <<EOF\n\\$(claude -p 'Summarize')\nEOF"), None);
+
         let nested = detect(r#"answer="$(claude -p "Review the diff")"; echo "$answer""#).unwrap();
         assert_eq!(nested.prompt.as_deref(), Some("Review the diff"));
         let deeper =
@@ -880,6 +922,7 @@ mod tests {
             "bash helper.sh -c 'codex exec \"Review\"'",
             "echo '$(claude -p hi)'",
             "echo \"\\$(claude -p 'Review the diff')\"",
+            "git commit -m \"$(cat <<'EOF'\nfix: don't run claude -p twice\n\nUse codex exec instead.\nEOF\n)\"",
             "echo \"$(printf '%s' \"hello; codex exec hi\")\"",
             "review() {\n  printf '%s\\n' \"}\"\n  codex exec 'Review the diff'\n}",
             "echo \"\\`codex exec 'Review'\\`\"",
