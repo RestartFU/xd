@@ -14543,6 +14543,8 @@ impl XdDesktop {
         // The widths the card below allows its content.
         let image_width = if user {
             column.min(600.0) - 28.0
+        } else if error {
+            column.min(780.0) - 25.0
         } else {
             column.min(780.0)
         };
@@ -14558,8 +14560,17 @@ impl XdDesktop {
             .iter()
             .map(|path| Self::render_message_file(colors, path))
             .collect::<Vec<_>>();
+        let prose_colors = if error {
+            ThemeColors {
+                text: colors.muted,
+                ..colors
+            }
+        } else {
+            colors
+        };
         let body = div()
             .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
             .gap_2()
@@ -14570,7 +14581,7 @@ impl XdDesktop {
                     .enumerate()
                     .map(|(block_index, block)| {
                         Self::render_native_markdown_block(
-                            colors,
+                            prose_colors,
                             block,
                             scoped_element_id(&block_scope, block_index) as usize,
                             images,
@@ -14598,8 +14609,8 @@ impl XdDesktop {
             .when(!files.is_empty(), |body| {
                 body.child(div().flex().flex_wrap().gap_2().children(files))
             });
-        // Prose sits on the page; only what the user wrote and host errors are
-        // set apart, the way a conversation reads.
+        // Host notices sit in the conversation with a warning icon; only the
+        // user's own words need a bubble.
         let card = div()
             .min_w_0()
             .flex()
@@ -14616,21 +14627,18 @@ impl XdDesktop {
                     .rounded(px(18.0))
                     .bg(rgb(colors.surface_high))
             })
-            .when(error, |card| {
-                card.max_w(px(760.0))
-                    .px_4()
-                    .py_3()
-                    .rounded(px(12.0))
-                    .border_1()
-                    .border_color(rgb(colors.danger))
-                    .bg(rgb(colors.danger_surface))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(colors.danger))
-                            .child("Host"),
-                    )
+            .when(error, |notice| {
+                notice
+                    .w_full()
+                    .max_w(px(780.0))
+                    .flex_row()
+                    .gap(px(10.0))
+                    .py(px(4.0))
+                    .child(div().mt(px(3.0)).flex_shrink_0().child(icon(
+                        ALERT_ICON,
+                        15.0,
+                        colors.danger,
+                    )))
             })
             .when(!user && !error, |card| card.w_full().max_w(px(780.0)))
             .child(body);

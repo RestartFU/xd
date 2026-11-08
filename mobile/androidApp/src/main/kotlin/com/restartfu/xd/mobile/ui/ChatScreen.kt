@@ -1109,7 +1109,12 @@ private fun MessageBody(item: TranscriptItem, model: ChatViewModel) {
                         live = item.live,
                     )
                     TranscriptKind.SYSTEM ->
-                        Text(part.text, fontFamily = XdMonoFamily)
+                        Text(
+                            part.text,
+                            fontFamily = if (item.label == "Host") null else XdMonoFamily,
+                            color = if (item.label == "Host") MaterialTheme.colorScheme.onSurfaceVariant
+                                else androidx.compose.material3.LocalContentColor.current,
+                        )
                     else -> Text(part.text)
                 }
             }
@@ -1325,6 +1330,22 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
 private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
     if (item.kind == TranscriptKind.TOOL) {
         ToolRow(item)
+        return
+    }
+    if (item.kind == TranscriptKind.SYSTEM && item.label == "Host") {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            Icon(
+                painterResource(com.restartfu.xd.mobile.R.drawable.ic_alert),
+                contentDescription = "Host notice",
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(top = 3.dp).size(16.dp),
+            )
+            Box(Modifier.weight(1f)) { SelectableMessageBody(item, model) }
+        }
         return
     }
     if (item.kind != TranscriptKind.USER) {

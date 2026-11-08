@@ -172,6 +172,8 @@ Controls use 6px corners, chat tabs 7px, panels 8px, and the composer 16px on de
 
 **Composer.** A bordered opaque surface, using Material on Android, holds the editor, attachments, agent options and send action. On desktop, attached images are 64px cover-cropped tiles above the editor, each with an overlaid remove button. A tile opens a full-window viewer over a black 75% backdrop that fits the image, zooms by click, wheel or keyboard, pans by drag or arrow keys, steps through the draft's images, and closes on Escape or a click outside the image. With nothing typed after a turn was cut short, the send action becomes a filled play button that continues the chat. Empty-state text uses natural height and a clear gap above it. While another chat's metadata loads, its editor waits for the correct saved draft. On phones the composer is one row: attach, the message growing upward to six lines, the agent and model chip that opens the model picker, and send or stop.
 
+**Host notices.** Warnings sit directly in the conversation with a small warning icon and muted, proportional text. They have no card, colored background, border, or heading. Keep the explanation selectable and allow it to wrap.
+
 **Workspace tools.** Files, Changes, Browser and Terminal retain session scope across sibling chat switches. Agent history, options, approvals and drafts retain chat scope. Hosts without grouped-session support remain usable with singleton sessions and show an update message when adding a sibling chat.
 
 **Settings.** Desktop groups Appearance, General, Agents, Devices and Shortcuts in one panel using existing capabilities. Android preserves its native settings dialog. Both offer Dark and Light.

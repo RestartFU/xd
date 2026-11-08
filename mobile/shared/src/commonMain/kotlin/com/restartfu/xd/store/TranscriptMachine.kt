@@ -382,7 +382,7 @@ public object TranscriptMachine {
                     kind = message.role.toKind(),
                     text = message.content,
                     atMillis = message.at * 1000,
-                    label = message.label,
+                    label = message.label ?: if (message.role == "error") "Host" else null,
                     messageId = message.id,
                 )
             },
