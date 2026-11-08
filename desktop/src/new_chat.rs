@@ -162,6 +162,7 @@ impl XdDesktop {
                                 colors.muted,
                             ))
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                this.new_chat_worktree_picked = Some(new);
                                 this.chat_create_worktree = if new {
                                     this.default_new_chat_base()
                                 } else {
@@ -746,6 +747,7 @@ impl XdDesktop {
         });
         self.new_chat_remote = remembered.start_from_remote;
         self.new_chat_remembered = remembered;
+        self.new_chat_worktree_picked = None;
     }
 
     /// Keep what the new chat is set up with for the project's next one.
@@ -773,7 +775,13 @@ impl XdDesktop {
                     choices.new_worktree = false;
                     choices.checkout = Some(path.clone());
                 }
-                Some(NewSessionWorktree::PullRequest { .. }) | None => {}
+                // The worktrees have not arrived yet to pick a checkout or
+                // base from, but the mode was picked.
+                Some(NewSessionWorktree::PullRequest { .. }) | None => {
+                    if let Some(new_worktree) = self.new_chat_worktree_picked {
+                        choices.new_worktree = new_worktree;
+                    }
+                }
             }
         }
         if choices == self.new_chat_remembered {
@@ -957,6 +965,15 @@ mod choice_tests {
     }
 
     fn sources(desktop: &mut XdDesktop, folder: &str, cx: &mut Context<XdDesktop>) {
+        sources_with_default(desktop, folder, "main", cx);
+    }
+
+    fn sources_with_default(
+        desktop: &mut XdDesktop,
+        folder: &str,
+        default_branch: &str,
+        cx: &mut Context<XdDesktop>,
+    ) {
         reply(
             desktop,
             RequestKind::NewChatSources {
@@ -964,7 +981,7 @@ mod choice_tests {
             },
             serde_json::json!({
                 "ok": true,
-                "default_branch": "main",
+                "default_branch": default_branch,
                 "branches": [
                     {"name": "main", "reference": "refs/heads/main", "oid": "aaa"},
                     {"name": "origin/dev", "reference": "refs/remotes/origin/dev", "oid": "bbb"}
@@ -1032,23 +1049,21 @@ mod choice_tests {
                 sources(desktop, "project", cx);
                 assert_eq!(desktop.chat_create_worktree, dev());
 
-                // A base that is gone falls back to the default branch or,
-                // when that is not among the branches either, to the current
-                // checkout's branch, whichever reply comes first.
+                // A base that is gone, with a default branch that is not
+                // among the branches either, falls back to the current
+                // checkout's branch whichever reply comes first.
                 desktop.new_chat_remembered.base = Some("refs/heads/gone".into());
                 for sources_first in [false, true] {
                     desktop.chat_create_worktree = Some(NewSessionWorktree::New);
                     desktop.chat_create_worktrees.clear();
                     desktop.chat_create_branches.clear();
                     desktop.chat_create_sources_loading = true;
-                    desktop.new_chat_default_branch = None;
                     if sources_first {
-                        sources(desktop, "project", cx);
-                        desktop.new_chat_default_branch = Some("trunk".into());
+                        sources_with_default(desktop, "project", "trunk", cx);
                         folder_settings(desktop, "project", cx);
                     } else {
                         folder_settings(desktop, "project", cx);
-                        sources(desktop, "project", cx);
+                        sources_with_default(desktop, "project", "trunk", cx);
                     }
                     assert_eq!(
                         desktop.chat_create_worktree,
@@ -1060,6 +1075,40 @@ mod choice_tests {
                     );
                 }
                 desktop.new_chat_remembered.base = Some("refs/remotes/origin/dev".into());
+                desktop.cancel_chat_create(cx);
+
+                // Current Worktree picked before the worktrees arrive stays
+                // picked, and is what the next new chat starts with.
+                desktop.begin_chat_create("project".into(), window, cx);
+                desktop.new_chat_worktree_picked = Some(false);
+                desktop.chat_create_worktree = None;
+                desktop.remember_new_chat_choices();
+                folder_settings(desktop, "project", cx);
+                sources(desktop, "project", cx);
+                assert!(matches!(
+                    desktop.chat_create_worktree,
+                    Some(NewSessionWorktree::Existing(ref path)) if path == "/repo"
+                ));
+                desktop.cancel_chat_create(cx);
+                desktop.begin_chat_create("project".into(), window, cx);
+                assert!(!desktop.new_chat_remembered.new_worktree);
+                // And New Worktree with a base picked early keeps that base.
+                sources(desktop, "project", cx);
+                desktop.new_chat_worktree_picked = Some(true);
+                desktop.chat_create_worktree = Some(NewSessionWorktree::Branch {
+                    reference: "refs/heads/main".into(),
+                    oid: "aaa".into(),
+                });
+                folder_settings(desktop, "project", cx);
+                assert_eq!(
+                    desktop.chat_create_worktree,
+                    Some(NewSessionWorktree::Branch {
+                        reference: "refs/heads/main".into(),
+                        oid: "aaa".into(),
+                    })
+                );
+                desktop.chat_create_worktree = dev();
+                desktop.remember_new_chat_choices();
 
                 // Back to a checkout of the project.
                 desktop.chat_create_worktree =
