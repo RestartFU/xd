@@ -88,6 +88,28 @@ class MinimalProjectsTest {
     }
 
     @Test
+    fun aSessionWaitsOnItsBackgroundTasksOnlyWhileNoTurnRuns() {
+        val idle = chat("first", "project", "Implement", "claude").copy(sessionId = "session", backgroundTasks = 2)
+        val sibling = chat("second", "project", "Review", "claude").copy(sessionId = "session", backgroundTasks = 1)
+        val snapshot = TreeSnapshot(
+            folders = listOf(Folder("project", "Compiler", null)),
+            chats = listOf(idle, sibling),
+            sessions = listOf(WorkspaceSession("session", "project", "Parser work", listOf("first", "second"))),
+        )
+        assertEquals(2, idle.waitingOn)
+        assertEquals(3, snapshot.minimalSessions("project").single().backgroundTasks)
+
+        val working = snapshot.copy(chats = listOf(idle.copy(working = true), sibling))
+        assertEquals(0, working.chats.first().waitingOn, "a running turn is work")
+        val session = working.minimalSessions("project").single()
+        assertEquals(true, session.working)
+        assertEquals(0, session.backgroundTasks)
+
+        assertEquals("Waiting on 1 background task", backgroundTasksLabel(1))
+        assertEquals("Waiting on 2 background tasks", backgroundTasksLabel(2))
+    }
+
+    @Test
     fun deletingOriginalChatKeepsSessionAndSharedTerminalIdentity() {
         val snapshot = TreeSnapshot(
             chats = listOf(chat("sibling", "project", "Review", "claude").copy(sessionId = "session")),

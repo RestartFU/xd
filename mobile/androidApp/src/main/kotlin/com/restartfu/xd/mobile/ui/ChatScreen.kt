@@ -143,6 +143,8 @@ internal fun ChatScreen(
     branch: String? = null,
     /** Any chat or shell in the session is busy; they share one checkout. */
     sessionWorking: Boolean = false,
+    /** Background agents and shells this chat's agent is still running, from the tree. */
+    backgroundTasks: Int = 0,
     workspaceId: String = model.state.value.chatId,
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
@@ -213,7 +215,9 @@ internal fun ChatScreen(
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
     // The working row sits below the last message, so it is what "the bottom"
     // means while a turn runs.
-    val trailingItemCount = if (state.working) 1 else 0
+    // Between turns, the same place says what the agent still runs in the background.
+    val waitingOn = if (state.working) 0 else backgroundTasks
+    val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
     val atBottom by remember(rows.size, leadingItemCount, trailingItemCount) {
         derivedStateOf {
@@ -472,6 +476,8 @@ internal fun ChatScreen(
             }
             if (state.working) {
                 item(key = "working") { WorkingRow(state.startedAtMillis) }
+            } else if (waitingOn > 0) {
+                item(key = "background-tasks") { BackgroundTasksRow(waitingOn) }
             }
         }
     }

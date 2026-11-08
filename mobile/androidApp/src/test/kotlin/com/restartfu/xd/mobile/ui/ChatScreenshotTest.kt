@@ -59,13 +59,21 @@ class ChatScreenshotTest {
     @Config(qualifiers = "w412dp-h560dp-420dpi")
     @Test fun phoneKeyboard() = shoot("phone-keyboard-dark", MinimalThemePreset.DARK)
 
-    private fun shoot(name: String, theme: MinimalThemePreset) {
+    /** The turn has ended, and the agent still runs two background tasks. */
+    @Test fun phoneWaitingOnBackgroundTasks() =
+        shoot("phone-background-dark", MinimalThemePreset.DARK, backgroundTasks = 2)
+
+    private fun shoot(name: String, theme: MinimalThemePreset, backgroundTasks: Int = 0) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val client = XdClient({ ScriptedSocket() }, NoCredentials, scope)
+        val working = backgroundTasks == 0
+        val client = XdClient({ ScriptedSocket(working) }, NoCredentials, scope)
         runBlocking { client.connect(connection) }
         val chat = ChatViewModel(client, "chat")
         val chats = listOf(
-            ChatSummary("chat", "folder", "Fix reconnect backoff", "claude", true, sessionId = "s"),
+            ChatSummary(
+                "chat", "folder", "Fix reconnect backoff", "claude", working,
+                sessionId = "s", backgroundTasks = backgroundTasks,
+            ),
             ChatSummary("chat2", "folder", "Release notes", "codex", false, sessionId = "s"),
             ChatSummary("chat3", "folder", "Flaky pairing test", "codex", false, sessionId = "s"),
         )
@@ -80,6 +88,7 @@ class ChatScreenshotTest {
                             goBack = {},
                             sessionTitle = "reconnect-backoff",
                             projectName = "xd",
+                            backgroundTasks = backgroundTasks,
                             sessionChats = SessionChats(chats, "chat", {}, {}, {}, {}, {}),
                         )
                     }
@@ -116,7 +125,7 @@ class ChatScreenshotTest {
     )
 
     /** Answers each request from a fixed script, echoing its request id. */
-    private class ScriptedSocket : PlatformSocket {
+    private class ScriptedSocket(private val working: Boolean) : PlatformSocket {
         private var listener: PlatformSocketListener? = null
 
         override fun connect(connection: SshConnection, listener: PlatformSocketListener) {
@@ -138,9 +147,9 @@ class ChatScreenshotTest {
 
         private fun reply(op: String?): String = when (op) {
             "tree" -> """{"ok":true,"folders":[{"id":"folder","name":"xd"}],"chats":[""" +
-                """{"id":"chat","folder":"folder","title":"Fix reconnect backoff","backend":"claude","working":true}]}"""
+                """{"id":"chat","folder":"folder","title":"Fix reconnect backoff","backend":"claude","working":$working}]}"""
             "chat" -> """{"ok":true,"title":"Fix reconnect backoff","backend":"claude","commands":[],"plan":false,""" +
-                """"queue":[],"working":true,"label":"Claude","working_for":48,"items":[],"new_worktree":false,""" +
+                """"queue":[],"working":$working,"label":"Claude","working_for":48,"items":[],"new_worktree":false,""" +
                 """"has_messages":true,"model":"claude-opus-5-5","effort":"high"}"""
             "messages" -> """{"ok":true,"total_messages":${MESSAGES.size},"last_message_id":${MESSAGES.size},"messages":[""" +
                 MESSAGES.mapIndexed { i, (role, text) ->

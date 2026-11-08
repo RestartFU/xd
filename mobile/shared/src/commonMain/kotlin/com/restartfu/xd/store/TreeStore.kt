@@ -26,6 +26,7 @@ internal class TreeStore(
     private var snapshotSequence = 0L
     private val workingEvents = mutableMapOf<String, WorkingEvent>()
     private val terminalWorkingEvents = mutableMapOf<String, WorkingEvent>()
+    private val backgroundTaskEvents = mutableMapOf<String, BackgroundTasksEvent>()
 
     val state: StateFlow<TreeSnapshot> = _state.asStateFlow()
 
@@ -54,6 +55,7 @@ internal class TreeStore(
             clearVersion = lifecycleVersion
             workingEvents.clear()
             terminalWorkingEvents.clear()
+            backgroundTaskEvents.clear()
             _state.value = TreeSnapshot()
         }
     }
@@ -93,6 +95,25 @@ internal class TreeStore(
             _state.value = _state.value.copy(
                 chats = _state.value.chats.map { chat ->
                     if (chat.id in members) chat.copy(terminalWorking = working) else chat
+                },
+            )
+        }
+    }
+
+    /** A `background-tasks` event: how many tasks the chat's agent still runs. */
+    suspend fun setChatBackgroundTasks(
+        chatId: String,
+        count: Int,
+        sequence: Long,
+    ) {
+        stateMutex.withLock {
+            if (sequence <= snapshotSequence) return
+            if ((backgroundTaskEvents[chatId]?.sequence ?: Long.MIN_VALUE) >= sequence) return
+            lifecycleVersion += 1
+            backgroundTaskEvents[chatId] = BackgroundTasksEvent(sequence, count)
+            _state.value = _state.value.copy(
+                chats = _state.value.chats.map { chat ->
+                    if (chat.id == chatId) chat.copy(backgroundTasks = count) else chat
                 },
             )
         }
@@ -159,6 +180,12 @@ internal class TreeStore(
                                     }
                                     ?.working
                                     ?: it.terminalWorking,
+                                backgroundTasks = backgroundTaskEvents[it.id]
+                                    ?.takeIf { event ->
+                                        event.sequence > authoritativeSequence
+                                    }
+                                    ?.count
+                                    ?: it.backgroundTasks,
                             )
                         },
                     )
@@ -166,6 +193,9 @@ internal class TreeStore(
                         it.value.sequence <= authoritativeSequence
                     }
                     terminalWorkingEvents.entries.removeAll {
+                        it.value.sequence <= authoritativeSequence
+                    }
+                    backgroundTaskEvents.entries.removeAll {
                         it.value.sequence <= authoritativeSequence
                     }
                 }
@@ -185,5 +215,10 @@ internal class TreeStore(
     private data class WorkingEvent(
         val sequence: Long,
         val working: Boolean,
+    )
+
+    private data class BackgroundTasksEvent(
+        val sequence: Long,
+        val count: Int,
     )
 }

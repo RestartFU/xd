@@ -25,6 +25,9 @@ public data class ChatSummaryReply(
     val branch: String? = null,
     @SerialName("terminal_working")
     val terminalWorking: Boolean = false,
+    /** Background agents and shells its agent process is still running. */
+    @SerialName("background_tasks")
+    val backgroundTasks: Int = 0,
     @SerialName("session_mode")
     val sessionMode: String = "chat",
     val session: String? = null,

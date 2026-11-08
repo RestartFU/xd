@@ -539,6 +539,43 @@ impl TurnRuntime {
         found
     }
 
+    /// How many background agents and shells the chat's kept process is still
+    /// running. While no turn runs, a chat with any is waiting on them.
+    pub(crate) fn background_tasks(&self, chat_id: &str) -> usize {
+        self.inner
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                let router = sessions.get(chat_id)?.router.lock().ok()?;
+                Some(router.tasks.len())
+            })
+            .unwrap_or(0)
+    }
+
+    /// [`Self::background_tasks`] for every chat that has any.
+    pub(crate) fn background_task_counts(&self) -> HashMap<String, usize> {
+        let Ok(sessions) = self.inner.sessions.lock() else {
+            return HashMap::new();
+        };
+        sessions
+            .iter()
+            .filter_map(|(chat_id, session)| {
+                let count = session.router.lock().ok()?.tasks.len();
+                (count > 0).then(|| (chat_id.clone(), count))
+            })
+            .collect()
+    }
+
+    /// Tells clients how many background tasks the chat now waits on.
+    fn publish_background_tasks(&self, chat_id: &str, count: usize) {
+        self.inner.events.publish(json!({
+            "event": "background-tasks",
+            "chat": chat_id,
+            "background_tasks": count,
+        }));
+    }
+
     /// Whether a kept process between turns is still running a background
     /// agent or shell. Stopping the process, as [`Self::shutdown`] does, stops
     /// those too, and the next process never hears of them.
@@ -1149,12 +1186,21 @@ impl TurnRuntime {
                     router.quiet_since = Instant::now();
                     router.wakes_itself |= schedules_a_wakeup(&text);
                     router.report_due = report_due_after(&text, router.report_due);
+                    let tasks_before = router.tasks.len();
                     track_tasks(&text, &mut router.tasks);
                     router.backlog.push_back(text);
                     runtime.pump(&chat_id, &mut router);
+                    // After the line is handled, so a report that starts a turn
+                    // reaches clients first and the chat goes straight from
+                    // waiting to working.
+                    if router.tasks.len() != tasks_before {
+                        runtime.publish_background_tasks(&chat_id, router.tasks.len());
+                    }
                 }
+                let mut had_tasks = false;
                 let idle = router.lock().is_ok_and(|mut router| {
                     // Whatever the process was running ended with it.
+                    had_tasks = !router.tasks.is_empty();
                     router.tasks.clear();
                     match router.sink.take() {
                         Some(sink) => {
@@ -1164,6 +1210,12 @@ impl TurnRuntime {
                         None => true,
                     }
                 });
+                if had_tasks && let Some(inner) = inner.upgrade() {
+                    let runtime = TurnRuntime { inner };
+                    // A process started since for the same chat speaks for it.
+                    let count = runtime.background_tasks(&chat_id);
+                    runtime.publish_background_tasks(&chat_id, count);
+                }
                 // A turn that holds the output settles its agents when it ends.
                 // Otherwise this is the only sign the process is gone. Holding
                 // the sessions keeps a new process from reporting first.
@@ -3913,6 +3965,65 @@ read poke"#,
         wait_for("the process to exit", || {
             !agent.runtime.has_background_tasks()
         });
+    }
+
+    /// A chat waits on its background tasks between turns: clients hear the
+    /// count each time it changes, and that it is zero once the process exits.
+    #[cfg(unix)]
+    #[test]
+    fn clients_hear_how_many_background_tasks_a_chat_waits_on() {
+        let agent = KeptAgent::new(&format!(
+            r#"read turn
+{}
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_helper","description":"Look around","subagent_type":"Explore","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_started","task_id":"t2","tool_use_id":"toolu_shell","description":"Wait","task_type":"local_bash","is_backgrounded":true}}'
+echo '{{"type":"system","subtype":"task_progress","task_id":"t1","tool_use_id":"toolu_helper","description":"Reading"}}'
+{}
+read poke
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_helper","status":"completed"}}'
+read poke"#,
+            KeptAgent::INIT,
+            KeptAgent::ANSWER
+        ));
+        let (sender, events) = std::sync::mpsc::sync_channel(256);
+        let (connection, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        agent
+            .runtime
+            .inner
+            .events
+            .subscribe(sender, connection)
+            .unwrap();
+        let mut counts = Vec::new();
+        let heard = |counts: &mut Vec<u64>| {
+            for event in events.try_iter() {
+                if event["event"] == "background-tasks" {
+                    assert_eq!(event["chat"], agent.chat.as_str());
+                    counts.push(event["background_tasks"].as_u64().unwrap());
+                }
+            }
+        };
+
+        agent.send_and_finish("first");
+        assert_eq!(agent.runtime.background_tasks(&agent.chat), 2);
+        assert_eq!(
+            agent.runtime.background_task_counts(),
+            HashMap::from([(agent.chat.clone(), 2)])
+        );
+        heard(&mut counts);
+        assert_eq!(counts, [1, 2]);
+
+        agent.poke();
+        wait_for("one task to finish", || {
+            agent.runtime.background_tasks(&agent.chat) == 1
+        });
+        agent.poke();
+        wait_for("the process to exit", || {
+            heard(&mut counts);
+            counts.last() == Some(&0)
+        });
+        assert_eq!(counts, [1, 2, 1, 0]);
+        assert_eq!(agent.runtime.background_tasks(&agent.chat), 0);
+        assert!(agent.runtime.background_task_counts().is_empty());
     }
 
     #[test]

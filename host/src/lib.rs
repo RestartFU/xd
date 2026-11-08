@@ -709,6 +709,9 @@ impl Engine {
         if tree.get("ok").and_then(Value::as_bool) == Some(true) {
             let activity = self.terminals.activity_snapshot();
             overlay_terminal_working(&mut tree, &activity.working_chats);
+            if let Some(runtime) = &self.runtime {
+                overlay_background_tasks(&mut tree, &runtime.background_task_counts());
+            }
             tree["terminal_activity_epoch"] = Value::String(activity.epoch);
             tree["terminal_activity_revision"] = activity.revision.into();
             self.overlay_folder_owners(&mut tree);
@@ -788,6 +791,7 @@ impl Engine {
             .to_owned();
         response["auth_state"] = Value::String(self.auth.state(&provider));
         if let Some(runtime) = &self.runtime {
+            response["background_tasks"] = runtime.background_tasks(chat_id).into();
             let interactions = runtime.interactions(chat_id);
             response["interactions"] = interactions["interactions"].clone();
             response["interaction_revision"] = interactions["interaction_revision"].clone();
@@ -2029,6 +2033,7 @@ fn shared_event(event: &Value) -> bool {
                 | "draft"
                 | "shortcuts-changed"
                 | "terminal-activity"
+                | "background-tasks"
         )
     )
 }
@@ -2290,6 +2295,43 @@ fn required_string<'a>(request: &'a Value, key: &str, message: &str) -> Result<&
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| message.into())
+}
+
+/// Adds `background_tasks` to every chat and session in the tree: how many
+/// background agents and shells its kept agent process is still running. A chat
+/// with no running turn and some of these is waiting on them. Only live
+/// processes have any, so after a daemon restart nothing is waiting.
+fn overlay_background_tasks(tree: &mut Value, counts: &HashMap<String, usize>) {
+    let mut by_session: HashMap<String, usize> = HashMap::new();
+    for chat in tree
+        .get_mut("chats")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let count = chat["id"]
+            .as_str()
+            .and_then(|id| counts.get(id))
+            .copied()
+            .unwrap_or(0);
+        chat["background_tasks"] = count.into();
+        if let Some(session) = chat["session"].as_str() {
+            *by_session.entry(session.to_owned()).or_default() += count;
+        }
+    }
+    for session in tree
+        .get_mut("sessions")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        let count = session["id"]
+            .as_str()
+            .and_then(|id| by_session.get(id))
+            .copied()
+            .unwrap_or(0);
+        session["background_tasks"] = count.into();
+    }
 }
 
 fn overlay_terminal_working(tree: &mut Value, working_chats: &HashSet<String>) {
@@ -2628,6 +2670,33 @@ mod tests {
             dispatch(json!({"op": "ping", "_xd_request": 42})),
             json!({"ok": true, "_xd_request": 42})
         );
+    }
+
+    #[test]
+    fn the_tree_says_how_many_background_tasks_each_chat_and_session_waits_on() {
+        let mut tree = json!({
+            "ok": true,
+            "chats": [
+                {"id": "a", "session": "s1", "working": false},
+                {"id": "b", "session": "s1", "working": true},
+                {"id": "c", "session": "s2", "working": false},
+            ],
+            "sessions": [{"id": "s1"}, {"id": "s2"}],
+        });
+        overlay_background_tasks(
+            &mut tree,
+            &HashMap::from([("a".to_owned(), 2), ("b".to_owned(), 1)]),
+        );
+        let counts = |key: &str| -> Vec<u64> {
+            tree[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["background_tasks"].as_u64().unwrap())
+                .collect()
+        };
+        assert_eq!(counts("chats"), [2, 1, 0]);
+        assert_eq!(counts("sessions"), [3, 0]);
     }
 
     #[test]

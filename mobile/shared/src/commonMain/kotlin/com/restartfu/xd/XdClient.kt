@@ -67,6 +67,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import com.restartfu.xd.terminal.TerminalEvent
 import com.restartfu.xd.terminal.TerminalWire
@@ -365,6 +366,12 @@ public class XdClient(
                         working = eventName == "turn-started",
                         sequence = event.sequence,
                     )
+                }
+                if (chatId != null && eventName == "background-tasks") {
+                    val count = (event.value["background_tasks"] as? JsonPrimitive)?.intOrNull
+                    if (count != null) {
+                        treeStore.setChatBackgroundTasks(chatId, count, event.sequence)
+                    }
                 }
                 if (chatId != null && eventName == "terminal-activity") {
                     val working = (event.value["terminal_working"] as? JsonPrimitive)

@@ -80,4 +80,32 @@ class TreeStoreTest {
         store.setChatTerminalWorking("chat", working = true, sequence = 4)
         assertTrue(store.state.value.chats.single().terminalWorking)
     }
+
+    @Test
+    fun backgroundTaskCountsFollowEventsNewerThanTheSnapshot() = runTest {
+        val factory = FakeSocketFactory()
+        val actor = ConnectionActor(factory, MemoryCredentialStore(testCredentials()), backgroundScope)
+        runCurrent()
+        factory.latest.connected()
+        runCurrent()
+        factory.latest.receiveReadinessTreeReply()
+        runCurrent()
+        val store = TreeStore(actor)
+        store.setChatBackgroundTasks("chat", 1, sequence = 99)
+        val refresh = async { store.refresh() }
+        runCurrent()
+        factory.latest.receive(
+            """{"ok":true,"folders":[],"chats":[{"id":"chat","folder":"folder",""" +
+                """"title":"Hello","backend":"claude","working":false,"background_tasks":2}],"_xd_request":2}""",
+        )
+        runCurrent()
+        refresh.await()
+        assertEquals(1, store.state.value.chats.single().backgroundTasks, "the event is newer than the snapshot")
+        assertEquals(1, store.state.value.chats.single().waitingOn)
+
+        store.setChatBackgroundTasks("chat", 3, sequence = 98)
+        assertEquals(1, store.state.value.chats.single().backgroundTasks, "an older event is ignored")
+        store.setChatBackgroundTasks("chat", 0, sequence = 100)
+        assertEquals(0, store.state.value.chats.single().waitingOn)
+    }
 }
