@@ -1942,37 +1942,56 @@ impl StateStore {
         }
         // Names xd's branch, not whatever is checked out, so it never touches
         // one of the user's.
-        let moved = run_git(path, &["branch", "-m", &recorded, &renamed])?;
-        if !moved.0.success() {
-            return Err(StorageError::InvalidRequest(command_error(
-                &moved.2,
-                "git could not rename the worktree's branch",
-            )));
-        }
-        // What deletion removes must name the branch the worktree has: the
-        // record follows only if it still names the old branch, and Git is
-        // put back if it cannot.
-        let recorded_now = self
-            .database
-            .lock()
-            .map_err(|_| StorageError::Poisoned)
-            .and_then(|database| {
-                database
-                    .execute(
-                        "UPDATE generated_worktrees SET branch = ? WHERE path = ? AND branch = ?",
-                        params![renamed, workdir, recorded],
-                    )
-                    .map_err(StorageError::from)
-            });
-        match recorded_now {
-            Ok(1) => Ok(Some(renamed)),
-            Ok(_) => {
-                let _ = run_git(path, &["branch", "-m", &renamed, &recorded]);
+        let moved = run_git(path, &["branch", "-m", &recorded, &renamed]);
+        // Git can rename the reference and still fail afterwards, so the
+        // branch the worktree is on now, not the exit status, says what
+        // happened. What deletion removes must name that branch.
+        let on_branch = |path: &Path| {
+            run_git(path, &["branch", "--show-current"])
+                .ok()
+                .filter(|output| output.0.success())
+                .map(|output| String::from_utf8_lossy(&output.1).trim().to_owned())
+        };
+        if on_branch(path).as_deref() != Some(renamed.as_str()) {
+            let moved = moved?;
+            return if moved.0.success() {
                 Ok(None)
-            }
-            Err(error) => {
-                let _ = run_git(path, &["branch", "-m", &renamed, &recorded]);
-                Err(error)
+            } else {
+                Err(StorageError::InvalidRequest(command_error(
+                    &moved.2,
+                    "git could not rename the worktree's branch",
+                )))
+            };
+        }
+        let record = |database: &Mutex<Connection>| {
+            database
+                .lock()
+                .map_err(|_| StorageError::Poisoned)
+                .and_then(|database| {
+                    database
+                        .execute(
+                            "UPDATE generated_worktrees SET branch = ? WHERE path = ? AND branch = ?",
+                            params![renamed, workdir, recorded],
+                        )
+                        .map_err(StorageError::from)
+                })
+        };
+        match record(&self.database) {
+            Ok(1) => Ok(Some(renamed)),
+            // The record moved on, or cannot be written: put Git back, and say
+            // so if even that fails, since cleanup will then leave the
+            // worktree alone.
+            other => {
+                let restored = run_git(path, &["branch", "-m", &renamed, &recorded]);
+                if on_branch(path).as_deref() != Some(recorded.as_str()) {
+                    eprintln!(
+                        "xd: worktree {workdir} is on {renamed}, but xd recorded {recorded}: {}",
+                        restored
+                            .map(|output| String::from_utf8_lossy(&output.2).trim().to_owned())
+                            .unwrap_or_else(|error| error.to_string())
+                    );
+                }
+                other.map(|_| None)
             }
         }
     }
