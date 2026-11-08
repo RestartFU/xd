@@ -1299,7 +1299,7 @@ impl Engine {
         };
         let message = memory_guard::notice(&victim, usage, cgroup.max());
         eprintln!("xd-host: {message}");
-        memory_guard::stop(&victim);
+        memory_guard::stop(&victim, &scope);
         if let Some(chat) = victim.owner.and_then(|owner| chats.get(&owner))
             && let Some(store) = &self.store
             && store.chat(chat).is_ok()

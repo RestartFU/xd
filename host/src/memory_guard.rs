@@ -43,6 +43,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -64,6 +65,8 @@ const COOLDOWN: Duration = Duration::from_secs(20);
 /// process found so far, so the tree is complete as soon as one finds nothing
 /// new; the bound only guards against a tree that keeps eluding it.
 const FREEZE_PASSES: usize = 50;
+/// How long one pass waits for the processes it stopped to stop.
+const FREEZE_WAIT: Duration = Duration::from_millis(200);
 /// Processes never stopped, by command name, whoever started them: agent CLIs
 /// another daemon or the user started, and xd itself.
 const PROTECTED_NAMES: [&str; 5] = ["claude", "codex", "jcode", "xd-host", "xd"];
@@ -261,6 +264,27 @@ pub(crate) struct Scope<'a> {
     pub(crate) owners: &'a HashSet<u32>,
 }
 
+impl Scope<'_> {
+    /// Whether `process` is this user's, in this cgroup or one below it, and
+    /// is not the daemon, an owner, or named like an agent CLI or xd. Its
+    /// ancestors are not considered.
+    fn may_stop(&self, process: &Process) -> bool {
+        let in_cgroup = self.cgroup == "/"
+            || process.cgroup == self.cgroup
+            || process
+                .cgroup
+                .strip_prefix(self.cgroup)
+                .is_some_and(|rest| rest.starts_with('/'));
+        process.uid == self.uid
+            && in_cgroup
+            && process.pid != self.me
+            && process.pid > 2
+            && process.parent != 2
+            && !self.owners.contains(&process.pid)
+            && !PROTECTED_NAMES.contains(&process.name.as_str())
+    }
+}
+
 /// The unprotected tree holding the most memory, if any.
 pub(crate) fn choose_victim(processes: &[Process], scope: &Scope) -> Option<Victim> {
     let by_pid: HashMap<u32, &Process> = processes.iter().map(|p| (p.pid, p)).collect();
@@ -287,20 +311,9 @@ pub(crate) fn choose_victim(processes: &[Process], scope: &Scope) -> Option<Vict
             }
         }
     }
-    let in_cgroup = |cgroup: &str| {
-        scope.cgroup == "/"
-            || cgroup == scope.cgroup
-            || cgroup
-                .strip_prefix(scope.cgroup)
-                .is_some_and(|rest| rest.starts_with('/'))
-    };
     let candidates: HashSet<u32> = processes
         .iter()
-        .filter(|process| {
-            process.uid == scope.uid
-                && in_cgroup(&process.cgroup)
-                && !protected.contains(&process.pid)
-        })
+        .filter(|process| scope.may_stop(process) && !protected.contains(&process.pid))
         .map(|process| process.pid)
         .collect();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -369,20 +382,20 @@ pub(crate) fn choose_victim(processes: &[Process], scope: &Scope) -> Option<Vict
 }
 
 /// `doomed` and every process that belongs with it in `processes`: their
-/// children, and processes in `groups`, the tree's own process groups. Never
-/// the daemon or a process named like an agent CLI or xd.
+/// children, and processes in `groups`, the tree's own process groups. Only
+/// processes `scope` lets the guard stop are added.
 pub(crate) fn enclose(
     processes: &[Process],
     doomed: &HashSet<(u32, u64)>,
     groups: &HashSet<u32>,
-    me: u32,
+    scope: &Scope,
 ) -> HashSet<(u32, u64)> {
     let by_pid: HashMap<u32, &Process> = processes.iter().map(|p| (p.pid, p)).collect();
     let mut found = doomed.clone();
     loop {
         let before = found.len();
         for process in processes {
-            if process.pid == me || PROTECTED_NAMES.contains(&process.name.as_str()) {
+            if !scope.may_stop(process) {
                 continue;
             }
             let parent_doomed = by_pid
@@ -489,6 +502,17 @@ pub(crate) fn read_processes() -> Vec<Process> {
         .collect()
 }
 
+/// Whether the process that had `pid` when it started at `start` can no longer
+/// start another: it has stopped, or it has gone.
+fn frozen(pid: u32, start: u64) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_stat(&stat))
+        .is_none_or(|stat| {
+            stat.start != start || !stat.running() || matches!(stat.state, 'T' | 't')
+        })
+}
+
 /// Whether the process that had `pid` when it started at `start` still runs.
 fn still_running(pid: u32, start: u64) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -509,16 +533,22 @@ fn signal<'a>(members: impl IntoIterator<Item = &'a (u32, u64)>, signal: libc::c
     }
 }
 
-/// Stops `victim`'s tree: freezes it with SIGSTOP, pass by pass, until a pass
-/// over `/proc` finds no process of it still free to start another, then kills
-/// all of it with SIGKILL.
-pub(crate) fn stop(victim: &Victim) {
-    let me = std::process::id();
+/// Stops `victim`'s tree: freezes it with SIGSTOP, pass by pass, until every
+/// process of it has stopped and a pass over `/proc` finds none it started
+/// meanwhile, then kills all of it with SIGKILL. SIGSTOP takes effect when the
+/// process next runs, so a pass also waits for that.
+pub(crate) fn stop(victim: &Victim, scope: &Scope) {
     let mut doomed: HashSet<(u32, u64)> = victim.members.iter().copied().collect();
+    let all_frozen =
+        |doomed: &HashSet<(u32, u64)>| doomed.iter().all(|&(pid, start)| frozen(pid, start));
     for _ in 0..FREEZE_PASSES {
         signal(&doomed, libc::SIGSTOP);
-        let found = enclose(&read_processes(), &doomed, &victim.groups, me);
-        if found.len() == doomed.len() {
+        let deadline = Instant::now() + FREEZE_WAIT;
+        while !all_frozen(&doomed) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let found = enclose(&read_processes(), &doomed, &victim.groups, scope);
+        if found.len() == doomed.len() && all_frozen(&doomed) {
             break;
         }
         doomed = found;
@@ -703,9 +733,24 @@ mod tests {
         processes.push(process(42, 41, "pytest", 2));
         processes.push(in_group(41, process(43, 1, "helper", 1)));
         processes.push(process(44, 42, "claude", 1));
-        let found = enclose(&processes, &doomed, &victim.groups, 10);
+        // Nor does one under another user or in another cgroup.
+        let mut stranger = process(45, 41, "sudo", 1);
+        stranger.uid = 0;
+        let mut elsewhere = in_group(41, process(46, 1, "make", 1));
+        elsewhere.cgroup = "/other".into();
+        processes.extend([stranger, elsewhere]);
+        for process in &mut processes {
+            if process.cgroup == "/" {
+                process.cgroup = "/system.slice/xd.service".into();
+            }
+        }
+        let scope = Scope {
+            cgroup: "/system.slice/xd.service",
+            ..scope(&owners)
+        };
+        let found = enclose(&processes, &doomed, &victim.groups, &scope);
         assert_eq!(found, HashSet::from([(41, 410), (42, 420), (43, 430)]));
-        assert_eq!(enclose(&processes, &found, &victim.groups, 10), found);
+        assert_eq!(enclose(&processes, &found, &victim.groups, &scope), found);
     }
 
     #[test]
@@ -852,7 +897,22 @@ mod tests {
             groups: HashSet::new(),
             owner: None,
         };
-        stop(&victim);
+        let owners = HashSet::new();
+        let cgroup = read_processes()
+            .into_iter()
+            .find(|process| process.pid == root)
+            .unwrap()
+            .cgroup;
+        stop(
+            &victim,
+            &Scope {
+                me: std::process::id(),
+                // SAFETY: getuid has no preconditions.
+                uid: unsafe { libc::getuid() },
+                cgroup: &cgroup,
+                owners: &owners,
+            },
+        );
         shell.wait().unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while left.iter().any(|&(pid, start)| still_running(pid, start)) {
