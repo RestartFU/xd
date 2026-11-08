@@ -1464,6 +1464,104 @@ mod start_tests {
         });
     }
 
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_created_chat_left_before_it_opens_still_sends_its_first_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::io::{BufRead, BufReader, Write};
+        let (client, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = server_end;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut seen = Vec::new();
+            while seen.len() < 3 {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                let op = request["op"].as_str().unwrap_or_default().to_owned();
+                if matches!(op.as_str(), "set-draft" | "send") {
+                    seen.push((
+                        op,
+                        request["chat"].as_str().unwrap_or_default().to_owned(),
+                        request["text"].as_str().unwrap_or_default().to_owned(),
+                    ));
+                }
+                if let Some(id) = request["_xd_request"].as_u64() {
+                    writeln!(stream, "{{\"ok\":true,\"_xd_request\":{id}}}").unwrap();
+                }
+            }
+            seen
+        });
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            std::env::temp_dir().join("xd-first-aside-identity"),
+        );
+
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.host = Some(host);
+                desktop.model = crate::tests::grouped_workspace_fixture();
+                desktop.creating_chat_folder = Some("atlas".into());
+                desktop.chat_create_title = "New Chat".into();
+                desktop.new_chat_submitted_prompt = Some("Fix the footer".into());
+                desktop.chat_create_submitting = true;
+                desktop.handle_reply(
+                    RequestKind::NewChat {
+                        folder_id: "atlas".into(),
+                        title: "New Chat".into(),
+                        workdir: None,
+                    },
+                    serde_json::json!({"ok": true, "id": "implementation"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                // Another chat is picked before the created one opens.
+                desktop.open_minimal_session(
+                    "atlas".into(),
+                    "review".into(),
+                    AgentCli::Claude,
+                    window,
+                    cx,
+                );
+                assert!(desktop.first_chat_prompts.is_empty());
+                // Once sent, the draft that held it is cleared.
+                desktop.handle_reply(
+                    RequestKind::Send {
+                        chat_id: "implementation".into(),
+                        text: "Fix the footer".into(),
+                    },
+                    serde_json::json!({"ok": true}).as_object().unwrap().clone(),
+                    None,
+                    cx,
+                );
+                assert!(desktop.first_messages_sent_aside.is_empty());
+            });
+        });
+        let seen = server.join().unwrap();
+        let seen = seen
+            .iter()
+            .map(|(op, chat, text)| (op.as_str(), chat.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            seen,
+            [
+                ("set-draft", "implementation", "Fix the footer"),
+                ("send", "implementation", "Fix the footer"),
+                ("set-draft", "implementation", ""),
+            ]
+        );
+    }
+
     #[gpui::test]
     fn a_created_chat_is_not_offered_again_after_a_disconnect(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
