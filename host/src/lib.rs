@@ -1301,22 +1301,26 @@ impl Engine {
         let Some(victim) = memory_guard::choose_victim(&memory_guard::read_processes(), &scope)
         else {
             eprintln!(
-                "xd-host: the container is about to run out of memory, but nothing is running that xd may stop."
+                "xd-host: memory is approaching the available limit, but nothing is running that xd may stop."
             );
             return;
         };
         let message = memory_guard::notice(&victim, usage, cgroup.max());
         eprintln!("xd-host: {message}");
         memory_guard::stop(&victim, &scope);
-        if let Some(chat) = victim.owner.and_then(|owner| chats.get(&owner))
-            && let Some(store) = &self.store
-            && store.chat(chat).is_ok()
-            && store
-                .append_turn_message(chat, "error", &message, None)
-                .is_ok()
-        {
-            self.events
-                .publish(json!({"event": "changed", "chat": chat}));
+        if let Some(chat) = victim.owner.and_then(|owner| chats.get(&owner)) {
+            if let Some(store) = &self.store
+                && store.chat(chat).is_ok()
+                && store
+                    .append_turn_message(chat, "error", &message, None)
+                    .is_ok()
+            {
+                self.events
+                    .publish(json!({"event": "changed", "chat": chat}));
+            }
+            if let Some(runtime) = &self.runtime {
+                runtime.notify_memory_guard(chat, &message);
+            }
         }
     }
 

@@ -658,6 +658,21 @@ impl TurnRuntime {
             .is_some_and(|sink| sink.send(Feed::Steer(prompt.to_owned())).is_ok())
     }
 
+    /// Tell the agent why its command disappeared. Use the normal steering
+    /// acknowledgement/requeue path so a turn ending concurrently cannot lose
+    /// the notice. Agents that cannot take input now read it on their next turn.
+    pub(crate) fn notify_memory_guard(&self, chat_id: &str, message: &str) {
+        let prompt = format!(
+            "[xd host notice: memory guard]\n{message}\n\nThe command was stopped by xd's memory guard, so its output may end abruptly without a normal tool error. Do not retry the same workload unchanged or move it into the background. Reduce memory use first (for example, run fewer build jobs or one test at a time), or explain that validation is blocked by the available memory limit."
+        );
+        if !self.steer(chat_id, &prompt) {
+            match self.inner.store.requeue_front(chat_id, &prompt) {
+                Ok(event) => self.inner.events.publish(event),
+                Err(error) => eprintln!("xd: cannot queue memory guard notice: {error}"),
+            }
+        }
+    }
+
     /// Puts a message the agent never read back at the front of the queue.
     /// `returned` holds those this turn has already put back, oldest first, so
     /// the message lands in the order it was sent, however they came back.
@@ -3256,6 +3271,66 @@ read second
             unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_guard_notice_reaches_the_running_agent() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Building."}]}}'
+read notice
+printf '%s\n' "$notice" > "$HEARD"
+echo '{"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming"}'
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Reducing build jobs."}]}}'
+echo '{"type":"result","subtype":"success","result":"Reducing build jobs."}'
+read next
+"#,
+        );
+        fixture.wait_for_streamed("Building.");
+        fixture
+            .runtime
+            .notify_memory_guard(&fixture.chat, "xd stopped `rustc` (pid 21).");
+        fixture.wait_for_text("Reducing build jobs.");
+        let heard = std::fs::read_to_string(fixture.root.join("heard")).unwrap();
+        let frame: Value = serde_json::from_str(&heard).unwrap();
+        let prompt = frame["message"]["content"][0]["text"].as_str().unwrap();
+        assert!(prompt.contains("[xd host notice: memory guard]"));
+        assert!(prompt.contains("xd stopped `rustc` (pid 21)."));
+        assert!(prompt.contains("Do not retry the same workload unchanged"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_guard_notice_waits_when_no_turn_can_take_it() {
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let fixture = SteerFixture::start(
+            r#"#!/bin/sh
+read first
+echo '{"type":"system","subtype":"init","session_id":"s1"}'
+echo '{"type":"result","subtype":"success","result":"Done."}'
+read next
+"#,
+        );
+        wait_for("turn to end", || {
+            fixture.runtime.live_turn(&fixture.chat).is_none()
+        });
+        fixture
+            .runtime
+            .notify_memory_guard(&fixture.chat, "xd stopped a background build.");
+        let chat = fixture.store.chat(&fixture.chat).unwrap();
+        let queue = chat["queue"].as_array().unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(
+            queue[0]
+                .as_str()
+                .unwrap()
+                .contains("xd stopped a background build.")
+        );
     }
 
     /// The agent must not be killed: whatever it has running keeps running, and

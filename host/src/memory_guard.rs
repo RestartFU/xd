@@ -695,7 +695,7 @@ pub(crate) fn notice(victim: &Victim, usage: u64, max: u64) -> String {
         String::new()
     };
     format!(
-        "xd stopped `{}` (pid {}){tree}, holding {:.1} GiB{mostly}, because the container was about to run out of memory: {:.1} of its {:.1} GiB could not be freed, and running out would have stopped every chat and terminal.",
+        "xd stopped `{}` (pid {}){tree}, holding {:.1} GiB{mostly}, to keep chats and terminals running as memory approached the available limit: {:.1} of {:.1} GiB was in use and could not be freed. Reduce memory use before retrying.",
         victim.name,
         victim.pid,
         gib(victim.bytes),
@@ -1146,7 +1146,7 @@ mod tests {
         };
         assert_eq!(
             notice(&victim, 15 * GIB, 16 * GIB),
-            "xd stopped `bash` (pid 21) and the 2 processes it started, holding 6.0 GiB, mostly in `rustc`, because the container was about to run out of memory: 15.0 of its 16.0 GiB could not be freed, and running out would have stopped every chat and terminal."
+            "xd stopped `bash` (pid 21) and the 2 processes it started, holding 6.0 GiB, mostly in `rustc`, to keep chats and terminals running as memory approached the available limit: 15.0 of 16.0 GiB was in use and could not be freed. Reduce memory use before retrying."
         );
         let alone = Victim {
             name: "java".into(),
@@ -1156,7 +1156,7 @@ mod tests {
         };
         assert_eq!(
             notice(&alone, 15 * GIB, 16 * GIB),
-            "xd stopped `java` (pid 21), holding 6.0 GiB, because the container was about to run out of memory: 15.0 of its 16.0 GiB could not be freed, and running out would have stopped every chat and terminal."
+            "xd stopped `java` (pid 21), holding 6.0 GiB, to keep chats and terminals running as memory approached the available limit: 15.0 of 16.0 GiB was in use and could not be freed. Reduce memory use before retrying."
         );
     }
 }
