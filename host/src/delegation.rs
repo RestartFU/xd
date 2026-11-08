@@ -415,6 +415,31 @@ fn segments(script: &str) -> Vec<Segment> {
                 finish_word!();
                 index += 1;
             }
+            // A substitution runs a command but stays part of the word it is in,
+            // so the words around it are still this command's.
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                let end = substitution_end(&chars, index + 2);
+                current
+                    .substitutions
+                    .push(chars[index + 2..end].iter().collect());
+                word.extend(&chars[index..(end + 1).min(chars.len())]);
+                in_word = true;
+                index = end + 1;
+            }
+            '`' => {
+                let start = index + 1;
+                let mut end = start;
+                while end < chars.len() && chars[end] != '`' {
+                    end += if chars[end] == '\\' { 2 } else { 1 };
+                }
+                let end = end.min(chars.len());
+                current
+                    .substitutions
+                    .push(chars[start..end].iter().collect());
+                word.extend(&chars[index..(end + 1).min(chars.len())]);
+                in_word = true;
+                index = end + 1;
+            }
             '(' if chars[index + 1..].iter().find(|c| !matches!(c, ' ' | '\t')) == Some(&')') => {
                 // `name()` defines a function rather than running anything.
                 finish_segment!();
@@ -442,7 +467,7 @@ fn segments(script: &str) -> Vec<Segment> {
                 parens = parens.saturating_sub(1);
                 index += 1;
             }
-            ';' | '&' | '|' | '`' => {
+            ';' | '&' | '|' => {
                 finish_segment!();
                 index += 1;
                 while index < chars.len() && matches!(chars[index], ';' | '&' | '|') {
@@ -804,8 +829,14 @@ fn claude(args: &[String], stdin: Option<&str>) -> Option<Delegation> {
         return None;
     }
     let (positional, model, _) = scan(args, CLAUDE_VALUED, &["--model"])?;
-    // Its admin commands are not a run, whatever flags they pass on.
-    if positional.first().is_some_and(|first| {
+    // Its admin commands are not a run, whatever flags they pass on. A word
+    // after the print flag is the prompt, even when it reads like one.
+    let print_at = own
+        .iter()
+        .position(|arg| matches!(arg.as_str(), "-p" | "--print"))
+        .unwrap_or(0);
+    let (before, _, _) = scan(&args[..print_at], CLAUDE_VALUED, &[])?;
+    if before.first().is_some_and(|first| {
         matches!(
             *first,
             "mcp"
@@ -935,6 +966,15 @@ mod tests {
                 .unwrap();
         assert_eq!(waited.prompt.as_deref(), Some("Review the diff"));
         assert!(detect("claude -p -- 'Review the diff'").is_some());
+        assert_eq!(
+            detect("claude -p 'doctor'").unwrap().prompt.as_deref(),
+            Some("doctor")
+        );
+        let unquoted =
+            detect("summary=$(claude -p 'Summarize the diff') && echo $summary").unwrap();
+        assert_eq!(unquoted.prompt.as_deref(), Some("Summarize the diff"));
+        assert!(detect("x=`codex exec 'go'`").is_some());
+        assert!(detect("(cd /repo && codex exec 'in a subshell')").is_some());
 
         let after =
             detect("echo start; CODEX_HOME=/x codex e 'fix the build' 2>&1 | tail -n 5").unwrap();
@@ -951,6 +991,8 @@ mod tests {
             "claude mcp list",
             "claude mcp add my-server -- npx -y -p some-package server",
             "claude config set -p theme dark",
+            "echo $(date +%F) codex exec 'example command'",
+            "echo `date` claude -p 'example'",
             "claude 'interactive prompt'",
             "~/.claude/skills/codex-opussy/bin/codex-agent --print-config",
             "cat ~/.claude/skills/codex-opussy/bin/codex-agent",
