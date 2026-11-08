@@ -630,6 +630,21 @@ fn icon(path: &'static str, size: f32, color: u32) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// Assistant marks retain their brand color even in muted or selected rows.
+fn assistant_icon(
+    path: &'static str,
+    size: f32,
+    fallback: u32,
+    colors: ThemeColors,
+) -> gpui::AnyElement {
+    let color = match path {
+        CODEX_ICON => colors.codex_icon,
+        CLAUDE_ICON => colors.claude_icon,
+        _ => fallback,
+    };
+    icon(path, size, color)
+}
+
 /// A workspace's mark: the avatar of the account that owns it, and the folder
 /// icon when there is no owner or no avatar to draw.
 fn workspace_icon(avatar: Option<Arc<Image>>, size: f32, color: u32) -> gpui::AnyElement {
@@ -6943,12 +6958,13 @@ impl XdDesktop {
                             );
                         }),
                     )
-                    .child(icon(
+                    .child(assistant_icon(
                         agent_icon(
                             AgentCli::from_backend(&chat.backend).unwrap_or(AgentCli::Codex),
                         ),
                         13.0,
                         colors.muted,
+                        colors,
                     ))
                     .child(truncating_label(title))
                     .when(self.model.is_waiting(&chat.id), |tab| {
@@ -11601,12 +11617,12 @@ impl XdDesktop {
                         .bg(rgb(colors.surface_high))
                         .text_size(px(11.5))
                         .text_color(rgb(colors.muted))
-                        .child(
-                            svg()
-                                .path(agent_icon(agent))
-                                .size(px(13.0))
-                                .text_color(rgb(colors.muted)),
-                        )
+                        .child(assistant_icon(
+                            agent_icon(agent),
+                            13.0,
+                            colors.muted,
+                            colors,
+                        ))
                         .child(presentation::provider_name(agent.protocol_name())),
                 )
             })
@@ -12111,17 +12127,16 @@ impl XdDesktop {
                     colors,
                 })
             })
-            .child(
-                svg()
-                    .path(agent_icon(agent))
-                    .size(px(13.0))
-                    .flex_none()
-                    .text_color(rgb(if emphasized {
-                        colors.text
-                    } else {
-                        colors.faint
-                    })),
-            )
+            .child(assistant_icon(
+                agent_icon(agent),
+                13.0,
+                if emphasized {
+                    colors.text
+                } else {
+                    colors.faint
+                },
+                colors,
+            ))
             .child(
                 truncating_label(session.title)
                     .flex_1()
@@ -12231,13 +12246,12 @@ impl XdDesktop {
                     }),
                 )
             })
-            .child(
-                svg()
-                    .path(agent_icon(agent))
-                    .size(px(13.0))
-                    .flex_none()
-                    .text_color(rgb(if selected { colors.text } else { colors.faint })),
-            )
+            .child(assistant_icon(
+                agent_icon(agent),
+                13.0,
+                if selected { colors.text } else { colors.faint },
+                colors,
+            ))
             .child(
                 truncating_label(card.title)
                     .flex_1()
@@ -14311,7 +14325,7 @@ impl XdDesktop {
                     .items_center()
                     .justify_center()
                     .when_some(provider_icon, |slot, path| {
-                        slot.child(icon(path, 13.0, colors.muted))
+                        slot.child(assistant_icon(path, 13.0, colors.muted, colors))
                     })
                     .when(provider_icon.is_none(), |slot| {
                         slot.child(div().size(px(7.0)).rounded_full().bg(rgb(signal)))
@@ -15563,53 +15577,56 @@ impl XdDesktop {
             .find(|backend| backend.id == self.model.backend)
             .map(|backend| !backend.efforts.is_empty())
             .unwrap_or(self.model.backend != "jcode");
-        let options = [
-            ("model", self.model.selected_model_label()),
-            (
-                "effort",
-                format!("{} effort", presentation::effort_name(&self.model.effort)),
-            ),
-            (
-                "access",
-                presentation::access_name(if self.model.plan {
-                    "read-only"
-                } else {
-                    &self.model.access
-                })
-                .to_owned(),
-            ),
-            (
-                "plan",
-                if self.model.plan { "Plan" } else { "Build" }.to_owned(),
-            ),
-        ]
-        .into_iter()
-        .filter(|(option, _)| *option != "effort" || supports_effort)
-        .enumerate()
-        .map(|(index, (option, label))| {
-            ui_button(("native-option", index), ButtonKind::Ghost, colors)
-                .h(px(28.0))
-                .px(px(8.0))
-                .gap(px(5.0))
-                .text_size(px(12.0))
-                .max_w(px(if option == "model" { 240.0 } else { 170.0 }))
-                .min_w_0()
-                .debug_selector(move || format!("native-option-{option}"))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.native_option_open = Some(option);
-                    this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
-                    this.minimal_popup_previous_focus =
-                        Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
-                    cx.notify();
-                }))
-                .when(option == "model", |chip| {
-                    chip.children(agent.map(|agent| icon(agent_icon(agent), 13.0, colors.muted)))
-                })
-                .child(div().min_w_0().truncate().child(label))
-                .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
-        })
-        .collect::<Vec<_>>();
+        let options =
+            [
+                ("model", self.model.selected_model_label()),
+                (
+                    "effort",
+                    format!("{} effort", presentation::effort_name(&self.model.effort)),
+                ),
+                (
+                    "access",
+                    presentation::access_name(if self.model.plan {
+                        "read-only"
+                    } else {
+                        &self.model.access
+                    })
+                    .to_owned(),
+                ),
+                (
+                    "plan",
+                    if self.model.plan { "Plan" } else { "Build" }.to_owned(),
+                ),
+            ]
+            .into_iter()
+            .filter(|(option, _)| *option != "effort" || supports_effort)
+            .enumerate()
+            .map(|(index, (option, label))| {
+                ui_button(("native-option", index), ButtonKind::Ghost, colors)
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .gap(px(5.0))
+                    .text_size(px(12.0))
+                    .max_w(px(if option == "model" { 240.0 } else { 170.0 }))
+                    .min_w_0()
+                    .debug_selector(move || format!("native-option-{option}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.native_option_open = Some(option);
+                        this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                        this.minimal_popup_previous_focus =
+                            Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
+                        cx.notify();
+                    }))
+                    .when(option == "model", |chip| {
+                        chip.children(agent.map(|agent| {
+                            assistant_icon(agent_icon(agent), 13.0, colors.muted, colors)
+                        }))
+                    })
+                    .child(div().min_w_0().truncate().child(label))
+                    .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
+            })
+            .collect::<Vec<_>>();
         div()
             .id("native-chat")
             .size_full()

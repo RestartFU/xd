@@ -73,7 +73,12 @@ impl XdDesktop {
                                 .items_center()
                                 .gap_2()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child(icon(agent_icon(agent), 14.0, colors.muted))
+                                .child(assistant_icon(
+                                    agent_icon(agent),
+                                    14.0,
+                                    colors.muted,
+                                    colors,
+                                ))
                                 .child(agent.label())
                                 .into_any_element(),
                         );
@@ -385,7 +390,12 @@ impl XdDesktop {
                                             });
                                             cx.notify();
                                         }))
-                                        .child(icon(agent_icon(agent), 14.0, colors.muted))
+                                        .child(assistant_icon(
+                                            agent_icon(agent),
+                                            14.0,
+                                            colors.muted,
+                                            colors,
+                                        ))
                                         .child(agent.label())
                                     }),
                             ),
@@ -760,7 +770,7 @@ impl XdDesktop {
                 cx.notify();
             }
         }))
-        .child(icon(
+        .child(assistant_icon(
             match menu {
                 "model" => agent_icon(self.minimal_new_session_agent),
                 "branch" => GIT_BRANCH_ICON,
@@ -768,6 +778,7 @@ impl XdDesktop {
             },
             13.0,
             colors.muted,
+            colors,
         ))
         .child(div().truncate().child(label))
         .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.muted))
