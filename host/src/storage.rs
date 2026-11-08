@@ -103,11 +103,12 @@ const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CHAT_TITLES_ENABLED_KEY: &str = "chat_titles_enabled";
 const MAX_CHAT_TITLE_MESSAGE_CHARS: usize = 2_000;
-/// The assistants that can title chats, each with its low-cost models, newest
-/// first. The older ones serve a CLI that does not offer the newest yet. JCode
-/// has no model choice to make, so its chats keep the name they were given.
+/// The assistants that can title chats and name worktrees, each with its
+/// low-cost models, newest first. An older one serves a CLI that does not offer
+/// the newest yet. Codex keeps to GPT-6 Luna: an older Luna writes worse names.
+/// JCode has no model choice to make, so its chats keep the name they were given.
 const CHAT_TITLE_MODELS: &[(&str, &[&str])] = &[
-    ("codex", &["gpt-6-luna", "gpt-5.6-luna"]),
+    ("codex", &["gpt-6-luna"]),
     (
         "claude",
         &[
@@ -10782,7 +10783,7 @@ mod tests {
             "codex",
             vec![
                 discovered("gpt-6-terra", true, None),
-                discovered("gpt-5.6-luna", false, None),
+                discovered("gpt-6-luna", false, None),
             ],
         );
         let fixture = Fixture::new();
@@ -10793,15 +10794,24 @@ mod tests {
             .unwrap();
         let chat = new_chat_on(&store, &folder, "codex");
 
-        crate::model_catalog::set_test_models(
-            "codex",
-            vec![discovered("gpt-5.6-luna", true, None)],
-        );
+        crate::model_catalog::set_test_models("codex", vec![discovered("gpt-6-luna", true, None)]);
         let spec = store
             .prepare_chat_title(&first_message(&chat))
             .unwrap()
             .unwrap();
-        assert_eq!(spec.model, "gpt-5.6-luna", "the chosen model is gone");
+        assert_eq!(spec.model, "gpt-6-luna", "the chosen model is gone");
+
+        // An older Luna is not a fallback.
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![discovered("gpt-5.6-luna", true, None)],
+        );
+        assert!(
+            store
+                .prepare_chat_title(&first_message(&chat))
+                .unwrap()
+                .is_none()
+        );
 
         crate::model_catalog::set_test_models("codex", vec![discovered("gpt-6-sol", true, None)]);
         assert!(
