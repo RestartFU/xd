@@ -1357,22 +1357,34 @@ impl AppModel {
             has_newer,
             reset: false,
         };
+        // A stored copy of a message sent from here is newer than every
+        // stored message shown when it was sent; an older one with the same
+        // words was said before.
+        let shown = self.messages.iter().filter_map(|message| message.id).max();
+        let stores = |stored: &Message, sent: &Message| {
+            stored.role == "user"
+                && stored.content == sent.content
+                && stored
+                    .id
+                    .is_some_and(|id| shown.is_none_or(|shown| id > shown))
+        };
         if direction == MessagePageDirection::Tail {
             // A message sent from here but not stored yet stays at the end
             // until a page has it. A chat's first page is often asked for
             // before its first message is stored, and would otherwise wipe
             // that message off the screen until the next page.
-            let unsent =
-                self.messages
-                    .iter()
-                    .filter(|message| message.id.is_none() && message.role == "user")
-                    .filter(|message| {
-                        !snapshot.messages.iter().any(|stored| {
-                            stored.role == "user" && stored.content == message.content
-                        })
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
+            let unsent = self
+                .messages
+                .iter()
+                .filter(|message| message.id.is_none() && message.role == "user")
+                .filter(|message| {
+                    !snapshot
+                        .messages
+                        .iter()
+                        .any(|stored| stores(stored, message))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             self.messages = snapshot.messages;
             self.messages.extend(unsent);
             if self.messages.len() > MAX_RETAINED_MESSAGES {
@@ -1399,12 +1411,13 @@ impl AppModel {
             MessagePageDirection::After => {
                 // The stored copy of a message sent from here replaces it.
                 let before = self.messages.len();
+                let snapshot_messages = &snapshot.messages;
                 self.messages.retain(|message| {
                     message.id.is_some()
                         || message.role != "user"
-                        || !snapshot.messages.iter().any(|stored| {
-                            stored.role == "user" && stored.content == message.content
-                        })
+                        || !snapshot_messages
+                            .iter()
+                            .any(|stored| stores(stored, message))
                 });
                 change.reset = self.messages.len() != before;
                 change.inserted_at_end = snapshot.messages.len();
@@ -3549,6 +3562,24 @@ mod tests {
             )
             .unwrap();
         assert!(change.reset);
+
+        // Words said before are not the copy of the same words sent again.
+        let again: Message =
+            serde_json::from_value(json!({"role": "user", "content": "Fix the footer"})).unwrap();
+        model.messages.push(again);
+        model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 1, "role": "user", "content": "Fix the footer"},
+                    {"id": 2, "role": "assistant", "content": "On it"},
+                    {"id": 3, "role": "user", "content": "And the header"}
+                ]}),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
+        assert_eq!(model.messages.len(), 4);
+        assert!(model.messages[3].id.is_none());
+        model.messages.pop();
         let ids = model
             .messages
             .iter()
