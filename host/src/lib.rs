@@ -326,14 +326,14 @@ impl Engine {
                 if action == Some("restart") && self.cli_updates.is_updating() {
                     error_reply("Wait for the assistant updates to finish before restarting.")
                 } else if action == Some("restart")
-                    && (self
-                        .runtime
-                        .as_ref()
-                        .is_some_and(TurnRuntime::has_active_turns)
-                        || self.terminals.has_sessions())
+                    && (self.runtime.as_ref().is_some_and(|runtime| {
+                        runtime.has_active_turns() || runtime.has_background_tasks()
+                    }) || self.terminals.has_sessions())
                 {
+                    // A restart stops every agent process, and with it any
+                    // background agent or shell that outlived its turn.
                     error_reply(
-                        "Close terminal tabs and wait for active chats to finish before restarting for an update.",
+                        "Close terminal tabs and wait for active chats and their background agents and shells to finish before restarting for an update.",
                     )
                 } else {
                     let reply = self.self_update.perform(action).unwrap_or_else(error_reply);

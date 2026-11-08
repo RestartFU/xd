@@ -108,8 +108,8 @@ Claude Code versions with their npm releases every 30 minutes; only the package
 names are sent. When something is out of date, an **Update** button appears beside
 the terminal and Settings buttons. It lists what will change, and nothing is
 installed until you confirm. **Settings → Updates** checks manually. Restart is
-blocked while chats are running or terminal tabs are open; close the terminal tabs
-first. Stored conversations can resume afterward. Turn on **Settings → General →
+blocked while chats are running, a chat's background agents or shells are still at
+work, or terminal tabs are open; close the terminal tabs first. Stored conversations can resume afterward. Turn on **Settings → General →
 Resume chats after a restart** to have xd continue any turn that a crash, reboot, or
 daemon stop cut off, the next time the app connects to that daemon, local or paired. With
 the setting off, connecting drops those waiting chats instead, so a later change of mind

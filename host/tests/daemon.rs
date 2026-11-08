@@ -1174,7 +1174,10 @@ fn bridge_keeps_a_busy_daemon_running_and_explains_how_to_stop_it() {
     stale.report("executable", json!(host));
     let error = stale.rejection(&host);
     assert_eq!(stale.restart_requests(), 1);
-    assert!(error.contains("chats or terminals are active"), "{error}");
+    assert!(
+        error.contains("chats, their background agents and shells, or terminals are active"),
+        "{error}"
+    );
     assert!(error.contains("daemon-stop --data"), "{error}");
 }
 
