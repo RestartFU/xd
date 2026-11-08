@@ -23,6 +23,7 @@ mod chat_title;
 mod cli_updates;
 mod cli_versions;
 mod codex_app;
+mod delegation;
 mod deletion;
 mod git_draft;
 mod local_socket;

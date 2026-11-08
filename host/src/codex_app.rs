@@ -176,6 +176,14 @@ impl CodexAppParser {
                 Vec::new()
             };
         }
+        // A command that runs another assistant is that assistant's card.
+        if matches!(method, "item/started" | "item/completed")
+            && params["item"]["type"].as_str() == Some("commandExecution")
+            && let Some(patch) =
+                crate::agent::codex_shell_agent(&params["item"], method == "item/completed")
+        {
+            return vec![AgentEvent::Subagent(patch)];
+        }
         match method {
             "turn/started" => {
                 if let Some(turn) = params["turn"]["id"].as_str() {
@@ -693,6 +701,29 @@ mod tests {
         assert_eq!(parser.feed(r#"{"method":"item/agentMessage/delta","params":{"threadId":"thread","itemId":"m","delta":"Recovered"}}"#), vec![AgentEvent::TextDelta("Recovered".into())]);
         assert!(parser.feed(r#"{"method":"item/completed","params":{"threadId":"thread","item":{"type":"agentMessage","id":"m","text":"Recovered"}}}"#).is_empty());
         assert_eq!(parser.feed(r#"{"method":"turn/completed","params":{"threadId":"thread","turn":{"status":"completed"}}}"#), vec![AgentEvent::Completed]);
+    }
+
+    #[test]
+    fn a_command_that_runs_claude_is_a_subagent_card() {
+        let mut parser = parser_on("parent");
+        let started = parser.feed(r#"{"method":"item/started","params":{"threadId":"parent","item":{"type":"commandExecution","id":"cmd-1","command":"/bin/bash -lc 'claude -p --model opus \"Review the diff\"'","status":"inProgress"}}}"#);
+        let AgentEvent::Subagent(patch) = &started[0] else {
+            panic!("{started:?}");
+        };
+        assert_eq!(patch.key, "cmd-1");
+        assert_eq!(patch.provider.as_deref(), Some("Claude"));
+        assert_eq!(patch.model.as_deref(), Some("opus"));
+        assert_eq!(patch.launcher.as_deref(), Some("Codex"));
+        let finished = parser.feed(r#"{"method":"item/completed","params":{"threadId":"parent","item":{"type":"commandExecution","id":"cmd-1","command":"/bin/bash -lc 'claude -p --model opus \"Review the diff\"'","status":"failed","exitCode":1,"aggregatedOutput":"Not logged in","durationMs":900}}}"#);
+        let AgentEvent::Subagent(patch) = &finished[0] else {
+            panic!("{finished:?}");
+        };
+        assert_eq!(patch.status, Some(SubagentStatus::Failed));
+        assert_eq!(patch.summary.as_deref(), Some("Not logged in"));
+        assert_eq!(patch.duration_ms, Some(900));
+        // Other commands are still commands.
+        let plain = parser.feed(r#"{"method":"item/completed","params":{"threadId":"parent","item":{"type":"commandExecution","id":"cmd-2","command":"/bin/bash -lc 'cargo test'","aggregatedOutput":"ok"}}}"#);
+        assert!(matches!(&plain[0], AgentEvent::Tool(text) if text.starts_with("Command: ")));
     }
 
     #[test]

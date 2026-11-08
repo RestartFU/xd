@@ -57,6 +57,8 @@ pub struct SubagentView {
     pub key: String,
     pub provider: String,
     pub agent: String,
+    /// The assistant whose shell runs this agent as a command, if one does.
+    pub launcher: String,
     pub model: String,
     pub description: String,
     pub prompt: String,
@@ -122,6 +124,7 @@ impl SubagentView {
             key: text("key"),
             provider: text("provider"),
             agent: text("agent"),
+            launcher: text("launcher"),
             model: text("model"),
             description: text("description"),
             prompt: text("prompt"),
@@ -181,15 +184,27 @@ impl SubagentView {
     }
 
     /// Claude can stop its agents, and send one the turn waits on to the
-    /// background; other backends report theirs but take no orders.
+    /// background; other backends report theirs but take no orders. An agent
+    /// Claude runs as a command is Claude's too, but Claude can only stop that
+    /// command once it runs in the background.
     pub fn can_stop(&self) -> bool {
-        self.status == SubagentState::Running
-            && !self.key.is_empty()
-            && self.provider.eq_ignore_ascii_case("claude")
+        self.claude_controls() && (self.launcher.is_empty() || self.background)
     }
 
     pub fn can_background(&self) -> bool {
-        self.can_stop() && !self.background
+        self.claude_controls() && !self.background
+    }
+
+    /// The assistant that started the agent is the one that can act on it.
+    fn claude_controls(&self) -> bool {
+        let controller = if self.launcher.is_empty() {
+            &self.provider
+        } else {
+            &self.launcher
+        };
+        self.status == SubagentState::Running
+            && !self.key.is_empty()
+            && controller.eq_ignore_ascii_case("claude")
     }
 
     /// Steps the record no longer lists: only a run longer than the host
@@ -647,6 +662,33 @@ mod tests {
         .unwrap();
         assert_eq!(running.stats_at(48_000), "1 tool · 47s");
         assert!(SubagentView::parse("subagent\nExplore\nRunning · x").is_none());
+    }
+
+    #[test]
+    fn claude_controls_agents_it_runs_as_commands() {
+        let parse = |record: &str| SubagentView::parse(&format!("subagent_run\n{record}")).unwrap();
+        let agent =
+            parse(r#"{"key":"t","provider":"Claude","agent":"Explore","status":"running"}"#);
+        assert!(agent.can_stop() && agent.can_background());
+        let codex = parse(r#"{"key":"t","provider":"Codex","agent":"worker","status":"running"}"#);
+        assert!(!codex.can_stop() && !codex.can_background());
+
+        // Claude can background the command; only then can it stop it.
+        let launched = parse(
+            r#"{"key":"toolu_b","provider":"Codex","launcher":"Claude","agent":"audit","status":"running"}"#,
+        );
+        assert_eq!(launched.launcher, "Claude");
+        assert!(!launched.is_shell());
+        assert!(!launched.can_stop() && launched.can_background());
+        let backgrounded = parse(
+            r#"{"key":"toolu_b","provider":"Codex","launcher":"Claude","agent":"audit","status":"running","background":true}"#,
+        );
+        assert!(backgrounded.can_stop() && !backgrounded.can_background());
+        // A Claude that Codex runs is Codex's, and Codex takes no orders.
+        let from_codex = parse(
+            r#"{"key":"c","provider":"Claude","launcher":"Codex","agent":"Claude agent","status":"running"}"#,
+        );
+        assert!(!from_codex.can_stop() && !from_codex.can_background());
     }
 
     #[test]

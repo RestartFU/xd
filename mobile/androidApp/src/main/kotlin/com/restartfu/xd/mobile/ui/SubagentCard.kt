@@ -126,7 +126,7 @@ internal fun SubagentCard(
                 )
             }
             val key = run.key
-            if (key != null && (run.canStop || pendingAction != null)) {
+            if (key != null && (run.canStop || run.canBackground || pendingAction != null)) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -145,16 +145,18 @@ internal fun SubagentCard(
                                 modifier = Modifier.heightIn(min = 48.dp),
                             ) { Text("Background", style = MaterialTheme.typography.labelMedium) }
                         }
-                        OutlinedButton(
-                            onClick = { onAction(key, "stop") },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.heightIn(min = 48.dp),
-                        ) {
-                            Text(
-                                "Stop",
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.labelMedium,
-                            )
+                        if (run.canStop) {
+                            OutlinedButton(
+                                onClick = { onAction(key, "stop") },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                modifier = Modifier.heightIn(min = 48.dp),
+                            ) {
+                                Text(
+                                    "Stop",
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                            }
                         }
                     }
                 }

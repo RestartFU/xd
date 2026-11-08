@@ -206,6 +206,9 @@ impl CodexParser {
                         if let Some(id) = item.get("id").and_then(Value::as_str) {
                             self.started_commands.insert(id.to_owned());
                         }
+                        if let Some(patch) = codex_shell_agent(item, false) {
+                            return vec![AgentEvent::Subagent(patch)];
+                        }
                         vec![AgentEvent::Tool(tool_summary(item))]
                     }
                     Some("file_change") => {
@@ -227,11 +230,16 @@ impl CodexParser {
                 let Some(item) = root.get("item") else {
                     return Vec::new();
                 };
-                if item
+                let started = item
                     .get("id")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| self.started_commands.remove(id))
+                    .is_some_and(|id| self.started_commands.remove(id));
+                if item.get("type").and_then(Value::as_str) == Some("command_execution")
+                    && let Some(patch) = codex_shell_agent(item, true)
                 {
+                    return vec![AgentEvent::Subagent(patch)];
+                }
+                if started {
                     return Vec::new();
                 }
                 if item.get("type").and_then(Value::as_str) == Some("file_change")
@@ -281,6 +289,35 @@ impl CodexParser {
             _ => Vec::new(),
         }
     }
+}
+
+/// A Codex command item that runs another assistant, as a subagent record.
+/// Both of Codex's protocols send one: `codex exec --json` in snake case and
+/// the app server in camel case. A finished item carries the agent's output.
+pub(crate) fn codex_shell_agent(item: &Value, finished: bool) -> Option<SubagentPatch> {
+    let id = text_field(item, "id")?;
+    let delegation = crate::delegation::detect(text_field(item, "command")?)?;
+    let mut patch = delegation.started(id, "Codex", None);
+    if !finished {
+        return Some(patch);
+    }
+    let field = |snake: &str, camel: &str| item.get(snake).or_else(|| item.get(camel));
+    let exit = field("exit_code", "exitCode").and_then(Value::as_i64);
+    let failed = exit.is_some_and(|code| code != 0)
+        || matches!(
+            text_field(item, "status"),
+            Some("failed" | "declined" | "error")
+        );
+    patch.status = Some(if failed {
+        SubagentStatus::Failed
+    } else {
+        SubagentStatus::Completed
+    });
+    patch.summary = field("aggregated_output", "aggregatedOutput")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    patch.duration_ms = field("duration_ms", "durationMs").and_then(Value::as_u64);
+    Some(patch)
 }
 
 impl AgentCommand<'_> {
@@ -594,6 +631,8 @@ fn append_system_prompt(command: &mut Command, prompt: Option<&str>) {
 pub struct ClaudeParser {
     /// Agent/Task tool calls in this turn, by tool use id.
     agent_tools: HashSet<String>,
+    /// Bash calls in this turn that run another assistant, by tool use id.
+    shell_agents: HashSet<String>,
     saw_streamed_text: bool,
     saw_text: bool,
     /// The account's limit turned this turn away, as far as Claude has said.
@@ -973,6 +1012,18 @@ impl ClaudeParser {
                         arguments.as_ref(),
                     ))];
                 }
+                if tool.name == "Bash"
+                    && let Some(id) = tool.id.clone()
+                    && let Some(arguments) = arguments.as_ref()
+                    && let Some(delegation) =
+                        text_field(arguments, "command").and_then(crate::delegation::detect)
+                {
+                    self.shell_agents.insert(id.clone());
+                    return vec![AgentEvent::Subagent(SubagentPatch {
+                        background: arguments.get("run_in_background").and_then(Value::as_bool),
+                        ..delegation.started(&id, "Claude", text_field(arguments, "description"))
+                    })];
+                }
                 if matches!(tool.name.as_str(), "TaskCreate" | "TaskList" | "TaskGet")
                     && let Some(id) = tool.id.clone()
                     && self.completed_task_tools.len() < Self::MAX_COMPLETED_TASK_TOOLS
@@ -1000,6 +1051,9 @@ impl ClaudeParser {
                 let id = block.get("tool_use_id").and_then(Value::as_str)?;
                 if self.agent_tools.remove(id) {
                     return claude_agent_result(id, block).map(AgentEvent::Subagent);
+                }
+                if self.shell_agents.remove(id) {
+                    return claude_shell_agent_result(id, block).map(AgentEvent::Subagent);
                 }
                 let tool = self.completed_task_tools.remove(id)?;
                 let content = tool_result_text(block.get("content")?)?;
@@ -1085,6 +1139,35 @@ fn claude_agent_started(id: &str, arguments: Option<&Value>) -> SubagentPatch {
 fn claude_agent_result(id: &str, block: &Value) -> Option<SubagentPatch> {
     let text = block.get("content").and_then(tool_result_text)?;
     if text.trim_start().starts_with("Async agent launched") {
+        return Some(SubagentPatch {
+            background: Some(true),
+            ..SubagentPatch::new(id)
+        });
+    }
+    let failed = block
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some(SubagentPatch {
+        status: Some(if failed {
+            SubagentStatus::Failed
+        } else {
+            SubagentStatus::Completed
+        }),
+        summary: Some(text),
+        ..SubagentPatch::new(id)
+    })
+}
+
+/// What a Bash call that runs another assistant returned: the agent's output,
+/// or word that the command went on in the background.
+fn claude_shell_agent_result(id: &str, block: &Value) -> Option<SubagentPatch> {
+    let text = block.get("content").and_then(tool_result_text)?;
+    let start = text.trim_start();
+    if start.starts_with("Command ")
+        && start.contains("Output is being written to:")
+        && start.contains("background")
+    {
         return Some(SubagentPatch {
             background: Some(true),
             ..SubagentPatch::new(id)
@@ -1228,6 +1311,9 @@ fn claude_task_event(root: &Value) -> Option<SubagentPatch> {
         "task_notification" => {
             patch.status = text_field(root, "status").and_then(SubagentStatus::from_wire);
             patch.summary = text_field(root, "summary").map(str::to_owned);
+            // The output is only a report for an agent run as a command, which
+            // only the record knows; this parser may not have seen it start.
+            patch.output = text_field(root, "output_file").and_then(crate::delegation::read_output);
             patch.tokens = usage_field("total_tokens");
             patch.tool_uses = usage_field("tool_uses");
             patch.duration_ms = usage_field("duration_ms");
@@ -2602,6 +2688,123 @@ mod tests {
             parent.contains(&AgentEvent::TextDelta("Done.".into())),
             "{parent:?}"
         );
+    }
+
+    #[test]
+    fn a_bash_call_that_runs_codex_is_a_subagent_not_a_command() {
+        let mut parser = ClaudeParser::default();
+        let input = serde_json::json!({
+            "command": "~/.claude/skills/codex-opussy/bin/codex-agent -n auth-audit -s read-only - <<'EOF'\nFind token checks.\nEOF",
+            "description": "Audit token checks",
+        })
+        .to_string();
+        let lines = [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_x","name":"Bash"}}}"#.to_owned(),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}}}).to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#.to_owned(),
+        ];
+        let events = lines
+            .iter()
+            .flat_map(|line| parser.feed(line))
+            .collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Tool(_))),
+            "{events:?}"
+        );
+        let started = subagent_patches(events);
+        assert_eq!(started[0].key, "toolu_x");
+        assert_eq!(started[0].provider.as_deref(), Some("Codex"));
+        assert_eq!(started[0].agent.as_deref(), Some("auth-audit"));
+        assert_eq!(started[0].launcher.as_deref(), Some("Claude"));
+        assert_eq!(
+            started[0].description.as_deref(),
+            Some("Audit token checks")
+        );
+        assert_eq!(started[0].prompt.as_deref(), Some("Find token checks."));
+
+        // Its output is its report.
+        let finished = subagent_patches(parser.feed(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_x","content":"None found.\n\n---\n[codex-opussy] ok · model=m · 3s · full log: /l"}]}}"#,
+        ));
+        assert_eq!(finished[0].status, Some(SubagentStatus::Completed));
+        assert!(
+            finished[0]
+                .summary
+                .as_deref()
+                .unwrap()
+                .starts_with("None found.")
+        );
+
+        // Sent to the background, it finishes later through Claude's task events.
+        let mut parser = ClaudeParser::default();
+        let input =
+            serde_json::json!({"command": "codex exec 'fix the build'", "run_in_background": true})
+                .to_string();
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_y","name":"Bash"}}}"#.to_owned(),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}}}).to_string(),
+        ] {
+            parser.feed(&line);
+        }
+        let started = subagent_patches(
+            parser
+                .feed(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#),
+        );
+        assert_eq!(started[0].background, Some(true));
+        assert_eq!(started[0].description.as_deref(), Some("fix the build"));
+        let launched = subagent_patches(parser.feed(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_y","content":"Command running in background with ID: b1. Output is being written to: /tmp/b1.output"}]}}"#,
+        ));
+        assert_eq!(launched[0].background, Some(true));
+        assert_eq!(launched[0].status, None);
+        // A parser that never saw it start, as between turns, reads its output.
+        let output = std::env::temp_dir().join(format!("xd-agent-{}.output", uuid::Uuid::new_v4()));
+        std::fs::write(&output, "Fixed.\n").unwrap();
+        let done = subagent_patches(ClaudeParser::default().feed(
+            &serde_json::json!({"type":"system","subtype":"task_notification","task_id":"b1","tool_use_id":"toolu_y","status":"completed","output_file":output,"summary":"Background command completed"}).to_string(),
+        ));
+        let _ = std::fs::remove_file(&output);
+        assert_eq!(done[0].output.as_deref(), Some("Fixed.\n"));
+
+        // Ordinary commands stay commands.
+        let mut parser = ClaudeParser::default();
+        let input = serde_json::json!({"command": "cargo test"}).to_string();
+        let events = [
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_z","name":"Bash"}}}"#.to_owned(),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}}}).to_string(),
+            r#"{"type":"stream_event","event":{"type":"content_block_stop","index":0}}"#.to_owned(),
+        ]
+        .iter()
+        .flat_map(|line| parser.feed(line))
+        .collect::<Vec<_>>();
+        assert!(subagent_patches(events.clone()).is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Tool(_)))
+        );
+    }
+
+    #[test]
+    fn a_codex_command_that_runs_claude_is_a_subagent() {
+        let mut parser = CodexParser::default();
+        let started = subagent_patches(parser.feed(
+            r#"{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"/bin/bash -lc 'claude -p \"Summarize the diff\"'","status":"in_progress"}}"#,
+        ));
+        assert_eq!(started[0].key, "c1");
+        assert_eq!(started[0].provider.as_deref(), Some("Claude"));
+        assert_eq!(started[0].launcher.as_deref(), Some("Codex"));
+        assert_eq!(
+            started[0].description.as_deref(),
+            Some("Summarize the diff")
+        );
+        let finished = subagent_patches(parser.feed(
+            r#"{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"/bin/bash -lc 'claude -p \"Summarize the diff\"'","aggregated_output":"Two files changed.","exit_code":0,"status":"completed"}}"#,
+        ));
+        assert_eq!(finished[0].status, Some(SubagentStatus::Completed));
+        assert_eq!(finished[0].summary.as_deref(), Some("Two files changed."));
     }
 
     #[test]
