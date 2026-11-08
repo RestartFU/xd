@@ -1926,6 +1926,14 @@ impl StateStore {
         if taken.0.success() {
             return Ok(None);
         }
+        // Recorded first, so a write that fails leaves Git alone, and undone
+        // in Git if the record cannot be kept: what deletion removes always
+        // names the branch the worktree has. The rename names xd's branch,
+        // not whatever is checked out, so it never touches one of the user's.
+        transaction.execute(
+            "UPDATE generated_worktrees SET branch = ? WHERE path = ?",
+            params![renamed, workdir],
+        )?;
         let moved = run_git(Path::new(&workdir), &["branch", "-m", &recorded, &renamed])?;
         if !moved.0.success() {
             return Err(StorageError::InvalidRequest(command_error(
@@ -1933,11 +1941,10 @@ impl StateStore {
                 "git could not rename the worktree's branch",
             )));
         }
-        transaction.execute(
-            "UPDATE generated_worktrees SET branch = ? WHERE path = ?",
-            params![renamed, workdir],
-        )?;
-        transaction.commit()?;
+        if let Err(error) = transaction.commit() {
+            let _ = run_git(Path::new(&workdir), &["branch", "-m", &renamed, &recorded]);
+            return Err(error.into());
+        }
         Ok(Some(renamed))
     }
 
