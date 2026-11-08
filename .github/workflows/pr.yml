@@ -42,7 +42,10 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # Everything happens in Docker, so the runner needs nothing else.
+      - name: Test browser history gestures
+        run: node --test desktop/tests/browser-history-gestures.cjs
+
+      # Rust formatting and linting happen in Docker.
       - name: Check formatting and lint the Rust crates
         run: ./scripts/clippy.sh
 
