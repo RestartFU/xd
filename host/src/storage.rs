@@ -12862,7 +12862,10 @@ mod tests {
         assert!(send(Value::Array(vec![png.clone(); 5])).contains("at most 4 images"));
         let large = STANDARD.encode(vec![0_u8; MAX_IMAGE_BYTES + 1]);
         let large = json!({"name": "big.bin", "mime": "application/octet-stream", "data": large});
-        assert!(send(json!([large.clone(), large.clone(), file.clone()])).is_empty());
+        assert!(
+            validate_attachments(&json!([large.clone(), large.clone(), file.clone()]), false)
+                .is_ok()
+        );
         for mime in ["", "text", "text/", "a/b/c", "text/plain\n", "text/pl ain"] {
             let bad = json!([{"name": "a.txt", "mime": mime, "data": "YQ=="}]);
             assert!(send(bad).contains("invalid"), "{mime:?} was accepted");
