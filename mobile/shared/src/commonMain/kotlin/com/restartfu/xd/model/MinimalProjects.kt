@@ -20,6 +20,9 @@ public data class MinimalProject(
     val name: String,
     val sessions: Int,
     val working: Int,
+    /** The GitHub account behind its repository, whose avatar stands in for its icon. */
+    val owner: String? = null,
+    val parentId: String? = null,
 )
 
 public data class MinimalSession(
@@ -50,14 +53,19 @@ public data class SettledSession(
     val session: MinimalSession,
 )
 
-/** Projects count only active sessions: settled ones sit on the shelf instead. */
-public fun TreeSnapshot.minimalProjects(): List<MinimalProject> = folders.map { folder ->
+/**
+ * The projects, without the folders that hold them. Projects count only
+ * active sessions: settled ones sit on the shelf instead.
+ */
+public fun TreeSnapshot.minimalProjects(): List<MinimalProject> = folders.filterNot(Folder::group).map { folder ->
     val sessions = minimalSessions(folder.id).filterNot(MinimalSession::settled)
     MinimalProject(
         id = folder.id,
         name = folder.name,
         sessions = sessions.size,
         working = sessions.count { it.working },
+        owner = folder.owner,
+        parentId = folder.parentId,
     )
 }
 

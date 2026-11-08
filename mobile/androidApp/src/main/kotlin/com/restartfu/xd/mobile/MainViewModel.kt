@@ -591,17 +591,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_createdDirectSession.value == session) _createdDirectSession.value = null
     }
 
-    fun createWorkspace(name: String, repository: String? = null) {
+    fun createWorkspace(name: String, repository: String? = null, parentId: String? = null) =
+        createInTree("Could not create the workspace") {
+            client.createFolder(name = name, parentId = parentId, repository = repository)
+        }
+
+    /** Makes a folder of projects, showing [owner]'s avatar when one is named. */
+    fun createProjectFolder(name: String, parentId: String? = null, owner: String? = null) =
+        createInTree("Could not create the folder") {
+            client.createFolder(name = name, parentId = parentId, group = true, owner = owner)
+        }
+
+    private fun createInTree(failure: String, create: suspend () -> Unit) {
         if (_creatingWorkspace.value) return
         _creatingWorkspace.value = true
         _error.value = null
         viewModelScope.launch {
             try {
-                client.createFolder(name = name, repository = repository)
+                create()
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _error.value = error.message ?: "Could not create the workspace"
+                _error.value = error.message ?: failure
             } finally {
                 _creatingWorkspace.value = false
             }
@@ -701,6 +712,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteProject(folderId: String) = treeAction("Could not delete the project") {
         client.trashFolder(folderId)
+    }
+
+    fun renameProjectFolder(folderId: String, name: String) = treeAction("Could not rename the folder") {
+        client.renameFolder(folderId, name)
+    }
+
+    /** Removes a folder and everything in it; the host moves the files to the workspace trash. */
+    fun deleteProjectFolder(folderId: String) = treeAction("Could not delete the folder") {
+        client.trashFolder(folderId)
+    }
+
+    /** Moves a project or folder into [parentId], or to the top level when it is null. */
+    fun moveIntoFolder(folderId: String, parentId: String?) = treeAction("Could not move it") {
+        client.moveFolder(folderId, parentId)
     }
 
     /** Reads the rules on opening Settings, leaving any failed change shown. */

@@ -22,6 +22,24 @@ class RepliesTest {
     }
 
     @Test
+    fun treeMarksFoldersOfProjectsAndTheHostThatKeepsThem() {
+        val older = WireJson.parseToJsonElement(
+            """{"ok":true,"folders":[{"id":"p","name":"Project","owner":"acme"}],"chats":[]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals(false, older.folderGroups)
+        assertEquals(false, older.folders.single().group)
+        assertEquals("acme", older.folders.single().owner)
+
+        val current = WireJson.parseToJsonElement(
+            """{"ok":true,"folder_groups":true,"folders":[{"id":"g","name":"acme","group":true,"owner":"acme"},""" +
+                """{"id":"p","name":"web","parent":"g"}],"chats":[]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertEquals(true, current.folderGroups)
+        assertEquals(listOf(true, false), current.folders.map { it.group })
+        assertNull(current.folders.last().owner)
+    }
+
+    @Test
     fun workflowStatusCarriesRunAndJobClocks() {
         val reply = WireJson.parseToJsonElement(
             """

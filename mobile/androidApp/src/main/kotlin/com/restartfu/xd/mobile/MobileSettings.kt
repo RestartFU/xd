@@ -59,6 +59,20 @@ public class MobileSettings(context: Context) {
         }
     }
 
+    private val _collapsedFolders = MutableStateFlow(
+        preferences.getStringSet(KEY_COLLAPSED_FOLDERS, null).orEmpty().toSet(),
+    )
+
+    /** Folders closed on the Projects page; the rest are open, as on the desktop. */
+    public val collapsedFolders: StateFlow<Set<String>> = _collapsedFolders.asStateFlow()
+
+    public fun setFolderOpen(folderId: String, open: Boolean) {
+        val next = if (open) _collapsedFolders.value - folderId else _collapsedFolders.value + folderId
+        if (next == _collapsedFolders.value) return
+        preferences.edit().putStringSet(KEY_COLLAPSED_FOLDERS, next).apply()
+        _collapsedFolders.value = next
+    }
+
     private val _theme = MutableStateFlow(
         MinimalThemePreset.fromKey(preferences.getString(KEY_THEME, null)),
     )
@@ -94,6 +108,7 @@ public class MobileSettings(context: Context) {
         const val KEY_SPEECH_ENABLED = "speech_enabled"
         const val KEY_ALLOW_ALL_PERMISSIONS = "allow_all_permissions"
         const val KEY_THEME = "minimal_theme"
+        const val KEY_COLLAPSED_FOLDERS = "collapsed_folders"
         const val KEY_RESUME_CHATS = "resume_chats"
         const val KEY_RESET_ATTEMPT = "usage_reset_attempt:"
     }

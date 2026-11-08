@@ -42,6 +42,16 @@ in every project; a project's **⋮** menu edits the ones only that project adds
 **New project** can browse the host's folders for the repository instead of typing
 its path.
 
+**New** on the Projects page makes a project or a folder, as the desktop's **+**
+does. Folders hold projects and other folders, open and close with a tap, and stay
+that way across launches. A folder can name a GitHub organization (`acme`, `@acme`,
+or `github.com/acme`) to show its avatar, and takes the organization's name when
+left unnamed; projects show the avatar of the account behind their repository. A
+folder's **⋮** menu adds a project or folder inside it, moves, renames, or deletes
+it; **Move to…**, in a folder's or a project's **⋮** menu, takes the place of the
+desktop's drag and drop. New folder needs a host that keeps folders; an older one
+shows it disabled.
+
 A session's **⋮** menu settles, renames, or deletes it, and keeps it out of
 auto-settle. Settled sessions move to the **Settled** shelf below the projects,
 most recently settled first; **Undo** appears for a moment after settling, and the
