@@ -19,6 +19,9 @@ pub struct ThemeColors {
     pub selected_border: u32,
     pub text: u32,
     pub muted: u32,
+    /// Assistant brand marks, independent of selection and activity state.
+    pub codex_icon: u32,
+    pub claude_icon: u32,
     /// Counts, hints, and timestamps; never body copy.
     pub faint: u32,
     /// Fill of the primary action.
@@ -80,6 +83,8 @@ impl ThemePreset {
                 selected_surface: 0x373737,
                 selected_border: 0x858585,
                 text: 0xf1f1f1,
+                codex_icon: 0xffffff,
+                claude_icon: 0xd97757,
                 muted: 0xb1b1b1,
                 faint: 0xababab,
                 accent: 0xdedede,
@@ -108,6 +113,8 @@ impl ThemePreset {
                 selected_surface: 0xededed,
                 selected_border: 0x7d7d7d,
                 text: 0x202020,
+                codex_icon: 0x202020,
+                claude_icon: 0xb85c3f,
                 muted: 0x5a5a5a,
                 faint: 0x606060,
                 accent: 0x363636,

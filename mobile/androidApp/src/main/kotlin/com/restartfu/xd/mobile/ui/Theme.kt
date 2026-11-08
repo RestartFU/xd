@@ -153,6 +153,8 @@ public data class XdSignals(
     val faint: Color,
     val diffAdded: Color,
     val diffRemoved: Color,
+    val codexIcon: Color,
+    val claudeIcon: Color,
 )
 
 public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
@@ -161,12 +163,14 @@ public fun xdSignals(theme: MinimalThemePreset): XdSignals = when (theme) {
         done = Color(0xFFC2C2C2), rule = Color(0xFF393939),
         link = Color(0xFFDEDEDE), faint = Color(0xFFABABAB),
         diffAdded = Color(0xFF263B30), diffRemoved = Color(0xFF462C30),
+        codexIcon = Color.White, claudeIcon = Color(0xFFD97757),
     )
     MinimalThemePreset.LIGHT -> XdSignals(
         working = Color(0xFF226347), waiting = Color(0xFF745319),
         done = Color(0xFF555555), rule = Color(0xFFD4D4D4),
         link = Color(0xFF444444), faint = Color(0xFF606060),
         diffAdded = Color(0xFFE0EEE5), diffRemoved = Color(0xFFF4E2E5),
+        codexIcon = Color(0xFF202020), claudeIcon = Color(0xFFB85C3F),
     )
 }
 
