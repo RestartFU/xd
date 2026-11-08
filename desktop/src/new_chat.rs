@@ -412,18 +412,117 @@ impl XdDesktop {
                             .gap(px(2.0))
                             .children(rows),
                     )
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // The model picker opens inside the composer, which would
+                    // take the focus from the search field to the editor.
+                    .on_click(|_, _, cx| cx.stop_propagation()),
             )
             .with_priority(1)
         });
-        self.new_chat_input
-            .update(cx, |editor, _| editor.set_wrap_width(px(620.0)));
         let folder = self
             .creating_chat_folder
             .as_ref()
             .and_then(|id| self.model.folders.iter().find(|f| &f.id == id))
             .map(|f| f.name.clone())
             .unwrap_or_default();
+        let editor = if self.chat_create_submitting {
+            div()
+                .text_color(rgb(colors.muted))
+                .child("Setting up…")
+                .into_any_element()
+        } else {
+            self.new_chat_input.clone().into_any_element()
+        };
+        let model_icon = assistant_icon(
+            agent_icon(self.minimal_new_session_agent),
+            13.0,
+            colors.muted,
+            colors,
+        )
+        .into_any_element();
+        let model = div()
+            .relative()
+            .child(self.draft_picker_toggle(
+                "model",
+                composer::composer_option(
+                    "draft-model",
+                    Some(model_icon),
+                    model_label,
+                    280.0,
+                    colors,
+                ),
+                cx,
+            ))
+            .children(if menu == Some("model") {
+                popup.take()
+            } else {
+                None
+            })
+            .into_any_element();
+        let send = composer::composer_send_button("draft-send", ready, SEND_ICON, colors)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if ready {
+                    this.save_minimal_chat_create(cx);
+                }
+            }))
+            .into_any_element();
+        let width = px(660.0);
+        let composer = self.render_composer(
+            composer::ComposerParts {
+                owner: image_preview::DraftOwner::NewChat,
+                width,
+                editor,
+                controls: vec![model],
+                actions: vec![send],
+            },
+            colors,
+            window,
+            cx,
+        );
+        let context = composer::context_row(folder, colors)
+            .debug_selector(|| "new-chat-context".into())
+            .when(!shared, |row| {
+                let workspace = composer::context_chip(
+                    "draft-workspace",
+                    FOLDER_ICON,
+                    if new_worktree {
+                        "New Worktree"
+                    } else {
+                        "Current Worktree"
+                    }
+                    .into(),
+                    true,
+                    colors,
+                );
+                let branch = composer::context_chip(
+                    "draft-branch",
+                    GIT_BRANCH_ICON,
+                    branch_label,
+                    true,
+                    colors,
+                );
+                row.child(
+                    div()
+                        .relative()
+                        .child(self.draft_picker_toggle("workspace", workspace, cx))
+                        .children(if menu == Some("workspace") {
+                            popup.take()
+                        } else {
+                            None
+                        }),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .child(self.draft_picker_toggle("branch", branch, cx))
+                        .children(if menu == Some("branch") {
+                            popup.take()
+                        } else {
+                            None
+                        }),
+                )
+            })
+            .when(shared, |row| row.child("Shared session worktree"));
         div()
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                 this.attach_new_chat_paths(paths.paths().to_vec(), cx);
@@ -446,182 +545,22 @@ impl XdDesktop {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(660.0))
+                    .max_w(width)
                     .mb_6()
                     .text_size(px(22.0))
                     .text_color(rgb(colors.text))
                     .child("What would you like to build?"),
             )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(660.0))
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .p_3()
-                            .rounded(px(16.0))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .bg(rgb(colors.composer))
-                            .children(self.new_chat_attachments.iter().enumerate().map(
-                                |(index, attachment)| {
-                                    ui_button(
-                                        ("draft-attachment", index),
-                                        ButtonKind::Secondary,
-                                        colors,
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if !this.chat_create_submitting {
-                                            this.new_chat_attachments.remove(index);
-                                            cx.notify();
-                                        }
-                                    }))
-                                    .child(format!("{} · Remove", attachment.name))
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .id("draft-composer")
-                                    .track_scroll(&self.new_chat_input.read(cx).scroll_handle())
-                                    .track_focus(&self.new_chat_input.read(cx).focus_handle(cx))
-                                    .min_h(px(70.0))
-                                    .max_h(px(200.0))
-                                    .overflow_y_scroll()
-                                    .text_color(rgb(colors.text))
-                                    .when(!self.chat_create_submitting, |editor| {
-                                        editor.child(self.new_chat_input.clone())
-                                    })
-                                    .when(self.chat_create_submitting, |editor| {
-                                        editor.child(
-                                            div()
-                                                .text_color(rgb(colors.muted))
-                                                .child("Setting up…"),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .relative()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        ui_button("draft-attach", ButtonKind::Ghost, colors)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.pick_new_chat_attachments(window, cx)
-                                            }))
-                                            .child(icon(PAPERCLIP_ICON, 15.0, colors.muted)),
-                                    )
-                                    .child(
-                                        div()
-                                            .relative()
-                                            .child(self.draft_picker_button(
-                                                "model",
-                                                model_label,
-                                                colors,
-                                                cx,
-                                            ))
-                                            .children(if menu == Some("model") {
-                                                popup.take()
-                                            } else {
-                                                None
-                                            }),
-                                    )
-                                    .child(div().flex_1())
-                                    .child(
-                                        div()
-                                            .id("draft-send")
-                                            .size(px(32.0))
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .rounded_full()
-                                            .bg(rgb(if ready {
-                                                colors.accent
-                                            } else {
-                                                colors.surface_high
-                                            }))
-                                            .when(ready, |button| {
-                                                button.cursor_pointer().hover(|style| {
-                                                    style.bg(rgb(colors.accent_hover))
-                                                })
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if ready {
-                                                    this.save_minimal_chat_create(cx);
-                                                }
-                                            }))
-                                            .child(icon(
-                                                SEND_ICON,
-                                                16.0,
-                                                if ready {
-                                                    colors.accent_text
-                                                } else {
-                                                    colors.faint
-                                                },
-                                            )),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .text_size(px(12.0))
-                            .text_color(rgb(colors.muted))
-                            .child(div().px_2().child(folder))
-                            .when(!shared, |row| {
-                                row.child(
-                                    div()
-                                        .relative()
-                                        .child(
-                                            self.draft_picker_button(
-                                                "workspace",
-                                                if new_worktree {
-                                                    "New Worktree"
-                                                } else {
-                                                    "Current Worktree"
-                                                }
-                                                .into(),
-                                                colors,
-                                                cx,
-                                            ),
-                                        )
-                                        .children(if menu == Some("workspace") {
-                                            popup.take()
-                                        } else {
-                                            None
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .relative()
-                                        .child(self.draft_picker_button(
-                                            "branch",
-                                            branch_label,
-                                            colors,
-                                            cx,
-                                        ))
-                                        .children(if menu == Some("branch") {
-                                            popup.take()
-                                        } else {
-                                            None
-                                        }),
-                                )
-                            })
-                            .when(shared, |row| row.child("Shared session worktree")),
-                    ),
-            )
+            .child(composer.mb_2())
+            .child(context.w_full().max_w(width))
             .into_any_element()
     }
 
-    fn pick_new_chat_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn pick_new_chat_attachments(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.chat_create_submitting {
             return;
         }
@@ -740,20 +679,16 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn draft_picker_button(
+    /// A chip that opens one of the new chat's pickers, or closes it again.
+    fn draft_picker_toggle(
         &self,
         menu: &'static str,
-        label: String,
-        colors: ThemeColors,
+        chip: gpui::Stateful<gpui::Div>,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        ui_button(
-            SharedString::from(format!("draft-{menu}")),
-            ButtonKind::Ghost,
-            colors,
-        )
-        .max_w(px(280.0))
-        .on_click(cx.listener(move |this, _, window, cx| {
+        chip.on_click(cx.listener(move |this, _, window, cx| {
+            // The composer behind it would take the focus back to the editor.
+            cx.stop_propagation();
             if !this.chat_create_submitting {
                 this.new_chat_query.clear();
                 this.new_chat_search
@@ -770,18 +705,6 @@ impl XdDesktop {
                 cx.notify();
             }
         }))
-        .child(assistant_icon(
-            match menu {
-                "model" => agent_icon(self.minimal_new_session_agent),
-                "branch" => GIT_BRANCH_ICON,
-                _ => FOLDER_ICON,
-            },
-            13.0,
-            colors.muted,
-            colors,
-        ))
-        .child(div().truncate().child(label))
-        .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.muted))
     }
 
     pub(super) fn default_new_chat_base(&self) -> Option<NewSessionWorktree> {

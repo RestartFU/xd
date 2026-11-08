@@ -64,6 +64,7 @@ use xd_desktop::{
 };
 
 mod browser;
+mod composer;
 mod editor;
 mod files;
 mod image_preview;
@@ -578,12 +579,9 @@ enum ButtonKind {
 }
 
 /// The one button vocabulary used across the shell, popovers, and dialogs.
-fn ui_button(
-    id: impl Into<gpui::ElementId>,
-    kind: ButtonKind,
-    colors: ThemeColors,
-) -> gpui::Stateful<gpui::Div> {
-    let base = div()
+/// A button's size and type, with nothing that reacts to the pointer.
+fn ui_button_shape(id: impl Into<gpui::ElementId>) -> gpui::Stateful<gpui::Div> {
+    div()
         .id(id)
         .h(px(30.0))
         .px_3()
@@ -595,7 +593,14 @@ fn ui_button(
         .rounded(px(8.0))
         .text_size(px(12.5))
         .font_weight(FontWeight::MEDIUM)
-        .cursor_pointer();
+}
+
+fn ui_button(
+    id: impl Into<gpui::ElementId>,
+    kind: ButtonKind,
+    colors: ThemeColors,
+) -> gpui::Stateful<gpui::Div> {
+    let base = ui_button_shape(id).cursor_pointer();
     match kind {
         ButtonKind::Primary => base
             .bg(rgb(colors.accent))
@@ -15530,17 +15535,8 @@ impl XdDesktop {
                         )),
                 )
         });
-        let composer_focus = self.composer_input.read(cx).focus_handle(cx);
-        let composer_scroll = self.composer_input.read(cx).scroll_handle();
-        // How wide the composer box can get, and how much of that its text has
-        // left once the shell's border and padding and the box's own padding
-        // are taken off each side. Layout hands the editor the space the chat
-        // column has, not the width of the box it is painted in, so a message
-        // would otherwise wrap to the window instead of to the composer.
+        // How wide the composer box can get.
         let composer_width = px(if empty_ready { 660.0 } else { 736.0 });
-        let composer_text_width = composer_width - px(2.0 * (8.0 + 1.0 + 8.0));
-        self.composer_input
-            .update(cx, |editor, _| editor.set_wrap_width(composer_text_width));
         let metadata_ready = !self.model.backend.is_empty();
         let can_send = self.model.connected
             && metadata_ready
@@ -15571,7 +15567,6 @@ impl XdDesktop {
         let can_submit = can_send || can_resume;
         let agent = AgentCli::from_backend(&self.model.backend);
 
-        let attachments = self.render_composer_attachments(colors, window, cx);
         let interaction = self.render_interaction(colors, cx);
         let agents_tray =
             Self::render_agents_tray(colors, &self.transcript_snapshot.running_agents);
@@ -15582,56 +15577,144 @@ impl XdDesktop {
             .find(|backend| backend.id == self.model.backend)
             .map(|backend| !backend.efforts.is_empty())
             .unwrap_or(self.model.backend != "jcode");
-        let options =
-            [
-                ("model", self.model.selected_model_label()),
-                (
-                    "effort",
-                    format!("{} effort", presentation::effort_name(&self.model.effort)),
-                ),
-                (
-                    "access",
-                    presentation::access_name(if self.model.plan {
-                        "read-only"
-                    } else {
-                        &self.model.access
+        let options = [
+            ("model", self.model.selected_model_label()),
+            (
+                "effort",
+                format!("{} effort", presentation::effort_name(&self.model.effort)),
+            ),
+            (
+                "access",
+                presentation::access_name(if self.model.plan {
+                    "read-only"
+                } else {
+                    &self.model.access
+                })
+                .to_owned(),
+            ),
+            (
+                "plan",
+                if self.model.plan { "Plan" } else { "Build" }.to_owned(),
+            ),
+        ]
+        .into_iter()
+        .filter(|(option, _)| *option != "effort" || supports_effort)
+        .enumerate()
+        .map(|(index, (option, label))| {
+            let leading = (option == "model")
+                .then(|| {
+                    agent.map(|agent| {
+                        assistant_icon(agent_icon(agent), 13.0, colors.muted, colors)
+                            .into_any_element()
                     })
-                    .to_owned(),
-                ),
-                (
-                    "plan",
-                    if self.model.plan { "Plan" } else { "Build" }.to_owned(),
-                ),
-            ]
-            .into_iter()
-            .filter(|(option, _)| *option != "effort" || supports_effort)
-            .enumerate()
-            .map(|(index, (option, label))| {
-                ui_button(("native-option", index), ButtonKind::Ghost, colors)
+                })
+                .flatten();
+            composer::composer_option(
+                ("native-option", index),
+                leading,
+                label,
+                if option == "model" { 240.0 } else { 170.0 },
+                colors,
+            )
+            .debug_selector(move || format!("native-option-{option}"))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.native_option_open = Some(option);
+                this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
+                this.minimal_popup_previous_focus =
+                    Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
+                cx.notify();
+            }))
+            .into_any_element()
+        })
+        .collect::<Vec<_>>();
+        let editor = if metadata_ready {
+            self.composer_input.clone().into_any_element()
+        } else {
+            div()
+                .text_color(rgb(colors.muted))
+                .child("Loading chat…")
+                .into_any_element()
+        };
+        let mut actions = Vec::new();
+        if let Some(meter) = context_meter {
+            actions.push(meter.into_any_element());
+        }
+        if can_queue {
+            actions.push(
+                ui_button("native-queue-message", ButtonKind::Ghost, colors)
                     .h(px(28.0))
                     .px(px(8.0))
-                    .gap(px(5.0))
                     .text_size(px(12.0))
-                    .max_w(px(if option == "model" { 240.0 } else { 170.0 }))
-                    .min_w_0()
-                    .debug_selector(move || format!("native-option-{option}"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.native_option_open = Some(option);
-                        this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
-                        this.minimal_popup_previous_focus =
-                            Some(this.composer_input.read(cx).focus_handle(cx).downgrade());
-                        cx.notify();
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if can_queue {
+                            this.queue_composer(cx)
+                        }
                     }))
-                    .when(option == "model", |chip| {
-                        chip.children(agent.map(|agent| {
-                            assistant_icon(agent_icon(agent), 13.0, colors.muted, colors)
-                        }))
+                    .child("Queue")
+                    .into_any_element(),
+            );
+        }
+        if working {
+            actions.push(
+                div()
+                    .id("native-cancel-turn")
+                    .size(px(32.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(colors.surface_high))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.danger_surface)))
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_turn(cx)))
+                    .child(icon(STOP_ICON, 13.0, colors.text))
+                    .into_any_element(),
+            );
+        }
+        if !working || can_send {
+            actions.push(
+                composer::composer_send_button(
+                    "native-send-message",
+                    can_submit,
+                    if shows_resume { PLAY_ICON } else { SEND_ICON },
+                    colors,
+                )
+                .when(shows_resume, |button| {
+                    button.tooltip(move |_, cx| {
+                        cx.new(|_| PaneTooltip {
+                            label: "Resume chat",
+                            colors,
+                        })
+                        .into()
                     })
-                    .child(div().min_w_0().truncate().child(label))
-                    .child(icon(CHEVRON_DOWN_ICON, 11.0, colors.faint))
-            })
-            .collect::<Vec<_>>();
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if can_send {
+                        this.send_composer(cx)
+                    } else if can_resume {
+                        this.resume_turn(cx)
+                    }
+                }))
+                .into_any_element(),
+            );
+        }
+        let composer = self.render_composer(
+            composer::ComposerParts {
+                owner: image_preview::DraftOwner::Chat,
+                width: composer_width,
+                editor,
+                controls: options,
+                actions,
+            },
+            colors,
+            window,
+            cx,
+        );
+        let context_row = metadata_ready
+            .then(|| self.render_chat_context_row(colors))
+            .flatten();
         div()
             .id("native-chat")
             .size_full()
@@ -15843,175 +15926,10 @@ impl XdDesktop {
                         .children(queued),
                 )
             })
-            .child(
-                div()
-                    .id("native-composer-shell")
-                    .debug_selector(|| "chat-composer".into())
-                    .w_full()
-                    .max_w(composer_width)
-                    .mb(px(16.0))
-                    .pt(px(10.0))
-                    .pb(px(8.0))
-                    .px(px(8.0))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .rounded(px(16.0))
-                    .border_1()
-                    .border_color(rgb(if composer_focus.is_focused(window) {
-                        colors.selected_border
-                    } else {
-                        colors.border
-                    }))
-                    .bg(rgb(colors.composer))
-                    .shadow_md()
-                    .drag_over::<ExternalPaths>(move |style, _, _, _| {
-                        style.border_color(rgb(colors.accent))
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let focus = this.composer_input.read(cx).focus_handle(cx);
-                        window.focus(&focus);
-                    }))
-                    .children(attachments)
-                    .child(
-                        div()
-                            .id("native-composer")
-                            .min_h(px(48.0))
-                            .max_h(px(200.0))
-                            .px(px(8.0))
-                            .py_1()
-                            .text_size(px(14.0))
-                            // A message past the tenth line scrolls inside the
-                            // composer; without this it paints over the chat.
-                            .overflow_y_scroll()
-                            .track_scroll(&composer_scroll)
-                            .track_focus(&composer_focus)
-                            .when(metadata_ready, |editor| {
-                                editor.child(self.composer_input.clone())
-                            })
-                            .when(!metadata_ready, |editor| {
-                                editor.child(
-                                    div().text_color(rgb(colors.muted)).child("Loading chat…"),
-                                )
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .id("native-attach")
-                                    .debug_selector(|| "native-attach".into())
-                                    .size(px(28.0))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(8.0))
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                                    .tooltip(move |_, cx| {
-                                        cx.new(|_| PaneTooltip {
-                                            label: "Attach files",
-                                            colors,
-                                        })
-                                        .into()
-                                    })
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.pick_attachments(window, cx);
-                                    }))
-                                    .child(icon(PAPERCLIP_ICON, 15.0, colors.muted)),
-                            )
-                            .children(options)
-                            .child(div().flex_1())
-                            .when_some(context_meter, |controls, meter| controls.child(meter))
-                            .when(can_queue, |controls| {
-                                controls.child(
-                                    ui_button("native-queue-message", ButtonKind::Ghost, colors)
-                                        .h(px(28.0))
-                                        .px(px(8.0))
-                                        .text_size(px(12.0))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_queue {
-                                                this.queue_composer(cx)
-                                            }
-                                        }))
-                                        .child("Queue"),
-                                )
-                            })
-                            .when(working, |controls| {
-                                controls.child(
-                                    div()
-                                        .id("native-cancel-turn")
-                                        .size(px(32.0))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_full()
-                                        .bg(rgb(colors.surface_high))
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(rgb(colors.danger_surface)))
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.cancel_turn(cx)),
-                                        )
-                                        .child(icon(STOP_ICON, 13.0, colors.text)),
-                                )
-                            })
-                            .when(!working || can_send, |controls| {
-                                controls.child(
-                                    div()
-                                        .id("native-send-message")
-                                        .debug_selector(|| "native-send-message".into())
-                                        .size(px(32.0))
-                                        .flex_none()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded_full()
-                                        .bg(rgb(if can_submit {
-                                            colors.accent
-                                        } else {
-                                            colors.surface_high
-                                        }))
-                                        .when(can_submit, |button| {
-                                            button
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(rgb(colors.accent_hover)))
-                                        })
-                                        .when(shows_resume, |button| {
-                                            button.tooltip(move |_, cx| {
-                                                cx.new(|_| PaneTooltip {
-                                                    label: "Resume chat",
-                                                    colors,
-                                                })
-                                                .into()
-                                            })
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if can_send {
-                                                this.send_composer(cx)
-                                            } else if can_resume {
-                                                this.resume_turn(cx)
-                                            }
-                                        }))
-                                        .child(icon(
-                                            if shows_resume { PLAY_ICON } else { SEND_ICON },
-                                            16.0,
-                                            if can_submit {
-                                                colors.accent_text
-                                            } else {
-                                                colors.faint
-                                            },
-                                        )),
-                                )
-                            }),
-                    ),
-            )
+            .child(composer.mb(px(if context_row.is_some() { 8.0 } else { 16.0 })))
+            .when_some(context_row, |chat, row| {
+                chat.child(row.w_full().max_w(composer_width).mb(px(10.0)))
+            })
             .into_any_element()
     }
 
