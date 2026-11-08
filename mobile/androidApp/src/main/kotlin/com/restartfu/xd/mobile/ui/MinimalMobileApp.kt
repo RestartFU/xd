@@ -1624,20 +1624,21 @@ private fun WorkspacePicker(
                 style = MaterialTheme.typography.bodySmall,
             )
             else -> {
-                places.worktrees.forEach { checkout ->
-                    PlaceRow(
-                        label = checkout.branch ?: checkout.path.substringAfterLast('/'),
-                        detail = if (checkout.main) "Project directory" else checkout.path,
-                        chosen = selected == Ops.NewSessionWorktree.Existing(checkout.path),
-                        onClick = { onSelect(Ops.NewSessionWorktree.Existing(checkout.path)) },
-                    )
-                }
+                // New worktree comes first, as on the desktop.
                 if (places.canCreateWorktree) {
                     PlaceRow(
                         label = "New worktree",
                         detail = "A fresh branch in its own checkout",
                         chosen = selected == Ops.NewSessionWorktree.New,
                         onClick = { onSelect(Ops.NewSessionWorktree.New) },
+                    )
+                }
+                places.worktrees.forEach { checkout ->
+                    PlaceRow(
+                        label = checkout.branch ?: checkout.path.substringAfterLast('/'),
+                        detail = if (checkout.main) "Project directory" else checkout.path,
+                        chosen = selected == Ops.NewSessionWorktree.Existing(checkout.path),
+                        onClick = { onSelect(Ops.NewSessionWorktree.Existing(checkout.path)) },
                     )
                 }
                 if (places.branches.isNotEmpty() || places.pullRequests.isNotEmpty()) {
