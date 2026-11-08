@@ -119,6 +119,23 @@ pub(crate) fn run(
     Ok(output.text)
 }
 
+/// Codex built-ins that add tools a short run must not use.
+const CODEX_TOOL_FEATURES: &[&str] = &[
+    "shell_tool",
+    "unified_exec",
+    "apps",
+    "plugins",
+    "multi_agent",
+    "view_image",
+    "image_generation",
+    "browser_use",
+    "computer_use",
+    "skill_search",
+    "tool_suggest",
+    "goals",
+    "sleep_tool",
+];
+
 /// The line to write on stdin, for a backend that takes its turns there. Claude
 /// reads its prompt only from stdin, so without this it exits having done nothing.
 pub(crate) fn turn_input(backend: &str, prompt: &str) -> Option<String> {
@@ -129,8 +146,8 @@ pub(crate) fn turn_input(backend: &str, prompt: &str) -> Option<String> {
 /// MCP servers and their schemas, slash commands, and a session left behind in
 /// the assistant's own history.
 ///
-/// Without `project_instructions` the run also skips CLAUDE.md, AGENTS.md and
-/// Claude's settings, which carry the user's hooks. With it, Claude still loads
+/// Without `project_instructions` the run also skips CLAUDE.md, AGENTS.md, the
+/// user's hooks, and Claude's settings, which carry them. With it, Claude still loads
 /// the repository's own settings and instructions, and Codex its AGENTS.md, so
 /// conventions written there still apply.
 pub(crate) fn keep_the_run_minimal(
@@ -156,8 +173,19 @@ pub(crate) fn keep_the_run_minimal(
         }
         "codex" => {
             command.args(["--ephemeral", "-c", "mcp_servers={}"]);
+            // Codex has no switch for all tools, so each built-in goes off by
+            // name; a CLI that lacks one ignores it. The schemas are most of
+            // what a one-line reply would otherwise send.
+            for feature in CODEX_TOOL_FEATURES {
+                command.args(["-c", &format!("features.{feature}=false")]);
+            }
             if !project_instructions {
-                command.args(["-c", "project_doc_max_bytes=0"]);
+                command.args([
+                    "-c",
+                    "project_doc_max_bytes=0",
+                    "-c",
+                    "features.hooks=false",
+                ]);
             }
         }
         _ => {}
@@ -233,6 +261,9 @@ mod tests {
         assert!(codex.contains(&"--ephemeral".to_owned()));
         assert!(codex.contains(&"mcp_servers={}".to_owned()));
         assert!(codex.contains(&"project_doc_max_bytes=0".to_owned()));
+        assert!(codex.contains(&"features.shell_tool=false".to_owned()));
+        assert!(codex.contains(&"features.unified_exec=false".to_owned()));
+        assert!(codex.contains(&"features.hooks=false".to_owned()));
         assert!(args("jcode", false).is_empty());
     }
 
@@ -248,6 +279,7 @@ mod tests {
         let codex = args("codex", true);
         assert!(codex.contains(&"--ephemeral".to_owned()));
         assert!(!codex.contains(&"project_doc_max_bytes=0".to_owned()));
+        assert!(codex.contains(&"features.shell_tool=false".to_owned()));
     }
 
     #[test]

@@ -47,8 +47,11 @@ fn parse(output: &str) -> Result<String, String> {
     let end = output
         .rfind('}')
         .ok_or("The assistant returned an incomplete worktree name.")?;
-    let value: Value = serde_json::from_str(&output[start..=end])
-        .map_err(|_| "The assistant returned an invalid worktree name.".to_string())?;
+    // The closing brace can come first in a malformed reply.
+    let value: Value = output
+        .get(start..=end)
+        .and_then(|json| serde_json::from_str(json).ok())
+        .ok_or("The assistant returned an invalid worktree name.")?;
     let name = value
         .get("name")
         .or_else(|| value.get("title"))
@@ -83,6 +86,7 @@ mod tests {
     fn rejects_missing_invalid_and_oversized_names() {
         assert!(parse("nothing").is_err());
         assert!(parse("{}").is_err());
+        assert!(parse("}\n{").is_err(), "the closing brace comes first");
         assert!(parse(&format!("{{\"name\":\"{}\"}}", "x".repeat(121))).is_err());
     }
 }
