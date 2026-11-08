@@ -5407,6 +5407,11 @@ impl XdDesktop {
                         }
                         self.sync_transcript_count(false);
                     }
+                    // A page that settled a message sent from here moved
+                    // rows other than at its ends.
+                    MessagePageDirection::After if change.reset => {
+                        self.transcript.reset(self.transcript_snapshot.len());
+                    }
                     MessagePageDirection::After => {
                         if change.inserted_at_end > 0 {
                             self.transcript.splice(
@@ -7105,8 +7110,12 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chat_create_submitting || !self.flush_draft_before_navigation() {
+        if self.chat_create_in_flight() || !self.flush_draft_before_navigation() {
             return;
+        }
+        // One already created, still showing its message, gives way.
+        if self.new_chat_started.is_some() {
+            self.cancel_chat_create(cx);
         }
         self.new_chat_generation += 1;
         self.new_chat_reading = 0;
@@ -7160,6 +7169,12 @@ impl XdDesktop {
             self.chat_create_title = text;
             cx.notify();
         }
+    }
+
+    /// A new chat the host has not answered for yet. Once it has, the view
+    /// only shows the message until a chat opens, and holds nothing up.
+    fn chat_create_in_flight(&self) -> bool {
+        self.chat_create_submitting && self.new_chat_started.is_none()
     }
 
     fn cancel_chat_create(&mut self, cx: &mut Context<Self>) {
@@ -10832,7 +10847,7 @@ impl XdDesktop {
         if !self.flush_draft_before_navigation() {
             return;
         }
-        if self.chat_create_submitting {
+        if self.chat_create_in_flight() {
             return;
         }
         if self.creating_chat_folder.is_some() {

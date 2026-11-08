@@ -777,6 +777,8 @@ pub struct MessagePageChange {
     pub removed_from_end: usize,
     pub has_older: bool,
     pub has_newer: bool,
+    /// Rows changed other than at the ends, so the list starts over.
+    pub reset: bool,
 }
 
 impl AppModel {
@@ -1353,6 +1355,7 @@ impl AppModel {
             removed_from_end: 0,
             has_older,
             has_newer,
+            reset: false,
         };
         if direction == MessagePageDirection::Tail {
             // A message sent from here but not stored yet stays at the end
@@ -1394,6 +1397,16 @@ impl AppModel {
                 self.messages.truncate(MAX_RETAINED_MESSAGES);
             }
             MessagePageDirection::After => {
+                // The stored copy of a message sent from here replaces it.
+                let before = self.messages.len();
+                self.messages.retain(|message| {
+                    message.id.is_some()
+                        || message.role != "user"
+                        || !snapshot.messages.iter().any(|stored| {
+                            stored.role == "user" && stored.content == message.content
+                        })
+                });
+                change.reset = self.messages.len() != before;
                 change.inserted_at_end = snapshot.messages.len();
                 self.messages.extend(snapshot.messages);
                 change.removed_from_start =
@@ -3522,6 +3535,26 @@ mod tests {
             .map(|message| message.id)
             .collect::<Vec<_>>();
         assert_eq!(ids, [Some(1), Some(2)]);
+
+        // Or a later page, reached going forward.
+        let sent: Message =
+            serde_json::from_value(json!({"role": "user", "content": "And the header"})).unwrap();
+        model.messages.push(sent);
+        let change = model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 3, "role": "user", "content": "And the header"}
+                ]}),
+                MessagePageDirection::After,
+            )
+            .unwrap();
+        assert!(change.reset);
+        let ids = model
+            .messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, [Some(1), Some(2), Some(3)]);
     }
 
     #[test]

@@ -1371,6 +1371,10 @@ mod start_tests {
                 ("implementation", "Fix the footer links")
             );
 
+            // Nothing waits on it any more: another chat can open, or
+            // another new chat start.
+            assert!(!desktop.chat_create_in_flight());
+
             desktop.reconcile_minimal_navigation(cx);
             assert!(desktop.creating_chat_folder.is_none());
             assert!(!desktop.chat_create_submitting);
@@ -1379,6 +1383,49 @@ mod start_tests {
                 desktop.model.selected_chat.as_deref(),
                 Some("implementation")
             );
+        });
+    }
+
+    #[gpui::test]
+    fn another_chat_opens_while_a_created_one_waits_for_the_tree(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.model = crate::tests::grouped_workspace_fixture();
+                desktop.creating_chat_folder = Some("atlas".into());
+                desktop.chat_create_submitting = true;
+                // Not answered yet: nothing else opens.
+                desktop.open_minimal_session(
+                    "atlas".into(),
+                    "review".into(),
+                    AgentCli::Claude,
+                    window,
+                    cx,
+                );
+                assert!(desktop.creating_chat_folder.is_some());
+                assert_ne!(desktop.model.selected_chat.as_deref(), Some("review"));
+
+                desktop.new_chat_started = Some("made".into());
+                desktop.open_minimal_session(
+                    "atlas".into(),
+                    "review".into(),
+                    AgentCli::Claude,
+                    window,
+                    cx,
+                );
+                assert!(desktop.creating_chat_folder.is_none());
+                assert!(!desktop.chat_create_submitting);
+                assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+
+                // And a new chat can start while one waits.
+                desktop.creating_chat_folder = Some("atlas".into());
+                desktop.chat_create_submitting = true;
+                desktop.new_chat_started = Some("made".into());
+                desktop.begin_chat_create("atlas".into(), window, cx);
+                assert!(!desktop.chat_create_submitting);
+                assert!(desktop.new_chat_started.is_none());
+                assert_eq!(desktop.creating_chat_folder.as_deref(), Some("atlas"));
+            });
         });
     }
 
