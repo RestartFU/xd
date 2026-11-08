@@ -7,6 +7,13 @@
 //! the daemon, every agent CLI, every background agent and every terminal, all
 //! because one chat ran a build that wanted more memory than was left.
 //!
+//! The limit and the group kill can each be set on the daemon's own cgroup or on
+//! any cgroup above it, as when the daemon runs in a child cgroup of a limited
+//! container: the kernel kills, together, the highest cgroup with
+//! `memory.oom.group` between the process it picked and the cgroup that ran out.
+//! The guard watches the tightest limit above the daemon whose breach would
+//! kill a group that includes the daemon.
+//!
 //! Only in that setup, the guard watches the cgroup's memory that cannot be
 //! reclaimed: anonymous memory, shared memory (tmpfs, shm), and kernel memory
 //! other than reclaimable slab, all from `memory.stat`. Page cache is left out,
@@ -26,7 +33,7 @@
 //! ancestors of any of them. What is left is the work they started: a compiler,
 //! a build tool, a test run, a build daemon. The guard stops a whole subtree from
 //! its topmost unprotected process, such as the `bash -c` an agent ran a build
-//! in, and only processes of this user in this cgroup.
+//! in, and only processes of this user in the guarded cgroup.
 //!
 //! The tree is frozen with SIGSTOP before it is killed with SIGKILL: a process
 //! that is stopped cannot start another, and a child whose parent has exited
@@ -71,8 +78,8 @@ const FREEZE_WAIT: Duration = Duration::from_millis(200);
 /// another daemon or the user started, and xd itself.
 const PROTECTED_NAMES: [&str; 5] = ["claude", "codex", "jcode", "xd-host", "xd"];
 
-/// The cgroup the daemon runs in, set up so that running out of memory there
-/// kills every process in it.
+/// The cgroup, the daemon's own or one above it, whose memory limit would kill
+/// the daemon's whole group if reached.
 pub(crate) struct Cgroup {
     directory: PathBuf,
     /// Its path in the cgroup hierarchy, as `/proc/<pid>/cgroup` names it.
@@ -81,16 +88,23 @@ pub(crate) struct Cgroup {
 }
 
 impl Cgroup {
-    /// The daemon's own cgroup, if the guard has anything to do there.
+    /// The cgroup to guard, if the guard has anything to do; see
+    /// [`guarded_limit`].
     pub(crate) fn discover() -> Option<Self> {
-        let path = cgroup_path(&fs::read_to_string("/proc/self/cgroup").ok()?)?;
-        let directory = Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
-        let max = group_kill_limit(
-            &fs::read_to_string(directory.join("memory.max")).ok()?,
-            &fs::read_to_string(directory.join("memory.oom.group")).ok()?,
-        )?;
+        let own = cgroup_path(&fs::read_to_string("/proc/self/cgroup").ok()?)?;
+        let directory = |path: &str| Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'));
+        let read = |path: &str, file: &str| fs::read_to_string(directory(path).join(file)).ok();
+        let levels: Vec<Level> = ancestors(&own)
+            .into_iter()
+            .map(|path| Level {
+                max: read(&path, "memory.max"),
+                oom_group: read(&path, "memory.oom.group"),
+                path,
+            })
+            .collect();
+        let (path, max) = guarded_limit(&levels)?;
         Some(Self {
-            directory,
+            directory: directory(&path),
             path,
             max,
         })
@@ -109,13 +123,48 @@ impl Cgroup {
     }
 }
 
-/// The limit to guard, from `memory.max` and `memory.oom.group`: only a finite
-/// limit whose breach kills the whole group.
-pub(crate) fn group_kill_limit(max: &str, oom_group: &str) -> Option<u64> {
-    if oom_group.trim() != "1" {
-        return None;
+/// One cgroup on the way from the daemon's to the root, with its
+/// `memory.max` and `memory.oom.group` files, which the root does not have.
+pub(crate) struct Level {
+    pub(crate) path: String,
+    pub(crate) max: Option<String>,
+    pub(crate) oom_group: Option<String>,
+}
+
+/// `path` and every cgroup above it, nearest first, ending with `/`.
+pub(crate) fn ancestors(path: &str) -> Vec<String> {
+    let mut found = vec![path.to_owned()];
+    let mut path = path.trim_end_matches('/');
+    while let Some((parent, _)) = path.rsplit_once('/') {
+        found.push(if parent.is_empty() { "/" } else { parent }.to_owned());
+        path = parent;
     }
-    max.trim().parse().ok().filter(|max| *max > 0)
+    found.dedup();
+    found
+}
+
+/// The cgroup to guard and its limit, from `levels`, the daemon's cgroup and
+/// those above it, nearest first. Reaching a finite `memory.max` kills a group
+/// holding the daemon when that cgroup, or one between it and the daemon, has
+/// `memory.oom.group` set. Of those limits, the smallest is reached first.
+pub(crate) fn guarded_limit(levels: &[Level]) -> Option<(String, u64)> {
+    let mut group_kill = false;
+    let mut guarded: Option<(String, u64)> = None;
+    for level in levels {
+        group_kill |= level.oom_group.as_deref().map(str::trim) == Some("1");
+        let max = level
+            .max
+            .as_deref()
+            .and_then(|max| max.trim().parse::<u64>().ok())
+            .filter(|max| *max > 0);
+        if let Some(max) = max
+            && group_kill
+            && guarded.as_ref().is_none_or(|(_, smallest)| max < *smallest)
+        {
+            guarded = Some((level.path.clone(), max));
+        }
+    }
+    guarded
 }
 
 /// The threshold percentage `setting` asks for, `None` to leave the guard off.
@@ -644,9 +693,53 @@ mod tests {
 
     #[test]
     fn only_a_finite_limit_that_kills_the_whole_group_is_guarded() {
-        assert_eq!(group_kill_limit("17179869184\n", "1\n"), Some(16 * GIB));
-        assert_eq!(group_kill_limit("max\n", "1\n"), None);
-        assert_eq!(group_kill_limit("17179869184\n", "0\n"), None);
+        let level = |path: &str, max: Option<&str>, oom_group: Option<&str>| Level {
+            path: path.into(),
+            max: max.map(str::to_owned),
+            oom_group: oom_group.map(str::to_owned),
+        };
+        // A container whose own cgroup is the root of its namespace.
+        assert_eq!(
+            guarded_limit(&[level("/", Some("17179869184\n"), Some("1\n"))]),
+            Some(("/".into(), 16 * GIB))
+        );
+        assert_eq!(
+            guarded_limit(&[level("/", Some("max\n"), Some("1\n"))]),
+            None
+        );
+        assert_eq!(
+            guarded_limit(&[level("/", Some("17179869184\n"), Some("0\n"))]),
+            None
+        );
+        // The daemon in a child cgroup of a limited container.
+        assert_eq!(
+            guarded_limit(&[
+                level("/pod/xd", Some("max\n"), Some("0\n")),
+                level("/pod", Some("17179869184\n"), Some("1\n")),
+                level("/", None, None),
+            ]),
+            Some(("/pod".into(), 16 * GIB))
+        );
+        // Group killing set below the limit still takes the daemon's group.
+        assert_eq!(
+            guarded_limit(&[
+                level("/pod/xd", Some("max\n"), Some("1\n")),
+                level("/pod", Some("17179869184\n"), Some("0\n")),
+            ]),
+            Some(("/pod".into(), 16 * GIB))
+        );
+        // A limit below any group kill kills one process, not the group; of
+        // two that would, the smaller is reached first.
+        assert_eq!(
+            guarded_limit(&[
+                level("/pod/xd", Some("1073741824\n"), Some("0\n")),
+                level("/pod", Some("34359738368\n"), Some("1\n")),
+                level("/", Some("17179869184\n"), Some("0\n")),
+            ]),
+            Some(("/".into(), 16 * GIB))
+        );
+        assert_eq!(ancestors("/"), ["/"]);
+        assert_eq!(ancestors("/pod/xd"), ["/pod/xd", "/pod", "/"]);
     }
 
     #[test]
