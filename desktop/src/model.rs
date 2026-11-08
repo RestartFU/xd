@@ -1376,13 +1376,14 @@ impl AppModel {
         // stored message shown when it was sent; an older one with the same
         // words was said before.
         // The host stores attachments as lines after the text, so the words
-        // are compared, as they are shown.
+        // are compared as they are shown, on both sides.
         let stores = |stored: &Message, sent: &Message| {
             let Some(from) = sent.sent_from else {
                 return false;
             };
             stored.role == "user"
-                && message_content(&stored.role, &stored.content).0.trim() == sent.content.trim()
+                && message_content(&stored.role, &stored.content).0.trim()
+                    == message_content(&sent.role, &sent.content).0.trim()
                 && stored
                     .id
                     .is_some_and(|id| from.newest.is_none_or(|newest| id > newest))
@@ -3661,6 +3662,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(model.messages.len(), 4);
+        assert!(model.messages.iter().all(|message| message.id.is_some()));
+        // Or words that look like an attachment line themselves.
+        let mut marked: Message = serde_json::from_value(
+            json!({"role": "user", "content": "Explain this:\n[file: /tmp/a.txt]"}),
+        )
+        .unwrap();
+        marked.sent_from = Some(SentFrom { newest: Some(4) });
+        model.messages.push(marked);
+        model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 1, "role": "user", "content": "Fix the footer"},
+                    {"id": 2, "role": "assistant", "content": "On it"},
+                    {"id": 3, "role": "user", "content": "And the header"},
+                    {"id": 4, "role": "user", "content": "Look at this\n[image: /tmp/shot.png]"},
+                    {"id": 5, "role": "user", "content": "Explain this:\n[file: /tmp/a.txt]"}
+                ]}),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
+        assert_eq!(model.messages.len(), 5);
         assert!(model.messages.iter().all(|message| message.id.is_some()));
 
         // One sent from an older window of the transcript is not kept.
