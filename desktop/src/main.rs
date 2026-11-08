@@ -2132,6 +2132,8 @@ struct XdDesktop {
     creating_chat_session: Option<String>,
     new_chat_input: Entity<FileEditor>,
     new_chat_prompt: String,
+    new_chat_generation: u64,
+    new_chat_reading: usize,
     new_chat_submitted_prompt: Option<String>,
     new_chat_remote: bool,
     new_chat_default_branch: Option<String>,
@@ -2767,6 +2769,8 @@ impl XdDesktop {
             creating_chat_session: None,
             new_chat_input,
             new_chat_prompt: String::new(),
+            new_chat_generation: 0,
+            new_chat_reading: 0,
             new_chat_submitted_prompt: None,
             new_chat_remote: false,
             new_chat_default_branch: None,
@@ -7023,6 +7027,8 @@ impl XdDesktop {
         if self.chat_create_submitting || !self.flush_draft_before_navigation() {
             return;
         }
+        self.new_chat_generation += 1;
+        self.new_chat_reading = 0;
         self.new_chat_prompt.clear();
         self.new_chat_attachments.clear();
         self.new_chat_remote = false;
@@ -10854,6 +10860,9 @@ impl XdDesktop {
         let Some(folder_id) = self.creating_chat_folder.clone() else {
             return;
         };
+        if self.new_chat_reading > 0 {
+            return;
+        }
         if self.new_chat_prompt.trim().is_empty() && self.new_chat_attachments.is_empty() {
             return;
         }
