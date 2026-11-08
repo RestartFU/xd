@@ -172,8 +172,7 @@ const MINIMIZE_ICON: &str = "icons/minimize.svg";
 const MAXIMIZE_ICON: &str = "icons/maximize.svg";
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
-/// The host's limits: ten attachments, of which at most four images, each up
-/// to 10 MiB and 20 MiB together.
+/// File attachments have no byte limit. Images retain the host's image limits.
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_IMAGE_ATTACHMENTS: usize = 4;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -10285,8 +10284,13 @@ impl XdDesktop {
                     .filter(|attachment| attachment.preview.is_some())
                     .count(),
             ),
-            bytes: MAX_TOTAL_ATTACHMENT_BYTES
-                .saturating_sub(draft.iter().map(|attachment| attachment.bytes).sum()),
+            bytes: MAX_TOTAL_ATTACHMENT_BYTES.saturating_sub(
+                draft
+                    .iter()
+                    .filter(|attachment| attachment.preview.is_some())
+                    .map(|attachment| attachment.bytes)
+                    .sum(),
+            ),
         };
         let connection = self.attachment_connection();
         let read = cx.background_spawn(async move { read_attachments(paths, room) });
@@ -19170,11 +19174,17 @@ fn attachment_fits(draft: &[Attachment], attachment: &Attachment) -> Result<(), 
             "A message can contain at most {MAX_IMAGE_ATTACHMENTS} images."
         ));
     }
-    if attachment.bytes > MAX_ATTACHMENT_BYTES {
+    if attachment.preview.is_some() && attachment.bytes > MAX_ATTACHMENT_BYTES {
         return Err(format!("{} is larger than 10 MiB.", attachment.name));
     }
-    let total = draft.iter().map(|added| added.bytes).sum::<usize>();
-    if total.saturating_add(attachment.bytes) > MAX_TOTAL_ATTACHMENT_BYTES {
+    let total = draft
+        .iter()
+        .filter(|added| added.preview.is_some())
+        .map(|added| added.bytes)
+        .sum::<usize>();
+    if attachment.preview.is_some()
+        && total.saturating_add(attachment.bytes) > MAX_TOTAL_ATTACHMENT_BYTES
+    {
         return Err("Attachments can add up to at most 20 MiB.".into());
     }
     Ok(())
@@ -19217,7 +19227,9 @@ fn read_attachments(paths: Vec<PathBuf>, mut room: DraftRoom) -> Vec<Result<Atta
             }
             room.slots -= 1;
             room.images -= usize::from(image);
-            room.bytes = room.bytes.saturating_sub(attachment.bytes);
+            if image {
+                room.bytes = room.bytes.saturating_sub(attachment.bytes);
+            }
             Ok(attachment)
         });
         read.push(attachment);
@@ -19247,8 +19259,7 @@ fn open_without_waiting(path: &Path) -> std::io::Result<fs::File> {
     options.open(path)
 }
 
-/// One file the user chose to attach, read whole if it is at most `room`
-/// bytes. What was opened is checked, not the path, so a FIFO or device that
+/// One file the user chose to attach. `room` bounds only PNG image bytes. What was opened is checked, not the path, so a FIFO or device that
 /// takes the file's place cannot stall the read.
 fn read_attachment(path: &Path, room: usize) -> Result<Attachment, String> {
     let name = path
@@ -19268,25 +19279,27 @@ fn read_attachment(path: &Path, room: usize) -> Result<Attachment, String> {
     if !metadata.is_file() {
         return Err(format!("{name} is not a file."));
     }
-    let too_large = || format!("{name} is larger than 10 MiB.");
-    let over_total = || "Attachments can add up to at most 20 MiB.".to_owned();
-    if metadata.len() > MAX_ATTACHMENT_BYTES as u64 {
-        return Err(too_large());
-    }
-    if metadata.len() > room as u64 {
-        return Err(over_total());
-    }
-    // The file may have grown since it was measured.
-    let limit = room.min(MAX_ATTACHMENT_BYTES);
-    let mut bytes = Vec::new();
-    file.take(limit as u64 + 1)
-        .read_to_end(&mut bytes)
+    let mut file = file;
+    let mut signature = [0; 8];
+    let image = file.read_exact(&mut signature).is_ok() && signature == *b"\x89PNG\r\n\x1a\n";
+    use std::io::{Seek as _, SeekFrom};
+    file.seek(SeekFrom::Start(0))
         .map_err(|_| format!("{name} could not be read."))?;
-    if bytes.len() > MAX_ATTACHMENT_BYTES {
-        return Err(too_large());
-    }
-    if bytes.len() > limit {
-        return Err(over_total());
+    let mut bytes = Vec::new();
+    if image {
+        let limit = room.min(MAX_ATTACHMENT_BYTES);
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| format!("{name} could not be read."))?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(format!("{name} is larger than 10 MiB."));
+        }
+        if bytes.len() > room {
+            return Err("Attached images can add up to at most 20 MiB.".into());
+        }
+    } else {
+        file.read_to_end(&mut bytes)
+            .map_err(|_| format!("{name} could not be read."))?;
     }
     Ok(Attachment::from_file(name, bytes))
 }

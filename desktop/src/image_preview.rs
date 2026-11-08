@@ -1384,13 +1384,8 @@ mod tests {
             );
             let large = || Attachment::from_file("large.bin", vec![0; MAX_ATTACHMENT_BYTES]);
             desktop.add_attachment(large()).unwrap();
-            assert!(
-                desktop
-                    .add_attachment(large())
-                    .unwrap_err()
-                    .contains("20 MiB")
-            );
-            for index in 0..5 {
+            desktop.add_attachment(large()).unwrap();
+            for index in 0..4 {
                 desktop
                     .add_attachment(Attachment::from_file(format!("{index}.txt"), vec![1]))
                     .unwrap();
@@ -1527,34 +1522,15 @@ mod tests {
                 .iter()
                 .map(|attachment| attachment.name.as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(names, ["sent.bin", "fits.bin"]);
-            assert!(
-                desktop
-                    .model
-                    .connection_error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("over.bin"))
-            );
+            assert_eq!(names, ["sent.bin", "fits.bin", "over.bin"]);
+            assert!(desktop.model.connection_error.is_none());
         });
     }
 
-    #[gpui::test]
-    fn a_draft_too_large_for_one_message_says_so_instead_of_sending(cx: &mut gpui::TestAppContext) {
-        let (desktop, cx) = composer_with_images(cx, &[]);
-        desktop.update(cx, |desktop, cx| {
-            let big = |name: &str| Attachment::from_file(name, vec![0; MAX_ATTACHMENT_BYTES]);
-            desktop.model.draft_attachments =
-                vec![big("one.bin"), big("two.bin"), big("three.bin")];
-            desktop.model.connection_error = None;
-            desktop.send_composer(cx);
-            let error = desktop.model.connection_error.clone().unwrap_or_default();
-            assert!(
-                error.contains("20 MiB") && error.contains("Remove some"),
-                "{error}"
-            );
-            assert_eq!(desktop.model.draft_attachments.len(), 3);
-        });
-        assert!(message_fits(&[]).is_ok());
+    #[test]
+    fn files_above_the_old_total_fit_one_message() {
+        let big = |name: &str| Attachment::from_file(name, vec![0; MAX_ATTACHMENT_BYTES + 1]);
+        assert!(message_fits(&[big("one.zip"), big("two.zip"), big("three.zip")]).is_ok());
     }
 
     #[gpui::test]
@@ -1599,7 +1575,7 @@ mod tests {
             (read.name.as_str(), read.mime.as_str()),
             ("Report.pdf", "application/pdf")
         );
-        assert!(read_attachment(&report, 7).unwrap_err().contains("20 MiB"));
+        assert!(read_attachment(&report, 0).is_ok());
         assert!(
             read_attachment(&root, MAX_TOTAL_ATTACHMENT_BYTES)
                 .unwrap_err()
@@ -1610,10 +1586,9 @@ mod tests {
             .unwrap()
             .set_len(MAX_ATTACHMENT_BYTES as u64 + 1)
             .unwrap();
-        assert!(
-            read_attachment(&large, MAX_TOTAL_ATTACHMENT_BYTES)
-                .unwrap_err()
-                .contains("larger than 10 MiB")
+        assert_eq!(
+            read_attachment(&large, 0).unwrap().bytes,
+            MAX_ATTACHMENT_BYTES + 1
         );
         #[cfg(unix)]
         {
@@ -1650,12 +1625,12 @@ mod tests {
         assert_eq!(read.len(), 4);
         assert!(read[0].is_ok() && read[1].is_err() && read[2].is_ok());
         assert!(read[3].as_ref().unwrap_err().contains("10 attachments"));
-        // The byte budget shrinks with each file read.
+        // Files do not consume the image byte budget.
         let small = root.join("small.txt");
         fs::write(&small, [1; 6]).unwrap();
         let read = read_attachments(vec![small.clone(), small.clone()], room(10, 4, 10));
         assert!(read[0].is_ok());
-        assert!(read[1].as_ref().unwrap_err().contains("20 MiB"));
+        assert!(read[1].is_ok());
         // An image with no image slot left is refused without taking the slot
         // a file after it can still use.
         let shot = root.join("shot.png");

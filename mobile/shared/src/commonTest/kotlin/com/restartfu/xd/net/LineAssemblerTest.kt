@@ -6,6 +6,16 @@ import kotlin.test.assertFailsWith
 
 class LineAssemblerTest {
     @Test
+    fun acceptsFramesAboveTheFormer96MiBLimit() {
+        val assembler = LineAssembler()
+        val chunk = ByteArray(1024 * 1024) { 'x'.code.toByte() }
+        repeat(97) { assertEquals(emptyList(), assembler.append(chunk)) }
+        val line = assembler.append(byteArrayOf(0x0a)).single()
+        assertEquals(97 * 1024 * 1024, line.length)
+        assertEquals('x', line.last())
+    }
+
+    @Test
     fun splitsSeveralLinesAndDropsEmptyOnes() {
         val assembler = LineAssembler()
 

@@ -13,8 +13,9 @@ members unless explicitly documented otherwise.
 - Application data is UTF-8 JSON Lines: one JSON object followed by `LF`
   (`0x0a`). Empty lines are ignored.
 - Requests, replies, and events share one ordered, full-duplex stdio stream.
-- Frames are limited to 96 MiB. An oversized frame is a protocol error and
-  closes the connection.
+- Unauthenticated frames are limited to 64 KiB. Authenticated frames have no
+  configured byte cap; transfers are buffered in memory and remain subject to
+  available memory and platform allocation limits.
 - The transport must keep draining output while connected. A stalled reader is
   disconnected rather than allowed to block the host indefinitely.
 - JSON member absence and JSON `null` are different. Unless an operation says
@@ -585,8 +586,8 @@ Each attachment is a file with a `name`, a media type in `mime`, and base64
 ]}
 ```
 
-At most 10 attachments, of which at most 4 are images, each at most 10 MiB and
-20 MiB in total. An `image/png` attachment must be a PNG and is passed to the
+At most 10 attachments, of which at most 4 are images. Files have no per-file
+or combined byte cap. Images are each at most 10 MiB and 20 MiB in total. An `image/png` attachment must be a PNG and is passed to the
 agent as an image, on a line `[image: <host path>]`. Any other media type is a
 file: the host writes it under its sent name, the last component of `name`, in
 a private directory of its own and appends `[file: <host path>]`, which the
@@ -623,10 +624,12 @@ last-writer-wins: each list a client sends replaces the one before it. Without
 list replaces only the draft's images: the files the client cannot see are kept
 after them. The client's own list keeps to
 a message's limits, and a draft's files and images each keep to their own: at
-most 10 files and 20 MiB of them, and at most 4 images and 20 MiB of those, so
+most 10 files with no byte cap, and at most 4 images and 20 MiB of those, so
 files kept beside a client's images never refuse them; a message sent from it
 must still fit a message's limits. A
-client that shows only images skips the other files. The `chat` snapshot returns `draft`,
+client that shows only images skips the other files. Large attachment drafts are
+stored in bounded SQLite chunks (schema 26) so no single SQLite value contains
+the full file payload. The `chat` snapshot returns `draft`,
 `draft_revision`, `draft_attachments`, and `draft_files` so a newly connected
 device starts with the same composer. `draft_attachments` holds only the draft's
 PNG images and `draft_files` its other files, so a client that knows only images

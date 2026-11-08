@@ -2,7 +2,9 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 
 pub const UNAUTHENTICATED_FRAME_LIMIT: usize = 64 * 1024;
-pub const AUTHENTICATED_FRAME_LIMIT: usize = 96 * 1024 * 1024;
+// Authenticated file transfers have no configured byte limit. Leave room
+// for the reader's extra byte; allocation capacity is the platform limit.
+pub const AUTHENTICATED_FRAME_LIMIT: usize = isize::MAX as usize - 1;
 const REQUEST_ID: &str = "_xd_request";
 
 #[derive(Debug, Clone, PartialEq)]

@@ -79,7 +79,9 @@ use terminal::TerminalManager;
 use usage::UsageService;
 use workflow::WorkflowStatuses;
 
-pub const FRAME_LIMIT: usize = 96 * 1024 * 1024;
+// Authenticated file transfers have no configured byte limit. Leave room
+// for the reader's extra byte; allocation capacity is the platform limit.
+pub const FRAME_LIMIT: usize = isize::MAX as usize - 1;
 pub const AUTH_FRAME_LIMIT: usize = 64 * 1024;
 const REQUEST_ID: &str = "_xd_request";
 
