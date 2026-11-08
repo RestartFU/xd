@@ -602,10 +602,12 @@ leaves the draft's attachments alone.
 
 Desktop clients may provide `worktree_name`, `worktree_backend`, and
 `worktree_model` when the chat is configured to create a new worktree. The
-name is used directly as the hint when supplied; otherwise the host uses that
-configured Git-writing assistant to choose a short worktree name before the
-first turn. Older or other clients may omit them and the host falls back to
-a prompt slug.
+name is used directly as the hint when supplied; otherwise the host asks a
+low-cost model to choose a short worktree name before the first turn: the
+`worktree_model` when given, or else the assistant's naming model from
+`chat-title-settings` (whether or not titles are enabled), once its CLI reports
+offering it. Without either, or for older or other clients that omit them, the
+host falls back to a prompt slug.
 
 ### `set-draft`
 

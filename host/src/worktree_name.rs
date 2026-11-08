@@ -14,23 +14,26 @@ pub(crate) fn generate(spec: WorktreeNameSpec) -> Result<String, String> {
         spec.prompt
     );
     let empty_environment = Vec::new();
-    let command = AgentCommand {
+    let mut command = AgentCommand {
         backend: &spec.backend,
         prompt: &prompt,
         system_prompt: Some(SYSTEM_PROMPT),
         workdir: &spec.workdir,
         model: &spec.model,
-        effort: &spec.effort,
+        effort: agent_text::LOW_EFFORT,
         access: "read-only",
         fast: false,
         session_id: None,
         environment: &empty_environment,
     }
     .build();
+    // The send waits on this, so it loads nothing a name does not need.
+    agent_text::keep_the_run_minimal(&mut command, &spec.backend, false);
+    let input = agent_text::turn_input(&spec.backend, &prompt);
     let output = agent_text::run(
         command,
         &spec.backend,
-        None,
+        input,
         NAME_TIMEOUT,
         "worktree naming",
     )?;
@@ -44,8 +47,11 @@ fn parse(output: &str) -> Result<String, String> {
     let end = output
         .rfind('}')
         .ok_or("The assistant returned an incomplete worktree name.")?;
-    let value: Value = serde_json::from_str(&output[start..=end])
-        .map_err(|_| "The assistant returned an invalid worktree name.".to_string())?;
+    // The closing brace can come first in a malformed reply.
+    let value: Value = output
+        .get(start..=end)
+        .and_then(|json| serde_json::from_str(json).ok())
+        .ok_or("The assistant returned an invalid worktree name.")?;
     let name = value
         .get("name")
         .or_else(|| value.get("title"))
@@ -80,6 +86,7 @@ mod tests {
     fn rejects_missing_invalid_and_oversized_names() {
         assert!(parse("nothing").is_err());
         assert!(parse("{}").is_err());
+        assert!(parse("}\n{").is_err(), "the closing brace comes first");
         assert!(parse(&format!("{{\"name\":\"{}\"}}", "x".repeat(121))).is_err());
     }
 }

@@ -472,7 +472,10 @@ internal fun ProjectContextDialog(
     )
 }
 
-/** The desktop's Chat titles settings: titling on or off, and each assistant's title model. */
+/**
+ * The desktop's Titles and names settings: titling on or off, and each
+ * assistant's naming model, which also names new worktrees.
+ */
 @Composable
 internal fun ChatTitleSettings(model: MainViewModel) {
     val settings by model.chatTitles.collectAsStateWithLifecycle()
@@ -497,14 +500,14 @@ internal fun ChatTitleSettings(model: MainViewModel) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
             Text("Generate chat titles", fontWeight = FontWeight.SemiBold)
             Text(
-                "Name a new chat from its first message, using a low-cost model.",
+                "Name a new chat from its first message, using its naming model.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.bodySmall,
             )
         }
         Switch(checked = current.enabled, onCheckedChange = model::setChatTitlesEnabled)
     }
-    if (current.enabled && catalog.isEmpty() && catalogError != null) {
+    if (catalog.isEmpty() && catalogError != null) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 catalogError.orEmpty(),
@@ -515,16 +518,16 @@ internal fun ChatTitleSettings(model: MainViewModel) {
             TextButton(onClick = model::loadChatTitles) { Text("Try again") }
         }
     }
-    if (current.enabled) {
-        listOf("codex" to "Codex title model", "claude" to "Claude title model").forEach { (backend, label) ->
-            if (current.models.containsKey(backend)) {
-                TitleModelRow(
-                    label = label,
-                    selected = current.models[backend],
-                    choices = catalog.firstOrNull { it.id == backend }?.models.orEmpty().map { it.id to it.name },
-                    onChoose = { model.setChatTitleModel(backend, it) },
-                )
-            }
+    // Shown with titles off too: new worktrees are still named with these.
+    listOf("codex" to "Codex", "claude" to "Claude").forEach { (backend, name) ->
+        if (current.models.containsKey(backend)) {
+            TitleModelRow(
+                label = "$name naming model",
+                detail = "Titles $name chats and names their worktrees.",
+                selected = current.models[backend],
+                choices = catalog.firstOrNull { it.id == backend }?.models.orEmpty().map { it.id to it.name },
+                onChoose = { model.setChatTitleModel(backend, it) },
+            )
         }
     }
     error?.let {
@@ -538,13 +541,21 @@ internal fun ChatTitleSettings(model: MainViewModel) {
 @Composable
 private fun TitleModelRow(
     label: String,
+    detail: String,
     selected: String?,
     choices: List<Pair<String, String>>,
     onChoose: (String?) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(label, fontWeight = FontWeight.SemiBold)
+            Text(
+                detail,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         Box {
             TextButton(onClick = { open = true }, enabled = choices.isNotEmpty()) {
                 Text(

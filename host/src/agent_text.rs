@@ -1,15 +1,24 @@
 //! Runs one short, unattended assistant turn and collects its reply.
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc::{self, TryRecvError},
     thread,
     time::{Duration, Instant},
 };
 
-use crate::agent::{AgentEvent, AgentParser};
+use crate::agent::{AgentCommand, AgentEvent, AgentParser};
 
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+/// The longest event line read. Claude's init line lists every tool, skill and
+/// command, so it is the longest by far, and stays well under this.
+const LINE_LIMIT: usize = 4 * 1024 * 1024;
+/// Everything a run may print, events and all, before it is stopped.
+const STREAM_LIMIT: usize = 16 * 1024 * 1024;
+
+/// The lowest effort every assistant accepts. Titles, names and Git messages
+/// need no reasoning, and thinking tokens are most of what a higher one costs.
+pub(crate) const LOW_EFFORT: &str = "low";
 
 struct AgentOutput {
     text: String,
@@ -71,28 +80,36 @@ pub(crate) fn run(
         match output_receiver.try_recv() {
             Ok(result) => {
                 if let Err(error) = &result {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    stop(&mut child);
                     return Err(error.clone());
                 }
                 output = Some(result);
             }
             Err(TryRecvError::Disconnected) if output.is_none() => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop(&mut child);
                 return Err(format!("Cannot read {backend} output."));
             }
             Err(_) => {}
         }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("Cannot wait for {backend}: {error}"))?
-        {
-            break status;
+        let exited = match has_exited(&mut child) {
+            Ok(exited) => exited,
+            // A signal cut the poll short; the next one asks again.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => false,
+            Err(error) => {
+                stop(&mut child);
+                return Err(format!("Cannot wait for {backend}: {error}"));
+            }
+        };
+        if exited {
+            // Whatever it started goes with it: a hook still holding the pipes
+            // would keep running, and keep the threads reading them waiting.
+            kill_group(&child);
+            break child
+                .wait()
+                .map_err(|error| format!("Cannot wait for {backend}: {error}"))?;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop(&mut child);
             return Err(format!("{task} timed out."));
         }
         thread::sleep(Duration::from_millis(10));
@@ -115,14 +132,159 @@ pub(crate) fn run(
     Ok(output.text)
 }
 
+/// Codex built-ins that add tools a short run must not use.
+const CODEX_TOOL_FEATURES: &[&str] = &[
+    "shell_tool",
+    "unified_exec",
+    "apps",
+    "plugins",
+    "multi_agent",
+    "view_image",
+    "image_generation",
+    "browser_use",
+    "computer_use",
+    "skill_search",
+    "tool_suggest",
+    "goals",
+    "sleep_tool",
+];
+
+/// The line to write on stdin, for a backend that takes its turns there. Claude
+/// reads its prompt only from stdin, so without this it exits having done nothing.
+pub(crate) fn turn_input(backend: &str, prompt: &str) -> Option<String> {
+    AgentCommand::keeps_its_process(backend).then(|| AgentCommand::encode_turn(prompt))
+}
+
+/// Drops what a short, unattended run does not need, for cost and speed: tools,
+/// MCP servers and their schemas, slash commands, and a session left behind in
+/// the assistant's own history.
+///
+/// Without `project_instructions` the run also skips CLAUDE.md, AGENTS.md, the
+/// user's hooks, and Claude's settings, which carry them. With it, Claude still loads
+/// the repository's own settings and instructions, and Codex its AGENTS.md, so
+/// conventions written there still apply.
+pub(crate) fn keep_the_run_minimal(
+    command: &mut Command,
+    backend: &str,
+    project_instructions: bool,
+) {
+    match backend {
+        "claude" => {
+            command.args([
+                "--tools",
+                "",
+                "--no-session-persistence",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--setting-sources",
+                if project_instructions {
+                    "project,local"
+                } else {
+                    ""
+                },
+            ]);
+        }
+        "codex" => {
+            command.args([
+                "--ephemeral",
+                "-c",
+                "mcp_servers={}",
+                // Web search is a setting of its own, not a feature.
+                "-c",
+                "web_search=\"disabled\"",
+            ]);
+            // Codex has no switch for all tools, so each built-in goes off by
+            // name; a CLI that lacks one ignores it. The schemas are most of
+            // what a one-line reply would otherwise send.
+            for feature in CODEX_TOOL_FEATURES {
+                command.args(["-c", &format!("features.{feature}=false")]);
+            }
+            if !project_instructions {
+                command.args([
+                    "-c",
+                    "project_doc_max_bytes=0",
+                    "-c",
+                    "features.hooks=false",
+                ]);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether the child has exited, leaving it unreaped on Unix: until it is
+/// reaped its pid stays taken, so its process group can still be signalled
+/// without reaching anyone else.
+#[cfg(unix)]
+fn has_exited(child: &mut Child) -> std::io::Result<bool> {
+    // SAFETY: waitid only writes the zeroed siginfo it is given, and WNOWAIT
+    // leaves the child for the Child handle to reap.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: waitid filled the siginfo, or left it zeroed when nothing exited.
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+#[cfg(not(unix))]
+fn has_exited(child: &mut Child) -> std::io::Result<bool> {
+    child.try_wait().map(|status| status.is_some())
+}
+
+/// Signals everything in the child's process group, which AgentCommand::build
+/// makes the child lead. The child must not have been reaped yet.
+fn kill_group(child: &Child) {
+    // SAFETY: the child leads a process group of its own and is unreaped, so
+    // the group id cannot have passed to anyone else.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
+/// Ends a run that is still going, with anything it started.
+fn stop(child: &mut Child) {
+    kill_group(child);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn read_output(stdout: impl Read, backend: &str) -> Result<AgentOutput, String> {
     let mut parser = AgentParser::new(backend)?;
     let mut output = String::new();
     let mut completed = false;
     let mut latest_error = None;
-    for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|error| format!("Cannot read agent output: {error}"))?;
-        for event in parser.feed(&line) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    let mut total = 0_usize;
+    loop {
+        line.clear();
+        // Bounded before it is read, so a runaway line cannot grow without end.
+        let read = reader
+            .by_ref()
+            .take(LINE_LIMIT as u64 + 1)
+            .read_until(b'\n', &mut line)
+            .map_err(|error| format!("Cannot read agent output: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read);
+        if line.len() > LINE_LIMIT || total > STREAM_LIMIT {
+            return Err("The assistant's output is too large.".into());
+        }
+        let line = String::from_utf8_lossy(&line);
+        for event in parser.feed(line.trim_end_matches(['\n', '\r'])) {
             match event {
                 AgentEvent::Text(text) | AgentEvent::TextDelta(text) => {
                     if output.len().saturating_add(text.len()) > OUTPUT_LIMIT {
@@ -154,4 +316,138 @@ fn read_bounded(mut reader: impl Read) -> String {
         retained.extend_from_slice(&chunk[..count.min(remaining)]);
     }
     String::from_utf8_lossy(&retained).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(backend: &str, project_instructions: bool) -> Vec<String> {
+        let mut command = Command::new("assistant");
+        keep_the_run_minimal(&mut command, backend, project_instructions);
+        command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn keeps_short_runs_out_of_history_and_free_of_tools() {
+        let claude = args("claude", false);
+        assert!(claude.contains(&"--no-session-persistence".to_owned()));
+        assert!(claude.contains(&"--strict-mcp-config".to_owned()));
+        assert!(claude.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert!(
+            claude
+                .windows(2)
+                .any(|pair| pair == ["--setting-sources", ""])
+        );
+        let codex = args("codex", false);
+        assert!(codex.contains(&"--ephemeral".to_owned()));
+        assert!(codex.contains(&"mcp_servers={}".to_owned()));
+        assert!(codex.contains(&"project_doc_max_bytes=0".to_owned()));
+        assert!(codex.contains(&"features.shell_tool=false".to_owned()));
+        assert!(codex.contains(&"features.unified_exec=false".to_owned()));
+        assert!(codex.contains(&"web_search=\"disabled\"".to_owned()));
+        assert!(codex.contains(&"features.hooks=false".to_owned()));
+        assert!(args("jcode", false).is_empty());
+    }
+
+    #[test]
+    fn keeps_the_repository_instructions_when_asked() {
+        let claude = args("claude", true);
+        assert!(
+            claude
+                .windows(2)
+                .any(|pair| pair == ["--setting-sources", "project,local"])
+        );
+        assert!(claude.windows(2).any(|pair| pair == ["--tools", ""]));
+        let codex = args("codex", true);
+        assert!(codex.contains(&"--ephemeral".to_owned()));
+        assert!(!codex.contains(&"project_doc_max_bytes=0".to_owned()));
+        assert!(codex.contains(&"features.shell_tool=false".to_owned()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_timed_out_run_takes_what_it_started_with_it() {
+        use std::os::unix::process::CommandExt;
+        let directory = std::env::temp_dir().join(format!("xd-agent-text-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("helper.pid");
+        // A helper that inherits stdout, as a hook started by the CLI would.
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "sleep 60 & echo $! > {}; sleep 60",
+                pid_file.display()
+            ))
+            .process_group(0);
+        let error = run(command, "codex", None, Duration::from_millis(500), "naming").unwrap_err();
+        assert_eq!(error, "naming timed out.");
+        assert_helper_ends(&pid_file);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_that_exits_takes_what_it_started_with_it() {
+        use std::os::unix::process::CommandExt;
+        let directory =
+            std::env::temp_dir().join(format!("xd-agent-text-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("helper.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "sleep 60 & echo $! > {}; exit 0",
+                pid_file.display()
+            ))
+            .process_group(0);
+        assert!(run(command, "codex", None, Duration::from_secs(30), "naming").is_err());
+        assert_helper_ends(&pid_file);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// Waits for the helper whose pid is in `pid_file` to be gone, or to be a
+    /// zombie waiting for whoever adopted it to reap it.
+    #[cfg(target_os = "linux")]
+    fn assert_helper_ends(pid_file: &std::path::Path) {
+        let helper = std::fs::read_to_string(pid_file).unwrap();
+        let stat = format!("/proc/{}/stat", helper.trim());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while std::fs::read_to_string(&stat)
+            .is_ok_and(|stat| !stat.rsplit(") ").next().unwrap_or("").starts_with('Z'))
+        {
+            assert!(Instant::now() < deadline, "the helper outlived its run");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn reads_events_line_by_line_and_refuses_a_runaway_line() {
+        let events = concat!(
+            r#"{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"{\"name\":\"x\"}"}}"#,
+            "\r\n",
+            r#"{"type":"turn.completed","usage":{}}"#,
+        );
+        let output = read_output(events.as_bytes(), "codex").unwrap();
+        assert!(output.completed);
+        assert_eq!(output.text, r#"{"name":"x"}"#);
+        let runaway = vec![b'x'; LINE_LIMIT + 2];
+        assert_eq!(
+            read_output(runaway.as_slice(), "codex").err().unwrap(),
+            "The assistant's output is too large."
+        );
+    }
+
+    #[test]
+    fn writes_the_prompt_on_stdin_only_for_claude() {
+        let line = turn_input("claude", "name it").unwrap();
+        assert!(line.contains("name it"));
+        assert!(turn_input("codex", "name it").is_none());
+        assert!(turn_input("jcode", "name it").is_none());
+    }
 }

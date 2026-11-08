@@ -179,7 +179,7 @@ class MainViewModel @JvmOverloads constructor(
     val signInDrafts: StateFlow<Map<String, SignInDraft>> = _signInDrafts.asStateFlow()
     private var accountActionSucceeded = 0L
     private var accountActionFailed = 0L
-    /** Each assistant's models, for choosing a title model. */
+    /** Each assistant's models, for choosing its naming model. */
     val hostCatalog: StateFlow<List<BackendReply>> = _catalog.asStateFlow()
     private var chatTitleRequests = 0L
     /** Settings has asked for the title settings, so a reconnect reads them again. */
@@ -408,7 +408,7 @@ class MainViewModel @JvmOverloads constructor(
 
     /** Null goes back to the host's built-in choice, which follows its default as that changes. */
     fun setChatTitleModel(backend: String, model: String?) =
-        chatTitleRequest("Could not change the title model", write = true) { client.setChatTitleModel(backend, model) }
+        chatTitleRequest("Could not change the naming model", write = true) { client.setChatTitleModel(backend, model) }
 
     init {
         viewModelScope.launch {

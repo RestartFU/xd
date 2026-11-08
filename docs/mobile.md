@@ -69,8 +69,9 @@ it is ahead or behind, and what is uncommitted; **Commit all** commits every cha
 with the message typed beside it. When the pushed branch has a pull request, its
 number links to it from Changes and from the session header.
 
-Settings also manages the host as the desktop does: **Chat titles** turns titling
-on and picks each assistant's title model, **Assistant accounts** signs the host's
+Settings also manages the host as the desktop does: **Generate chat titles** turns
+titling on, each assistant's **naming model** titles its chats and names new
+worktrees (chosen even with titling off), **Assistant accounts** signs the host's
 Codex and Claude CLIs in and updates them, and **Agent secrets** edits the
 environment variables agents get; secret values are write-only and never sent
 back. A project's **⋮** menu edits its **Project context** and its own secrets.

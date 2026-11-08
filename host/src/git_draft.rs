@@ -1,23 +1,28 @@
 use std::{
-    io::{BufRead, BufReader, Read},
-    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use serde_json::{Value, json};
 
-use crate::{
-    EventBus, StateStore,
-    agent::{AgentCommand, AgentEvent, AgentParser},
-    storage::GitDraftSpec,
-};
+use crate::{EventBus, StateStore, agent::AgentCommand, agent_text, storage::GitDraftSpec};
 
 const MAX_ACTIVE_DRAFTS: usize = 2;
-const MAX_DRAFT_OUTPUT_BYTES: usize = 1024 * 1024;
+/// A stalled run would otherwise hold its slot until the host restarts.
+const DRAFT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Holds a draft's slot, and gives it back even if the run panics.
+struct ActiveDraft(Arc<AtomicUsize>);
+
+impl Drop for ActiveDraft {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct GitDraftService {
@@ -41,23 +46,21 @@ impl GitDraftService {
             .clone()
             .ok_or_else(|| "Rust host state storage is not configured.".to_string())?;
         reserve_slot(&self.active)?;
+        let slot = ActiveDraft(self.active.clone());
         let request = request.clone();
         let service = self.clone();
-        if let Err(error) = thread::Builder::new()
+        thread::Builder::new()
             .name("xd-git-draft".into())
             .spawn(move || {
+                let _slot = slot;
                 let event = match store.prepare_git_draft(&request) {
                     Ok(spec) => service.run(spec),
                     Err(error) => failure_event(&request, error.to_string()),
                 };
                 service.events.publish(event);
-                service.active.fetch_sub(1, Ordering::AcqRel);
             })
-        {
-            self.active.fetch_sub(1, Ordering::AcqRel);
-            return Err(format!("Cannot start Git draft worker: {error}"));
-        }
-        Ok(())
+            .map(|_| ())
+            .map_err(|error| format!("Cannot start Git draft worker: {error}"))
     }
 
     fn run(&self, spec: GitDraftSpec) -> Value {
@@ -68,69 +71,19 @@ impl GitDraftService {
             system_prompt: Some(&spec.system_prompt),
             workdir: &spec.workdir,
             model: &spec.model,
-            effort: &spec.effort,
+            effort: agent_text::LOW_EFFORT,
             access: "read-only",
             fast: false,
             session_id: None,
             environment: &empty_environment,
         }
         .build();
-        let result = (|| -> Result<(String, String), String> {
-            let mut child = command
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .map_err(|error| format!("Cannot start {}: {error}", spec.backend))?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| format!("Cannot read {} output.", spec.backend))?;
-            let mut stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| format!("Cannot read {} errors.", spec.backend))?;
-            let stderr_reader = thread::spawn(move || {
-                let mut output = String::new();
-                let _ = stderr
-                    .by_ref()
-                    .take(MAX_DRAFT_OUTPUT_BYTES as u64)
-                    .read_to_string(&mut output);
-                output
-            });
-            let mut parser = AgentParser::new(&spec.backend)?;
-            let mut output = String::new();
-            let mut completed = false;
-            let mut latest_error = None;
-            for line in BufReader::new(stdout).lines() {
-                let line = line.map_err(|error| format!("Cannot read agent output: {error}"))?;
-                for event in parser.feed(&line) {
-                    match event {
-                        AgentEvent::Text(text) | AgentEvent::TextDelta(text) => {
-                            if output.len().saturating_add(text.len()) > MAX_DRAFT_OUTPUT_BYTES {
-                                return Err("The generated Git draft is too large.".into());
-                            }
-                            output.push_str(&text);
-                        }
-                        AgentEvent::Completed => completed = true,
-                        AgentEvent::Error(error) => latest_error = Some(error),
-                        _ => {}
-                    }
-                }
-            }
-            let status = child
-                .wait()
-                .map_err(|error| format!("Cannot wait for {}: {error}", spec.backend))?;
-            let stderr = stderr_reader.join().unwrap_or_default();
-            if !status.success() || !completed {
-                return Err(latest_error
-                    .or_else(|| stderr.lines().next_back().map(str::to_owned))
-                    .unwrap_or_else(|| {
-                        format!("{} did not complete the Git draft.", spec.backend)
-                    }));
-            }
-            parse_draft(&output)
-        })();
+        // A draft follows the repository's own conventions, so its instructions
+        // stay; nothing else the run would load helps describe a diff.
+        agent_text::keep_the_run_minimal(&mut command, &spec.backend, true);
+        let input = agent_text::turn_input(&spec.backend, &spec.prompt);
+        let result = agent_text::run(command, &spec.backend, input, DRAFT_TIMEOUT, "Git drafting")
+            .and_then(|output| parse_draft(&output));
         match result {
             Ok((title, body)) => json!({
                 "event": "git-draft-finished",
@@ -180,8 +133,11 @@ fn parse_draft(output: &str) -> Result<(String, String), String> {
     let end = output
         .rfind('}')
         .ok_or("The agent returned incomplete JSON.")?;
-    let value: Value = serde_json::from_str(&output[start..=end])
-        .map_err(|_| "The agent returned an invalid JSON draft.".to_string())?;
+    // The closing brace can come first in a malformed reply.
+    let value: Value = output
+        .get(start..=end)
+        .and_then(|json| serde_json::from_str(json).ok())
+        .ok_or("The agent returned an invalid JSON draft.")?;
     let title = value
         .get("title")
         .and_then(Value::as_str)

@@ -8,20 +8,21 @@ const SETTINGS_SECTIONS: [(&str, &str); 5] = [
     ("Shortcuts", "Keep your hands on the keyboard."),
 ];
 
-/// The assistants a title model can be chosen for, each with its row's element
-/// id, title, and description.
+/// The assistants a naming model can be chosen for, each with its row's element
+/// id, title, and description. The host titles chats and names new worktrees
+/// with the same low-cost model.
 const CHAT_TITLE_BACKENDS: [(&str, &str, &str, &str); 2] = [
     (
         "codex",
         "workspace-settings-chat-title-codex",
-        "Codex title model",
-        "Used to name Codex chats.",
+        "Codex naming model",
+        "Titles Codex chats and names their worktrees.",
     ),
     (
         "claude",
         "workspace-settings-chat-title-claude",
-        "Claude title model",
-        "Used to name Claude chats.",
+        "Claude naming model",
+        "Titles Claude chats and names their worktrees.",
     ),
 ];
 
@@ -165,20 +166,20 @@ impl XdDesktop {
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let mut section = div().child(settings_heading("Chat titles", colors)).child(
-            settings_row(
-                "workspace-settings-chat-titles",
-                "Generate chat titles",
-                "Name a new chat from its first message, using a low-cost model.",
-                colors,
-            )
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_titles(cx)))
-            .child(settings_switch(colors, settings.enabled)),
-        );
-        if !settings.enabled {
-            return section;
-        }
+        let mut section = div()
+            .child(settings_heading("Titles and names", colors))
+            .child(
+                settings_row(
+                    "workspace-settings-chat-titles",
+                    "Generate chat titles",
+                    "Name a new chat from its first message, using its naming model.",
+                    colors,
+                )
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_chat_titles(cx)))
+                .child(settings_switch(colors, settings.enabled)),
+            );
+        // Shown with titles off too: new worktrees are still named with these.
         for (backend, row, title, description) in CHAT_TITLE_BACKENDS {
             let catalog = self
                 .model
