@@ -754,7 +754,7 @@ or Codex running `claude -p`. Its record has the same shape, keyed by the
 command's tool call. `provider` is the assistant doing the work and `launcher`
 the one whose shell runs it; `launcher` is absent for an agent started through
 a subagent tool. The command's output, without any wrapper footer, is its
-`summary`. Such an agent has no `steps`, because its tool calls happen in
+`summary`. Such an agent's `steps` is empty, because its tool calls happen in
 another process.
 
 ### `set-option`
