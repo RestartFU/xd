@@ -209,6 +209,41 @@ chats still answer `chat` and `messages` and can still be opened. List settled
 sessions apart from active ones, most recently settled first. Clients that
 ignore these members keep listing settled sessions with the active ones.
 
+### `background-task-output`
+
+Read-only request: `{"op":"background-task-output","chat":"<chat-id>"}`.
+Optionally pass `"task":"<task-id>"` to read only that live task. The host accepts
+ids, never client-supplied file paths. This reads the current kept process only;
+completed tasks and tasks from an exited or replaced process are absent.
+
+```json
+{"ok":true,"chat":"c1","tasks":[{
+  "id":"watch-1","kind":"Monitor","description":"Watch CI checks",
+  "started_at":1794140000,"output_file":"/tmp/claude/tasks/watch-1.output",
+  "lines":[{"text":"Checking CI status…","error":false},
+           {"text":"/bin/sh: jq: command not found","error":true}],
+  "truncated":false
+}]}
+```
+
+`started_at` is seconds since the epoch when the host first observed the task.
+Kind and description come from Claude's structured task/tool messages, with
+text parsing as a fallback for older tool results. `output_file` is the absolute
+path Claude reported, or null when it did not report one. The host opens only
+that path, refuses symlinks and non-regular files, and never waits on a FIFO.
+Each snapshot reads at most 4 KiB and returns at most the latest 20 lines,
+including a partial final line. `truncated` indicates older output was omitted.
+`error` is a case-insensitive heuristic for error text, not an exit status.
+An unavailable file has `lines:[]` and a short `output_error`, such as
+`"Output file unavailable."` or `"Output file not reported."`.
+
+Expand the waiting row to show task kind, description, elapsed time and output,
+highlighting error lines. Keep it collapsed by default. Refresh gently (about
+every 2.5 seconds) only while expanded and visible. Output is fetched on demand
+and is not broadcast through the count-only `background-tasks` event. An empty
+`tasks` array means no matching live tasks remain. Older hosts can reject this
+additive operation; show a brief load error without interrupting the chat.
+
 ### `chat`
 
 ```json

@@ -6,6 +6,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.core.app.ApplicationProvider
 import com.restartfu.xd.XdClient
@@ -63,7 +67,13 @@ class ChatScreenshotTest {
     @Test fun phoneWaitingOnBackgroundTasks() =
         shoot("phone-background-dark", MinimalThemePreset.DARK, backgroundTasks = 2)
 
-    private fun shoot(name: String, theme: MinimalThemePreset, backgroundTasks: Int = 0) {
+    @Test fun phoneExpandedBackgroundTasks() =
+        shoot("phone-background-expanded-dark", MinimalThemePreset.DARK, backgroundTasks = 2, expanded = true)
+
+    @Test fun phoneExpandedBackgroundTasksLight() =
+        shoot("phone-background-expanded-light", MinimalThemePreset.LIGHT, backgroundTasks = 2, expanded = true)
+
+    private fun shoot(name: String, theme: MinimalThemePreset, backgroundTasks: Int = 0, expanded: Boolean = false) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val working = backgroundTasks == 0
         val client = XdClient({ ScriptedSocket(working) }, NoCredentials, scope)
@@ -100,6 +110,16 @@ class ChatScreenshotTest {
             Thread.sleep(30)
         }
         check(chat.state.value.visibleItems.size >= 6)
+        if (expanded) {
+            compose.onNodeWithText("Waiting on 2 background tasks").performClick()
+            repeat(30) {
+                compose.mainClock.advanceTimeBy(100)
+                Thread.sleep(30)
+            }
+            compose.mainClock.autoAdvance = true
+            compose.onNodeWithText("/bin/sh: jq: command not found").performScrollTo().assertIsDisplayed()
+            compose.mainClock.autoAdvance = false
+        }
         // Drawn directly: the running turn's animation never lets Compose go
         // idle, which captureToImage waits for.
         org.robolectric.shadows.ShadowLooper.idleMainLooper()
@@ -138,7 +158,7 @@ class ChatScreenshotTest {
                 val request = Json.parseToJsonElement(line).jsonObject
                 val id = request["_xd_request"]?.jsonPrimitive?.longOrNull
                 val op = request["op"]?.jsonPrimitive?.content
-                val body = reply(op).removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
+                val body = reply(op).replace("\n", "").removeSuffix("}") + (if (id != null) ""","_xd_request":$id}""" else "}")
                 Thread { Thread.sleep(5); listener?.onBytes((body + "\n").encodeToByteArray()) }.start()
             }
         }
@@ -146,6 +166,11 @@ class ChatScreenshotTest {
         override fun close() = Unit
 
         private fun reply(op: String?): String = when (op) {
+            "background-task-output" -> """{"ok":true,"chat":"chat","tasks":[
+                {"id":"tests","kind":"Shell","description":"Run tests","started_at":${System.currentTimeMillis() / 1000 - 125},
+                 "lines":[{"text":"Running 42 tests"},{"text":"42 passed; waiting for integration tests"}]},
+                {"id":"watch","kind":"Monitor","description":"Watch CI checks","started_at":${System.currentTimeMillis() / 1000 - 125},
+                 "lines":[{"text":"Checking CI status…"},{"text":"/bin/sh: jq: command not found","error":true}]}]}"""
             "tree" -> """{"ok":true,"folders":[{"id":"folder","name":"xd"}],"chats":[""" +
                 """{"id":"chat","folder":"folder","title":"Fix reconnect backoff","backend":"claude","working":$working}]}"""
             "chat" -> """{"ok":true,"title":"Fix reconnect backoff","backend":"claude","commands":[],"plan":false,""" +

@@ -73,6 +73,9 @@ public class ChatSession internal constructor(
     private var closed = false
 
     /** Drops any speech block that was in progress when speech was disabled. */
+    public suspend fun backgroundTaskOutput(): List<com.restartfu.xd.protocol.BackgroundTaskOutput> =
+        core.read(Ops.backgroundTaskOutput(core.chatId)) { it.decodeReply<com.restartfu.xd.protocol.BackgroundTaskOutputReply>().tasks }
+
     public suspend fun resetSpeech(): Unit = core.resetSpeech()
 
     public suspend fun send(

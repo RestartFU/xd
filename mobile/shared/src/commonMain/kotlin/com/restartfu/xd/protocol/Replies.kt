@@ -605,3 +605,25 @@ public fun InteractionReply.toModel(): com.restartfu.xd.model.PendingInteraction
         patch = present("patch"),
     )
 }
+
+/** A bounded, read-only snapshot of a task still owned by a kept agent process. */
+@Serializable
+public data class BackgroundTaskOutput(
+    val id: String,
+    val kind: String = "Task",
+    val description: String = "Background task",
+    @SerialName("started_at") val startedAt: Long = 0,
+    val lines: List<BackgroundOutputLine> = emptyList(),
+    @SerialName("output_error") val outputError: String? = null,
+    val truncated: Boolean = false,
+)
+
+@Serializable
+public data class BackgroundOutputLine(val text: String, val error: Boolean = false)
+
+@Serializable
+public data class BackgroundTaskOutputReply(
+    val ok: Boolean,
+    val chat: String,
+    val tasks: List<BackgroundTaskOutput> = emptyList(),
+)
