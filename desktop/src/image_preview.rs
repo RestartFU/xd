@@ -87,10 +87,19 @@ struct ViewerLayout {
     content_height: f32,
 }
 
+/// The draft a viewer was opened from. It closes when that draft is no longer
+/// on screen: another chat is selected, or the new chat it belonged to is
+/// created or abandoned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreviewOwner {
+    Chat(String),
+    NewChat(u64),
+}
+
 /// The images as they were when the viewer opened. Like a dialog over the draft,
 /// it does not change under the reader if another device edits that draft.
 pub(super) struct ImagePreview {
-    chat: String,
+    owner: PreviewOwner,
     images: Vec<PreviewImage>,
     index: usize,
     zoom: f32,
@@ -101,9 +110,14 @@ pub(super) struct ImagePreview {
 }
 
 impl ImagePreview {
-    fn new(chat: String, images: Vec<PreviewImage>, index: usize, window: (f32, f32)) -> Self {
+    fn new(
+        owner: PreviewOwner,
+        images: Vec<PreviewImage>,
+        index: usize,
+        window: (f32, f32),
+    ) -> Self {
         Self {
-            chat,
+            owner,
             images,
             index,
             zoom: 1.0,
@@ -354,8 +368,8 @@ fn viewer_button(
 impl XdDesktop {
     /// Each attachment's key: its id, and how many equal ones come before it,
     /// so two copies of one file are still two tiles.
-    fn draft_keys(&self) -> Vec<DraftKey> {
-        let attachments = &self.model.draft_attachments;
+    fn draft_keys(&self, owner: DraftOwner) -> Vec<DraftKey> {
+        let attachments = self.draft(owner);
         attachments
             .iter()
             .enumerate()
@@ -371,39 +385,74 @@ impl XdDesktop {
 
     /// Where an attachment is in the draft now. A tile's position is from the
     /// last draw, and a synchronized draft or a paste may have moved it since.
-    fn draft_attachment_index(&self, key: DraftKey) -> Option<usize> {
-        self.draft_keys().iter().position(|other| *other == key)
+    fn draft_attachment_index(&self, owner: DraftOwner, key: DraftKey) -> Option<usize> {
+        self.draft_keys(owner)
+            .iter()
+            .position(|other| *other == key)
+    }
+
+    /// The attachments waiting in a composer.
+    pub(super) fn draft(&self, owner: DraftOwner) -> &[Attachment] {
+        match owner {
+            DraftOwner::Chat => &self.model.draft_attachments,
+            DraftOwner::NewChat => &self.new_chat_attachments,
+        }
+    }
+
+    /// The editor a composer types into, which its tiles hand the focus back to.
+    pub(super) fn draft_editor_focus(&self, owner: DraftOwner, cx: &App) -> FocusHandle {
+        match owner {
+            DraftOwner::Chat => self.composer_input.read(cx).focus_handle(cx),
+            DraftOwner::NewChat => self.new_chat_input.read(cx).focus_handle(cx),
+        }
     }
 
     pub(super) fn remove_draft_attachment(
         &mut self,
+        owner: DraftOwner,
         key: DraftKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.draft_attachment_index(key) {
-            self.model.draft_attachments.remove(index);
-            self.attachments_dirty = true;
-            self.attachment_generation = self.attachment_generation.saturating_add(1);
-            self.schedule_draft_sync(cx);
+        match (owner, self.draft_attachment_index(owner, key)) {
+            (DraftOwner::Chat, Some(index)) => {
+                self.model.draft_attachments.remove(index);
+                self.attachments_dirty = true;
+                self.attachment_generation = self.attachment_generation.saturating_add(1);
+                self.schedule_draft_sync(cx);
+            }
+            // A chat being created already has its first message.
+            (DraftOwner::NewChat, Some(index)) if !self.chat_create_submitting => {
+                self.new_chat_attachments.remove(index);
+            }
+            _ => {}
         }
-        let focus = self.composer_input.read(cx).focus_handle(cx);
+        let focus = self.draft_editor_focus(owner, cx);
         window.focus(&focus);
         cx.notify();
     }
 
     /// Start any thumbnails the draft needs and forget the ones it no longer does.
     fn request_composer_thumbnails(&mut self, side: u32, cx: &mut Context<Self>) {
-        let wanted = self
-            .model
-            .draft_attachments
-            .iter()
+        // Both composers' drafts: only one is on screen, and the other keeps
+        // its thumbnails for when it is shown again.
+        let drafts = || {
+            self.model
+                .draft_attachments
+                .iter()
+                .chain(&self.new_chat_attachments)
+        };
+        let wanted = drafts()
             .filter(|attachment| attachment.preview.is_some())
             .map(|attachment| (attachment.id, side))
             .collect::<HashSet<_>>();
         self.composer_thumbnails
             .retain(|key, _| wanted.contains(key));
-        for attachment in &self.model.draft_attachments {
+        let pending = drafts()
+            .filter(|attachment| attachment.preview.is_some())
+            .cloned()
+            .collect::<Vec<_>>();
+        for attachment in &pending {
             let Some(image) = attachment.preview.clone() else {
                 continue;
             };
@@ -444,19 +493,19 @@ impl XdDesktop {
     /// then every other file as its name.
     pub(super) fn render_composer_attachments(
         &mut self,
+        owner: DraftOwner,
         colors: ThemeColors,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let side = (TILE_SIZE * window.scale_factor()).ceil() as u32;
         self.request_composer_thumbnails(side, cx);
-        if self.model.draft_attachments.is_empty() {
+        if self.draft(owner).is_empty() {
             return None;
         }
-        let keys = self.draft_keys();
+        let keys = self.draft_keys(owner);
         let tiles = self
-            .model
-            .draft_attachments
+            .draft(owner)
             .iter()
             .zip(keys.iter().copied())
             .filter(|(attachment, _)| attachment.preview.is_some())
@@ -497,7 +546,7 @@ impl XdDesktop {
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.open_image_preview(image, window, cx);
+                                this.open_image_preview(owner, image, window, cx);
                             }))
                             .child(content),
                     )
@@ -529,21 +578,20 @@ impl XdDesktop {
                             .hover(|style| style.bg(rgba(CLOSE_HOVER_BACKGROUND)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
-                                this.remove_draft_attachment(image, window, cx);
+                                this.remove_draft_attachment(owner, image, window, cx);
                             }))
                             .child(icon(CLOSE_ICON, 14.0, MEDIA_FOREGROUND)),
                     )
             })
             .collect::<Vec<_>>();
         let files = self
-            .model
-            .draft_attachments
+            .draft(owner)
             .iter()
             .zip(keys.iter().copied())
             .filter(|(attachment, _)| attachment.preview.is_none())
             .enumerate()
             .map(|(index, (attachment, key))| {
-                self.render_draft_file(colors, index, key, attachment, cx)
+                self.render_draft_file(owner, colors, index, key, attachment, cx)
                     .into_any_element()
             });
         Some(
@@ -563,6 +611,7 @@ impl XdDesktop {
     /// A file waiting to be sent: its name and size, and a button to drop it.
     fn render_draft_file(
         &self,
+        owner: DraftOwner,
         colors: ThemeColors,
         index: usize,
         id: DraftKey,
@@ -621,7 +670,7 @@ impl XdDesktop {
                     .hover(|style| style.bg(rgb(colors.surface_high)))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                        this.remove_draft_attachment(id, window, cx);
+                        this.remove_draft_attachment(owner, id, window, cx);
                     }))
                     .child(icon(CLOSE_ICON, 13.0, colors.muted)),
             )
@@ -629,17 +678,21 @@ impl XdDesktop {
 
     fn open_image_preview(
         &mut self,
+        owner: DraftOwner,
         image_id: DraftKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(chat) = self.model.selected_chat.clone() else {
-            return;
+        let preview_owner = match owner {
+            DraftOwner::Chat => match self.model.selected_chat.clone() {
+                Some(chat) => PreviewOwner::Chat(chat),
+                None => return,
+            },
+            DraftOwner::NewChat => PreviewOwner::NewChat(self.new_chat_generation),
         };
-        let keys = self.draft_keys();
+        let keys = self.draft_keys(owner);
         let shown = self
-            .model
-            .draft_attachments
+            .draft(owner)
             .iter()
             .zip(keys)
             .filter_map(|(attachment, key)| Some((key, attachment.preview.clone()?, attachment)));
@@ -660,18 +713,31 @@ impl XdDesktop {
         };
         let viewport = window.viewport_size();
         let window_size = (f32::from(viewport.width), f32::from(viewport.height));
-        self.image_preview = Some(ImagePreview::new(chat, images, index, window_size));
+        self.image_preview = Some(ImagePreview::new(preview_owner, images, index, window_size));
         // Closing goes back to the editor the tile belongs to, whatever the click
         // on the tile did to the focus.
-        let composer = self.composer_input.read(cx).focus_handle(cx);
+        let composer = self.draft_editor_focus(owner, cx);
         self.focus_minimal_popup(self.minimal_popup_focus.clone(), window, cx);
         self.minimal_popup_previous_focus = Some(composer.downgrade());
         cx.notify();
     }
 
     pub(super) fn close_image_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.image_preview = None;
-        self.restore_minimal_popup_focus(window);
+        let owner = self.image_preview.take().map(|preview| preview.owner);
+        if matches!(owner, Some(PreviewOwner::NewChat(_))) && self.creating_chat_folder.is_some() {
+            // A new chat counts as a popup itself, which would keep the focus
+            // on the viewer that just closed. Hand it back to the editor.
+            self.minimal_popup_focus_captured = false;
+            if let Some(focus) = self
+                .minimal_popup_previous_focus
+                .take()
+                .and_then(|focus| focus.upgrade())
+            {
+                window.focus(&focus);
+            }
+        } else {
+            self.restore_minimal_popup_focus(window);
+        }
         cx.notify();
     }
 
@@ -695,12 +761,21 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        // Its chat closed, or another one was selected, under it.
-        if self
+        // Its chat closed, or another one was selected, under it; or the new
+        // chat it was opened from was created or abandoned.
+        let gone = self
             .image_preview
             .as_ref()
-            .is_some_and(|preview| self.model.selected_chat.as_ref() != Some(&preview.chat))
-        {
+            .is_some_and(|preview| match &preview.owner {
+                PreviewOwner::Chat(chat) => {
+                    self.creating_chat_folder.is_some()
+                        || self.model.selected_chat.as_ref() != Some(chat)
+                }
+                PreviewOwner::NewChat(generation) => {
+                    self.creating_chat_folder.is_none() || self.new_chat_generation != *generation
+                }
+            });
+        if gone {
             self.close_image_preview(window, cx);
             return None;
         }
@@ -922,6 +997,13 @@ impl XdDesktop {
 /// An attachment's id and how many equal ones precede it in the draft.
 pub(super) type DraftKey = (u64, usize);
 
+/// Which composer a draft is in: the open chat's, or the one starting a new chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DraftOwner {
+    Chat,
+    NewChat,
+}
+
 /// A file's size as the composer shows it: "812 B", "14 KB", "3.2 MB".
 pub(super) fn file_size_label(bytes: usize) -> String {
     const KB: f64 = 1024.0;
@@ -963,7 +1045,7 @@ mod tests {
                 size: Some(size),
             })
             .collect();
-        ImagePreview::new("chat".into(), images, 0, window)
+        ImagePreview::new(PreviewOwner::Chat("chat".into()), images, 0, window)
     }
 
     /// The window position of a point in the image, in fitted image coordinates.
@@ -1367,7 +1449,7 @@ mod tests {
         click(cx, "remove-draft-file-1");
         desktop.read_with(cx, |desktop, _| {
             assert_eq!(desktop.model.draft_attachments.len(), 3);
-            assert_eq!(desktop.draft_keys()[2].1, 0);
+            assert_eq!(desktop.draft_keys(DraftOwner::Chat)[2].1, 0);
         });
     }
 
@@ -1995,6 +2077,142 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn a_new_chat_shows_its_images_as_tiles_like_a_chat_does(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        desktop.update(cx, |desktop, cx| {
+            desktop.creating_chat_folder = Some("atlas".into());
+            desktop.new_chat_generation += 1;
+            for index in 0..2 {
+                let bytes = png(300, 200, |_, _| [40 * index, 80, 160, 255]);
+                desktop.attach_new_chat_image(ImageFormat::Png, bytes, cx);
+            }
+            desktop
+                .new_chat_attachments
+                .push(Attachment::from_file("notes.txt", b"hello".to_vec()));
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let composer = cx.debug_bounds("new-chat-composer").unwrap();
+        for selector in ["draft-image-0", "draft-image-1", "draft-file-0"] {
+            let tile = cx.debug_bounds(selector).unwrap();
+            assert!(tile.left() > composer.left() && tile.right() < composer.right());
+            assert!(tile.top() > composer.top() && tile.bottom() < composer.bottom());
+        }
+        assert_eq!(
+            cx.debug_bounds("draft-image-0").unwrap().size,
+            size(px(TILE_SIZE), px(TILE_SIZE))
+        );
+        cx.update(|_, cx| {
+            let thumbnails = &desktop.read(cx).composer_thumbnails;
+            assert_eq!(thumbnails.len(), 2);
+            assert!(
+                thumbnails
+                    .values()
+                    .all(|state| matches!(state, ThumbnailState::Ready(_)))
+            );
+        });
+
+        click(cx, "draft-image-1");
+        desktop.read_with(cx, |desktop, _| {
+            let preview = desktop.image_preview.as_ref().expect("the viewer is open");
+            assert_eq!(preview.index, 1);
+            assert_eq!(preview.images.len(), 2);
+        });
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| desktop.close_image_preview(window, cx));
+        });
+        cx.run_until_parked();
+        let new_chat_focused = cx.update(|window, cx| {
+            desktop
+                .read(cx)
+                .new_chat_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        });
+        assert!(new_chat_focused);
+
+        click(cx, "remove-draft-image-0");
+        desktop.read_with(cx, |desktop, _| {
+            let names = desktop
+                .new_chat_attachments
+                .iter()
+                .map(|attachment| attachment.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, ["paste-2.png", "notes.txt"]);
+            // The open chat's draft is a different one.
+            assert!(desktop.model.draft_attachments.is_empty());
+        });
+
+        // Once the chat is being created its first message is settled.
+        desktop.update(cx, |desktop, _| desktop.chat_create_submitting = true);
+        click(cx, "remove-draft-file-0");
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.new_chat_attachments.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn the_viewer_of_a_new_chat_closes_when_that_chat_is_abandoned(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        desktop.update(cx, |desktop, cx| {
+            desktop.creating_chat_folder = Some("atlas".into());
+            let bytes = png(300, 200, |_, _| [0, 80, 160, 255]);
+            desktop.attach_new_chat_image(ImageFormat::Png, bytes, cx);
+        });
+        cx.run_until_parked();
+        click(cx, "draft-image-0");
+        desktop.update(cx, |desktop, cx| {
+            assert!(desktop.image_preview.is_some());
+            desktop.cancel_chat_create(cx);
+        });
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.image_preview.is_none());
+            assert!(!desktop.minimal_popup_is_open());
+        });
+    }
+
+    #[gpui::test]
+    fn a_chat_shows_its_project_worktree_and_branch_under_the_composer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = composer_with_images(cx, &[]);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model.worktrees = vec![
+                Worktree {
+                    path: "/repo".into(),
+                    branch: Some("main".into()),
+                    detached: false,
+                    main: true,
+                    current: false,
+                },
+                Worktree {
+                    path: "/worktrees/repo-1".into(),
+                    branch: Some("xd/footer-1a2b".into()),
+                    detached: false,
+                    main: false,
+                    current: true,
+                },
+            ];
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        let row = cx.debug_bounds("chat-context").unwrap();
+        assert!(row.top() >= composer.bottom());
+        assert!(row.left() >= composer.left() && row.right() <= composer.right());
+        click(cx, "chat-context-branch");
+        click(cx, "chat-context-workspace");
+        desktop.read_with(cx, |desktop, _| {
+            assert!(desktop.new_chat_menu.is_none());
+            assert!(desktop.native_option_open.is_none());
+        });
+    }
+
     #[test]
     fn the_chevron_left_icon_is_embedded() {
         let bytes = EmbeddedIcons
@@ -2011,7 +2229,12 @@ mod tests {
             image: Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new())),
             size: None,
         }];
-        let mut preview = ImagePreview::new("chat".into(), images, 0, (1400.0, 1000.0));
+        let mut preview = ImagePreview::new(
+            PreviewOwner::Chat("chat".into()),
+            images,
+            0,
+            (1400.0, 1000.0),
+        );
         let layout = preview.layout();
         assert_eq!(
             (layout.width, layout.height),
