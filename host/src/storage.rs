@@ -324,17 +324,28 @@ impl StateStore {
         let encoded = serde_json::to_string(event)
             .map_err(|error| StorageError::InvalidRequest(error.to_string()))?;
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
-        database.execute(
+        let transaction = database.unchecked_transaction()?;
+        let chunked = encoded.len() > DRAFT_CHUNK_BYTES;
+        transaction.execute(
             "INSERT INTO shared_events (source, payload) VALUES (?, ?)",
-            (source, encoded),
+            (source, if chunked { CHUNKED_DRAFT } else { &encoded }),
         )?;
-        let id = database.last_insert_rowid();
+        let id = transaction.last_insert_rowid();
+        if chunked {
+            let mut insert = transaction.prepare(
+                "INSERT INTO shared_event_chunks (event_id, ordinal, data) VALUES (?, ?, ?)",
+            )?;
+            for (ordinal, chunk) in encoded.as_bytes().chunks(DRAFT_CHUNK_BYTES).enumerate() {
+                insert.execute(params![id, ordinal as i64, chunk])?;
+            }
+        }
         if id % 256 == 0 {
-            database.execute(
+            transaction.execute(
                 "DELETE FROM shared_events WHERE id <= ?",
                 [id.saturating_sub(16_384)],
             )?;
         }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -367,6 +378,19 @@ impl StateStore {
         let mut events = Vec::new();
         for row in rows {
             let (id, source, payload) = row?;
+            let payload = if payload == CHUNKED_DRAFT {
+                let mut chunks = database.prepare(
+                    "SELECT data FROM shared_event_chunks WHERE event_id = ? ORDER BY ordinal",
+                )?;
+                let mut bytes = Vec::new();
+                for chunk in chunks.query_map([id], |row| row.get::<_, Vec<u8>>(0))? {
+                    bytes.extend_from_slice(&chunk?);
+                }
+                String::from_utf8(bytes)
+                    .map_err(|error| StorageError::InvalidRequest(error.to_string()))?
+            } else {
+                payload
+            };
             let event = serde_json::from_str(&payload).map_err(|error| {
                 StorageError::InvalidRequest(format!("Saved host event is invalid: {error}"))
             })?;
@@ -5262,7 +5286,7 @@ fn ensure_workspace_sessions(database: &Connection) -> Result<(), StorageError> 
          END; \
          DELETE FROM workspace_sessions WHERE NOT EXISTS \
            (SELECT 1 FROM chats WHERE workspace_session_id = workspace_sessions.id); \
-         UPDATE meta SET value = '25' WHERE key = 'schema_version';",
+         UPDATE meta SET value = '25' WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 25;",
     )?;
     transaction.commit()?;
     Ok(())
@@ -8644,6 +8668,10 @@ fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
             chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL, data BLOB NOT NULL,
             PRIMARY KEY(chat_id, ordinal));
+         CREATE TABLE IF NOT EXISTS shared_event_chunks (
+            event_id INTEGER NOT NULL REFERENCES shared_events(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL, data BLOB NOT NULL,
+            PRIMARY KEY(event_id, ordinal));
          UPDATE meta SET value = '26' WHERE key = 'schema_version';",
     )?;
     Ok(())
@@ -12905,6 +12933,43 @@ mod tests {
             store
                 .image_read(&json!({"path": report.to_string_lossy()}))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn chunked_shared_events_roundtrip_and_expire() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let event =
+            json!({"event": "draft", "draft_files": [{"data": "a".repeat(DRAFT_CHUNK_BYTES + 1)}]});
+        store.append_shared_event("test", &event).unwrap();
+        assert_eq!(store.shared_events_after(0).unwrap()[0].2, event);
+        {
+            let database = store.database.lock().unwrap();
+            assert!(
+                database
+                    .query_row("SELECT count(*) FROM shared_event_chunks", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap()
+                    > 1
+            );
+            database
+                .execute(
+                    "UPDATE sqlite_sequence SET seq = 16639 WHERE name = 'shared_events'",
+                    [],
+                )
+                .unwrap();
+        }
+        store
+            .append_shared_event("test", &json!({"event": "draft"}))
+            .unwrap();
+        let database = store.database.lock().unwrap();
+        assert_eq!(
+            database
+                .query_row("SELECT count(*) FROM shared_event_chunks", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
         );
     }
 
