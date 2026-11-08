@@ -79,7 +79,9 @@ fn substitutions(quoted: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut index = 0;
     while index < chars.len() {
-        if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+        if chars[index] == '\\' {
+            index += 2;
+        } else if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
             let start = index + 2;
             let mut depth = 1;
             let mut end = start;
@@ -286,7 +288,7 @@ fn segments(script: &str) -> Vec<Segment> {
             '"' => {
                 in_word = true;
                 index += 1;
-                let quoted_start = word.len();
+                let quoted_start = index;
                 while index < chars.len() && chars[index] != '"' {
                     if chars[index] == '\\'
                         && matches!(chars.get(index + 1), Some('"' | '\\' | '$' | '`' | '\n'))
@@ -300,10 +302,12 @@ fn segments(script: &str) -> Vec<Segment> {
                     }
                     index += 1;
                 }
+                // Escapes still in place, so `\$(` stays text.
+                let quoted = chars[quoted_start..index.min(chars.len())]
+                    .iter()
+                    .collect::<String>();
                 index += 1;
-                current
-                    .substitutions
-                    .extend(substitutions(&word[quoted_start..]));
+                current.substitutions.extend(substitutions(&quoted));
             }
             '\\' => {
                 if let Some(&next) = chars.get(index + 1)
@@ -850,6 +854,8 @@ mod tests {
             "review() ( codex exec 'Review the diff' )",
             "bash helper.sh -c 'codex exec \"Review\"'",
             "echo '$(claude -p hi)'",
+            "echo \"\\$(claude -p 'Review the diff')\"",
+            "echo \"\\`codex exec 'Review'\\`\"",
             "echo \"price: $(date)\"",
             "review () (\n  cd /repo && claude -p 'Review'\n)",
         ] {
