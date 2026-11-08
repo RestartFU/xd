@@ -119,6 +119,8 @@ enum NativeEvent {
     },
     Open(String),
     Error(String),
+    #[cfg(target_os = "linux")]
+    HistoryGesture(bool),
     Navigation {
         url: Option<String>,
         can_back: bool,
@@ -796,6 +798,8 @@ struct BrowserTab {
     can_forward: bool,
     error: Option<String>,
     colors: ThemeColors,
+    #[cfg(target_os = "linux")]
+    last_history_gesture: Option<std::time::Instant>,
 }
 
 impl EventEmitter<TabEvent> for BrowserTab {}
@@ -849,6 +853,8 @@ impl BrowserTab {
             can_forward: false,
             error,
             colors,
+            #[cfg(target_os = "linux")]
+            last_history_gesture: None,
         };
         cx.subscribe_in(&address, window, |pane, _, event, _, cx| match event {
             ComposerEvent::Changed(text) => {
@@ -1028,6 +1034,21 @@ impl BrowserTab {
                 }
             }
             NativeEvent::Open(url) => cx.emit(TabEvent::Open(url)),
+            #[cfg(target_os = "linux")]
+            NativeEvent::HistoryGesture(back) => {
+                // Keep momentum from continuing through a second document,
+                // and ignore requests from a hidden or covered tab.
+                if !self.display.native_visible.get()
+                    || self.display.covered.get()
+                    || self
+                        .last_history_gesture
+                        .is_some_and(|last| last.elapsed() < Duration::from_millis(800))
+                {
+                    return;
+                }
+                self.last_history_gesture = Some(std::time::Instant::now());
+                self.history(back, cx);
+            }
             NativeEvent::Error(error) => {
                 self.loading = false;
                 self.load_timed_out = false;
@@ -1853,6 +1874,7 @@ fn create_native(parent: NativeParent, events: NativeEvents) -> Result<NativeEnt
     let popup_events = events.clone();
     let builder = WebViewBuilder::new_with_web_context(&mut context_ref);
     let native = builder
+        .with_back_forward_navigation_gestures(true)
         .with_visible(false)
         .with_focused(false)
         .with_bounds(Rect {
@@ -2163,6 +2185,44 @@ mod tests {
                 pane.set_covered(false);
                 assert!(!has_picture());
             })
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn history_gestures_ignore_hidden_tabs_and_cross_document_momentum(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (tab, cx) = cx.add_window_view(|window, cx| {
+            BrowserTab::new(
+                Some("https://example.com/".into()),
+                xd_desktop::theme::ThemePreset::Dark.colors(),
+                window,
+                cx,
+            )
+        });
+        cx.update(|_, cx| {
+            tab.update(cx, |tab, cx| {
+                tab.native_event(NativeEvent::HistoryGesture(true), cx);
+                assert!(tab.last_history_gesture.is_none());
+                tab.display.native_visible.set(true);
+                tab.display.covered.set(true);
+                tab.native_event(NativeEvent::HistoryGesture(true), cx);
+                assert!(tab.last_history_gesture.is_none());
+                tab.display.covered.set(false);
+                tab.native_event(NativeEvent::HistoryGesture(true), cx);
+                let generation = tab.loading_generation;
+                assert!(tab.last_history_gesture.is_some());
+                tab.native_event(
+                    NativeEvent::Started("https://example.com/previous".into()),
+                    cx,
+                );
+                let started = tab.loading_generation;
+                assert!(started > generation);
+                tab.display.native_visible.set(true);
+                tab.native_event(NativeEvent::HistoryGesture(true), cx);
+                assert_eq!(tab.loading_generation, started);
+            });
         });
     }
 

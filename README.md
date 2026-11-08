@@ -25,6 +25,7 @@ A local-first desktop workspace for user-installed Codex, Claude Code, and JCode
 - Projects, Git worktrees, branches, and pull requests in one workspace.
 - Settle finished sessions with one click: they move to a Settled shelf and come back when you message them. Idle and merged sessions settle by themselves, even while the app is closed.
 - An integrated browser with separate tabs for each chat and shared site data.
+  Swipe horizontally on a supported touchpad to go back or forward.
 - Uses your installed CLI tools, authentication, and configuration.
 - A Usage page beside Settings (Ctrl+U), and in the Android app: cost and tokens by provider, model, and day, plus your Codex and Claude subscription limits.
 - Dark and light themes, chosen in Settings.

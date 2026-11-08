@@ -584,6 +584,15 @@ wrap_load_handler! {
             if let Some(frame) = frame.filter(|frame| frame.is_main() != 0) {
                 let url = text(&frame.url());
                 if is_browser_url(&url) {
+                    // CEF's Alloy embedder disables Chromium's native history
+                    // overscroll controller. Recognize unconsumed horizontal
+                    // wheel gestures in the page and route them through the
+                    // same history controls as the toolbar.
+                    frame.execute_java_script(
+                        Some(&CefString::from(include_str!("history_gestures.js"))),
+                        Some(&CefString::from("xd-browser-history.js")),
+                        1,
+                    );
                     self.events.send(NativeEvent::Finished(url));
                 }
             }
@@ -765,6 +774,10 @@ wrap_request_handler! {
         ) -> ::std::os::raw::c_int {
             let main_frame = frame.is_some_and(|frame| frame.is_main() != 0);
             let url = request.map(|request| text(&request.url())).unwrap_or_default();
+            if main_frame && let Some(back) = history_gesture(&url) {
+                self.events.send(NativeEvent::HistoryGesture(back));
+                return 1;
+            }
             i32::from(main_frame && !is_browser_url(&url) && url != "about:blank")
         }
 
@@ -779,6 +792,14 @@ wrap_request_handler! {
                 "The page stopped responding and was closed. Reload to try again.".into(),
             ));
         }
+    }
+}
+
+fn history_gesture(url: &str) -> Option<bool> {
+    match url {
+        "xd-browser-history://back/" => Some(true),
+        "xd-browser-history://forward/" => Some(false),
+        _ => None,
     }
 }
 
