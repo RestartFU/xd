@@ -10,6 +10,11 @@ use std::{
 use crate::agent::{AgentCommand, AgentEvent, AgentParser};
 
 const OUTPUT_LIMIT: usize = 1024 * 1024;
+/// The longest event line read. Claude's init line lists every tool, skill and
+/// command, so it is the longest by far, and stays well under this.
+const LINE_LIMIT: usize = 4 * 1024 * 1024;
+/// Everything a run may print, events and all, before it is stopped.
+const STREAM_LIMIT: usize = 16 * 1024 * 1024;
 
 /// The lowest effort every assistant accepts. Titles, names and Git messages
 /// need no reasoning, and thinking tokens are most of what a higher one costs.
@@ -244,9 +249,26 @@ fn read_output(stdout: impl Read, backend: &str) -> Result<AgentOutput, String> 
     let mut output = String::new();
     let mut completed = false;
     let mut latest_error = None;
-    for line in BufReader::new(stdout).lines() {
-        let line = line.map_err(|error| format!("Cannot read agent output: {error}"))?;
-        for event in parser.feed(&line) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::new();
+    let mut total = 0_usize;
+    loop {
+        line.clear();
+        // Bounded before it is read, so a runaway line cannot grow without end.
+        let read = reader
+            .by_ref()
+            .take(LINE_LIMIT as u64 + 1)
+            .read_until(b'\n', &mut line)
+            .map_err(|error| format!("Cannot read agent output: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read);
+        if line.len() > LINE_LIMIT || total > STREAM_LIMIT {
+            return Err("The assistant's output is too large.".into());
+        }
+        let line = String::from_utf8_lossy(&line);
+        for event in parser.feed(line.trim_end_matches(['\n', '\r'])) {
             match event {
                 AgentEvent::Text(text) | AgentEvent::TextDelta(text) => {
                     if output.len().saturating_add(text.len()) > OUTPUT_LIMIT {
@@ -385,6 +407,23 @@ mod tests {
             assert!(Instant::now() < deadline, "the helper outlived its run");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn reads_events_line_by_line_and_refuses_a_runaway_line() {
+        let events = concat!(
+            r#"{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"{\"name\":\"x\"}"}}"#,
+            "\r\n",
+            r#"{"type":"turn.completed","usage":{}}"#,
+        );
+        let output = read_output(events.as_bytes(), "codex").unwrap();
+        assert!(output.completed);
+        assert_eq!(output.text, r#"{"name":"x"}"#);
+        let runaway = vec![b'x'; LINE_LIMIT + 2];
+        assert_eq!(
+            read_output(runaway.as_slice(), "codex").err().unwrap(),
+            "The assistant's output is too large."
+        );
     }
 
     #[test]
