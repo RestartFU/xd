@@ -90,6 +90,7 @@ impl UpdateChannel {
 
 #[derive(Clone)]
 struct InstallLocation {
+    channel: UpdateChannel,
     installer: PathBuf,
     host: PathBuf,
 }
@@ -102,7 +103,8 @@ struct UpdateState {
 
 impl SelfUpdate {
     pub(crate) fn new(events: Arc<EventBus>) -> Self {
-        let channel = update_channel();
+        let install = install_location();
+        let channel = update_channel(install.as_ref());
         let updater = Self {
             inner: Arc::new(SelfUpdateInner {
                 state: Mutex::new(UpdateState {
@@ -111,7 +113,7 @@ impl SelfUpdate {
                     error: None,
                 }),
                 events,
-                install: install_location(),
+                install,
                 channel,
                 current: current_version(channel),
             }),
@@ -327,8 +329,21 @@ fn update_available(channel: UpdateChannel, current: &str, latest: &str) -> bool
     }
 }
 
-fn update_channel() -> UpdateChannel {
-    update_channel_from(env::var("XD_UPDATE_CHANNEL").ok().as_deref())
+fn update_channel(install: Option<&InstallLocation>) -> UpdateChannel {
+    installed_update_channel(install, env::var("XD_UPDATE_CHANNEL").ok().as_deref())
+}
+
+fn installed_update_channel(
+    install: Option<&InstallLocation>,
+    configured: Option<&str>,
+) -> UpdateChannel {
+    // A persistent daemon can inherit a stale channel when it re-execs after
+    // an upgrade. The recognized installed bundle is the authority for where
+    // its updater must install, even if an older desktop passed another value.
+    install.map_or_else(
+        || update_channel_from(configured),
+        |location| location.channel,
+    )
 }
 
 fn update_channel_from(channel: Option<&str>) -> UpdateChannel {
@@ -520,12 +535,10 @@ fn install_location() -> Option<InstallLocation> {
     let executable = fs::canonicalize(env::current_exe().ok()?).ok()?;
     let home = PathBuf::from(env::var_os("HOME")?);
     let location = install_location_for_executable(&executable, &home)?;
-    let installer = location.installer;
-    let host = location.host;
-    if !executable_file(&installer) || !executable_file(&host) {
+    if !executable_file(&location.installer) || !executable_file(&location.host) {
         return None;
     }
-    Some(InstallLocation { installer, host })
+    Some(location)
 }
 
 fn install_location_for_executable(executable: &Path, home: &Path) -> Option<InstallLocation> {
@@ -554,7 +567,18 @@ fn install_location_for_executable(executable: &Path, home: &Path) -> Option<Ins
     if !recognized {
         return None;
     }
+    let bundle_name = if linux_layout {
+        parent.file_name()?.to_str()?
+    } else {
+        parent.parent()?.parent()?.file_stem()?.to_str()?
+    };
+    let channel = match bundle_name {
+        "xd-dev" => UpdateChannel::Dev,
+        "xd-nightly" => UpdateChannel::Nightly,
+        _ => UpdateChannel::Release,
+    };
     Some(InstallLocation {
+        channel,
         installer: libexec.join("install.sh"),
         host: libexec.join("xd-host"),
     })
@@ -773,6 +797,39 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    #[test]
+    fn installed_bundle_channel_overrides_stale_daemon_environment() {
+        for (bundle, channel) in [
+            ("xd", UpdateChannel::Release),
+            ("xd-nightly", UpdateChannel::Nightly),
+            ("xd-dev", UpdateChannel::Dev),
+        ] {
+            for executable in [
+                format!("/home/person/.local/opt/{bundle}/libexec/xd-host"),
+                format!(
+                    "/home/person/Applications/{bundle}.app/Contents/Resources/libexec/xd-host"
+                ),
+            ] {
+                let location = install_location_for_executable(
+                    Path::new(&executable),
+                    Path::new("/home/person"),
+                )
+                .unwrap();
+                for configured in [None, Some("dev"), Some("nightly"), Some("release")] {
+                    assert_eq!(
+                        installed_update_channel(Some(&location), configured),
+                        channel
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            installed_update_channel(None, Some("dev")),
+            UpdateChannel::Dev
+        );
+        assert_eq!(installed_update_channel(None, None), UpdateChannel::Nightly);
     }
 
     #[test]

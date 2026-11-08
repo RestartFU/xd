@@ -67,7 +67,12 @@ fn host_update_channel(configured: Option<OsString>, nightly_build: bool) -> OsS
     // Installed launchers know the bundle identity. In particular, Linux
     // bundles may share a desktop binary across release and nightly layouts.
     if configured.as_deref().is_some_and(|channel| {
-        [OsStr::new("dev"), OsStr::new("nightly"), OsStr::new("release")].contains(&channel)
+        [
+            OsStr::new("dev"),
+            OsStr::new("nightly"),
+            OsStr::new("release"),
+        ]
+        .contains(&channel)
     }) {
         configured.unwrap()
     } else if nightly_build {
