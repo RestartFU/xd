@@ -2160,7 +2160,9 @@ struct XdDesktop {
     new_chat_query: String,
     new_chat_model: Option<String>,
     new_chat_menu: Option<&'static str>,
-    first_chat_prompt: Option<(String, String, Vec<Attachment>)>,
+    /// Created chats' first messages, sent when each chat's state arrives,
+    /// by chat id: another chat can be started before one is sent.
+    first_chat_prompts: HashMap<String, (String, Vec<Attachment>)>,
     new_chat_attachments: Vec<Attachment>,
     new_chat_submitted_attachments: Vec<Attachment>,
     /// The chat the new chat view created, which it stays on screen for
@@ -2807,7 +2809,7 @@ impl XdDesktop {
             new_chat_query: String::new(),
             new_chat_model: None,
             new_chat_menu: None,
-            first_chat_prompt: None,
+            first_chat_prompts: HashMap::new(),
             new_chat_attachments: Vec::new(),
             new_chat_submitted_attachments: Vec::new(),
             new_chat_started: None,
@@ -5266,11 +5268,13 @@ impl XdDesktop {
                     {
                         self.model.connection_error = Some(error);
                     }
-                    self.first_chat_prompt = Some((
+                    self.first_chat_prompts.insert(
                         chat_id.to_owned(),
-                        self.new_chat_submitted_prompt.clone().unwrap_or_default(),
-                        self.new_chat_submitted_attachments.clone(),
-                    ));
+                        (
+                            self.new_chat_submitted_prompt.clone().unwrap_or_default(),
+                            self.new_chat_submitted_attachments.clone(),
+                        ),
+                    );
                     // The view stays, showing the message, until the chat
                     // opens in its place.
                     self.new_chat_started = Some(chat_id.to_owned());
@@ -5320,12 +5324,7 @@ impl XdDesktop {
                     let draft = self.model.draft.clone();
                     self.set_composer_text(draft, cx);
                 }
-                if self
-                    .first_chat_prompt
-                    .as_ref()
-                    .is_some_and(|(id, _, _)| id == &chat_id)
-                {
-                    let (_, prompt, attachments) = self.first_chat_prompt.take().unwrap();
+                if let Some((prompt, attachments)) = self.first_chat_prompts.remove(&chat_id) {
                     self.model.draft_attachments = attachments;
                     self.attachments_dirty = true;
                     self.set_composer_text(prompt, cx);
@@ -10852,6 +10851,14 @@ impl XdDesktop {
         }
         if self.creating_chat_folder.is_some() {
             self.cancel_chat_create(cx);
+        }
+        // Picked over a chat that was about to open by itself.
+        if self
+            .pending_minimal_session
+            .as_ref()
+            .is_some_and(|(_, pending)| *pending != chat_id)
+        {
+            self.pending_minimal_session = None;
         }
         self.select_minimal_session(project_id, chat_id, agent, cx);
         let focus = self.composer_input.read(cx).focus_handle(cx);

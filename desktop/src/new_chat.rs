@@ -1365,11 +1365,8 @@ mod start_tests {
             assert_eq!(desktop.creating_chat_folder.as_deref(), Some("atlas"));
             assert!(desktop.chat_create_submitting);
             assert_eq!(desktop.new_chat_status(), "Opening the chat");
-            let (id, text, _) = desktop.first_chat_prompt.as_ref().unwrap();
-            assert_eq!(
-                (id.as_str(), text.as_str()),
-                ("implementation", "Fix the footer links")
-            );
+            let (text, _) = &desktop.first_chat_prompts["implementation"];
+            assert_eq!(text, "Fix the footer links");
 
             // Nothing waits on it any more: another chat can open, or
             // another new chat start.
@@ -1405,7 +1402,22 @@ mod start_tests {
                 assert!(desktop.creating_chat_folder.is_some());
                 assert_ne!(desktop.model.selected_chat.as_deref(), Some("review"));
 
-                desktop.new_chat_started = Some("made".into());
+                desktop.chat_create_title = "New Chat".into();
+                desktop.new_chat_submitted_prompt = Some("First".into());
+                desktop.handle_reply(
+                    RequestKind::NewChat {
+                        folder_id: "atlas".into(),
+                        title: "New Chat".into(),
+                        workdir: None,
+                    },
+                    serde_json::json!({"ok": true, "id": "implementation"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                assert!(desktop.new_chat_started.is_some());
                 desktop.open_minimal_session(
                     "atlas".into(),
                     "review".into(),
@@ -1416,6 +1428,10 @@ mod start_tests {
                 assert!(desktop.creating_chat_folder.is_none());
                 assert!(!desktop.chat_create_submitting);
                 assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+                // The tree that would have opened the created chat does not
+                // take the reader away from the one picked.
+                desktop.reconcile_minimal_navigation(cx);
+                assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
 
                 // And a new chat can start while one waits.
                 desktop.creating_chat_folder = Some("atlas".into());
@@ -1425,6 +1441,25 @@ mod start_tests {
                 assert!(!desktop.chat_create_submitting);
                 assert!(desktop.new_chat_started.is_none());
                 assert_eq!(desktop.creating_chat_folder.as_deref(), Some("atlas"));
+                // Its first message, and the first chat's, both wait to be sent.
+                desktop.chat_create_title = "New Chat".into();
+                desktop.new_chat_submitted_prompt = Some("Second".into());
+                desktop.chat_create_submitting = true;
+                desktop.handle_reply(
+                    RequestKind::NewChat {
+                        folder_id: "atlas".into(),
+                        title: "New Chat".into(),
+                        workdir: None,
+                    },
+                    serde_json::json!({"ok": true, "id": "second"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                assert_eq!(desktop.first_chat_prompts["implementation"].0, "First");
+                assert_eq!(desktop.first_chat_prompts["second"].0, "Second");
             });
         });
     }
@@ -1483,8 +1518,7 @@ mod image_tests {
                 None,
                 cx,
             );
-            let (id, text, attachments) = desktop.first_chat_prompt.as_ref().unwrap();
-            assert_eq!(id, "image-chat");
+            let (text, attachments) = &desktop.first_chat_prompts["image-chat"];
             assert!(text.is_empty());
             assert_eq!(attachments.len(), 1);
         });
