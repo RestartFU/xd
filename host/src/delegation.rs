@@ -73,46 +73,43 @@ fn detect_within(script: &str, depth: usize) -> Option<Delegation> {
         })
 }
 
-/// The commands a double-quoted string runs through `$(…)` or backticks.
-fn substitutions(quoted: &str) -> Vec<String> {
-    let chars = quoted.chars().collect::<Vec<_>>();
-    let mut found = Vec::new();
-    let mut index = 0;
+/// Where the `$(…)` whose body starts at `start` closes. The body is a
+/// script of its own, so its quotes and nested substitutions are its own too.
+fn substitution_end(chars: &[char], start: usize) -> usize {
+    let mut depth = 1;
+    let mut index = start;
     while index < chars.len() {
-        if chars[index] == '\\' {
-            index += 2;
-        } else if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
-            let start = index + 2;
-            let mut depth = 1;
-            let mut end = start;
-            while end < chars.len() {
-                match chars[end] {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
+        match chars[index] {
+            '\\' => index += 1,
+            '\'' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
                 }
-                end += 1;
             }
-            found.push(chars[start..end].iter().collect());
-            index = end + 1;
-        } else if chars[index] == '`' {
-            let start = index + 1;
-            let end = chars[start..]
-                .iter()
-                .position(|c| *c == '`')
-                .map_or(chars.len(), |offset| start + offset);
-            found.push(chars[start..end].iter().collect());
-            index = end + 1;
-        } else {
-            index += 1;
+            '"' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '"' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    } else if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                        index = substitution_end(chars, index + 2);
+                    }
+                    index += 1;
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
         }
+        index += 1;
     }
-    found
+    chars.len()
 }
 
 /// What a delegated agent reported, read from its command's output.
@@ -210,6 +207,8 @@ fn segments(script: &str) -> Vec<Segment> {
     let mut current = Segment::default();
     let mut word = String::new();
     let mut in_word = false;
+    // The word so far was quoted or escaped, so braces in it are text.
+    let mut quoted_word = false;
     let mut redirect = Redirect::None;
     let mut heredocs: Vec<PendingHeredoc> = Vec::new();
     // `name()` or `function name` was just read; its body is the next `{`.
@@ -227,6 +226,7 @@ fn segments(script: &str) -> Vec<Segment> {
             if in_word {
                 let finished = std::mem::take(&mut word);
                 match std::mem::replace(&mut redirect, Redirect::None) {
+                    Redirect::None if quoted_word => current.words.push(finished),
                     Redirect::None => {
                         if finished == "{" {
                             braces += 1;
@@ -253,6 +253,7 @@ fn segments(script: &str) -> Vec<Segment> {
                     Redirect::HereString => current.stdin = Some(finished),
                 }
                 in_word = false;
+                quoted_word = false;
             }
         };
     }
@@ -278,6 +279,7 @@ fn segments(script: &str) -> Vec<Segment> {
         match character {
             '\'' => {
                 in_word = true;
+                quoted_word = true;
                 index += 1;
                 while index < chars.len() && chars[index] != '\'' {
                     word.push(chars[index]);
@@ -287,27 +289,44 @@ fn segments(script: &str) -> Vec<Segment> {
             }
             '"' => {
                 in_word = true;
+                quoted_word = true;
                 index += 1;
-                let quoted_start = index;
                 while index < chars.len() && chars[index] != '"' {
                     if chars[index] == '\\'
                         && matches!(chars.get(index + 1), Some('"' | '\\' | '$' | '`' | '\n'))
                     {
+                        // An escaped `$(` or backtick is text.
                         index += 1;
                         if chars[index] != '\n' {
                             word.push(chars[index]);
                         }
+                        index += 1;
+                    } else if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                        // A substitution runs a command, whose quotes are its own.
+                        let end = substitution_end(&chars, index + 2);
+                        current
+                            .substitutions
+                            .push(chars[index + 2..end].iter().collect());
+                        word.extend(&chars[index..(end + 1).min(chars.len())]);
+                        index = end + 1;
+                    } else if chars[index] == '`' {
+                        let start = index + 1;
+                        let mut end = start;
+                        while end < chars.len() && chars[end] != '`' {
+                            end += if chars[end] == '\\' { 2 } else { 1 };
+                        }
+                        let end = end.min(chars.len());
+                        current
+                            .substitutions
+                            .push(chars[start..end].iter().collect());
+                        word.extend(&chars[index..(end + 1).min(chars.len())]);
+                        index = end + 1;
                     } else {
                         word.push(chars[index]);
+                        index += 1;
                     }
-                    index += 1;
                 }
-                // Escapes still in place, so `\$(` stays text.
-                let quoted = chars[quoted_start..index.min(chars.len())]
-                    .iter()
-                    .collect::<String>();
                 index += 1;
-                current.substitutions.extend(substitutions(&quoted));
             }
             '\\' => {
                 if let Some(&next) = chars.get(index + 1)
@@ -315,6 +334,7 @@ fn segments(script: &str) -> Vec<Segment> {
                 {
                     word.push(next);
                     in_word = true;
+                    quoted_word = true;
                 }
                 index += 2;
             }
@@ -815,6 +835,11 @@ mod tests {
         let quoted = detect("answer=\"$(claude -p 'Review the diff')\"; echo \"$answer\"").unwrap();
         assert_eq!(quoted.prompt.as_deref(), Some("Review the diff"));
         assert!(detect("echo \"`codex exec 'old style'`\"").is_some());
+        let nested = detect(r#"answer="$(claude -p "Review the diff")"; echo "$answer""#).unwrap();
+        assert_eq!(nested.prompt.as_deref(), Some("Review the diff"));
+        let deeper =
+            detect(r#"x="$(cd "$(git rev-parse --show-toplevel)" && codex exec "go")""#).unwrap();
+        assert_eq!(deeper.prompt.as_deref(), Some("go"));
         assert!(detect("bash -e -o pipefail -c 'codex exec \"go\"'").is_some());
 
         let resumed =
@@ -855,6 +880,8 @@ mod tests {
             "bash helper.sh -c 'codex exec \"Review\"'",
             "echo '$(claude -p hi)'",
             "echo \"\\$(claude -p 'Review the diff')\"",
+            "echo \"$(printf '%s' \"hello; codex exec hi\")\"",
+            "review() {\n  printf '%s\\n' \"}\"\n  codex exec 'Review the diff'\n}",
             "echo \"\\`codex exec 'Review'\\`\"",
             "echo \"price: $(date)\"",
             "review () (\n  cd /repo && claude -p 'Review'\n)",
