@@ -550,6 +550,7 @@ fn classify(segment: &Segment, depth: usize) -> Option<Delegation> {
             // Options come before the first operand: with `-c` that is the
             // script, otherwise a script file whose arguments follow.
             let mut command = false;
+            let mut from_stdin = false;
             let mut index = 0;
             while let Some(arg) = args.get(index) {
                 match arg.as_str() {
@@ -571,15 +572,21 @@ fn classify(segment: &Segment, depth: usize) -> Option<Delegation> {
                             return None;
                         }
                         command |= flag.starts_with('-') && flag.contains('c');
+                        from_stdin |= flag.starts_with('-') && flag.contains('s');
                     }
                     _ => break,
                 }
                 index += 1;
             }
-            if !command {
-                return None;
+            if command {
+                return detect_within(args.get(index)?, depth + 1);
             }
-            detect_within(args.get(index)?, depth + 1)
+            // With no script file, or with `-s`, the shell runs what it reads,
+            // as with `bash <<'EOF'`.
+            if from_stdin || index >= args.len() {
+                return detect_within(stdin?, depth + 1);
+            }
+            None
         }
         "codex-agent" => codex_agent(args, stdin),
         "codex" => codex(args, stdin),
@@ -876,6 +883,13 @@ mod tests {
         assert_eq!(heredoc.prompt.as_deref(), Some("Summarize the diff"));
         assert_eq!(detect("cat <<'EOF'\n$(claude -p 'Summarize')\nEOF"), None);
         assert_eq!(detect("cat <<EOF\n\\$(claude -p 'Summarize')\nEOF"), None);
+
+        // A shell reading its script from a heredoc or here-string runs it.
+        let script = detect("bash <<'EOF'\nset -e\nclaude -p 'Review the diff'\nEOF").unwrap();
+        assert_eq!(script.prompt.as_deref(), Some("Review the diff"));
+        assert!(detect("bash -s -- arg <<< \"codex exec 'go'\"").is_some());
+        assert_eq!(detect("bash -n <<'EOF'\nclaude -p 'Review'\nEOF"), None);
+        assert_eq!(detect("bash run.sh <<'EOF'\nclaude -p 'Review'\nEOF"), None);
 
         let nested = detect(r#"answer="$(claude -p "Review the diff")"; echo "$answer""#).unwrap();
         assert_eq!(nested.prompt.as_deref(), Some("Review the diff"));
