@@ -1032,6 +1032,35 @@ mod choice_tests {
                 sources(desktop, "project", cx);
                 assert_eq!(desktop.chat_create_worktree, dev());
 
+                // A base that is gone falls back to the default branch or,
+                // when that is not among the branches either, to the current
+                // checkout's branch, whichever reply comes first.
+                desktop.new_chat_remembered.base = Some("refs/heads/gone".into());
+                for sources_first in [false, true] {
+                    desktop.chat_create_worktree = Some(NewSessionWorktree::New);
+                    desktop.chat_create_worktrees.clear();
+                    desktop.chat_create_branches.clear();
+                    desktop.chat_create_sources_loading = true;
+                    desktop.new_chat_default_branch = None;
+                    if sources_first {
+                        sources(desktop, "project", cx);
+                        desktop.new_chat_default_branch = Some("trunk".into());
+                        folder_settings(desktop, "project", cx);
+                    } else {
+                        folder_settings(desktop, "project", cx);
+                        sources(desktop, "project", cx);
+                    }
+                    assert_eq!(
+                        desktop.chat_create_worktree,
+                        Some(NewSessionWorktree::Branch {
+                            reference: "refs/heads/main".into(),
+                            oid: "aaa".into(),
+                        }),
+                        "sources first: {sources_first}"
+                    );
+                }
+                desktop.new_chat_remembered.base = Some("refs/remotes/origin/dev".into());
+
                 // Back to a checkout of the project.
                 desktop.chat_create_worktree =
                     Some(NewSessionWorktree::Existing("/worktrees/repo-1".into()));

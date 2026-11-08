@@ -5131,7 +5131,11 @@ impl XdDesktop {
                         .as_ref()
                         .filter(|path| worktrees.iter().any(|worktree| &worktree.path == *path))
                         .map(|path| NewSessionWorktree::Existing(path.clone()));
-                    self.chat_create_worktree = if remembered.new_worktree && can_create {
+                    let new_worktree = remembered.new_worktree;
+                    // Before the base is resolved: without the remembered
+                    // base, it falls back to the current checkout's branch.
+                    self.chat_create_worktrees = worktrees;
+                    self.chat_create_worktree = if new_worktree && can_create {
                         // The base is chosen once the branches arrive.
                         if self.chat_create_sources_loading {
                             Some(NewSessionWorktree::New)
@@ -5141,7 +5145,6 @@ impl XdDesktop {
                     } else {
                         checkout.or(selected)
                     };
-                    self.chat_create_worktrees = worktrees;
                     self.chat_create_can_new_worktree = can_create;
                     self.chat_create_worktrees_loading = false;
                 }
