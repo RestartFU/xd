@@ -1238,15 +1238,24 @@ impl Engine {
         let Some(percent) = memory_guard::threshold_percent(setting.as_deref()) else {
             return;
         };
-        let Some(cgroup) = memory_guard::Cgroup::discover() else {
+        let cgroups = memory_guard::Cgroup::discover();
+        if cgroups.is_empty() {
             return;
-        };
-        let mut trigger = memory_guard::Trigger::new(cgroup.max(), percent);
-        eprintln!(
-            "xd-host: running out of memory would stop every process in this container, so xd stops the largest build or tool once {:.1} of its {:.1} GiB cannot be freed.",
-            trigger.threshold() as f64 / (1u64 << 30) as f64,
-            cgroup.max() as f64 / (1u64 << 30) as f64,
-        );
+        }
+        let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
+        let mut guarded: Vec<_> = cgroups
+            .into_iter()
+            .map(|cgroup| {
+                let trigger = memory_guard::Trigger::new(cgroup.max(), percent);
+                eprintln!(
+                    "xd-host: running out of memory in cgroup {} would stop every chat and terminal, so xd stops the largest build or tool once {:.1} of its {:.1} GiB cannot be freed.",
+                    cgroup.path(),
+                    gib(trigger.threshold()),
+                    gib(cgroup.max()),
+                );
+                (cgroup, trigger)
+            })
+            .collect();
         // Weak, since the engine owns nothing that would stop this thread.
         let engine = Arc::downgrade(self);
         let spawned = thread::Builder::new()
@@ -1254,18 +1263,20 @@ impl Engine {
             .spawn(move || {
                 while engine.strong_count() > 0 {
                     thread::sleep(memory_guard::SAMPLE_EVERY);
-                    let Some(usage) = cgroup.unreclaimable() else {
-                        continue;
-                    };
-                    let now = std::time::Instant::now();
-                    if !trigger.due(usage, now) {
-                        continue;
+                    for (cgroup, trigger) in &mut guarded {
+                        let Some(usage) = cgroup.unreclaimable() else {
+                            continue;
+                        };
+                        let now = std::time::Instant::now();
+                        if !trigger.due(usage, now) {
+                            continue;
+                        }
+                        trigger.fired(now);
+                        let Some(engine) = engine.upgrade() else {
+                            return;
+                        };
+                        engine.relieve_memory(cgroup, usage);
                     }
-                    trigger.fired(now);
-                    let Some(engine) = engine.upgrade() else {
-                        return;
-                    };
-                    engine.relieve_memory(&cgroup, usage);
                 }
             });
         if let Err(error) = spawned {
