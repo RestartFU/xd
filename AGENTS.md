@@ -37,6 +37,16 @@ Use actual application captures and keep private or sensitive content out of the
 images. Do not mark a UI change ready for review or merge until both screenshots
 are included; report any capture blockers and incomplete validation explicitly.
 
+## Desktop and mobile parity
+
+Every user-facing feature or behaviour change ships on both the desktop app
+(`desktop/`) and the mobile app (`mobile/`). When a change adds or alters a
+feature on one client, make the same change on the other in the same PR, or in
+a companion PR opened alongside it and merged with it. Match the flow and wording
+the other client already uses, adapted to its layout. If the other client cannot
+support the feature yet, for example because the host protocol lacks something,
+say so in the PR description and open an issue to track the missing side.
+
 ## Conventional Commits
 
 Use Conventional Commits for every commit subject and PR title:
