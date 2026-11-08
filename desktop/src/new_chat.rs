@@ -780,6 +780,10 @@ impl XdDesktop {
                 Some(NewSessionWorktree::PullRequest { .. }) | None => {
                     if let Some(new_worktree) = self.new_chat_worktree_picked {
                         choices.new_worktree = new_worktree;
+                        if !new_worktree {
+                            // The project's current checkout, whichever that is.
+                            choices.checkout = None;
+                        }
                     }
                 }
             }
@@ -1080,6 +1084,8 @@ mod choice_tests {
                 // Current Worktree picked before the worktrees arrive stays
                 // picked, and is what the next new chat starts with.
                 desktop.begin_chat_create("project".into(), window, cx);
+                // Even over a checkout remembered from before.
+                desktop.new_chat_remembered.checkout = Some("/worktrees/repo-1".into());
                 desktop.new_chat_worktree_picked = Some(false);
                 desktop.chat_create_worktree = None;
                 desktop.remember_new_chat_choices();
@@ -1092,6 +1098,7 @@ mod choice_tests {
                 desktop.cancel_chat_create(cx);
                 desktop.begin_chat_create("project".into(), window, cx);
                 assert!(!desktop.new_chat_remembered.new_worktree);
+                assert!(desktop.new_chat_remembered.checkout.is_none());
                 // And New Worktree with a base picked early keeps that base.
                 sources(desktop, "project", cx);
                 desktop.new_chat_worktree_picked = Some(true);

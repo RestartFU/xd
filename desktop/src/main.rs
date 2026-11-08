@@ -5156,6 +5156,10 @@ impl XdDesktop {
                         } else {
                             self.default_new_chat_base()
                         }
+                    } else if self.new_chat_worktree_picked == Some(false) {
+                        // Current Worktree picked here: the checkout the host
+                        // calls current, as the picker would have chosen.
+                        selected
                     } else {
                         checkout.or(selected)
                     };
