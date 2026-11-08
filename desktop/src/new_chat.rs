@@ -1464,11 +1464,10 @@ mod start_tests {
         });
     }
 
+    /// A chat is created, then another one is picked, before the created
+    /// chat opens or, once it has, before its state arrives.
     #[cfg(unix)]
-    #[gpui::test]
-    fn a_created_chat_left_before_it_opens_still_sends_its_first_message(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn leave_a_created_chat(cx: &mut gpui::TestAppContext, opened_first: bool) {
         use std::io::{BufRead, BufReader, Write};
         let (client, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let server = std::thread::spawn(move || {
@@ -1525,7 +1524,15 @@ mod start_tests {
                     None,
                     cx,
                 );
-                // Another chat is picked before the created one opens.
+                if opened_first {
+                    desktop.reconcile_minimal_navigation(cx);
+                    assert_eq!(
+                        desktop.model.selected_chat.as_deref(),
+                        Some("implementation")
+                    );
+                    assert!(desktop.first_chat_prompts.contains_key("implementation"));
+                }
+                // Another chat is picked.
                 desktop.open_minimal_session(
                     "atlas".into(),
                     "review".into(),
@@ -1548,6 +1555,22 @@ mod start_tests {
                 ("send", "implementation", "Fix the footer"),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_created_chat_left_before_it_opens_still_sends_its_first_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        leave_a_created_chat(cx, false);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_created_chat_left_before_its_state_arrives_still_sends_its_first_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        leave_a_created_chat(cx, true);
     }
 
     #[gpui::test]

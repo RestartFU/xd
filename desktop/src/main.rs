@@ -7113,9 +7113,10 @@ impl XdDesktop {
         if self.chat_create_in_flight() || !self.flush_draft_before_navigation() {
             return;
         }
+        // Chats created and not opened yet send their first messages anyway.
+        self.send_first_messages_aside(None);
         // One already created, still showing its message, gives way.
-        if let Some(started) = self.new_chat_started.clone() {
-            self.send_first_message_aside(&started);
+        if self.new_chat_started.is_some() {
             self.cancel_chat_create(cx);
         }
         self.new_chat_generation += 1;
@@ -7177,6 +7178,20 @@ impl XdDesktop {
     /// the chat's draft until that chat was opened. The host empties that
     /// draft when it starts the turn, as for any message; if the send fails,
     /// the message is still in the draft to send from there.
+    /// Send the first messages of created chats other than `keep` without
+    /// opening those chats.
+    fn send_first_messages_aside(&mut self, keep: Option<&str>) {
+        let waiting = self
+            .first_chat_prompts
+            .keys()
+            .filter(|chat_id| Some(chat_id.as_str()) != keep)
+            .cloned()
+            .collect::<Vec<_>>();
+        for chat_id in waiting {
+            self.send_first_message_aside(&chat_id);
+        }
+    }
+
     fn send_first_message_aside(&mut self, chat_id: &str) {
         // Without a host it stays, to go out when the chat opens.
         let Some(host) = self.active_host().cloned() else {
@@ -10885,11 +10900,6 @@ impl XdDesktop {
         if self.chat_create_in_flight() {
             return;
         }
-        if let Some(started) = self.new_chat_started.clone()
-            && started != chat_id
-        {
-            self.send_first_message_aside(&started);
-        }
         if self.creating_chat_folder.is_some() {
             self.cancel_chat_create(cx);
         }
@@ -10919,12 +10929,13 @@ impl XdDesktop {
         {
             return;
         }
+        // Chats created and left before their state arrived, which is when
+        // a chat sends its first message, send it anyway; this one still
+        // sends its own when its state arrives.
+        self.send_first_messages_aside(Some(&chat_id));
         // A new chat that was created, showing its message until now: this
         // chat, or whichever was picked instead, takes its place.
-        if let Some(started) = self.new_chat_started.clone() {
-            if started != chat_id {
-                self.send_first_message_aside(&started);
-            }
+        if self.new_chat_started.is_some() {
             self.cancel_chat_create(cx);
         }
         if let Some(session) = self
