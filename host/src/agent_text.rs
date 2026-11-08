@@ -86,11 +86,13 @@ pub(crate) fn run(
             }
             Err(_) => {}
         }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| format!("Cannot wait for {backend}: {error}"))?
-        {
-            break status;
+        if has_exited(&mut child).map_err(|error| format!("Cannot wait for {backend}: {error}"))? {
+            // Whatever it started goes with it: a hook still holding the pipes
+            // would keep running, and keep the threads reading them waiting.
+            kill_group(&child);
+            break child
+                .wait()
+                .map_err(|error| format!("Cannot wait for {backend}: {error}"))?;
         }
         if Instant::now() >= deadline {
             stop(&mut child);
@@ -189,16 +191,50 @@ pub(crate) fn keep_the_run_minimal(
     }
 }
 
-/// Ends a run that is still going, with anything it started: a hook left
-/// holding the output pipes would otherwise outlive it, and so would the
-/// threads reading them.
-fn stop(child: &mut Child) {
-    // SAFETY: AgentCommand::build makes the child lead a process group of its
-    // own, and it has not been reaped, so this signal can only reach that group.
+/// Whether the child has exited, leaving it unreaped on Unix: until it is
+/// reaped its pid stays taken, so its process group can still be signalled
+/// without reaching anyone else.
+#[cfg(unix)]
+fn has_exited(child: &mut Child) -> std::io::Result<bool> {
+    // SAFETY: waitid only writes the zeroed siginfo it is given, and WNOWAIT
+    // leaves the child for the Child handle to reap.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: waitid filled the siginfo, or left it zeroed when nothing exited.
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
+#[cfg(not(unix))]
+fn has_exited(child: &mut Child) -> std::io::Result<bool> {
+    child.try_wait().map(|status| status.is_some())
+}
+
+/// Signals everything in the child's process group, which AgentCommand::build
+/// makes the child lead. The child must not have been reaped yet.
+fn kill_group(child: &Child) {
+    // SAFETY: the child leads a process group of its own and is unreaped, so
+    // the group id cannot have passed to anyone else.
     #[cfg(unix)]
     unsafe {
         libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
     }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
+/// Ends a run that is still going, with anything it started.
+fn stop(child: &mut Child) {
+    kill_group(child);
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -311,17 +347,44 @@ mod tests {
             .process_group(0);
         let error = run(command, "codex", None, Duration::from_millis(500), "naming").unwrap_err();
         assert_eq!(error, "naming timed out.");
-        let helper = std::fs::read_to_string(&pid_file).unwrap();
+        assert_helper_ends(&pid_file);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_that_exits_takes_what_it_started_with_it() {
+        use std::os::unix::process::CommandExt;
+        let directory =
+            std::env::temp_dir().join(format!("xd-agent-text-exit-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("helper.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "sleep 60 & echo $! > {}; exit 0",
+                pid_file.display()
+            ))
+            .process_group(0);
+        assert!(run(command, "codex", None, Duration::from_secs(30), "naming").is_err());
+        assert_helper_ends(&pid_file);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// Waits for the helper whose pid is in `pid_file` to be gone, or to be a
+    /// zombie waiting for whoever adopted it to reap it.
+    #[cfg(target_os = "linux")]
+    fn assert_helper_ends(pid_file: &std::path::Path) {
+        let helper = std::fs::read_to_string(pid_file).unwrap();
         let stat = format!("/proc/{}/stat", helper.trim());
         let deadline = Instant::now() + Duration::from_secs(5);
-        // Gone, or a zombie waiting for whoever adopted it to reap it.
         while std::fs::read_to_string(&stat)
             .is_ok_and(|stat| !stat.rsplit(") ").next().unwrap_or("").starts_with('Z'))
         {
             assert!(Instant::now() < deadline, "the helper outlived its run");
             thread::sleep(Duration::from_millis(20));
         }
-        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
