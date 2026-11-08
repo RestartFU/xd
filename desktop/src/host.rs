@@ -32,6 +32,15 @@ pub enum MessageCursor {
     After(i64),
 }
 
+/// A new chat's first message, which names the worktree made with the chat,
+/// and the Git writer the user chose to name worktrees, if any.
+#[derive(Clone, Copy, Debug)]
+pub struct FirstMessage<'a> {
+    pub text: &'a str,
+    pub worktree_backend: Option<&'a str>,
+    pub worktree_model: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionWorktree {
     New,
@@ -944,13 +953,22 @@ impl HostHandle {
         model: Option<&str>,
         worktree: Option<&NewSessionWorktree>,
         start_from_remote: bool,
-        first_message: Option<&str>,
+        first_message: Option<FirstMessage<'_>>,
     ) -> Result<(), String> {
         let mut body = json!({"op":"new-chat", "folder":folder, "title":title, "backend":backend});
         body["start_from_remote"] = json!(start_from_remote);
-        // A worktree made with the chat is named for what the chat is for.
-        if let Some(prompt) = first_message.filter(|prompt| !prompt.trim().is_empty()) {
-            body["prompt"] = json!(prompt);
+        // A worktree made with the chat is named for what the chat is for:
+        // from the message's first line at once, then by the naming model in
+        // the background.
+        if let Some(message) = first_message.filter(|message| !message.text.trim().is_empty()) {
+            body["prompt"] = json!(message.text);
+            body["generate_worktree_name"] = json!(true);
+            if let Some(backend) = message.worktree_backend {
+                body["worktree_backend"] = json!(backend);
+            }
+            if let Some(model) = message.worktree_model {
+                body["worktree_model"] = json!(model);
+            }
         }
         if let Some(session) = session {
             body["session"] = json!(session);
@@ -2858,9 +2876,13 @@ mod tests {
                 assert_eq!(request["worktree"]["kind"], "new");
                 if expect_prompt {
                     assert_eq!(request["prompt"], "fix the footer");
+                    assert_eq!(request["generate_worktree_name"], true);
+                    assert_eq!(request["worktree_backend"], "claude");
+                    assert_eq!(request["worktree_model"], "claude-sonnet-5");
                 } else {
                     // Only attachments: nothing to name it from.
                     assert!(request.get("prompt").is_none());
+                    assert!(request.get("generate_worktree_name").is_none());
                 }
                 let request_id = request["_xd_request"].as_u64().unwrap();
                 writeln!(
@@ -2885,7 +2907,11 @@ mod tests {
                 None,
                 Some(&NewSessionWorktree::New),
                 false,
-                Some(text),
+                Some(FirstMessage {
+                    text,
+                    worktree_backend: Some("claude"),
+                    worktree_model: Some("claude-sonnet-5"),
+                }),
             )
             .unwrap();
             assert!(matches!(

@@ -46,8 +46,8 @@ use serde_json::Value;
 use xd_desktop::{
     activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
     host::{
-        HostHandle, HostUpdate, MessageCursor, NewFolder, NewSessionWorktree, RESUME_TEXT,
-        RequestKind, StartedHost,
+        FirstMessage, HostHandle, HostUpdate, MessageCursor, NewFolder, NewSessionWorktree,
+        RESUME_TEXT, RequestKind, StartedHost,
     },
     markdown,
     model::{
@@ -11111,7 +11111,11 @@ impl XdDesktop {
                     self.new_chat_model.as_deref(),
                     worktree.as_ref(),
                     self.new_chat_remote,
-                    Some(&self.new_chat_prompt),
+                    Some(FirstMessage {
+                        text: &self.new_chat_prompt,
+                        worktree_backend: self.settings.git_writer.backend(),
+                        worktree_model: self.settings.git_writer_model.as_deref(),
+                    }),
                 )
             });
         match result {
