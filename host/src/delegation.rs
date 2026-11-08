@@ -63,7 +63,54 @@ fn detect_within(script: &str, depth: usize) -> Option<Delegation> {
     segments(script)
         .iter()
         .filter(|segment| !segment.defined)
-        .find_map(|segment| classify(segment, depth))
+        .find_map(|segment| {
+            classify(segment, depth).or_else(|| {
+                segment
+                    .substitutions
+                    .iter()
+                    .find_map(|inner| detect_within(inner, depth + 1))
+            })
+        })
+}
+
+/// The commands a double-quoted string runs through `$(…)` or backticks.
+fn substitutions(quoted: &str) -> Vec<String> {
+    let chars = quoted.chars().collect::<Vec<_>>();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+            let start = index + 2;
+            let mut depth = 1;
+            let mut end = start;
+            while end < chars.len() {
+                match chars[end] {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            found.push(chars[start..end].iter().collect());
+            index = end + 1;
+        } else if chars[index] == '`' {
+            let start = index + 1;
+            let end = chars[start..]
+                .iter()
+                .position(|c| *c == '`')
+                .map_or(chars.len(), |offset| start + offset);
+            found.push(chars[start..end].iter().collect());
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
+    found
 }
 
 /// What a delegated agent reported, read from its command's output.
@@ -117,11 +164,11 @@ pub fn read_output(path: &str) -> Option<String> {
     let mut bytes = Vec::new();
     file.take(LIMIT).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
-    // A read that starts mid-file starts mid-line.
-    let text = if start > 0 {
-        text.split_once('\n').map_or("", |(_, rest)| rest)
-    } else {
-        &text
+    // A read that starts mid-file starts mid-line, unless that line is all
+    // there is.
+    let text = match text.split_once('\n') {
+        Some((_, rest)) if start > 0 && !rest.trim().is_empty() => rest,
+        _ => &text,
     };
     Some(text.to_owned())
 }
@@ -133,6 +180,9 @@ struct Segment {
     stdin: Option<String>,
     /// Part of a function's body, which defining the function does not run.
     defined: bool,
+    /// Commands run by substitutions inside double quotes, which the words
+    /// keep as text.
+    substitutions: Vec<String>,
 }
 
 struct PendingHeredoc {
@@ -236,6 +286,7 @@ fn segments(script: &str) -> Vec<Segment> {
             '"' => {
                 in_word = true;
                 index += 1;
+                let quoted_start = word.len();
                 while index < chars.len() && chars[index] != '"' {
                     if chars[index] == '\\'
                         && matches!(chars.get(index + 1), Some('"' | '\\' | '$' | '`' | '\n'))
@@ -250,6 +301,9 @@ fn segments(script: &str) -> Vec<Segment> {
                     index += 1;
                 }
                 index += 1;
+                current
+                    .substitutions
+                    .extend(substitutions(&word[quoted_start..]));
             }
             '\\' => {
                 if let Some(&next) = chars.get(index + 1)
@@ -433,20 +487,39 @@ fn classify(segment: &Segment, depth: usize) -> Option<Delegation> {
     let stdin = segment.stdin.as_deref();
     match program {
         "bash" | "sh" | "zsh" | "dash" => {
-            let short_flags = |arg: &&String| arg.starts_with('-') && !arg.starts_with("--");
-            // `-n` reads the script without running it.
-            if args.iter().filter(short_flags).any(|arg| arg.contains('n'))
-                || args.iter().any(|arg| arg == "--noexec")
-                || args
-                    .windows(2)
-                    .any(|pair| pair[0] == "-o" && pair[1] == "noexec")
-            {
+            // Options come before the first operand: with `-c` that is the
+            // script, otherwise a script file whose arguments follow.
+            let mut command = false;
+            let mut index = 0;
+            while let Some(arg) = args.get(index) {
+                match arg.as_str() {
+                    "--" => {
+                        index += 1;
+                        break;
+                    }
+                    // `-n` reads the script without running it.
+                    "--noexec" => return None,
+                    "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file" => {
+                        if arg == "-o" && args.get(index + 1).is_some_and(|o| o == "noexec") {
+                            return None;
+                        }
+                        index += 1;
+                    }
+                    flag if flag.starts_with("--") => {}
+                    flag if flag.len() > 1 && (flag.starts_with('-') || flag.starts_with('+')) => {
+                        if flag.starts_with('-') && flag.contains('n') {
+                            return None;
+                        }
+                        command |= flag.starts_with('-') && flag.contains('c');
+                    }
+                    _ => break,
+                }
+                index += 1;
+            }
+            if !command {
                 return None;
             }
-            let flag = args
-                .iter()
-                .position(|arg| short_flags(&arg) && arg.contains('c'))?;
-            detect_within(args.get(flag + 1)?, depth + 1)
+            detect_within(args.get(index)?, depth + 1)
         }
         "codex-agent" => codex_agent(args, stdin),
         "codex" => codex(args, stdin),
@@ -735,6 +808,11 @@ mod tests {
         assert!(detect("f() { ls; }\ncodex exec 'after the function'").is_some());
         assert!(detect("f() ( ls )\n(cd /repo && codex exec 'in a subshell')").is_some());
 
+        let quoted = detect("answer=\"$(claude -p 'Review the diff')\"; echo \"$answer\"").unwrap();
+        assert_eq!(quoted.prompt.as_deref(), Some("Review the diff"));
+        assert!(detect("echo \"`codex exec 'old style'`\"").is_some());
+        assert!(detect("bash -e -o pipefail -c 'codex exec \"go\"'").is_some());
+
         let resumed =
             detect("codex exec resume 019aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 'Continue'").unwrap();
         assert_eq!(resumed.prompt.as_deref(), Some("Continue"));
@@ -770,6 +848,9 @@ mod tests {
             "bash --noexec -c 'codex exec \"Review\"'",
             "bash -o noexec -c 'codex exec \"Review\"'",
             "review() ( codex exec 'Review the diff' )",
+            "bash helper.sh -c 'codex exec \"Review\"'",
+            "echo '$(claude -p hi)'",
+            "echo \"price: $(date)\"",
             "review () (\n  cd /repo && claude -p 'Review'\n)",
         ] {
             assert_eq!(detect(command), None, "{command}");
@@ -814,5 +895,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(read_output("/nonexistent/xd/output"), None);
         assert_eq!(read_output(std::env::temp_dir().to_str().unwrap()), None);
+
+        // One long line, as a JSON answer can be, is kept rather than dropped.
+        let single =
+            std::env::temp_dir().join(format!("xd-delegation-{}.output", uuid::Uuid::new_v4()));
+        std::fs::write(&single, format!("head\n{}", "x".repeat(70_000))).unwrap();
+        let read = read_output(single.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&single);
+        assert_eq!(read.len(), 64 * 1024);
     }
 }
