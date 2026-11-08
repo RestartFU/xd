@@ -5176,17 +5176,17 @@ impl XdDesktop {
                     && self.chat_create_title.trim() == title
                     && self.chat_create_submitting
                 {
-                    if let Some(host) = self.active_host() {
-                        if let Err(error) = host.set_draft(
+                    if let Some(host) = self.active_host()
+                        && let Err(error) = host.set_draft(
                             chat_id,
                             self.new_chat_submitted_prompt
                                 .as_deref()
                                 .unwrap_or_default(),
                             Some(&self.new_chat_submitted_attachments),
                             None,
-                        ) {
-                            self.model.connection_error = Some(error);
-                        }
+                        )
+                    {
+                        self.model.connection_error = Some(error);
                     }
                     self.first_chat_prompt = Some((
                         chat_id.to_owned(),
