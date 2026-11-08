@@ -399,6 +399,7 @@ struct PendingInteraction {
 struct AgentSession {
     child: Arc<Mutex<Child>>,
     /// The child's pid, readable without waiting on `child`.
+    #[cfg(target_os = "linux")]
     pid: u32,
     stdin: ChildStdin,
     /// Where the process's output goes; see [`Router`].
@@ -440,6 +441,7 @@ struct ActiveProcess {
     turn_id: u64,
     child: Arc<Mutex<Child>>,
     /// The child's pid, readable without waiting on `child`.
+    #[cfg(target_os = "linux")]
     pid: u32,
     cancelled: Arc<AtomicBool>,
     started: Instant,
@@ -952,6 +954,7 @@ impl TurnRuntime {
         let turn_id = self.inner.next_turn.fetch_add(1, Ordering::Relaxed) + 1;
         let cancelled = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(TurnProgress::default());
+        #[cfg(target_os = "linux")]
         let pid = child.lock().map_or(0, |child| child.id());
         {
             let mut active = self
@@ -971,6 +974,7 @@ impl TurnRuntime {
                     message_boundary,
                     turn_id,
                     child: child.clone(),
+                    #[cfg(target_os = "linux")]
                     pid,
                     cancelled: cancelled.clone(),
                     started: Instant::now(),
@@ -1377,6 +1381,7 @@ impl TurnRuntime {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Cannot start {backend}: {error}"))?;
+        #[cfg(target_os = "linux")]
         let pid = child.id();
         let mut stdin = child
             .stdin
@@ -1428,6 +1433,7 @@ impl TurnRuntime {
             chat_id.to_owned(),
             AgentSession {
                 child: child.clone(),
+                #[cfg(target_os = "linux")]
                 pid,
                 stdin,
                 router,
@@ -2796,6 +2802,7 @@ mod tests {
             ActiveProcess {
                 message_boundary: 0,
                 turn_id: 1,
+                #[cfg(target_os = "linux")]
                 pid: child.id(),
                 child: Arc::new(Mutex::new(child)),
                 cancelled: Arc::new(AtomicBool::new(false)),
