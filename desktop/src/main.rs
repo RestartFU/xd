@@ -3528,6 +3528,7 @@ impl XdDesktop {
                 remote_model.connected = false;
                 remote_model.connection_error = Some(format!("{message} Reconnecting…"));
                 if self.active_endpoint == ChatEndpoint::Remote {
+                    self.background_reading = false;
                     // Created already: sending its message again would make another.
                     if self.new_chat_started.take().is_some() {
                         self.creating_chat_folder = None;
@@ -3882,6 +3883,7 @@ impl XdDesktop {
                 self.host = None;
                 self.model.connected = false;
                 self.model.connection_error = Some(format!("{message} Reconnecting…"));
+                self.background_reading = false;
                 self.sending = false;
                 self.transcript_loading = false;
                 self.transcript_page_loading = false;
@@ -9557,6 +9559,7 @@ impl XdDesktop {
     /// this naturally falls back to the tail page. The file root is retried as
     /// well because its previous request may have died with the same socket.
     fn refresh_selected_chat_after_connect(&mut self, cx: &mut Context<Self>) {
+        self.background_reading = false;
         let Some(chat_id) = self.model.selected_chat.clone() else {
             return;
         };
@@ -20132,6 +20135,112 @@ Binary files /dev/null and b/image.png differ\n";
             desktop.toggle_background_tasks(cx);
             assert!(desktop.background_expanded.is_none());
             assert!(desktop.background_output.is_empty());
+        });
+    }
+
+    #[cfg(unix)]
+    fn check_background_output_retries_after_reconnect(
+        cx: &mut gpui::TestAppContext,
+        endpoint: ChatEndpoint,
+    ) {
+        use std::{io::BufRead, os::unix::net::UnixStream};
+
+        let (client, server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            PathBuf::from("background-output-test"),
+        );
+        let mut requests = std::io::BufReader::new(server);
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = endpoint;
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.selected_chat = Some("review".into());
+            desktop.model.connected = true;
+            desktop.background_expanded = Some((endpoint, "review".into()));
+            desktop.background_visible = true;
+            match endpoint {
+                ChatEndpoint::Local => desktop.host = Some(host.clone()),
+                ChatEndpoint::Remote => desktop.remote_host = Some(host.clone()),
+            }
+            desktop.poll_background_tasks(cx);
+            assert!(desktop.background_reading);
+            let mut line = String::new();
+            requests.read_line(&mut line).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&line).unwrap()["op"],
+                "background-task-output"
+            );
+
+            let disconnected = HostUpdate::Disconnected {
+                message: "Connection lost during output read".into(),
+            };
+            match endpoint {
+                ChatEndpoint::Local => {
+                    desktop.handle_host_update(disconnected, desktop.connection_generation, cx);
+                    assert!(!desktop.background_reading);
+                    desktop.host = Some(host.clone());
+                    desktop.handle_host_update(
+                        HostUpdate::Connected {
+                            path: PathBuf::from("reconnected"),
+                        },
+                        desktop.connection_generation,
+                        cx,
+                    );
+                }
+                ChatEndpoint::Remote => {
+                    desktop.handle_remote_update(disconnected, desktop.remote_generation, cx);
+                    assert!(!desktop.background_reading);
+                    // Mirror install_remote_session after the transport is installed.
+                    desktop.remote_host = Some(host.clone());
+                    desktop.remote_state = RemoteState::Connected;
+                    desktop.model.connected = true;
+                    desktop.refresh_selected_chat_after_connect(cx);
+                }
+            }
+            // No polling tick observes the disconnected state.
+            desktop.poll_background_tasks(cx);
+            loop {
+                line.clear();
+                requests
+                    .read_line(&mut line)
+                    .expect("the next tick must send another background-task-output request");
+                let request: Value = serde_json::from_str(&line).unwrap();
+                if request["op"] == "background-task-output" {
+                    assert_eq!(request["chat"], "review");
+                    break;
+                }
+            }
+            assert!(desktop.background_reading);
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn background_output_retries_after_local_reconnect(cx: &mut gpui::TestAppContext) {
+        check_background_output_retries_after_reconnect(cx, ChatEndpoint::Local);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn background_output_retries_after_remote_reconnect(cx: &mut gpui::TestAppContext) {
+        check_background_output_retries_after_reconnect(cx, ChatEndpoint::Remote);
+    }
+
+    #[gpui::test]
+    fn background_output_reconnect_clears_an_old_pending_read(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            for endpoint in [ChatEndpoint::Local, ChatEndpoint::Remote] {
+                desktop.active_endpoint = endpoint;
+                desktop.background_reading = true;
+                desktop.refresh_selected_chat_after_connect(cx);
+                assert!(!desktop.background_reading);
+            }
         });
     }
 

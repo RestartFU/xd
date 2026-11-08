@@ -221,16 +221,16 @@ impl Tasks {
             return;
         };
         for block in blocks {
-            if block["type"] != "tool_result" || block["is_error"] == true {
+            if block["type"] != "tool_result" {
                 continue;
             }
             let Some(tool_id) = field(block, &["tool_use_id"]) else {
                 continue;
             };
-            if self.completed.contains(tool_id) {
+            let tool = self.tools.remove(tool_id);
+            if block["is_error"] == true || self.completed.contains(tool_id) {
                 continue;
             }
-            let tool = self.tools.remove(tool_id);
             let structured = &root["tool_use_result"];
             let text = result_text(&block["content"]);
             let existing = self
@@ -539,6 +539,48 @@ fn error_line(line: &str) -> bool {
 mod tests {
     use super::*;
     use std::{fs, time::Instant};
+
+    #[test]
+    fn failed_background_tool_results_do_not_exhaust_pending_metadata() {
+        let mut tasks = Tasks::default();
+        for n in 0..MAX_PENDING + 5 {
+            let id = format!("failed-{n}");
+            tasks.track(
+                &json!({"type":"assistant","message":{"content":[{
+                    "type":"tool_use","id":id,"name":"Bash",
+                    "input":{"command":"false","description":"Failed command"}
+                }]}})
+                .to_string(),
+            );
+            tasks.track(
+                &json!({"type":"user","message":{"content":[{
+                    "type":"tool_result","tool_use_id":id,"is_error":true,
+                    "content":"Command failed"
+                }]}})
+                .to_string(),
+            );
+        }
+        assert!(tasks.is_empty());
+
+        tasks.track(
+            &json!({"type":"assistant","message":{"content":[{
+                "type":"tool_use","id":"working","name":"Bash",
+                "input":{"command":"sleep 60","description":"Run integration tests"}
+            }]}})
+            .to_string(),
+        );
+        tasks.track(&json!({"type":"user","message":{"content":[{
+            "type":"tool_result","tool_use_id":"working",
+            "content":"Command running in background with ID: tests-1. Output is being written to: /tmp/integration.output"
+        }]}}).to_string());
+
+        let snapshots = tasks.snapshot(None);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0]["id"], "tests-1");
+        assert_eq!(snapshots[0]["description"], "Run integration tests");
+        assert_eq!(snapshots[0]["output_file"], "/tmp/integration.output");
+        assert!(tasks.tools.is_empty());
+    }
 
     #[test]
     fn tracks_structured_and_fallback_results_and_merges_lifecycle() {
