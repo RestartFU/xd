@@ -393,6 +393,10 @@ pub struct Message {
     /// every frame it is drawn.
     #[serde(skip)]
     tool: Option<Arc<ToolView>>,
+    /// For a message sent from here and not stored yet: the newest stored
+    /// message shown when it was sent. Its stored copy comes after it.
+    #[serde(skip)]
+    pub sent_after: Option<i64>,
 }
 
 /// What a tool row draws.
@@ -456,6 +460,7 @@ impl Message {
             image_paths,
             file_paths,
             tool,
+            sent_after: None,
         }
     }
 
@@ -480,6 +485,7 @@ impl Message {
             image_paths,
             file_paths: Vec::new(),
             tool: None,
+            sent_after: None,
         }
     }
 
@@ -503,6 +509,7 @@ impl Message {
             image_paths,
             file_paths,
             tool,
+            sent_after: None,
         }
     }
 
@@ -1360,13 +1367,24 @@ impl AppModel {
         // A stored copy of a message sent from here is newer than every
         // stored message shown when it was sent; an older one with the same
         // words was said before.
-        let shown = self.messages.iter().filter_map(|message| message.id).max();
         let stores = |stored: &Message, sent: &Message| {
             stored.role == "user"
                 && stored.content == sent.content
                 && stored
                     .id
-                    .is_some_and(|id| shown.is_none_or(|shown| id > shown))
+                    .is_some_and(|id| sent.sent_after.is_none_or(|after| id > after))
+        };
+        // Whether a newest page goes back far enough to hold that copy. One
+        // that starts after the point the message was sent from shows a chat
+        // that has moved on since, so the message was stored long ago.
+        let oldest = snapshot
+            .messages
+            .iter()
+            .filter_map(|message| message.id)
+            .min();
+        let reaches = |sent: &Message| {
+            !has_older
+                || matches!((sent.sent_after, oldest), (Some(after), Some(oldest)) if oldest <= after)
         };
         if direction == MessagePageDirection::Tail {
             // A message sent from here but not stored yet stays at the end
@@ -1378,10 +1396,11 @@ impl AppModel {
                 .iter()
                 .filter(|message| message.id.is_none() && message.role == "user")
                 .filter(|message| {
-                    !snapshot
-                        .messages
-                        .iter()
-                        .any(|stored| stores(stored, message))
+                    reaches(message)
+                        && !snapshot
+                            .messages
+                            .iter()
+                            .any(|stored| stores(stored, message))
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -3564,8 +3583,9 @@ mod tests {
         assert!(change.reset);
 
         // Words said before are not the copy of the same words sent again.
-        let again: Message =
+        let mut again: Message =
             serde_json::from_value(json!({"role": "user", "content": "Fix the footer"})).unwrap();
+        again.sent_after = Some(3);
         model.messages.push(again);
         model
             .apply_message_page(
@@ -3579,7 +3599,32 @@ mod tests {
             .unwrap();
         assert_eq!(model.messages.len(), 4);
         assert!(model.messages[3].id.is_none());
-        model.messages.pop();
+
+        // A newest page that starts after it was sent: the chat has moved on,
+        // so it was stored, just not on this page.
+        model
+            .apply_message_page(
+                &json!({
+                    "messages": [
+                        {"id": 9, "role": "tool", "content": "ran the tests"},
+                        {"id": 10, "role": "assistant", "content": "Done"}
+                    ],
+                    "has_older": true
+                }),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
+        assert!(model.messages.iter().all(|message| message.id.is_some()));
+        model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 1, "role": "user", "content": "Fix the footer"},
+                    {"id": 2, "role": "assistant", "content": "On it"},
+                    {"id": 3, "role": "user", "content": "And the header"}
+                ]}),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
         let ids = model
             .messages
             .iter()

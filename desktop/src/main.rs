@@ -9982,9 +9982,14 @@ impl XdDesktop {
 
         let message_index = (!text.is_empty()).then(|| {
             let index = self.model.messages.len();
-            self.model
+            let mut message = Message::new(None, "user", text, None);
+            message.sent_after = self
+                .model
                 .messages
-                .push(Message::new(None, "user", text, None));
+                .iter()
+                .filter_map(|shown| shown.id)
+                .max();
+            self.model.messages.push(message);
             self.transcript_snapshot.sync_messages(&self.model);
             self.sync_transcript_count(false);
             // Sending is a request to see the reply, wherever the reader was.
