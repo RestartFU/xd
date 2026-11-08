@@ -1801,7 +1801,7 @@ impl StateStore {
                 validate_model(&backend, model)?;
                 model.to_owned()
             }
-            None => match chat_title_model(&self.database, &backend)? {
+            None => match self.offered_side_model(&backend)? {
                 Some(model) => model,
                 None if !chat_title_models(&backend).is_empty() => return Ok(None),
                 None => {
@@ -1820,6 +1820,19 @@ impl StateStore {
             workdir: self.scratch_workdir()?,
             model,
         }))
+    }
+
+    /// The low-cost model for a run the user waits on, only once the CLI is
+    /// known to offer it: titles may guess while discovery is pending, since
+    /// they never hold anything up, but a guess here could delay a send.
+    /// Discovery can take seconds, so never call this with the database locked.
+    fn offered_side_model(&self, backend: &str) -> Result<Option<String>, StorageError> {
+        let mut offered = crate::model_catalog::cached_models(backend);
+        if offered.is_empty() {
+            offered = crate::model_catalog::models(backend);
+        }
+        Ok(chat_title_model(&self.database, backend)?
+            .filter(|model| offered.iter().any(|known| known.id == *model)))
     }
 
     /// An empty directory for short runs, so they load no project instructions:
@@ -12609,7 +12622,26 @@ mod tests {
         assert_eq!(naming.workdir, store.chat_title_root.to_string_lossy());
         assert!(store.chat_title_root.is_dir());
 
+        // Nothing confirms the low-cost model yet, so naming is left to the message.
+        assert!(
+            store
+                .prepare_worktree_name(&json!({
+                    "chat": "chat-worktree",
+                    "text": "review it",
+                    "generate_worktree_name": true
+                }))
+                .unwrap()
+                .is_none()
+        );
+
         // Without a chosen model the name comes from the low-cost title model.
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-6-luna", false, None),
+                discovered("gpt-6-sol", true, None),
+            ],
+        );
         let default_naming = store
             .prepare_worktree_name(&json!({
                 "chat": "chat-worktree",
@@ -12619,10 +12651,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(default_naming.backend, "codex");
-        assert_eq!(
-            Some(default_naming.model),
-            chat_title_model(&store.database, "codex").unwrap()
-        );
+        assert_eq!(default_naming.model, "gpt-6-luna");
 
         // A CLI with only older or costlier models leaves naming to the message.
         crate::model_catalog::set_test_models(
