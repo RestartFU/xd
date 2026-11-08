@@ -86,7 +86,7 @@ class ProjectsScreenshotTest {
     @Test fun folderMenu() = shoot("folder-menu-dark", MinimalThemePreset.DARK) {
         // A top-level folder with no other folder to go into cannot move.
         click("acme actions")
-        check(shows("New project here") && shows("Delete folder") && !shows("Move to…"))
+        check(shows("New project here") && shows("Prompt shortcuts") && shows("Delete folder") && !shows("Move to…"))
         pressBack()
         click("Clients actions")
         check(shows("New project here") && shows("Move to…") && shows("Delete folder"))

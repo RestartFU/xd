@@ -554,6 +554,8 @@ private fun MinimalProjectsHome(
     var deletingFolderId by rememberSaveable { mutableStateOf<String?>(null) }
     var movingId by rememberSaveable { mutableStateOf<String?>(null) }
     val collapsed by settings.collapsedFolders.collectAsStateWithLifecycle()
+    // An earlier project or folder is still being made; another waits rather than being dropped.
+    val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
     val rows = tree.projectTree(collapsed)
     val folders = tree.projectTree().mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
@@ -646,6 +648,9 @@ private fun MinimalProjectsHome(
                                         onMove = { movingId = row.folder.id }
                                             .takeIf { canMove(row.folder.id, row.folder.parentId) },
                                         onRename = { renamingFolderId = row.folder.id },
+                                        onShortcuts = {
+                                            model.openShortcutEditor(row.folder.id, "${row.folder.name} shortcuts")
+                                        },
                                         onDelete = { deletingFolderId = row.folder.id },
                                     )
                                 },
@@ -725,6 +730,7 @@ private fun MinimalProjectsHome(
         "project" -> NewProjectDialog(
             model = model,
             parentName = createParent?.name,
+            busy = creatingWorkspace,
             onDismiss = { creating = null },
             onCreate = { name, repository ->
                 creating = null
@@ -734,6 +740,7 @@ private fun MinimalProjectsHome(
         )
         "folder" -> NewFolderDialog(
             parentName = createParent?.name,
+            busy = creatingWorkspace,
             onDismiss = { creating = null },
             onCreate = { name, owner ->
                 creating = null
@@ -1408,6 +1415,8 @@ private fun FolderMenu(
     /** Null when there is no other folder to move it into or out of. */
     onMove: (() -> Unit)?,
     onRename: () -> Unit,
+    /** Shortcuts set here reach every project inside. */
+    onShortcuts: () -> Unit,
     onDelete: () -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -1440,6 +1449,10 @@ private fun FolderMenu(
                 text = { Text("Rename folder") },
                 onClick = { open = false; onRename() },
             )
+            DropdownMenuItem(
+                text = { Text("Prompt shortcuts") },
+                onClick = { open = false; onShortcuts() },
+            )
             HorizontalDivider()
             DropdownMenuItem(
                 text = { Text("Delete folder", color = MaterialTheme.colorScheme.error) },
@@ -1454,6 +1467,8 @@ private fun FolderMenu(
 private fun NewFolderDialog(
     /** The folder it is made in; null for the top level. */
     parentName: String?,
+    /** An earlier creation is still out; Create waits for it. */
+    busy: Boolean,
     onDismiss: () -> Unit,
     onCreate: (name: String, owner: String?) -> Unit,
 ) {
@@ -1507,7 +1522,7 @@ private fun NewFolderDialog(
         confirmButton = {
             Button(
                 onClick = { onCreate(folderName, login) },
-                enabled = folderName.isNotEmpty() && nameError == null && !organizationError,
+                enabled = folderName.isNotEmpty() && nameError == null && !organizationError && !busy,
             ) { Text("Create folder") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -2217,6 +2232,8 @@ private fun NewProjectDialog(
     model: MainViewModel,
     /** The folder it is made in; null for the top level. */
     parentName: String? = null,
+    /** An earlier creation is still out; Create waits for it. */
+    busy: Boolean = false,
     onDismiss: () -> Unit,
     onCreate: (String, String?) -> Unit,
 ) {
@@ -2258,7 +2275,7 @@ private fun NewProjectDialog(
             Button(
                 // Sent exactly as chosen: a Unix folder name can end in a space.
                 onClick = { onCreate(name.trim(), repository.takeIf(String::isNotBlank)) },
-                enabled = name.isNotBlank(),
+                enabled = name.isNotBlank() && !busy,
             ) { Text("Create project") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },

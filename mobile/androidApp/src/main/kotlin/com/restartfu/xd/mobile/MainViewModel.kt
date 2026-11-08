@@ -129,6 +129,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val createdDirectSession: StateFlow<CreatedDirectSession?> =
         _createdDirectSession.asStateFlow()
     val error: StateFlow<String?> = _error.asStateFlow()
+    val creatingWorkspace: StateFlow<Boolean> = _creatingWorkspace.asStateFlow()
     val deletingChat: StateFlow<Boolean> = _deletingChat.asStateFlow()
     val renamingChat: StateFlow<Boolean> = _renamingChat.asStateFlow()
     private val _settledNotice = MutableStateFlow<SettledNotice?>(null)
