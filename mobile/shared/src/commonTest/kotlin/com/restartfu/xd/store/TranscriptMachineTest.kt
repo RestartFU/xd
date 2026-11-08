@@ -204,16 +204,18 @@ class TranscriptMachineTest {
                 messages = messages(
                     MessageReply("user", "ask", 12),
                     MessageReply("assistant", "answer", 13),
+                    MessageReply("error", "Stopped to free memory.", 14),
                 ),
                 nowMillis = 0,
             ),
         ).state
 
         assertEquals(
-            listOf(TranscriptKind.USER, TranscriptKind.ASSISTANT),
+            listOf(TranscriptKind.USER, TranscriptKind.ASSISTANT, TranscriptKind.SYSTEM),
             result.messages.map { it.kind },
         )
-        assertEquals(listOf(12_000L, 13_000L), result.messages.map { it.atMillis })
+        assertEquals(listOf(12_000L, 13_000L, 14_000L), result.messages.map { it.atMillis })
+        assertEquals("Host", result.messages.last().label)
     }
 
     @Test
