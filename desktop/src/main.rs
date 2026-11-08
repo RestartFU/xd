@@ -5307,6 +5307,14 @@ impl XdDesktop {
             RequestKind::RenameChat { .. } => self.request_tree(),
             RequestKind::MoveChat { .. } => self.request_tree(),
             RequestKind::DeleteChat { .. } => self.request_tree(),
+            // A created chat left, by any route, after it was opened and
+            // before its state arrived: its first message still goes out.
+            RequestKind::Chat { chat_id }
+                if !self.chat_is_active(&chat_id)
+                    && self.first_chat_prompts.contains_key(&chat_id) =>
+            {
+                self.send_first_message_aside(&chat_id);
+            }
             RequestKind::Chat { chat_id } if self.chat_is_active(&chat_id) => {
                 let local_attachments = self
                     .attachments_dirty

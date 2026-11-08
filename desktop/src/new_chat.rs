@@ -1466,8 +1466,19 @@ mod start_tests {
 
     /// A chat is created, then another one is picked, before the created
     /// chat opens or, once it has, before its state arrives.
+    #[derive(Clone, Copy)]
+    enum Leave {
+        /// For another chat, before the created one opens.
+        BeforeOpening,
+        /// For another chat, once it has opened but before its state arrives.
+        BeforeItsState,
+        /// For somewhere that is not a chat, such as the terminal, before its
+        /// state arrives.
+        ForNoChat,
+    }
+
     #[cfg(unix)]
-    fn leave_a_created_chat(cx: &mut gpui::TestAppContext, opened_first: bool) {
+    fn leave_a_created_chat(cx: &mut gpui::TestAppContext, leave: Leave) {
         use std::io::{BufRead, BufReader, Write};
         let (client, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
         let server = std::thread::spawn(move || {
@@ -1524,7 +1535,7 @@ mod start_tests {
                     None,
                     cx,
                 );
-                if opened_first {
+                if !matches!(leave, Leave::BeforeOpening) {
                     desktop.reconcile_minimal_navigation(cx);
                     assert_eq!(
                         desktop.model.selected_chat.as_deref(),
@@ -1532,14 +1543,27 @@ mod start_tests {
                     );
                     assert!(desktop.first_chat_prompts.contains_key("implementation"));
                 }
-                // Another chat is picked.
-                desktop.open_minimal_session(
-                    "atlas".into(),
-                    "review".into(),
-                    AgentCli::Claude,
-                    window,
-                    cx,
-                );
+                if matches!(leave, Leave::ForNoChat) {
+                    // Whatever route did it, the chat is no longer the open one
+                    // when its state arrives.
+                    desktop.model.selected_chat = None;
+                    desktop.handle_reply(
+                        RequestKind::Chat {
+                            chat_id: "implementation".into(),
+                        },
+                        serde_json::json!({"ok": true}).as_object().unwrap().clone(),
+                        None,
+                        cx,
+                    );
+                } else {
+                    desktop.open_minimal_session(
+                        "atlas".into(),
+                        "review".into(),
+                        AgentCli::Claude,
+                        window,
+                        cx,
+                    );
+                }
                 assert!(desktop.first_chat_prompts.is_empty());
             });
         });
@@ -1562,7 +1586,7 @@ mod start_tests {
     fn a_created_chat_left_before_it_opens_still_sends_its_first_message(
         cx: &mut gpui::TestAppContext,
     ) {
-        leave_a_created_chat(cx, false);
+        leave_a_created_chat(cx, Leave::BeforeOpening);
     }
 
     #[cfg(unix)]
@@ -1570,7 +1594,15 @@ mod start_tests {
     fn a_created_chat_left_before_its_state_arrives_still_sends_its_first_message(
         cx: &mut gpui::TestAppContext,
     ) {
-        leave_a_created_chat(cx, true);
+        leave_a_created_chat(cx, Leave::BeforeItsState);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_created_chat_left_for_no_chat_still_sends_its_first_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        leave_a_created_chat(cx, Leave::ForNoChat);
     }
 
     #[gpui::test]
