@@ -1792,8 +1792,10 @@ impl StateStore {
         let backend = requested_backend.unwrap_or(&chat_backend).to_owned();
         validate_backend(&backend)?;
         // A name is a few words, so it goes to the low-cost model that titles
-        // chats unless the user chose a Git writer model. The chat's own model
-        // is the fallback for an assistant without one.
+        // chats unless the user chose a Git writer model. When the CLI offers
+        // none of those, the worktree is named from the message instead of by
+        // a costlier model. Only an assistant without such models (JCode) uses
+        // the chat's own.
         let model = match optional_string(request, "worktree_model")? {
             Some(model) => {
                 validate_model(&backend, model)?;
@@ -1801,6 +1803,7 @@ impl StateStore {
             }
             None => match chat_title_model(&self.database, &backend)? {
                 Some(model) => model,
+                None if !chat_title_models(&backend).is_empty() => return Ok(None),
                 None => {
                     let model = (backend == chat_backend)
                         .then_some(chat_model)
@@ -12620,6 +12623,26 @@ mod tests {
             Some(default_naming.model),
             chat_title_model(&store.database, "codex").unwrap()
         );
+
+        // A CLI with only older or costlier models leaves naming to the message.
+        crate::model_catalog::set_test_models(
+            "codex",
+            vec![
+                discovered("gpt-5.6-luna", false, None),
+                discovered("gpt-6-sol", true, None),
+            ],
+        );
+        assert!(
+            store
+                .prepare_worktree_name(&json!({
+                    "chat": "chat-worktree",
+                    "text": "review it",
+                    "generate_worktree_name": true
+                }))
+                .unwrap()
+                .is_none()
+        );
+        crate::model_catalog::set_test_models("codex", Vec::new());
 
         let turn = match store
             .prepare_send(&json!({
