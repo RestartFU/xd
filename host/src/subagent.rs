@@ -168,7 +168,8 @@ impl SubagentRun {
                     status = Some(SubagentStatus::Failed);
                 }
                 set(&mut self.model, report.model, 80);
-                summary = Some(report.text);
+                // A command prints its answer last, after any logging.
+                summary = Some(clip_tail(&report.text, MAX_TEXT));
             }
         }
         set(&mut self.description, patch.description, MAX_LINE);
@@ -213,9 +214,10 @@ impl SubagentRun {
             }
         }
         // A finished agent is not doing anything any more, and a late progress
-        // report must not reopen it.
+        // report must not reopen it. Nor does a late report undo stopping it.
         if let Some(status) = status
             && status != SubagentStatus::Running
+            && self.status != SubagentStatus::Stopped
         {
             // Not every backend reports how long an agent took; what xd saw
             // stands in until a reported figure replaces it.
@@ -321,6 +323,18 @@ fn clean(value: &str, limit: usize) -> String {
         &value.split_whitespace().collect::<Vec<_>>().join(" "),
         limit,
     )
+}
+
+/// Like [`clip`], but keeps the end.
+fn clip_tail(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    let mut start = value.len() - limit.saturating_sub('…'.len_utf8());
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", &value[start..])
 }
 
 fn clip(value: &str, limit: usize) -> String {
@@ -459,6 +473,25 @@ mod tests {
         });
         assert_eq!(stopped.status, SubagentStatus::Stopped);
         assert_eq!(stopped.summary, "Nothing checks expiry.");
+        // A later report does not undo the stop.
+        stopped.apply(SubagentPatch {
+            status: Some(SubagentStatus::Completed),
+            ..SubagentPatch::new("toolu_bash")
+        });
+        assert_eq!(stopped.status, SubagentStatus::Stopped);
+
+        // Long output keeps its end, where the answer is.
+        let mut long = run.clone();
+        long.apply(SubagentPatch {
+            output: Some(format!(
+                "{}The answer.\n",
+                "log line ünïcode\n".repeat(1_000)
+            )),
+            ..SubagentPatch::new("toolu_bash")
+        });
+        assert!(long.summary.starts_with('…'));
+        assert!(long.summary.ends_with("The answer."));
+        assert!(long.summary.len() <= MAX_TEXT);
 
         // An ordinary background command is still a shell.
         let mut shell = SubagentRun::new("toolu_ls");

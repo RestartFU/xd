@@ -165,6 +165,9 @@ fn segments(script: &str) -> Vec<Segment> {
     let mut braces = 0usize;
     // The brace depth at which the function body being read ends.
     let mut function_body: Option<usize> = None;
+    // The same for a body written as a subshell, `name() ( … )`.
+    let mut parens = 0usize;
+    let mut function_subshell: Option<usize> = None;
     let mut index = 0;
 
     macro_rules! finish_word {
@@ -206,7 +209,7 @@ fn segments(script: &str) -> Vec<Segment> {
             finish_word!();
             redirect = Redirect::None;
             let mut segment = std::mem::take(&mut current);
-            segment.defined = function_body.is_some();
+            segment.defined = function_body.is_some() || function_subshell.is_some();
             if !segment.words.is_empty() || segment.stdin.is_some() {
                 done.push(segment);
             } else {
@@ -308,7 +311,24 @@ fn segments(script: &str) -> Vec<Segment> {
                 }
                 index += 1;
             }
-            ';' | '&' | '|' | '(' | ')' | '`' => {
+            '(' => {
+                finish_segment!();
+                parens += 1;
+                if function_pending && function_body.is_none() && function_subshell.is_none() {
+                    function_subshell = Some(parens);
+                }
+                function_pending = false;
+                index += 1;
+            }
+            ')' => {
+                finish_segment!();
+                if function_subshell == Some(parens) {
+                    function_subshell = None;
+                }
+                parens = parens.saturating_sub(1);
+                index += 1;
+            }
+            ';' | '&' | '|' | '`' => {
                 finish_segment!();
                 index += 1;
                 while index < chars.len() && matches!(chars[index], ';' | '&' | '|') {
@@ -415,7 +435,12 @@ fn classify(segment: &Segment, depth: usize) -> Option<Delegation> {
         "bash" | "sh" | "zsh" | "dash" => {
             let short_flags = |arg: &&String| arg.starts_with('-') && !arg.starts_with("--");
             // `-n` reads the script without running it.
-            if args.iter().filter(short_flags).any(|arg| arg.contains('n')) {
+            if args.iter().filter(short_flags).any(|arg| arg.contains('n'))
+                || args.iter().any(|arg| arg == "--noexec")
+                || args
+                    .windows(2)
+                    .any(|pair| pair[0] == "-o" && pair[1] == "noexec")
+            {
                 return None;
             }
             let flag = args
@@ -708,6 +733,7 @@ mod tests {
         let called = detect("review() { codex exec \"$1\"; }; review 'Check it'");
         assert_eq!(called, None);
         assert!(detect("f() { ls; }\ncodex exec 'after the function'").is_some());
+        assert!(detect("f() ( ls )\n(cd /repo && codex exec 'in a subshell')").is_some());
 
         let resumed =
             detect("codex exec resume 019aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 'Continue'").unwrap();
@@ -741,6 +767,10 @@ mod tests {
             "review() { codex exec 'Review the diff'; }",
             "function review {\n  claude -p 'Review the diff'\n}\necho defined",
             "bash -n -c 'codex exec \"Review\"'",
+            "bash --noexec -c 'codex exec \"Review\"'",
+            "bash -o noexec -c 'codex exec \"Review\"'",
+            "review() ( codex exec 'Review the diff' )",
+            "review () (\n  cd /repo && claude -p 'Review'\n)",
         ] {
             assert_eq!(detect(command), None, "{command}");
         }
