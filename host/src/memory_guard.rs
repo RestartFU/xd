@@ -537,7 +537,18 @@ pub(crate) fn read_processes() -> Vec<Process> {
     };
     entries
         .filter_map(|entry| {
-            let path = entry.ok()?.path();
+            let entry = entry.ok()?;
+            // Only processes: `self` and `thread-self` would list the daemon,
+            // or the guard's own thread, a second time.
+            if !entry
+                .file_name()
+                .as_encoded_bytes()
+                .iter()
+                .all(u8::is_ascii_digit)
+            {
+                return None;
+            }
+            let path = entry.path();
             let stat = parse_stat(&fs::read_to_string(path.join("stat")).ok()?)?;
             if !stat.running() {
                 return None;
@@ -953,6 +964,21 @@ mod tests {
         assert!(found.bytes > 0);
         assert!(still_running(me, found.start));
         assert!(!still_running(me, found.start + 1));
+    }
+
+    #[test]
+    fn only_processes_are_read_from_proc_never_a_thread_of_one() {
+        std::thread::spawn(|| {
+            // SAFETY: gettid has no preconditions.
+            let thread = unsafe { libc::gettid() } as u32;
+            assert_ne!(thread, std::process::id());
+            let processes = read_processes();
+            assert!(processes.iter().all(|process| process.pid != thread));
+            let pids: HashSet<u32> = processes.iter().map(|process| process.pid).collect();
+            assert_eq!(pids.len(), processes.len(), "no process is listed twice");
+        })
+        .join()
+        .unwrap();
     }
 
     /// Only processes this test starts, in a process group of their own, are

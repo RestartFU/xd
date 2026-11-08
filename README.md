@@ -73,9 +73,10 @@ once when it runs out (cgroup v2 `memory.oom.group`). There, a single heavy
 build would take down the daemon, every chat and every terminal. When the host
 runs in such a container, it watches the memory the kernel cannot reclaim (page
 cache does not count) and, once that reaches 92% of the limit, stops the
-largest process tree it started work in, such as a compiler or build tool, and
-never an agent, a terminal shell or xd itself. The host log and the chat the
-work belonged to say what was stopped. Set `XD_MEMORY_GUARD_PERCENT` to a
+largest process tree of the same user in the container, such as a compiler or
+build tool, whether or not xd started it, and never an agent, a terminal shell
+or xd itself. The host log, and the chat the work ran under when there is one,
+say what was stopped. Set `XD_MEMORY_GUARD_PERCENT` to a
 value from 50 to 99 to change the threshold, or to `off` to turn this off.
 
 ## Install
