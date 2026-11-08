@@ -1,7 +1,7 @@
 //! Runs one short, unattended assistant turn and collects its reply.
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc::{self, TryRecvError},
     thread,
     time::{Duration, Instant},
@@ -75,15 +75,13 @@ pub(crate) fn run(
         match output_receiver.try_recv() {
             Ok(result) => {
                 if let Err(error) = &result {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    stop(&mut child);
                     return Err(error.clone());
                 }
                 output = Some(result);
             }
             Err(TryRecvError::Disconnected) if output.is_none() => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop(&mut child);
                 return Err(format!("Cannot read {backend} output."));
             }
             Err(_) => {}
@@ -95,8 +93,7 @@ pub(crate) fn run(
             break status;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop(&mut child);
             return Err(format!("{task} timed out."));
         }
         thread::sleep(Duration::from_millis(10));
@@ -192,6 +189,20 @@ pub(crate) fn keep_the_run_minimal(
     }
 }
 
+/// Ends a run that is still going, with anything it started: a hook left
+/// holding the output pipes would otherwise outlive it, and so would the
+/// threads reading them.
+fn stop(child: &mut Child) {
+    // SAFETY: AgentCommand::build makes the child lead a process group of its
+    // own, and it has not been reaped, so this signal can only reach that group.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn read_output(stdout: impl Read, backend: &str) -> Result<AgentOutput, String> {
     let mut parser = AgentParser::new(backend)?;
     let mut output = String::new();
@@ -280,6 +291,37 @@ mod tests {
         assert!(codex.contains(&"--ephemeral".to_owned()));
         assert!(!codex.contains(&"project_doc_max_bytes=0".to_owned()));
         assert!(codex.contains(&"features.shell_tool=false".to_owned()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_timed_out_run_takes_what_it_started_with_it() {
+        use std::os::unix::process::CommandExt;
+        let directory = std::env::temp_dir().join(format!("xd-agent-text-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let pid_file = directory.join("helper.pid");
+        // A helper that inherits stdout, as a hook started by the CLI would.
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "sleep 60 & echo $! > {}; sleep 60",
+                pid_file.display()
+            ))
+            .process_group(0);
+        let error = run(command, "codex", None, Duration::from_millis(500), "naming").unwrap_err();
+        assert_eq!(error, "naming timed out.");
+        let helper = std::fs::read_to_string(&pid_file).unwrap();
+        let stat = format!("/proc/{}/stat", helper.trim());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Gone, or a zombie waiting for whoever adopted it to reap it.
+        while std::fs::read_to_string(&stat)
+            .is_ok_and(|stat| !stat.rsplit(") ").next().unwrap_or("").starts_with('Z'))
+        {
+            assert!(Instant::now() < deadline, "the helper outlived its run");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]
