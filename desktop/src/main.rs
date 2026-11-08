@@ -19526,8 +19526,7 @@ fn notify_turn_finished(title: &str) {
         .spawn()
     {
         thread::spawn(move || {
-            use gtk::gio;
-            use gtk::glib::variant::ToVariant;
+            use gio::glib::variant::ToVariant;
 
             let Ok(output) = child.wait_with_output() else {
                 return;
