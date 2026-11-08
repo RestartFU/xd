@@ -52,7 +52,8 @@ use xd_desktop::{
     markdown,
     model::{
         AppModel, Attachment, AutoDeleteRules, AutoSettleRules, ChatSummary, Folder,
-        MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, ToolView, Worktree,
+        MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection, SentFrom, ToolView,
+        Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -9983,12 +9984,16 @@ impl XdDesktop {
         let message_index = (!text.is_empty()).then(|| {
             let index = self.model.messages.len();
             let mut message = Message::new(None, "user", text, None);
-            message.sent_after = self
-                .model
-                .messages
-                .iter()
-                .filter_map(|shown| shown.id)
-                .max();
+            // From the newest page only: in an older window, a newer message
+            // with the same words could pass for its stored copy.
+            message.sent_from = (!self.transcript_has_newer).then(|| SentFrom {
+                newest: self
+                    .model
+                    .messages
+                    .iter()
+                    .filter_map(|shown| shown.id)
+                    .max(),
+            });
             self.model.messages.push(message);
             self.transcript_snapshot.sync_messages(&self.model);
             self.sync_transcript_count(false);

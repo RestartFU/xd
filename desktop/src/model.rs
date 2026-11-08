@@ -393,10 +393,18 @@ pub struct Message {
     /// every frame it is drawn.
     #[serde(skip)]
     tool: Option<Arc<ToolView>>,
-    /// For a message sent from here and not stored yet: the newest stored
-    /// message shown when it was sent. Its stored copy comes after it.
+    /// For a message sent from here and not stored yet, where it was sent
+    /// from. Without it, the message is dropped by the next newest page, as
+    /// a message sent from an older window of the transcript is.
     #[serde(skip)]
-    pub sent_after: Option<i64>,
+    pub sent_from: Option<SentFrom>,
+}
+
+/// Where in a chat a message was sent from: after the newest stored message
+/// shown, while the newest page was shown. Its stored copy comes after that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SentFrom {
+    pub newest: Option<i64>,
 }
 
 /// What a tool row draws.
@@ -460,7 +468,7 @@ impl Message {
             image_paths,
             file_paths,
             tool,
-            sent_after: None,
+            sent_from: None,
         }
     }
 
@@ -485,7 +493,7 @@ impl Message {
             image_paths,
             file_paths: Vec::new(),
             tool: None,
-            sent_after: None,
+            sent_from: None,
         }
     }
 
@@ -509,7 +517,7 @@ impl Message {
             image_paths,
             file_paths,
             tool,
-            sent_after: None,
+            sent_from: None,
         }
     }
 
@@ -1367,12 +1375,17 @@ impl AppModel {
         // A stored copy of a message sent from here is newer than every
         // stored message shown when it was sent; an older one with the same
         // words was said before.
+        // The host stores attachments as lines after the text, so the words
+        // are compared, as they are shown.
         let stores = |stored: &Message, sent: &Message| {
+            let Some(from) = sent.sent_from else {
+                return false;
+            };
             stored.role == "user"
-                && stored.content == sent.content
+                && message_content(&stored.role, &stored.content).0.trim() == sent.content.trim()
                 && stored
                     .id
-                    .is_some_and(|id| sent.sent_after.is_none_or(|after| id > after))
+                    .is_some_and(|id| from.newest.is_none_or(|newest| id > newest))
         };
         // Whether a newest page goes back far enough to hold that copy. One
         // that starts after the point the message was sent from shows a chat
@@ -1382,9 +1395,12 @@ impl AppModel {
             .iter()
             .filter_map(|message| message.id)
             .min();
-        let reaches = |sent: &Message| {
-            !has_older
-                || matches!((sent.sent_after, oldest), (Some(after), Some(oldest)) if oldest <= after)
+        let reaches = |sent: &Message| match sent.sent_from {
+            None => false,
+            Some(from) => {
+                !has_older
+                    || matches!((from.newest, oldest), (Some(newest), Some(oldest)) if oldest <= newest)
+            }
         };
         if direction == MessagePageDirection::Tail {
             // A message sent from here but not stored yet stays at the end
@@ -3541,8 +3557,9 @@ mod tests {
     fn a_sent_message_stays_until_a_page_has_it() {
         let mut model = AppModel::default();
         model.select_chat("chat-1");
-        let sent: Message =
+        let mut sent: Message =
             serde_json::from_value(json!({"role": "user", "content": "Fix the footer"})).unwrap();
+        sent.sent_from = Some(SentFrom::default());
         model.messages.push(sent);
         // Asked for before the message was stored.
         model
@@ -3569,8 +3586,9 @@ mod tests {
         assert_eq!(ids, [Some(1), Some(2)]);
 
         // Or a later page, reached going forward.
-        let sent: Message =
+        let mut sent: Message =
             serde_json::from_value(json!({"role": "user", "content": "And the header"})).unwrap();
+        sent.sent_from = Some(SentFrom::default());
         model.messages.push(sent);
         let change = model
             .apply_message_page(
@@ -3585,7 +3603,7 @@ mod tests {
         // Words said before are not the copy of the same words sent again.
         let mut again: Message =
             serde_json::from_value(json!({"role": "user", "content": "Fix the footer"})).unwrap();
-        again.sent_after = Some(3);
+        again.sent_from = Some(SentFrom { newest: Some(3) });
         model.messages.push(again);
         model
             .apply_message_page(
@@ -3615,6 +3633,44 @@ mod tests {
             )
             .unwrap();
         assert!(model.messages.iter().all(|message| message.id.is_some()));
+        model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 1, "role": "user", "content": "Fix the footer"},
+                    {"id": 2, "role": "assistant", "content": "On it"},
+                    {"id": 3, "role": "user", "content": "And the header"}
+                ]}),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
+
+        // Its stored copy carries its attachments as lines after its words.
+        let mut with_image: Message =
+            serde_json::from_value(json!({"role": "user", "content": "Look at this"})).unwrap();
+        with_image.sent_from = Some(SentFrom { newest: Some(3) });
+        model.messages.push(with_image);
+        model
+            .apply_message_page(
+                &json!({"messages": [
+                    {"id": 1, "role": "user", "content": "Fix the footer"},
+                    {"id": 2, "role": "assistant", "content": "On it"},
+                    {"id": 3, "role": "user", "content": "And the header"},
+                    {"id": 4, "role": "user", "content": "Look at this\n[image: /tmp/shot.png]"}
+                ]}),
+                MessagePageDirection::Tail,
+            )
+            .unwrap();
+        assert_eq!(model.messages.len(), 4);
+        assert!(model.messages.iter().all(|message| message.id.is_some()));
+
+        // One sent from an older window of the transcript is not kept.
+        let older: Message =
+            serde_json::from_value(json!({"role": "user", "content": "Try again"})).unwrap();
+        model.messages.push(older);
+        model
+            .apply_message_page(&json!({"messages": []}), MessagePageDirection::Tail)
+            .unwrap();
+        assert!(model.messages.is_empty());
         model
             .apply_message_page(
                 &json!({"messages": [
