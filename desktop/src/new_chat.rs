@@ -1475,7 +1475,7 @@ mod start_tests {
             let mut stream = server_end;
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             let mut seen = Vec::new();
-            while seen.len() < 3 {
+            while seen.len() < 2 {
                 let mut line = String::new();
                 if reader.read_line(&mut line).unwrap() == 0 {
                     break;
@@ -1534,17 +1534,6 @@ mod start_tests {
                     cx,
                 );
                 assert!(desktop.first_chat_prompts.is_empty());
-                // Once sent, the draft that held it is cleared.
-                desktop.handle_reply(
-                    RequestKind::Send {
-                        chat_id: "implementation".into(),
-                        text: "Fix the footer".into(),
-                    },
-                    serde_json::json!({"ok": true}).as_object().unwrap().clone(),
-                    None,
-                    cx,
-                );
-                assert!(desktop.first_messages_sent_aside.is_empty());
             });
         });
         let seen = server.join().unwrap();
@@ -1557,7 +1546,6 @@ mod start_tests {
             [
                 ("set-draft", "implementation", "Fix the footer"),
                 ("send", "implementation", "Fix the footer"),
-                ("set-draft", "implementation", ""),
             ]
         );
     }

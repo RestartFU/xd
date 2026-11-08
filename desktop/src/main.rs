@@ -2163,9 +2163,6 @@ struct XdDesktop {
     /// Created chats' first messages, sent when each chat's state arrives,
     /// by chat id: another chat can be started before one is sent.
     first_chat_prompts: HashMap<String, (String, Vec<Attachment>)>,
-    /// Created chats whose first message went out without the chat being
-    /// opened, whose drafts, still holding it, are cleared once it is sent.
-    first_messages_sent_aside: HashSet<String>,
     new_chat_attachments: Vec<Attachment>,
     new_chat_submitted_attachments: Vec<Attachment>,
     /// The chat the new chat view created, which it stays on screen for
@@ -2813,7 +2810,6 @@ impl XdDesktop {
             new_chat_model: None,
             new_chat_menu: None,
             first_chat_prompts: HashMap::new(),
-            first_messages_sent_aside: HashSet::new(),
             new_chat_attachments: Vec::new(),
             new_chat_submitted_attachments: Vec::new(),
             new_chat_started: None,
@@ -4010,9 +4006,6 @@ impl XdDesktop {
                 }
                 RequestKind::SetAutoSettleSettings => self.request_auto_settle_settings(),
                 RequestKind::SetAutoDeleteSettings => self.request_auto_delete_settings(),
-                // Not sent: it stays in that chat's draft, to send from there.
-                RequestKind::Send { chat_id, .. }
-                    if self.first_messages_sent_aside.remove(chat_id) => {}
                 RequestKind::Send { chat_id, .. } => {
                     self.sending = false;
                     self.restore_pending_send(cx);
@@ -5437,16 +5430,6 @@ impl XdDesktop {
                 self.request_workflow_statuses();
                 if std::mem::take(&mut self.transcript_refresh_pending) {
                     self.request_messages(&chat_id);
-                }
-            }
-            RequestKind::Send { chat_id, .. }
-                if self.first_messages_sent_aside.remove(&chat_id) =>
-            {
-                // Sent: the draft that held it until now goes.
-                if let Some(host) = self.active_host()
-                    && let Err(error) = host.set_draft(&chat_id, "", Some(&[]), None)
-                {
-                    self.model.connection_error = Some(error);
                 }
             }
             RequestKind::Send { chat_id, text } if self.chat_is_active(&chat_id) => {
@@ -7190,7 +7173,9 @@ impl XdDesktop {
 
     /// Send a created chat's first message without opening the chat, when
     /// another one was picked before it opened. Otherwise it would wait in
-    /// the chat's draft until that chat was opened.
+    /// the chat's draft until that chat was opened. The host empties that
+    /// draft when it starts the turn, as for any message; if the send fails,
+    /// the message is still in the draft to send from there.
     fn send_first_message_aside(&mut self, chat_id: &str) {
         // Without a host it stays, to go out when the chat opens.
         let Some(host) = self.active_host().cloned() else {
@@ -7199,7 +7184,7 @@ impl XdDesktop {
         let Some((text, attachments)) = self.first_chat_prompts.remove(chat_id) else {
             return;
         };
-        match host.send_message(
+        if let Err(error) = host.send_message(
             chat_id,
             &text,
             &attachments,
@@ -7207,10 +7192,7 @@ impl XdDesktop {
             self.settings.git_writer_model.as_deref(),
             false,
         ) {
-            Ok(()) => {
-                self.first_messages_sent_aside.insert(chat_id.to_owned());
-            }
-            Err(error) => self.model.connection_error = Some(error),
+            self.model.connection_error = Some(error);
         }
     }
 
