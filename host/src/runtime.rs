@@ -567,13 +567,32 @@ impl TurnRuntime {
             .collect()
     }
 
-    /// Tells clients how many background tasks the chat now waits on.
-    fn publish_background_tasks(&self, chat_id: &str, count: usize) {
-        self.inner.events.publish(json!({
-            "event": "background-tasks",
-            "chat": chat_id,
-            "background_tasks": count,
-        }));
+    /// Tells clients how many background tasks the chat now waits on: those of
+    /// its current process, none without one. A process that has been replaced
+    /// or has exited never speaks for the chat.
+    ///
+    /// The count is read and published while holding the sessions and the
+    /// current process's router, which every change to that count holds, so
+    /// whichever publication comes last carries the latest count.
+    fn publish_background_tasks(&self, chat_id: &str) {
+        let publish = |count: usize| {
+            self.inner.events.publish(json!({
+                "event": "background-tasks",
+                "chat": chat_id,
+                "background_tasks": count,
+            }));
+        };
+        let Ok(sessions) = self.inner.sessions.lock() else {
+            return;
+        };
+        match sessions.get(chat_id) {
+            Some(session) => {
+                if let Ok(router) = session.router.lock() {
+                    publish(router.tasks.len());
+                }
+            }
+            None => publish(0),
+        }
     }
 
     /// Whether a kept process between turns is still running a background
@@ -1180,21 +1199,24 @@ impl TurnRuntime {
                         return;
                     };
                     let runtime = TurnRuntime { inner };
-                    let Ok(mut router) = router.lock() else {
-                        return;
+                    let tasks_changed = {
+                        let Ok(mut router) = router.lock() else {
+                            return;
+                        };
+                        router.quiet_since = Instant::now();
+                        router.wakes_itself |= schedules_a_wakeup(&text);
+                        router.report_due = report_due_after(&text, router.report_due);
+                        let tasks_before = router.tasks.len();
+                        track_tasks(&text, &mut router.tasks);
+                        router.backlog.push_back(text);
+                        runtime.pump(&chat_id, &mut router);
+                        router.tasks.len() != tasks_before
                     };
-                    router.quiet_since = Instant::now();
-                    router.wakes_itself |= schedules_a_wakeup(&text);
-                    router.report_due = report_due_after(&text, router.report_due);
-                    let tasks_before = router.tasks.len();
-                    track_tasks(&text, &mut router.tasks);
-                    router.backlog.push_back(text);
-                    runtime.pump(&chat_id, &mut router);
                     // After the line is handled, so a report that starts a turn
                     // reaches clients first and the chat goes straight from
                     // waiting to working.
-                    if router.tasks.len() != tasks_before {
-                        runtime.publish_background_tasks(&chat_id, router.tasks.len());
+                    if tasks_changed {
+                        runtime.publish_background_tasks(&chat_id);
                     }
                 }
                 let mut had_tasks = false;
@@ -1211,10 +1233,7 @@ impl TurnRuntime {
                     }
                 });
                 if had_tasks && let Some(inner) = inner.upgrade() {
-                    let runtime = TurnRuntime { inner };
-                    // A process started since for the same chat speaks for it.
-                    let count = runtime.background_tasks(&chat_id);
-                    runtime.publish_background_tasks(&chat_id, count);
+                    TurnRuntime { inner }.publish_background_tasks(&chat_id);
                 }
                 // A turn that holds the output settles its agents when it ends.
                 // Otherwise this is the only sign the process is gone. Holding
