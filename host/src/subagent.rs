@@ -64,6 +64,9 @@ pub struct SubagentRun {
     pub key: String,
     pub provider: String,
     pub agent: String,
+    /// The assistant whose shell started this one, for an agent run as a
+    /// command rather than through a subagent tool. It owns the process.
+    pub launcher: String,
     pub model: String,
     pub description: String,
     pub prompt: String,
@@ -93,6 +96,7 @@ pub struct SubagentPatch {
     pub task_id: Option<String>,
     pub provider: Option<String>,
     pub agent: Option<String>,
+    pub launcher: Option<String>,
     pub model: Option<String>,
     pub description: Option<String>,
     pub prompt: Option<String>,
@@ -105,6 +109,8 @@ pub struct SubagentPatch {
     pub duration_ms: Option<u64>,
     pub latest: Option<String>,
     pub summary: Option<String>,
+    /// Where a backgrounded command wrote its output, once it has finished.
+    pub output_file: Option<String>,
     /// A task the agent says to keep out of the transcript.
     pub hidden: bool,
 }
@@ -138,9 +144,37 @@ impl SubagentRun {
                 *field = value;
             }
         };
-        set(&mut self.provider, patch.provider, 40);
-        set(&mut self.agent, patch.agent, 80);
+        // Claude reports a command it runs in the background as a "Shell"
+        // task. For a command that starts an agent, only what recognised the
+        // agent says who it is.
+        if self.launcher.is_empty() || patch.launcher.is_some() {
+            set(&mut self.provider, patch.provider, 40);
+            set(&mut self.agent, patch.agent, 80);
+        }
+        set(&mut self.launcher, patch.launcher, 40);
         set(&mut self.model, patch.model, 80);
+        let mut status = patch.status;
+        let mut summary = patch.summary;
+        if !self.launcher.is_empty() {
+            // The command's output is the agent's report, plus whatever the
+            // command adds around it.
+            if let Some(output) = patch
+                .output_file
+                .as_deref()
+                .and_then(crate::delegation::read_output)
+                .filter(|output| !output.trim().is_empty())
+            {
+                summary = Some(output);
+            }
+            if let Some(output) = summary.take() {
+                let report = crate::delegation::report(&output);
+                if report.failed && status.is_some_and(|status| status != SubagentStatus::Running) {
+                    status = Some(SubagentStatus::Failed);
+                }
+                set(&mut self.model, report.model, 80);
+                summary = Some(report.text);
+            }
+        }
         set(&mut self.description, patch.description, MAX_LINE);
         if let Some(prompt) = patch.prompt {
             self.prompt = clip(prompt.trim(), MAX_TEXT);
@@ -176,7 +210,7 @@ impl SubagentRun {
                 self.latest = latest;
             }
         }
-        if let Some(summary) = patch.summary {
+        if let Some(summary) = summary {
             let summary = clip(unwrap_hand_back(&summary).trim(), MAX_TEXT);
             if !summary.is_empty() {
                 self.summary = summary;
@@ -184,7 +218,7 @@ impl SubagentRun {
         }
         // A finished agent is not doing anything any more, and a late progress
         // report must not reopen it.
-        if let Some(status) = patch.status
+        if let Some(status) = status
             && status != SubagentStatus::Running
         {
             // Not every backend reports how long an agent took; what xd saw
@@ -220,6 +254,7 @@ impl SubagentRun {
             "tool_uses": self.tool_uses,
         });
         for (field, value) in [
+            ("launcher", &self.launcher),
             ("model", &self.model),
             ("prompt", &self.prompt),
             ("activity", &self.activity),
@@ -384,6 +419,60 @@ mod tests {
         );
         // Plain reports, and other backends, pass through untouched.
         assert_eq!(unwrap_hand_back("  indented\nreport"), "  indented\nreport");
+    }
+
+    #[test]
+    fn an_agent_started_from_a_shell_keeps_its_identity_and_reports_cleanly() {
+        let mut run = SubagentRun::new("toolu_bash");
+        run.apply(SubagentPatch {
+            provider: Some("Codex".into()),
+            agent: Some("auth-audit".into()),
+            launcher: Some("Claude".into()),
+            status: Some(SubagentStatus::Running),
+            ..SubagentPatch::new("toolu_bash")
+        });
+        // Claude's own report of the backgrounded command.
+        run.apply(SubagentPatch {
+            provider: Some("Claude".into()),
+            agent: Some("Shell".into()),
+            description: Some("Audit token checks".into()),
+            background: Some(true),
+            ..SubagentPatch::new("toolu_bash")
+        });
+        assert_eq!(run.provider, "Codex");
+        assert_eq!(run.agent, "auth-audit");
+        assert_eq!(run.description, "Audit token checks");
+
+        let path =
+            std::env::temp_dir().join(format!("xd-subagent-{}.output", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            "Nothing checks expiry.\n\n---\n[codex-opussy] FAILED (exit 1) · model=gpt-6.1-sol effort=low · 9s · full log: /l\n",
+        )
+        .unwrap();
+        run.apply(SubagentPatch {
+            status: Some(SubagentStatus::Completed),
+            summary: Some("Background command \"Audit\" completed (exit code 1)".into()),
+            output_file: Some(path.to_string_lossy().into_owned()),
+            ..SubagentPatch::new("toolu_bash")
+        });
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(run.status, SubagentStatus::Failed);
+        assert_eq!(run.summary, "Nothing checks expiry.");
+        assert_eq!(run.model, "gpt-6.1-sol");
+        assert_eq!(decode(&run.encode()).unwrap()["launcher"], "Claude");
+
+        // An ordinary background command is still a shell.
+        let mut shell = SubagentRun::new("toolu_ls");
+        shell.apply(SubagentPatch {
+            agent: Some("Shell".into()),
+            summary: Some("x\n---\n[codex-opussy] FAILED".into()),
+            status: Some(SubagentStatus::Completed),
+            ..SubagentPatch::new("toolu_ls")
+        });
+        assert_eq!(shell.agent, "Shell");
+        assert_eq!(shell.status, SubagentStatus::Completed);
+        assert!(decode(&shell.encode()).unwrap().get("launcher").is_none());
     }
 
     #[test]

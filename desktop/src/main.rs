@@ -14210,53 +14210,58 @@ impl XdDesktop {
                         .child(format!("{label}…")),
                 )
             })
-            .when(pending.is_none() && view.can_stop(), |header| {
-                let action =
-                    |id: &'static str, label: &'static str, verb: &'static str, tone: u32| {
-                        let key = view.key.clone();
-                        div()
-                            .id((id, index))
-                            .flex_none()
-                            .h(px(22.0))
-                            .px(px(8.0))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .cursor_pointer()
-                            .text_size(px(11.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(tone))
-                            .hover(|style| style.bg(rgb(colors.surface_high)))
-                            .on_click(move |_, window, cx| {
-                                cx.stop_propagation();
-                                window.dispatch_action(
-                                    Box::new(ControlSubagent {
-                                        key: key.clone(),
-                                        action: verb.to_owned(),
-                                    }),
-                                    cx,
-                                );
-                            })
-                            .child(label)
-                    };
-                header
-                    .when(view.can_background(), |header| {
-                        header.child(action(
-                            "native-subagent-background",
-                            "Background",
-                            "background",
-                            colors.muted,
-                        ))
-                    })
-                    .child(action(
-                        "native-subagent-stop",
-                        "Stop",
-                        "stop",
-                        colors.danger,
-                    ))
-            })
+            .when(
+                pending.is_none() && (view.can_stop() || view.can_background()),
+                |header| {
+                    let action =
+                        |id: &'static str, label: &'static str, verb: &'static str, tone: u32| {
+                            let key = view.key.clone();
+                            div()
+                                .id((id, index))
+                                .flex_none()
+                                .h(px(22.0))
+                                .px(px(8.0))
+                                .flex()
+                                .items_center()
+                                .rounded(px(6.0))
+                                .border_1()
+                                .border_color(rgb(colors.border))
+                                .cursor_pointer()
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(tone))
+                                .hover(|style| style.bg(rgb(colors.surface_high)))
+                                .on_click(move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    window.dispatch_action(
+                                        Box::new(ControlSubagent {
+                                            key: key.clone(),
+                                            action: verb.to_owned(),
+                                        }),
+                                        cx,
+                                    );
+                                })
+                                .child(label)
+                        };
+                    header
+                        .when(view.can_background(), |header| {
+                            header.child(action(
+                                "native-subagent-background",
+                                "Background",
+                                "background",
+                                colors.muted,
+                            ))
+                        })
+                        .when(view.can_stop(), |header| {
+                            header.child(action(
+                                "native-subagent-stop",
+                                "Stop",
+                                "stop",
+                                colors.danger,
+                            ))
+                        })
+                },
+            )
             .child(match view.status {
                 SubagentState::Running => div()
                     .flex_none()

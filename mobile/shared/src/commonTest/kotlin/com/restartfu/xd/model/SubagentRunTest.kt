@@ -81,6 +81,28 @@ class SubagentRunTest {
             "subagent_run\n" + """{"key":"t","provider":"Codex","agent":"worker","status":"running"}""",
         )!!
         assertEquals(false, codex.canStop)
+        assertEquals(false, codex.canBackground)
+
+        // Codex run from Claude's shell: Claude can background the command,
+        // and stop it once it runs in the background.
+        val launched = SubagentRun.parse(
+            "subagent_run\n" +
+                """{"key":"toolu_b","provider":"Codex","launcher":"Claude","agent":"audit","status":"running"}""",
+        )!!
+        assertEquals("Claude", launched.launcher)
+        assertEquals(false, launched.canStop)
+        assertEquals(true, launched.canBackground)
+        val backgrounded = launched.copy(background = true)
+        assertEquals(true, backgrounded.canStop)
+        assertEquals(false, backgrounded.canBackground)
+
+        // A Claude that Codex runs is Codex's, and Codex takes no orders.
+        val fromCodex = SubagentRun.parse(
+            "subagent_run\n" +
+                """{"key":"c","provider":"Claude","launcher":"Codex","agent":"Claude agent","status":"running"}""",
+        )!!
+        assertEquals(false, fromCodex.canStop)
+        assertEquals(false, fromCodex.canBackground)
     }
 
     @Test

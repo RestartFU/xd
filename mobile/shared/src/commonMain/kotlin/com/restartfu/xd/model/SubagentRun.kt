@@ -21,6 +21,8 @@ public data class SubagentRun(
     val detail: String,
     val marker: String,
     val provider: String = "",
+    /** The assistant whose shell runs this agent as a command, if one does. */
+    val launcher: String = "",
     val model: String = "",
     val prompt: String = "",
     val background: Boolean = false,
@@ -59,13 +61,21 @@ public data class SubagentRun(
     val droppedSteps: Long
         get() = if (steps.size < KEPT_STEPS) 0 else (toolUses - steps.size).coerceAtLeast(0)
 
-    /** Claude agents can be stopped, and one the turn waits on sent to the background. */
+    /**
+     * Claude agents can be stopped, and one the turn waits on sent to the background. An agent
+     * Claude runs as a command is Claude's too, but Claude can only stop that command once it
+     * runs in the background.
+     */
     val canStop: Boolean
-        get() = state == SubagentState.RUNNING && !key.isNullOrBlank() &&
-            provider.equals("claude", ignoreCase = true)
+        get() = claudeControls && (launcher.isBlank() || background)
 
     val canBackground: Boolean
-        get() = canStop && !background
+        get() = claudeControls && !background
+
+    /** The assistant that started the agent is the one that can act on it. */
+    private val claudeControls: Boolean
+        get() = state == SubagentState.RUNNING && !key.isNullOrBlank() &&
+            launcher.ifBlank { provider }.equals("claude", ignoreCase = true)
 
     public companion object {
         private const val PREFIX = "subagent\n"
@@ -101,6 +111,7 @@ public data class SubagentRun(
                 detail = field("description"),
                 marker = text,
                 provider = field("provider"),
+                launcher = field("launcher"),
                 model = field("model"),
                 prompt = field("prompt"),
                 background = (record["background"] as? JsonPrimitive)?.booleanOrNull ?: false,

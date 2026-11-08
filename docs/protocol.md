@@ -717,7 +717,10 @@ requests survive client disconnects and are available from `chat` snapshots.
 Controls a running Claude Code subagent. `key` is the `key` from its
 `subagent_run` record. `stop` ends the agent; `background` lets the turn carry
 on without waiting for it. The host refuses agents that have finished, that
-are not Claude's, or that Claude has not reported a task for yet. A control
+are not Claude's, or that Claude has not reported a task for yet. An agent
+Claude runs as a shell command (its record's `launcher` is `Claude`) counts as
+Claude's, and Claude reports a task for it once the command runs in the
+background. A control
 operation: answered even while a serialized command is slow. The agent's
 record reports the outcome.
 
@@ -744,6 +747,15 @@ milliseconds, for a live elapsed time. `latest` is the agent's newest message
 and `summary` its final report. `model`, `prompt`, `activity`, `latest`,
 `summary`, `tokens`, `duration_ms`, and `started_at` are absent until known;
 ignore unknown members.
+
+An agent can also be another assistant that the chat's agent runs as a shell
+command: Claude running `codex exec` or the codex-opussy `codex-agent` script,
+or Codex running `claude -p`. Its record has the same shape, keyed by the
+command's tool call. `provider` is the assistant doing the work and `launcher`
+the one whose shell runs it; `launcher` is absent for an agent started through
+a subagent tool. The command's output, without any wrapper footer, is its
+`summary`. Such an agent has no `steps`, because its tool calls happen in
+another process.
 
 ### `set-option`
 

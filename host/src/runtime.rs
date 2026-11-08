@@ -781,7 +781,14 @@ impl TurnRuntime {
             if run.status != SubagentStatus::Running {
                 return Err("That agent has already finished".into());
             }
-            if run.provider != "Claude" {
+            // The assistant that started the agent is the one that controls
+            // it: an agent run as a command belongs to the shell's owner.
+            let controller = if run.launcher.is_empty() {
+                &run.provider
+            } else {
+                &run.launcher
+            };
+            if controller != "Claude" {
                 return Err("Only Claude agents can be stopped from xd".into());
             }
             book.aliases
