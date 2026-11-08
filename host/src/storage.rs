@@ -79,7 +79,10 @@ const MAX_COMPAT_REPOSITORY_FILES: usize = 5_000;
 const MAX_COMPAT_REPOSITORY_PREVIEW_BYTES: usize = 128 * 1024;
 const MAX_FILE_BROWSE_BYTES: usize = 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 5_000;
-const MAX_GIT_DRAFT_CONTEXT_BYTES: usize = 256 * 1024;
+/// Codex takes a draft's prompt as one argument, and Linux refuses to start a
+/// program with an argument over 128 KiB, so the evidence stays well below it.
+const MAX_GIT_DRAFT_CONTEXT_BYTES: usize = 96 * 1024;
+const _: () = assert!(MAX_GIT_DRAFT_CONTEXT_BYTES + 8 * 1024 < 128 * 1024);
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(1);
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_CLONE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
