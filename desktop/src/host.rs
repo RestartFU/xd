@@ -933,6 +933,50 @@ impl HostHandle {
         )
     }
 
+    /// Materialize a composer draft only when its first message is submitted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_draft_chat(
+        &self,
+        folder: &str,
+        session: Option<&str>,
+        title: &str,
+        backend: &str,
+        model: Option<&str>,
+        worktree: Option<&NewSessionWorktree>,
+        start_from_remote: bool,
+    ) -> Result<(), String> {
+        let mut body = json!({"op":"new-chat", "folder":folder, "title":title, "backend":backend});
+        body["start_from_remote"] = json!(start_from_remote);
+        if let Some(session) = session {
+            body["session"] = json!(session);
+        }
+        if let Some(model) = model {
+            body["model"] = json!(model);
+        }
+        if session.is_none()
+            && let Some(worktree) = worktree
+        {
+            body["worktree"] = match worktree {
+                NewSessionWorktree::New => json!({"kind":"new"}),
+                NewSessionWorktree::Existing(path) => json!({"kind":"existing", "path":path}),
+                NewSessionWorktree::Branch { reference, oid } => {
+                    json!({"kind":"branch", "ref":reference, "oid":oid})
+                }
+                NewSessionWorktree::PullRequest { number, oid } => {
+                    json!({"kind":"pull-request", "number":number, "oid":oid})
+                }
+            };
+        }
+        self.send(
+            RequestKind::NewChat {
+                folder_id: folder.into(),
+                title: title.into(),
+                workdir: None,
+            },
+            body,
+        )
+    }
+
     pub fn new_chat_in_session(
         &self,
         folder_id: &str,
