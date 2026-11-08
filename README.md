@@ -66,6 +66,19 @@ branch holds. Using a session's terminal counts as activity. Sessions you've kep
 deleted, and neither is one you brought back from the **Settled** shelf, until
 it sees new activity.
 
+## Memory limits
+
+On Linux, a container's memory limit can be set to stop every process in it at
+once when it runs out (cgroup v2 `memory.oom.group`). There, a single heavy
+build would take down the daemon, every chat and every terminal. When the host
+runs in such a container, it watches the memory the kernel cannot reclaim (page
+cache does not count) and, once that reaches 92% of the limit, stops the
+largest process tree of the same user in the container, such as a compiler or
+build tool, whether or not xd started it, and never an agent, a terminal shell
+or xd itself. The host log, and the chat the work ran under when there is one,
+say what was stopped. Set `XD_MEMORY_GUARD_PERCENT` to a
+value from 50 to 99 to change the threshold, or to `off` to turn this off.
+
 ## Install
 
 Linux x86_64:
@@ -108,8 +121,8 @@ Claude Code versions with their npm releases every 30 minutes; only the package
 names are sent. When something is out of date, an **Update** button appears beside
 the terminal and Settings buttons. It lists what will change, and nothing is
 installed until you confirm. **Settings → Updates** checks manually. Restart is
-blocked while chats are running or terminal tabs are open; close the terminal tabs
-first. Stored conversations can resume afterward. Turn on **Settings → General →
+blocked while chats are running, a chat's background agents or shells are still at
+work, or terminal tabs are open; close the terminal tabs first. Stored conversations can resume afterward. Turn on **Settings → General →
 Resume chats after a restart** to have xd continue any turn that a crash, reboot, or
 daemon stop cut off, the next time the app connects to that daemon, local or paired. With
 the setting off, connecting drops those waiting chats instead, so a later change of mind

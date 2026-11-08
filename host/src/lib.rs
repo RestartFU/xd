@@ -26,6 +26,8 @@ mod codex_app;
 mod deletion;
 mod git_draft;
 mod local_socket;
+#[cfg(target_os = "linux")]
+mod memory_guard;
 mod model_catalog;
 mod owner_icon;
 mod pairing;
@@ -326,14 +328,14 @@ impl Engine {
                 if action == Some("restart") && self.cli_updates.is_updating() {
                     error_reply("Wait for the assistant updates to finish before restarting.")
                 } else if action == Some("restart")
-                    && (self
-                        .runtime
-                        .as_ref()
-                        .is_some_and(TurnRuntime::has_active_turns)
-                        || self.terminals.has_sessions())
+                    && (self.runtime.as_ref().is_some_and(|runtime| {
+                        runtime.has_active_turns() || runtime.has_background_tasks()
+                    }) || self.terminals.has_sessions())
                 {
+                    // A restart stops every agent process, and with it any
+                    // background agent or shell that outlived its turn.
                     error_reply(
-                        "Close terminal tabs and wait for active chats to finish before restarting for an update.",
+                        "Close terminal tabs and wait for active chats and their background agents and shells to finish before restarting for an update.",
                     )
                 } else {
                     let reply = self.self_update.perform(action).unwrap_or_else(error_reply);
@@ -1225,6 +1227,92 @@ impl Engine {
                     }),
                 )
             });
+        }
+    }
+
+    /// Starts the memory guard; see [`memory_guard`]. It does nothing while the
+    /// daemon runs in no cgroup that running out of memory kills as a whole,
+    /// but looks again now and then, since a container's limits can change.
+    #[cfg(target_os = "linux")]
+    pub fn start_memory_guard(self: &Arc<Self>) {
+        let setting = std::env::var(memory_guard::PERCENT_VARIABLE).ok();
+        let Some(percent) = memory_guard::threshold_percent(setting.as_deref()) else {
+            return;
+        };
+        // Weak, since the engine owns nothing that would stop this thread.
+        let engine = Arc::downgrade(self);
+        let spawned = thread::Builder::new()
+            .name("xd-memory-guard".into())
+            .spawn(move || {
+                let mut guarded = Vec::new();
+                let mut discovered: Option<std::time::Instant> = None;
+                while engine.strong_count() > 0 {
+                    if discovered.is_none_or(|at| at.elapsed() >= memory_guard::DISCOVER_EVERY) {
+                        guarded = memory_guard::retarget(
+                            guarded,
+                            memory_guard::Cgroup::discover(),
+                            percent,
+                        );
+                        discovered = Some(std::time::Instant::now());
+                    }
+                    for memory_guard::Guarded { cgroup, trigger } in &mut guarded {
+                        let Some(usage) = cgroup.unreclaimable() else {
+                            continue;
+                        };
+                        let now = std::time::Instant::now();
+                        if !trigger.due(usage, now) {
+                            continue;
+                        }
+                        trigger.fired(now);
+                        let Some(engine) = engine.upgrade() else {
+                            return;
+                        };
+                        engine.relieve_memory(cgroup, usage);
+                    }
+                    thread::sleep(memory_guard::SAMPLE_EVERY);
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("xd-host: cannot start the memory guard: {error}");
+        }
+    }
+
+    /// Stops the largest process tree xd may stop, and says so in the host log
+    /// and in the chat whose agent or terminal it ran under.
+    #[cfg(target_os = "linux")]
+    fn relieve_memory(&self, cgroup: &memory_guard::Cgroup, usage: u64) {
+        let mut chats: HashMap<u32, String> =
+            self.terminals.session_leaders().into_iter().collect();
+        if let Some(runtime) = &self.runtime {
+            chats.extend(runtime.agent_processes());
+        }
+        let owners = chats.keys().copied().collect();
+        let scope = memory_guard::Scope {
+            me: std::process::id(),
+            // SAFETY: getuid has no preconditions.
+            uid: unsafe { libc::getuid() },
+            cgroup: cgroup.path(),
+            owners: &owners,
+        };
+        let Some(victim) = memory_guard::choose_victim(&memory_guard::read_processes(), &scope)
+        else {
+            eprintln!(
+                "xd-host: the container is about to run out of memory, but nothing is running that xd may stop."
+            );
+            return;
+        };
+        let message = memory_guard::notice(&victim, usage, cgroup.max());
+        eprintln!("xd-host: {message}");
+        memory_guard::stop(&victim, &scope);
+        if let Some(chat) = victim.owner.and_then(|owner| chats.get(&owner))
+            && let Some(store) = &self.store
+            && store.chat(chat).is_ok()
+            && store
+                .append_turn_message(chat, "error", &message, None)
+                .is_ok()
+        {
+            self.events
+                .publish(json!({"event": "changed", "chat": chat}));
         }
     }
 

@@ -182,6 +182,8 @@ fn run_inner(options: HostOptions) -> io::Result<()> {
         .map_err(io::Error::other)?;
     let engine = Arc::new(Engine::with_store_and_data(store, Some(paths.data.clone())));
     engine.start_auto_settle();
+    #[cfg(target_os = "linux")]
+    engine.start_memory_guard();
     let listener = UnixListener::bind(&paths.socket)?;
     fs::set_permissions(&paths.socket, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
@@ -340,8 +342,9 @@ fn matches_this_build(info: &Value) -> bool {
 }
 /// An update replaces the installed files but leaves the previous daemon
 /// running, so the next client finds a build it cannot talk to. The daemon's
-/// own update restart refuses while turns or shells are live, which keeps this
-/// from interrupting work. Clients retry, so the upgrade completes once idle.
+/// own update restart refuses while turns, background agents or shells are
+/// live, which keeps this from interrupting work. Clients retry, so the upgrade
+/// completes once idle.
 fn replace_stale_daemon(
     options: &HostOptions,
     mut stale: UnixStream,
@@ -364,7 +367,7 @@ fn replace_stale_daemon(
     .map_err(|e| e.to_string())?;
     if reply["ok"] != true {
         return Err(format!(
-            "xd was updated, but the previous daemon is still running because chats or terminals are active. It restarts by itself when they finish. To restart it now and interrupt them, run `{stop}`."
+            "xd was updated, but the previous daemon is still running because chats, their background agents and shells, or terminals are active. It restarts by itself when they finish. To restart it now and interrupt them, run `{stop}`."
         ));
     }
     drop(stale);
