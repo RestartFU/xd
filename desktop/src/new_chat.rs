@@ -1466,6 +1466,7 @@ mod start_tests {
 
     /// A chat is created, then another one is picked, before the created
     /// chat opens or, once it has, before its state arrives.
+    #[cfg(unix)]
     #[derive(Clone, Copy)]
     enum Leave {
         /// For another chat, before the created one opens.
