@@ -431,10 +431,12 @@ impl XdDesktop {
             .and_then(|id| self.model.folders.iter().find(|f| &f.id == id))
             .map(|f| f.name.clone())
             .unwrap_or_default();
-        let editor = if self.chat_create_submitting {
+        let starting = self.chat_create_submitting;
+        let editor = if starting {
+            // The message went up into the conversation above.
             div()
-                .text_color(rgb(colors.muted))
-                .child("Setting up…")
+                .text_color(rgb(colors.faint))
+                .child("Message xd...")
                 .into_any_element()
         } else {
             self.new_chat_input.clone().into_any_element()
@@ -472,7 +474,9 @@ impl XdDesktop {
                 }
             }))
             .into_any_element();
-        let width = px(660.0);
+        // Starting, it takes the open chat's width and place, which is
+        // where the chat will show when it opens.
+        let width = px(if starting { 736.0 } else { 660.0 });
         let composer = self.render_composer(
             composer::ComposerParts {
                 owner: image_preview::DraftOwner::NewChat,
@@ -480,6 +484,7 @@ impl XdDesktop {
                 editor,
                 controls: vec![model],
                 actions: vec![send],
+                show_attachments: !starting,
             },
             colors,
             window,
@@ -545,21 +550,175 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
+            .when(!starting, |view| view.justify_center())
             .px_6()
             .bg(rgb(colors.background))
+            .when(!starting, |view| {
+                view.child(
+                    div()
+                        .w_full()
+                        .max_w(width)
+                        .mb_6()
+                        .text_size(px(22.0))
+                        .text_color(rgb(colors.text))
+                        .child("What would you like to build?"),
+                )
+            })
+            .when(starting, |view| {
+                view.child(self.render_new_chat_starting(width, colors, window))
+            })
+            .child(composer.mb_2())
+            .child(
+                context
+                    .w_full()
+                    .max_w(width)
+                    .when(starting, |row| row.mb(px(10.0))),
+            )
+            .into_any_element()
+    }
+
+    /// What the conversation will open with, while the chat is set up: the
+    /// message as sent, and what is being done before it can be answered.
+    fn render_new_chat_starting(
+        &self,
+        width: Pixels,
+        colors: ThemeColors,
+        window: &Window,
+    ) -> gpui::AnyElement {
+        let prompt = self.new_chat_submitted_prompt.clone().unwrap_or_default();
+        let side = (64.0 * window.scale_factor()).ceil() as u32;
+        let images = self
+            .new_chat_submitted_attachments
+            .iter()
+            .filter(|attachment| attachment.preview.is_some())
+            .map(|attachment| {
+                let thumbnail = match self.composer_thumbnails.get(&(attachment.id, side)) {
+                    Some(image_preview::ThumbnailState::Ready(image)) => Some(image.clone()),
+                    _ => None,
+                };
+                div()
+                    .size(px(64.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .overflow_hidden()
+                    .bg(rgb(colors.surface_high))
+                    .children(thumbnail.map(|image| {
+                        gpui::img(image)
+                            .size_full()
+                            .object_fit(gpui::ObjectFit::Fill)
+                    }))
+            })
+            .collect::<Vec<_>>();
+        let files = self
+            .new_chat_submitted_attachments
+            .iter()
+            .filter(|attachment| attachment.preview.is_none())
+            .map(|attachment| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.0))
+                    .text_color(rgb(colors.muted))
+                    .child(icon(FILE_ICON, 13.0, colors.muted))
+                    .child(attachment.name.clone())
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id("new-chat-starting")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .max_w(width)
+            .pt(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .overflow_y_scroll()
             .child(
                 div()
                     .w_full()
-                    .max_w(width)
-                    .mb_6()
-                    .text_size(px(22.0))
-                    .text_color(rgb(colors.text))
-                    .child("What would you like to build?"),
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_2()
+                    .when(!images.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .justify_end()
+                                .gap_2()
+                                .children(images),
+                        )
+                    })
+                    .when(!prompt.trim().is_empty() || !files.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .debug_selector(|| "new-chat-sent".into())
+                                .max_w(px(600.0))
+                                .px(px(14.0))
+                                .py(px(9.0))
+                                .rounded(px(18.0))
+                                .bg(rgb(colors.surface_high))
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .text_size(px(14.0))
+                                .text_color(rgb(colors.text))
+                                .when(!prompt.trim().is_empty(), |bubble| bubble.child(prompt))
+                                .children(files),
+                        )
+                    }),
             )
-            .child(composer.mb_2())
-            .child(context.w_full().max_w(width))
+            .child(
+                div()
+                    .debug_selector(|| "new-chat-status".into())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(2.0))
+                    .text_size(px(12.5))
+                    .text_color(rgb(colors.muted))
+                    .child(
+                        div()
+                            .size(px(7.0))
+                            .rounded_full()
+                            .bg(rgb(colors.working))
+                            .opacity(pulse_opacity()),
+                    )
+                    .child(self.new_chat_status())
+                    .child(working_dots(0, colors.muted)),
+            )
             .into_any_element()
+    }
+
+    /// What starting the chat is waiting on, in the words of its pickers.
+    pub(super) fn new_chat_status(&self) -> String {
+        if self.new_chat_started.is_some() {
+            return "Opening the chat".into();
+        }
+        if self.creating_chat_session.is_some() {
+            return "Starting the chat".into();
+        }
+        match &self.chat_create_worktree {
+            Some(NewSessionWorktree::New) => "Creating a worktree".into(),
+            Some(NewSessionWorktree::Branch { reference, .. }) => {
+                let branch = reference
+                    .strip_prefix("refs/heads/")
+                    .or_else(|| reference.strip_prefix("refs/remotes/"))
+                    .unwrap_or(reference);
+                if self.new_chat_remote {
+                    format!("Creating a worktree from the latest {branch}")
+                } else {
+                    format!("Creating a worktree from {branch}")
+                }
+            }
+            Some(NewSessionWorktree::PullRequest { number, .. }) => {
+                format!("Checking out pull request #{number}")
+            }
+            Some(NewSessionWorktree::Existing(_)) | None => "Starting the chat".into(),
+        }
     }
 
     pub(super) fn pick_new_chat_attachments(
@@ -1152,6 +1311,379 @@ mod choice_tests {
 }
 
 #[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn a_new_chat_shows_its_message_until_the_chat_opens(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.model = crate::tests::grouped_workspace_fixture();
+            desktop.creating_chat_folder = Some("atlas".into());
+            desktop.chat_create_title = "New Chat".into();
+            desktop.new_chat_prompt = "Fix the footer links".into();
+            desktop.new_chat_submitted_prompt = Some("Fix the footer links".into());
+            desktop.chat_create_worktree = Some(NewSessionWorktree::Branch {
+                reference: "refs/heads/dev".into(),
+                oid: "abc".into(),
+            });
+            desktop.chat_create_submitting = true;
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(1200.0), px(800.0)));
+        cx.run_until_parked();
+
+        let sent = cx.debug_bounds("new-chat-sent").expect("the message shows");
+        let status = cx
+            .debug_bounds("new-chat-status")
+            .expect("the status shows");
+        let composer = cx.debug_bounds("new-chat-composer").unwrap();
+        // In the conversation above the composer, as the chat will show it.
+        assert!(sent.bottom() <= status.top() && status.bottom() < composer.top());
+        assert!(sent.right() > composer.center().x);
+        desktop.read_with(cx, |desktop, _| {
+            assert_eq!(desktop.new_chat_status(), "Creating a worktree from dev");
+            assert!(desktop.anything_working());
+        });
+
+        desktop.update(cx, |desktop, cx| {
+            desktop.handle_reply(
+                RequestKind::NewChat {
+                    folder_id: "atlas".into(),
+                    title: "New Chat".into(),
+                    workdir: None,
+                },
+                serde_json::json!({"ok": true, "id": "implementation"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                None,
+                cx,
+            );
+            // Still on screen until the chat it made opens in its place.
+            assert_eq!(desktop.creating_chat_folder.as_deref(), Some("atlas"));
+            assert!(desktop.chat_create_submitting);
+            assert_eq!(desktop.new_chat_status(), "Opening the chat");
+            let prompt = &desktop.first_chat_prompts["implementation"];
+            assert_eq!(prompt.text, "Fix the footer links");
+            assert_eq!(prompt.endpoint, ChatEndpoint::Local);
+
+            // Nothing waits on it any more: another chat can open, or
+            // another new chat start.
+            assert!(!desktop.chat_create_in_flight());
+
+            desktop.reconcile_minimal_navigation(cx);
+            assert!(desktop.creating_chat_folder.is_none());
+            assert!(!desktop.chat_create_submitting);
+            assert!(desktop.new_chat_started.is_none());
+            assert_eq!(
+                desktop.model.selected_chat.as_deref(),
+                Some("implementation")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn another_chat_opens_while_a_created_one_waits_for_the_tree(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.model = crate::tests::grouped_workspace_fixture();
+                desktop.creating_chat_folder = Some("atlas".into());
+                desktop.chat_create_submitting = true;
+                // Not answered yet: nothing else opens.
+                desktop.open_minimal_session(
+                    "atlas".into(),
+                    "review".into(),
+                    AgentCli::Claude,
+                    window,
+                    cx,
+                );
+                assert!(desktop.creating_chat_folder.is_some());
+                assert_ne!(desktop.model.selected_chat.as_deref(), Some("review"));
+
+                desktop.chat_create_title = "New Chat".into();
+                desktop.new_chat_submitted_prompt = Some("First".into());
+                desktop.handle_reply(
+                    RequestKind::NewChat {
+                        folder_id: "atlas".into(),
+                        title: "New Chat".into(),
+                        workdir: None,
+                    },
+                    serde_json::json!({"ok": true, "id": "implementation"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                assert!(desktop.new_chat_started.is_some());
+                desktop.open_minimal_session(
+                    "atlas".into(),
+                    "review".into(),
+                    AgentCli::Claude,
+                    window,
+                    cx,
+                );
+                assert!(desktop.creating_chat_folder.is_none());
+                assert!(!desktop.chat_create_submitting);
+                assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+                // The tree that would have opened the created chat does not
+                // take the reader away from the one picked.
+                desktop.reconcile_minimal_navigation(cx);
+                assert_eq!(desktop.model.selected_chat.as_deref(), Some("review"));
+
+                // And a new chat can start while one waits.
+                desktop.creating_chat_folder = Some("atlas".into());
+                desktop.chat_create_submitting = true;
+                desktop.new_chat_started = Some("made".into());
+                desktop.begin_chat_create("atlas".into(), window, cx);
+                assert!(!desktop.chat_create_submitting);
+                assert!(desktop.new_chat_started.is_none());
+                assert_eq!(desktop.creating_chat_folder.as_deref(), Some("atlas"));
+                // Its first message, and the first chat's, both wait to be sent.
+                desktop.chat_create_title = "New Chat".into();
+                desktop.new_chat_submitted_prompt = Some("Second".into());
+                desktop.chat_create_submitting = true;
+                desktop.handle_reply(
+                    RequestKind::NewChat {
+                        folder_id: "atlas".into(),
+                        title: "New Chat".into(),
+                        workdir: None,
+                    },
+                    serde_json::json!({"ok": true, "id": "second"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                assert_eq!(desktop.first_chat_prompts["implementation"].text, "First");
+                assert_eq!(desktop.first_chat_prompts["second"].text, "Second");
+            });
+        });
+    }
+
+    /// A chat is created, then another one is picked, before the created
+    /// chat opens or, once it has, before its state arrives.
+    #[cfg(unix)]
+    #[derive(Clone, Copy)]
+    enum Leave {
+        /// For another chat, before the created one opens.
+        BeforeOpening,
+        /// For another chat, once it has opened but before its state arrives.
+        BeforeItsState,
+        /// For somewhere that is not a chat, such as the terminal, before its
+        /// state arrives.
+        ForNoChat,
+    }
+
+    #[cfg(unix)]
+    fn leave_a_created_chat(cx: &mut gpui::TestAppContext, leave: Leave) {
+        use std::io::{BufRead, BufReader, Write};
+        let (client, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = server_end;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut seen = Vec::new();
+            while seen.len() < 2 {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    break;
+                }
+                let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                let op = request["op"].as_str().unwrap_or_default().to_owned();
+                if matches!(op.as_str(), "set-draft" | "send") {
+                    seen.push((
+                        op,
+                        request["chat"].as_str().unwrap_or_default().to_owned(),
+                        request["text"].as_str().unwrap_or_default().to_owned(),
+                    ));
+                }
+                if let Some(id) = request["_xd_request"].as_u64() {
+                    writeln!(stream, "{{\"ok\":true,\"_xd_request\":{id}}}").unwrap();
+                }
+            }
+            seen
+        });
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            std::env::temp_dir().join("xd-first-aside-identity"),
+        );
+
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.host = Some(host);
+                desktop.model = crate::tests::grouped_workspace_fixture();
+                desktop.creating_chat_folder = Some("atlas".into());
+                desktop.chat_create_title = "New Chat".into();
+                desktop.new_chat_submitted_prompt = Some("Fix the footer".into());
+                desktop.chat_create_submitting = true;
+                desktop.handle_reply(
+                    RequestKind::NewChat {
+                        folder_id: "atlas".into(),
+                        title: "New Chat".into(),
+                        workdir: None,
+                    },
+                    serde_json::json!({"ok": true, "id": "implementation"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    None,
+                    cx,
+                );
+                if !matches!(leave, Leave::BeforeOpening) {
+                    desktop.reconcile_minimal_navigation(cx);
+                    assert_eq!(
+                        desktop.model.selected_chat.as_deref(),
+                        Some("implementation")
+                    );
+                    assert!(desktop.first_chat_prompts.contains_key("implementation"));
+                }
+                if matches!(leave, Leave::ForNoChat) {
+                    // Whatever route did it, the chat is no longer the open one
+                    // when its state arrives.
+                    desktop.model.selected_chat = None;
+                    desktop.handle_reply(
+                        RequestKind::Chat {
+                            chat_id: "implementation".into(),
+                        },
+                        serde_json::json!({"ok": true}).as_object().unwrap().clone(),
+                        None,
+                        cx,
+                    );
+                } else {
+                    desktop.open_minimal_session(
+                        "atlas".into(),
+                        "review".into(),
+                        AgentCli::Claude,
+                        window,
+                        cx,
+                    );
+                }
+                assert!(desktop.first_chat_prompts.is_empty());
+            });
+        });
+        let seen = server.join().unwrap();
+        let seen = seen
+            .iter()
+            .map(|(op, chat, text)| (op.as_str(), chat.as_str(), text.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            seen,
+            [
+                ("set-draft", "implementation", "Fix the footer"),
+                ("send", "implementation", "Fix the footer"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_created_chat_left_before_it_opens_still_sends_its_first_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        leave_a_created_chat(cx, Leave::BeforeOpening);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_created_chat_left_before_its_state_arrives_still_sends_its_first_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        leave_a_created_chat(cx, Leave::BeforeItsState);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_created_chat_left_for_no_chat_still_sends_its_first_message(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        leave_a_created_chat(cx, Leave::ForNoChat);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_waiting_first_message_goes_only_to_its_chats_host(cx: &mut gpui::TestAppContext) {
+        use std::io::{BufRead, BufReader, Write};
+        let (client, server_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut stream = server_end;
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    return None;
+                }
+                let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                if let Some(id) = request["_xd_request"].as_u64() {
+                    writeln!(stream, "{{\"ok\":true,\"_xd_request\":{id}}}").unwrap();
+                }
+                if request["op"] == "send" {
+                    return request["chat"].as_str().map(str::to_owned);
+                }
+            }
+        });
+        let (host, _updates) = HostHandle::connect_io(
+            client.try_clone().unwrap(),
+            client,
+            std::env::temp_dir().join("xd-first-host-identity"),
+        );
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.host = Some(host);
+            for (chat, endpoint) in [
+                ("on-remote", ChatEndpoint::Remote),
+                ("on-local", ChatEndpoint::Local),
+            ] {
+                desktop.first_chat_prompts.insert(
+                    chat.into(),
+                    FirstChatPrompt {
+                        endpoint,
+                        text: "First".into(),
+                        attachments: Vec::new(),
+                    },
+                );
+            }
+            desktop.send_first_messages_aside(None);
+            // The remote chat's host is not connected: its message waits.
+            assert!(desktop.first_chat_prompts.contains_key("on-remote"));
+            assert!(!desktop.first_chat_prompts.contains_key("on-local"));
+        });
+        assert_eq!(server.join().unwrap().as_deref(), Some("on-local"));
+    }
+
+    #[gpui::test]
+    fn a_created_chat_is_not_offered_again_after_a_disconnect(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            assert!(desktop.switch_active_endpoint(ChatEndpoint::Remote, cx));
+            desktop.creating_chat_folder = Some("project".into());
+            desktop.chat_create_submitting = true;
+            desktop.new_chat_started = Some("made".into());
+            let generation = desktop.remote_generation;
+            desktop.handle_remote_update(
+                HostUpdate::Disconnected {
+                    message: "test disconnect".into(),
+                },
+                generation,
+                cx,
+            );
+            assert!(!desktop.chat_create_submitting);
+            assert!(desktop.new_chat_started.is_none());
+            assert!(desktop.creating_chat_folder.is_none());
+        });
+    }
+}
+
+#[cfg(test)]
 mod image_tests {
     use super::*;
     #[gpui::test]
@@ -1182,8 +1714,8 @@ mod image_tests {
                 None,
                 cx,
             );
-            let (id, text, attachments) = desktop.first_chat_prompt.as_ref().unwrap();
-            assert_eq!(id, "image-chat");
+            let prompt = &desktop.first_chat_prompts["image-chat"];
+            let (text, attachments) = (&prompt.text, &prompt.attachments);
             assert!(text.is_empty());
             assert_eq!(attachments.len(), 1);
         });

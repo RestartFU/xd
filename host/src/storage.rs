@@ -3770,6 +3770,13 @@ impl StateStore {
         if let Some(backend) = backend_override {
             validate_backend(backend)?;
         }
+        // A worktree made here is named for the chat's first message when the
+        // client sends it, as one made by that message would be without a
+        // naming model, and not for the placeholder title every new chat
+        // starts with.
+        let worktree_name = optional_string(request, "prompt")?
+            .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
+            .unwrap_or(title);
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
         let shared = if let Some(session) = requested_session {
@@ -3901,7 +3908,8 @@ impl StateStore {
                 RequestedNewChatWorktree::New => {
                     let source =
                         resolve_workdir(&transaction, &self.workspace_root, folder_id, None, None)?;
-                    let created = create_worktree(&transaction, &source, &id, Some(title), None)?;
+                    let created =
+                        create_worktree(&transaction, &source, &id, Some(worktree_name), None)?;
                     (Some(created), Some(source))
                 }
                 RequestedNewChatWorktree::Branch { reference, oid } => {
@@ -3924,8 +3932,13 @@ impl StateStore {
                     } else {
                         oid.to_owned()
                     };
-                    let created =
-                        create_worktree(&transaction, &source, &id, Some(title), Some(&base))?;
+                    let created = create_worktree(
+                        &transaction,
+                        &source,
+                        &id,
+                        Some(worktree_name),
+                        Some(&base),
+                    )?;
                     (Some(created), Some(source))
                 }
                 RequestedNewChatWorktree::PullRequest { number, oid } => {
@@ -3947,8 +3960,13 @@ impl StateStore {
                             .into(),
                     ));
                     }
-                    let created =
-                        create_worktree(&transaction, &source, &id, Some(title), Some(oid))?;
+                    let created = create_worktree(
+                        &transaction,
+                        &source,
+                        &id,
+                        Some(worktree_name),
+                        Some(oid),
+                    )?;
                     (Some(created), Some(source))
                 }
             }
@@ -12834,6 +12852,35 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("xd/fresh-session-")
+        );
+
+        // A chat started with its first message is named for that message,
+        // not for its placeholder title.
+        let named = store
+            .new_chat(&json!({
+                "folder": "repo",
+                "title": "New Chat",
+                "worktree": {"kind": "new"},
+                "prompt": "\nMake the footer links open in a new tab\nand test it",
+            }))
+            .unwrap();
+        let named_id = named["id"].as_str().unwrap().to_owned();
+        let tree = store.tree().unwrap();
+        let branch = |id: &str| {
+            tree["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|chat| chat["id"] == id)
+                .unwrap()["branch"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(
+            branch(&named_id).starts_with("xd/make-the-footer-links"),
+            "{}",
+            branch(&named_id)
         );
     }
 
