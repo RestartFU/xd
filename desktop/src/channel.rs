@@ -64,8 +64,12 @@ pub fn restart_command(launcher: &Path, parent: u32) -> Command {
 }
 
 fn host_update_channel(configured: Option<OsString>, nightly_build: bool) -> OsString {
-    if configured.as_deref() == Some(OsStr::new("dev")) {
-        "dev".into()
+    // Installed launchers know the bundle identity. In particular, Linux
+    // bundles may share a desktop binary across release and nightly layouts.
+    if configured.as_deref().is_some_and(|channel| {
+        [OsStr::new("dev"), OsStr::new("nightly"), OsStr::new("release")].contains(&channel)
+    }) {
+        configured.unwrap()
     } else if nightly_build {
         "nightly".into()
     } else {
@@ -121,20 +125,30 @@ mod tests {
     }
 
     #[test]
-    fn host_update_channel_preserves_explicit_dev_identity() {
-        assert_eq!(
-            host_update_channel(Some(OsString::from("dev")), true),
-            OsString::from("dev")
-        );
-        assert_eq!(
-            host_update_channel(Some(OsString::from("nightly")), false),
-            OsString::from("release")
-        );
-        assert_eq!(
-            host_update_channel(Some(OsString::from("release")), true),
-            OsString::from("nightly")
-        );
-        assert_eq!(host_update_channel(None, true), OsString::from("nightly"));
-        assert_eq!(host_update_channel(None, false), OsString::from("release"));
+    fn host_update_channel_preserves_the_launcher_channel() {
+        // Linux's shared binary has historically had no nightly build profile.
+        // Its launcher must still select the nightly feed and install directory.
+        for nightly_build in [false, true] {
+            for channel in ["dev", "nightly", "release"] {
+                assert_eq!(
+                    host_update_channel(Some(OsString::from(channel)), nightly_build),
+                    OsString::from(channel)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_update_channel_defaults_to_the_build_profile() {
+        for configured in [None, Some(OsString::new()), Some(OsString::from("invalid"))] {
+            assert_eq!(
+                host_update_channel(configured.clone(), true),
+                OsString::from("nightly")
+            );
+            assert_eq!(
+                host_update_channel(configured, false),
+                OsString::from("release")
+            );
+        }
     }
 }
