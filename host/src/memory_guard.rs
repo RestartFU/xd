@@ -19,14 +19,20 @@
 //!
 //! When that measure reaches a share of `memory.max` (92% unless
 //! `XD_MEMORY_GUARD_PERCENT` says otherwise; `off` turns the guard off), the guard
-//! stops the process tree holding the most memory that is not protected, with
-//! SIGTERM and then SIGKILL after a short grace period. Protected are the daemon
+//! stops the process tree holding the most memory that is not protected.
+//! Protected are the daemon
 //! and its ancestors, the agent processes it started, every process named like
 //! an agent CLI or xd itself, the shells leading terminal sessions, and the
 //! ancestors of any of them. What is left is the work they started: a compiler,
 //! a build tool, a test run, a build daemon. The guard stops a whole subtree from
 //! its topmost unprotected process, such as the `bash -c` an agent ran a build
 //! in, and only processes of this user in this cgroup.
+//!
+//! The tree is frozen with SIGSTOP before it is killed with SIGKILL: a process
+//! that is stopped cannot start another, and a child whose parent has exited
+//! belongs to init and can no longer be traced to the tree. A grace period after
+//! SIGTERM would let a build do exactly that while it shuts down, and the kernel
+//! gives a group it kills for lack of memory no grace either.
 //!
 //! After acting, it does nothing more until the measure falls a few points below
 //! the threshold or a cooldown passes, so one spike stops one tree. What it
@@ -37,7 +43,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -55,8 +60,10 @@ pub(crate) const SAMPLE_EVERY: Duration = Duration::from_secs(1);
 const REARM_POINTS: u64 = 5;
 /// How long a spike that does not let up waits before another tree is stopped.
 const COOLDOWN: Duration = Duration::from_secs(20);
-/// How long a stopped tree has to exit after SIGTERM before it gets SIGKILL.
-const GRACE: Duration = Duration::from_secs(3);
+/// Passes over `/proc` that freezing a tree may take. Each pass stops every
+/// process found so far, so the tree is complete as soon as one finds nothing
+/// new; the bound only guards against a tree that keeps eluding it.
+const FREEZE_PASSES: usize = 50;
 /// Processes never stopped, by command name, whoever started them: agent CLIs
 /// another daemon or the user started, and xd itself.
 const PROTECTED_NAMES: [&str; 5] = ["claude", "codex", "jcode", "xd-host", "xd"];
@@ -216,20 +223,29 @@ pub(crate) struct Process {
     pub(crate) cgroup: String,
     /// Its own unreclaimable memory: `RssAnon + RssShmem`.
     pub(crate) bytes: u64,
-    /// The kernel's short command name.
+    /// Its process group.
+    pub(crate) group: u32,
+    /// The kernel's short command name, never its arguments, which can hold
+    /// secrets.
     pub(crate) name: String,
-    pub(crate) command: String,
 }
 
 /// The tree to stop.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Victim {
     pub(crate) pid: u32,
-    pub(crate) command: String,
+    /// Its topmost process's command name.
+    pub(crate) name: String,
+    /// The command name of the process in it holding the most memory.
+    pub(crate) largest: String,
     /// What the whole tree holds.
     pub(crate) bytes: u64,
     /// Every process in it, with its start time.
     pub(crate) members: Vec<(u32, u64)>,
+    /// Process groups only the tree's processes are in. A process in one of
+    /// them belongs to the tree even after its parent exits and it is handed
+    /// to init.
+    pub(crate) groups: HashSet<u32>,
     /// The nearest of `owners` above it: the agent or terminal it ran under.
     pub(crate) owner: Option<u32>,
 }
@@ -304,13 +320,28 @@ pub(crate) fn choose_victim(processes: &[Process], scope: &Scope) -> Option<Vict
         .map(|root| {
             let mut members = Vec::new();
             let mut bytes = 0;
+            let mut largest = root;
             let mut pending = vec![root.pid];
             while let Some(pid) = pending.pop() {
                 let process = by_pid[&pid];
                 members.push((pid, process.start));
                 bytes += process.bytes;
+                if process.bytes > largest.bytes {
+                    largest = process;
+                }
                 pending.extend(children.get(&pid).into_iter().flatten());
             }
+            let member_pids: HashSet<u32> = members.iter().map(|(pid, _)| *pid).collect();
+            let shared_groups: HashSet<u32> = processes
+                .iter()
+                .filter(|process| !member_pids.contains(&process.pid))
+                .map(|process| process.group)
+                .collect();
+            let groups = member_pids
+                .iter()
+                .map(|pid| by_pid[pid].group)
+                .filter(|group| !shared_groups.contains(group))
+                .collect();
             // Nothing at or above the daemon is an agent or a terminal. The
             // bound only guards against a snapshot that loops.
             let mut owner = root.parent;
@@ -325,14 +356,46 @@ pub(crate) fn choose_victim(processes: &[Process], scope: &Scope) -> Option<Vict
             }
             Victim {
                 pid: root.pid,
-                command: root.command.clone(),
+                name: root.name.clone(),
+                largest: largest.name.clone(),
                 bytes,
                 members,
+                groups,
                 owner: scope.owners.contains(&owner).then_some(owner),
             }
         })
         .filter(|victim| victim.bytes > 0)
         .max_by_key(|victim| victim.bytes)
+}
+
+/// `doomed` and every process that belongs with it in `processes`: their
+/// children, and processes in `groups`, the tree's own process groups. Never
+/// the daemon or a process named like an agent CLI or xd.
+pub(crate) fn enclose(
+    processes: &[Process],
+    doomed: &HashSet<(u32, u64)>,
+    groups: &HashSet<u32>,
+    me: u32,
+) -> HashSet<(u32, u64)> {
+    let by_pid: HashMap<u32, &Process> = processes.iter().map(|p| (p.pid, p)).collect();
+    let mut found = doomed.clone();
+    loop {
+        let before = found.len();
+        for process in processes {
+            if process.pid == me || PROTECTED_NAMES.contains(&process.name.as_str()) {
+                continue;
+            }
+            let parent_doomed = by_pid
+                .get(&process.parent)
+                .is_some_and(|parent| found.contains(&(parent.pid, parent.start)));
+            if parent_doomed || groups.contains(&process.group) {
+                found.insert((process.pid, process.start));
+            }
+        }
+        if found.len() == before {
+            return found;
+        }
+    }
 }
 
 /// The cgroup path in a `/proc/<pid>/cgroup` file, from its cgroup v2 line.
@@ -343,20 +406,38 @@ pub(crate) fn cgroup_path(cgroup: &str) -> Option<String> {
         .map(|path| path.trim().to_owned())
 }
 
-/// Pid, command name, state, parent and start time from `/proc/<pid>/stat`. The
-/// command name is free text in parentheses, so fields count from the last one.
-pub(crate) fn parse_stat(stat: &str) -> Option<(u32, String, char, u32, u64)> {
+/// What `/proc/<pid>/stat` says about a process.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Stat {
+    pub(crate) pid: u32,
+    pub(crate) name: String,
+    pub(crate) state: char,
+    pub(crate) parent: u32,
+    pub(crate) group: u32,
+    pub(crate) start: u64,
+}
+
+impl Stat {
+    fn running(&self) -> bool {
+        !matches!(self.state, 'Z' | 'X')
+    }
+}
+
+/// Reads a `/proc/<pid>/stat` line. The command name is free text in
+/// parentheses, so fields count from the last one.
+pub(crate) fn parse_stat(stat: &str) -> Option<Stat> {
     let (head, fields) = stat.rsplit_once(')')?;
     let (pid, name) = head.split_once(" (")?;
     let fields: Vec<&str> = fields.split_ascii_whitespace().collect();
-    // Fields 3, 4 and 22 of proc(5); `fields` starts at field 3.
-    Some((
-        pid.trim().parse().ok()?,
-        name.to_owned(),
-        fields.first()?.chars().next()?,
-        fields.get(1)?.parse().ok()?,
-        fields.get(19)?.parse().ok()?,
-    ))
+    // Fields 3, 4, 5 and 22 of proc(5); `fields` starts at field 3.
+    Some(Stat {
+        pid: pid.trim().parse().ok()?,
+        name: name.to_owned(),
+        state: fields.first()?.chars().next()?,
+        parent: fields.get(1)?.parse().ok()?,
+        group: fields.get(2)?.parse().ok()?,
+        start: fields.get(19)?.parse().ok()?,
+    })
 }
 
 /// The real uid and the unreclaimable resident memory, in bytes, from
@@ -388,34 +469,21 @@ pub(crate) fn read_processes() -> Vec<Process> {
     entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
-            let pid: u32 = path.file_name()?.to_str()?.parse().ok()?;
-            let (_, name, state, parent, start) =
-                parse_stat(&fs::read_to_string(path.join("stat")).ok()?)?;
-            if matches!(state, 'Z' | 'X') {
+            let stat = parse_stat(&fs::read_to_string(path.join("stat")).ok()?)?;
+            if !stat.running() {
                 return None;
             }
             let (uid, bytes) = parse_status(&fs::read_to_string(path.join("status")).ok()?)?;
             let cgroup = cgroup_path(&fs::read_to_string(path.join("cgroup")).ok()?)?;
-            let command = fs::read(path.join("cmdline"))
-                .map(|line| {
-                    String::from_utf8_lossy(&line)
-                        .split('\0')
-                        .filter(|word| !word.is_empty())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .ok()
-                .filter(|command| !command.is_empty())
-                .unwrap_or_else(|| name.clone());
             Some(Process {
-                pid,
-                parent,
-                start,
+                pid: stat.pid,
+                parent: stat.parent,
+                start: stat.start,
                 uid,
                 cgroup,
                 bytes,
-                name,
-                command,
+                group: stat.group,
+                name: stat.name,
             })
         })
         .collect()
@@ -426,10 +494,10 @@ fn still_running(pid: u32, start: u64) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
         .and_then(|stat| parse_stat(&stat))
-        .is_some_and(|(_, _, state, _, started)| started == start && !matches!(state, 'Z' | 'X'))
+        .is_some_and(|stat| stat.start == start && stat.running())
 }
 
-fn signal(members: &[(u32, u64)], signal: libc::c_int) {
+fn signal<'a>(members: impl IntoIterator<Item = &'a (u32, u64)>, signal: libc::c_int) {
     for &(pid, start) in members {
         if still_running(pid, start)
             && let Ok(pid) = libc::pid_t::try_from(pid)
@@ -441,48 +509,41 @@ fn signal(members: &[(u32, u64)], signal: libc::c_int) {
     }
 }
 
-/// Stops `victim`'s tree: SIGTERM, then SIGKILL for whatever is still running
-/// after the grace period, including children it started in the meantime.
+/// Stops `victim`'s tree: freezes it with SIGSTOP, pass by pass, until a pass
+/// over `/proc` finds no process of it still free to start another, then kills
+/// all of it with SIGKILL.
 pub(crate) fn stop(victim: &Victim) {
-    signal(&victim.members, libc::SIGTERM);
-    let deadline = Instant::now() + GRACE;
-    while Instant::now() < deadline {
-        if !victim
-            .members
-            .iter()
-            .any(|&(pid, start)| still_running(pid, start))
-        {
-            return;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    let processes = read_processes();
+    let me = std::process::id();
     let mut doomed: HashSet<(u32, u64)> = victim.members.iter().copied().collect();
-    loop {
-        let before = doomed.len();
-        for process in &processes {
-            if doomed.iter().any(|&(pid, _)| pid == process.parent) {
-                doomed.insert((process.pid, process.start));
-            }
-        }
-        if doomed.len() == before {
+    for _ in 0..FREEZE_PASSES {
+        signal(&doomed, libc::SIGSTOP);
+        let found = enclose(&read_processes(), &doomed, &victim.groups, me);
+        if found.len() == doomed.len() {
             break;
         }
+        doomed = found;
     }
-    signal(&doomed.into_iter().collect::<Vec<_>>(), libc::SIGKILL);
+    signal(&doomed, libc::SIGKILL);
 }
 
 /// What the user is told about a stopped tree.
+/// It names commands, never their arguments, which can hold secrets.
 pub(crate) fn notice(victim: &Victim, usage: u64, max: u64) -> String {
-    const MAX_COMMAND: usize = 120;
     let gib = |bytes: u64| bytes as f64 / (1u64 << 30) as f64;
-    let mut command = victim.command.clone();
-    if let Some((cut, _)) = command.char_indices().nth(MAX_COMMAND) {
-        command.truncate(cut);
-        command.push('…');
-    }
+    let others = victim.members.len().saturating_sub(1);
+    let tree = match others {
+        0 => String::new(),
+        1 => " and the process it started".to_owned(),
+        others => format!(" and the {others} processes it started"),
+    };
+    let mostly = if victim.largest != victim.name {
+        format!(", mostly in `{}`", victim.largest)
+    } else {
+        String::new()
+    };
     format!(
-        "xd stopped `{command}` (pid {}, {:.1} GiB) because the container was about to run out of memory: {:.1} of its {:.1} GiB could not be freed, and running out would have stopped every chat and terminal.",
+        "xd stopped `{}` (pid {}){tree}, holding {:.1} GiB{mostly}, because the container was about to run out of memory: {:.1} of its {:.1} GiB could not be freed, and running out would have stopped every chat and terminal.",
+        victim.name,
         victim.pid,
         gib(victim.bytes),
         gib(usage),
@@ -504,9 +565,14 @@ mod tests {
             uid: 1000,
             cgroup: "/".into(),
             bytes: gib * GIB,
+            group: pid,
             name: name.into(),
-            command: name.into(),
         }
+    }
+
+    /// `process`, in the process group of `group`.
+    fn in_group(group: u32, process: Process) -> Process {
+        Process { group, ..process }
     }
 
     /// A container: init, the daemon, two agents, a terminal shell, and the work
@@ -517,10 +583,11 @@ mod tests {
             process(10, 1, "xd-host", 1),
             // An agent running a build through its shell tool.
             process(20, 10, "claude", 1),
-            process(21, 20, "bash", 0),
-            process(22, 21, "cargo", 1),
-            process(23, 22, "rustc", 3),
-            process(24, 22, "rustc", 2),
+            // A shell tool's command stays in the agent's process group.
+            in_group(20, process(21, 20, "bash", 0)),
+            in_group(20, process(22, 21, "cargo", 1)),
+            in_group(20, process(23, 22, "rustc", 3)),
+            in_group(20, process(24, 22, "rustc", 2)),
             // Another agent with a small tool server.
             process(30, 10, "claude", 1),
             process(31, 30, "node", 1),
@@ -610,6 +677,35 @@ mod tests {
         assert_eq!(members, [21, 22, 23, 24]);
         assert_eq!(victim.members[0], (21, 210));
         assert_eq!(victim.owner, Some(20));
+        assert_eq!(
+            (victim.name.as_str(), victim.largest.as_str()),
+            ("bash", "rustc")
+        );
+        assert!(
+            victim.groups.is_empty(),
+            "the agent's own process group does not mark the tree"
+        );
+    }
+
+    #[test]
+    fn a_tree_is_frozen_with_what_it_started_since_and_what_it_left_behind() {
+        let owners = owners();
+        let mut processes = container();
+        processes.retain(|process| ![21, 22, 23, 24, 50].contains(&process.pid));
+        let victim = choose_victim(&processes, &scope(&owners)).unwrap();
+        assert_eq!(victim.pid, 41);
+        assert_eq!(victim.groups, HashSet::from([41]));
+        let doomed: HashSet<(u32, u64)> = victim.members.iter().copied().collect();
+
+        // Since the snapshot, the test started a worker, and a helper whose
+        // parent exited at once, so init holds it. Neither may escape. An agent
+        // started inside the tree is still never stopped.
+        processes.push(process(42, 41, "pytest", 2));
+        processes.push(in_group(41, process(43, 1, "helper", 1)));
+        processes.push(process(44, 42, "claude", 1));
+        let found = enclose(&processes, &doomed, &victim.groups, 10);
+        assert_eq!(found, HashSet::from([(41, 410), (42, 420), (43, 430)]));
+        assert_eq!(enclose(&processes, &found, &victim.groups, 10), found);
     }
 
     #[test]
@@ -668,9 +764,16 @@ mod tests {
     fn proc_files_are_read_as_the_kernel_writes_them() {
         assert_eq!(
             parse_stat(
-                "4242 (odd) name) S 7 4242 4242 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 98765 1 2"
+                "4242 (odd) name) S 7 4200 4242 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 98765 1 2"
             ),
-            Some((4242, "odd) name".into(), 'S', 7, 98765))
+            Some(Stat {
+                pid: 4242,
+                name: "odd) name".into(),
+                state: 'S',
+                parent: 7,
+                group: 4200,
+                start: 98765,
+            })
         );
         assert_eq!(parse_stat("damaged"), None);
         assert_eq!(
@@ -706,18 +809,82 @@ mod tests {
         assert!(!still_running(me, found.start + 1));
     }
 
+    /// Only processes this test starts, in a process group of their own, are
+    /// signalled.
+    #[test]
+    fn stopping_a_tree_kills_the_children_it_started_after_it_was_chosen() {
+        use std::os::unix::process::CommandExt;
+
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & sleep 31 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let root = shell.id();
+        let children = || -> Vec<(u32, u64)> {
+            read_processes()
+                .into_iter()
+                .filter(|process| process.parent == root)
+                .map(|process| (process.pid, process.start))
+                .collect()
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while children().len() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "the shell never started its sleeps"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = children();
+        let start = read_processes()
+            .into_iter()
+            .find(|process| process.pid == root)
+            .unwrap()
+            .start;
+        // Chosen before its children existed: only the shell is listed.
+        let victim = Victim {
+            pid: root,
+            name: "sh".into(),
+            largest: "sh".into(),
+            bytes: 0,
+            members: vec![(root, start)],
+            groups: HashSet::new(),
+            owner: None,
+        };
+        stop(&victim);
+        shell.wait().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while left.iter().any(|&(pid, start)| still_running(pid, start)) {
+            assert!(Instant::now() < deadline, "a child survived");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn the_notice_says_what_was_stopped_and_why() {
         let victim = Victim {
             pid: 21,
-            command: "cargo build --release".into(),
+            name: "bash".into(),
+            largest: "rustc".into(),
             bytes: 6 * GIB,
-            members: Vec::new(),
+            members: vec![(21, 1), (22, 2), (23, 3)],
+            groups: HashSet::new(),
             owner: None,
         };
         assert_eq!(
             notice(&victim, 15 * GIB, 16 * GIB),
-            "xd stopped `cargo build --release` (pid 21, 6.0 GiB) because the container was about to run out of memory: 15.0 of its 16.0 GiB could not be freed, and running out would have stopped every chat and terminal."
+            "xd stopped `bash` (pid 21) and the 2 processes it started, holding 6.0 GiB, mostly in `rustc`, because the container was about to run out of memory: 15.0 of its 16.0 GiB could not be freed, and running out would have stopped every chat and terminal."
+        );
+        let alone = Victim {
+            name: "java".into(),
+            largest: "java".into(),
+            members: vec![(21, 1)],
+            ..victim
+        };
+        assert_eq!(
+            notice(&alone, 15 * GIB, 16 * GIB),
+            "xd stopped `java` (pid 21), holding 6.0 GiB, because the container was about to run out of memory: 15.0 of its 16.0 GiB could not be freed, and running out would have stopped every chat and terminal."
         );
     }
 }
