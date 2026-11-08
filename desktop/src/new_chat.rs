@@ -412,7 +412,10 @@ impl XdDesktop {
                             .gap(px(2.0))
                             .children(rows),
                     )
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // The model picker opens inside the composer, which would
+                    // take the focus from the search field to the editor.
+                    .on_click(|_, _, cx| cx.stop_propagation()),
             )
             .with_priority(1)
         });
