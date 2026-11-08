@@ -132,6 +132,7 @@ impl XdDesktop {
                                 this.minimal_new_session_agent = agent;
                                 this.new_chat_model = id.clone();
                                 this.new_chat_menu = None;
+                                this.remember_new_chat_choices();
                                 cx.notify();
                             }))
                             .child(name)
@@ -171,6 +172,7 @@ impl XdDesktop {
                                         .map(|w| NewSessionWorktree::Existing(w.path.clone()))
                                 };
                                 this.new_chat_menu = None;
+                                this.remember_new_chat_choices();
                                 cx.notify();
                             }))
                             .child(
@@ -211,6 +213,7 @@ impl XdDesktop {
                             .justify_start()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.new_chat_remote = !this.new_chat_remote;
+                                this.remember_new_chat_choices();
                                 cx.notify();
                             }))
                             .child(div().flex_1().child("Start from remote"))
@@ -269,6 +272,7 @@ impl XdDesktop {
                                         oid: branch.oid.clone(),
                                     });
                                     this.new_chat_menu = None;
+                                    this.remember_new_chat_choices();
                                     cx.notify();
                                 }))
                                 .child(icon(GIT_BRANCH_ICON, 13.0, colors.muted))
@@ -294,6 +298,7 @@ impl XdDesktop {
                                     this.chat_create_worktree =
                                         Some(NewSessionWorktree::Existing(path.clone()));
                                     this.new_chat_menu = None;
+                                    this.remember_new_chat_choices();
                                     cx.notify();
                                 }))
                                 .child(
@@ -707,7 +712,95 @@ impl XdDesktop {
         }))
     }
 
+    fn new_chat_choices_key(&self, folder_id: &str) -> String {
+        format!("{}/project/{folder_id}", self.current_connection_key())
+    }
+
+    /// Start a project's new chat the way its last one was set up. The agent,
+    /// model, and remote start apply now; the worktree and base branch once
+    /// the host has said which still exist.
+    pub(super) fn restore_new_chat_choices(&mut self, folder_id: &str) {
+        let remembered = self
+            .settings
+            .new_chat_choices
+            .get(&self.new_chat_choices_key(folder_id))
+            .cloned()
+            .unwrap_or_default();
+        let agent = remembered
+            .agent
+            .as_deref()
+            .and_then(AgentCli::from_protocol_name)
+            .filter(|agent| matches!(agent, AgentCli::Codex | AgentCli::Claude));
+        if let Some(agent) = agent {
+            self.minimal_new_session_agent = agent;
+        }
+        // A model the agent no longer offers would be refused on send.
+        self.new_chat_model = remembered.model.clone().filter(|model| {
+            agent.is_some()
+                && self
+                    .model
+                    .agent_backends
+                    .iter()
+                    .find(|backend| backend.id == self.minimal_new_session_agent.protocol_name())
+                    .is_some_and(|backend| backend.models.iter().any(|m| &m.id == model))
+        });
+        self.new_chat_remote = remembered.start_from_remote;
+        self.new_chat_remembered = remembered;
+    }
+
+    /// Keep what the new chat is set up with for the project's next one.
+    pub(super) fn remember_new_chat_choices(&mut self) {
+        let Some(folder_id) = self.creating_chat_folder.clone() else {
+            return;
+        };
+        let mut choices = self.new_chat_remembered.clone();
+        choices.agent = Some(self.minimal_new_session_agent.protocol_name().to_owned());
+        choices.model = self.new_chat_model.clone();
+        // A chat joining a shared session takes that session's worktree, and
+        // says nothing about where the project's next chat should run.
+        if self.creating_chat_session.is_none() {
+            match &self.chat_create_worktree {
+                Some(NewSessionWorktree::New) => {
+                    choices.new_worktree = true;
+                    choices.start_from_remote = self.new_chat_remote;
+                }
+                Some(NewSessionWorktree::Branch { reference, .. }) => {
+                    choices.new_worktree = true;
+                    choices.base = Some(reference.clone());
+                    choices.start_from_remote = self.new_chat_remote;
+                }
+                Some(NewSessionWorktree::Existing(path)) => {
+                    choices.new_worktree = false;
+                    choices.checkout = Some(path.clone());
+                }
+                Some(NewSessionWorktree::PullRequest { .. }) | None => {}
+            }
+        }
+        if choices == self.new_chat_remembered {
+            return;
+        }
+        self.settings
+            .new_chat_choices
+            .insert(self.new_chat_choices_key(&folder_id), choices.clone());
+        self.new_chat_remembered = choices;
+        if let Err(error) = self.settings.save() {
+            self.model.connection_error = Some(error);
+        }
+    }
+
     pub(super) fn default_new_chat_base(&self) -> Option<NewSessionWorktree> {
+        // The base the project's last new worktree branched from, while it
+        // is still there.
+        if let Some(branch) = self.new_chat_remembered.base.as_ref().and_then(|base| {
+            self.chat_create_branches
+                .iter()
+                .find(|branch| &branch.reference == base)
+        }) {
+            return Some(NewSessionWorktree::Branch {
+                reference: branch.reference.clone(),
+                oid: branch.oid.clone(),
+            });
+        }
         let current = self
             .chat_create_worktrees
             .iter()
@@ -827,6 +920,148 @@ mod tests {
             assert_eq!(desktop.new_chat_prompt, "Build a footer");
             assert_eq!(desktop.creating_chat_folder.as_deref(), Some("project"));
             assert!(desktop.model.chats.is_empty());
+        });
+    }
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+
+    fn reply(
+        desktop: &mut XdDesktop,
+        kind: RequestKind,
+        body: serde_json::Value,
+        cx: &mut Context<XdDesktop>,
+    ) {
+        desktop.handle_reply(kind, body.as_object().unwrap().clone(), None, cx);
+    }
+
+    fn folder_settings(desktop: &mut XdDesktop, folder: &str, cx: &mut Context<XdDesktop>) {
+        reply(
+            desktop,
+            RequestKind::FolderSettings {
+                folder_id: folder.into(),
+            },
+            serde_json::json!({
+                "ok": true,
+                "effective_workdir": "/repo",
+                "can_create_worktree": true,
+                "worktrees": [
+                    {"path": "/repo", "branch": "main", "detached": false, "main": true, "current": true},
+                    {"path": "/worktrees/repo-1", "branch": "spike", "detached": false, "main": false, "current": false}
+                ]
+            }),
+            cx,
+        );
+    }
+
+    fn sources(desktop: &mut XdDesktop, folder: &str, cx: &mut Context<XdDesktop>) {
+        reply(
+            desktop,
+            RequestKind::NewChatSources {
+                folder_id: folder.into(),
+            },
+            serde_json::json!({
+                "ok": true,
+                "default_branch": "main",
+                "branches": [
+                    {"name": "main", "reference": "refs/heads/main", "oid": "aaa"},
+                    {"name": "origin/dev", "reference": "refs/remotes/origin/dev", "oid": "bbb"}
+                ]
+            }),
+            cx,
+        );
+    }
+
+    fn dev() -> Option<NewSessionWorktree> {
+        Some(NewSessionWorktree::Branch {
+            reference: "refs/remotes/origin/dev".into(),
+            oid: "bbb".into(),
+        })
+    }
+
+    #[gpui::test]
+    fn a_projects_next_new_chat_starts_the_way_its_last_one_was_set_up(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.model.agent_backends = vec![xd_desktop::model::AgentBackend {
+                    id: "claude".into(),
+                    name: "Claude".into(),
+                    default_model: "claude-sonnet-5".into(),
+                    models: vec![xd_desktop::model::AgentModel {
+                        id: "claude-opus-5".into(),
+                        name: "Opus 5".into(),
+                    }],
+                    efforts: Vec::new(),
+                }];
+                desktop.begin_chat_create("project".into(), window, cx);
+                folder_settings(desktop, "project", cx);
+                sources(desktop, "project", cx);
+                assert_eq!(desktop.minimal_new_session_agent, AgentCli::Codex);
+                assert!(matches!(
+                    desktop.chat_create_worktree,
+                    Some(NewSessionWorktree::Existing(ref path)) if path == "/repo"
+                ));
+
+                // The picks, as the pickers make them.
+                desktop.minimal_new_session_agent = AgentCli::Claude;
+                desktop.new_chat_model = Some("claude-opus-5".into());
+                desktop.remember_new_chat_choices();
+                desktop.chat_create_worktree = dev();
+                desktop.new_chat_remote = true;
+                desktop.remember_new_chat_choices();
+                desktop.cancel_chat_create(cx);
+
+                desktop.begin_chat_create("project".into(), window, cx);
+                assert_eq!(desktop.minimal_new_session_agent, AgentCli::Claude);
+                assert_eq!(desktop.new_chat_model.as_deref(), Some("claude-opus-5"));
+                assert!(desktop.new_chat_remote);
+                // The branches may arrive before the worktrees, or after.
+                sources(desktop, "project", cx);
+                folder_settings(desktop, "project", cx);
+                assert_eq!(desktop.chat_create_worktree, dev());
+                desktop.cancel_chat_create(cx);
+
+                desktop.begin_chat_create("project".into(), window, cx);
+                folder_settings(desktop, "project", cx);
+                assert_eq!(desktop.chat_create_worktree, Some(NewSessionWorktree::New));
+                sources(desktop, "project", cx);
+                assert_eq!(desktop.chat_create_worktree, dev());
+
+                // Back to a checkout of the project.
+                desktop.chat_create_worktree =
+                    Some(NewSessionWorktree::Existing("/worktrees/repo-1".into()));
+                desktop.remember_new_chat_choices();
+                desktop.cancel_chat_create(cx);
+                desktop.begin_chat_create("project".into(), window, cx);
+                folder_settings(desktop, "project", cx);
+                sources(desktop, "project", cx);
+                assert!(matches!(
+                    desktop.chat_create_worktree,
+                    Some(NewSessionWorktree::Existing(ref path)) if path == "/worktrees/repo-1"
+                ));
+                desktop.cancel_chat_create(cx);
+
+                // Another project keeps its own, and a model the agent no
+                // longer offers is not carried over.
+                desktop.begin_chat_create("other".into(), window, cx);
+                assert!(!desktop.new_chat_remote);
+                assert!(desktop.new_chat_model.is_none());
+                folder_settings(desktop, "other", cx);
+                assert!(matches!(
+                    desktop.chat_create_worktree,
+                    Some(NewSessionWorktree::Existing(ref path)) if path == "/repo"
+                ));
+                desktop.cancel_chat_create(cx);
+                desktop.model.agent_backends.clear();
+                desktop.begin_chat_create("project".into(), window, cx);
+                assert_eq!(desktop.minimal_new_session_agent, AgentCli::Claude);
+                assert!(desktop.new_chat_model.is_none());
+            });
         });
     }
 }

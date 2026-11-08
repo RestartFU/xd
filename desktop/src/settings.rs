@@ -51,6 +51,23 @@ impl GitWriter {
     }
 }
 
+/// How a project's last new chat was set up, so the next one starts the same
+/// way: the agent and model, and the worktree and branch it runs in.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(default)]
+pub struct NewChatChoices {
+    /// The agent's protocol name, such as `codex` or `claude`.
+    pub agent: Option<String>,
+    /// The model, or none for the agent's default.
+    pub model: Option<String>,
+    pub new_worktree: bool,
+    /// The checkout a chat in the current worktree runs in.
+    pub checkout: Option<String>,
+    /// The ref a new worktree branches from.
+    pub base: Option<String>,
+    pub start_from_remote: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
@@ -102,6 +119,8 @@ pub struct AppSettings {
     pub usage_metric: String,
     pub usage_window_days: u32,
     pub usage_hidden_providers: Vec<String>,
+    /// The choices of each project's last new chat, per connection and project.
+    pub new_chat_choices: HashMap<String, NewChatChoices>,
     #[serde(skip)]
     load_error: Option<String>,
 }
@@ -145,6 +164,7 @@ impl Default for AppSettings {
             usage_metric: "limits".into(),
             usage_window_days: 30,
             usage_hidden_providers: Vec::new(),
+            new_chat_choices: HashMap::new(),
             load_error: None,
         }
     }
@@ -385,6 +405,17 @@ mod tests {
                 ("local/chat-restore".into(), 5),
                 ("remote/dev.example:4001/chat-remote".into(), 1),
             ]),
+            new_chat_choices: HashMap::from([(
+                "local/project/folder-a".into(),
+                NewChatChoices {
+                    agent: Some("claude".into()),
+                    model: Some("claude-opus-5".into()),
+                    new_worktree: true,
+                    checkout: None,
+                    base: Some("refs/remotes/origin/dev".into()),
+                    start_from_remote: true,
+                },
+            )]),
             load_error: None,
         };
         save_to(&path, &settings).unwrap();
