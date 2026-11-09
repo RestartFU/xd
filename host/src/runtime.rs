@@ -153,6 +153,16 @@ enum RecordWrite {
     },
 }
 
+/// What becomes of a chat whose turn its account's usage limit turned away.
+enum AfterLimit {
+    /// It stays on its account: there is no other, or switching is off.
+    Stays,
+    /// It stays, since every account is spent. The first is back at `back`.
+    AllSpent { provider: &'static str, back: i64 },
+    /// It continues on another account; the sentence says which and why.
+    Switches(String),
+}
+
 /// One line of a kept process's output, or its end.
 enum Feed {
     Line(String),
@@ -818,50 +828,65 @@ impl TurnRuntime {
     }
 
     /// A turn was turned away for usage. Holds the account back until its
-    /// limit resets and, when another account has room and switching is on,
-    /// continues the chat there.
+    /// limit resets and works out what becomes of the chat. Runs before the
+    /// turn is finished, so a message waiting in the queue already starts on
+    /// the account the chat moves to.
     fn after_usage_limit(
         &self,
         chat_id: &str,
         provider: &str,
         account: &str,
-        last_message: i64,
         resets_at_ms: Option<i64>,
         limit: Option<String>,
-    ) {
+    ) -> AfterLimit {
         let auth = &self.inner.auth;
         let account = crate::accounts::tag_account(account);
         if !auth.accounts().has_several(provider) {
-            return;
+            return AfterLimit::Stays;
         }
         auth.note_limited(provider, account, resets_at_ms, limit.as_deref());
         if !auth.accounts().auto_switch(provider) {
-            return;
+            return AfterLimit::Stays;
         }
         let choice = auth.choose(provider, Some(account));
         if choice.account == account {
-            if let Some(back) = choice.all_spent_until {
-                self.post_account_notice(
-                    chat_id,
-                    &format!(
-                        "Every {} account is out of usage. The first is back in {}.",
-                        provider_name(provider),
-                        until(back)
-                    ),
-                );
-            }
-            return;
+            return match choice.all_spent_until {
+                Some(back) => AfterLimit::AllSpent {
+                    provider: provider_name(provider),
+                    back,
+                },
+                None => AfterLimit::Stays,
+            };
         }
-        let sentence = self.switch_sentence(provider, &choice);
-        self.post_account_notice(chat_id, &format!("{sentence} Continuing there."));
+        // The turn that takes the chat to the other account does not explain
+        // the move again, whether it is this continuation or a queued message.
         if let Ok(mut explained) = self.inner.explained_switches.lock() {
             explained.insert(chat_id.to_owned());
         }
-        let handler = self.inner.on_account_switch.lock();
-        if let Ok(handler) = handler
-            && let Some(handler) = handler.as_ref()
-        {
-            handler(chat_id.to_owned(), last_message);
+        AfterLimit::Switches(self.switch_sentence(provider, &choice))
+    }
+
+    /// Once the limited turn is finished: tells the chat what became of it
+    /// and, when it moved to another account, continues it there.
+    fn continue_after_limit(&self, chat_id: &str, outcome: AfterLimit, last_message: i64) {
+        match outcome {
+            AfterLimit::Stays => {}
+            AfterLimit::AllSpent { provider, back } => self.post_account_notice(
+                chat_id,
+                &format!(
+                    "Every {provider} account is out of usage. The first is back in {}.",
+                    until(back)
+                ),
+            ),
+            AfterLimit::Switches(sentence) => {
+                self.post_account_notice(chat_id, &format!("{sentence} Continuing there."));
+                let handler = self.inner.on_account_switch.lock();
+                if let Ok(handler) = handler
+                    && let Some(handler) = handler.as_ref()
+                {
+                    handler(chat_id.to_owned(), last_message);
+                }
+            }
         }
     }
 
@@ -2713,13 +2738,26 @@ impl TurnRuntime {
             let _ = self.inner.store.mark_turn_resumable(&chat_id);
         }
         // The message the turn answered, read while the chat is still this
-        // turn's: once it is released the user can send and stop another.
-        let limited = usage_limit
-            .filter(|_| !was_cancelled && !background)
-            .and_then(|limit| {
-                let message = self.inner.store.latest_user_message(&chat_id).ok()?;
-                Some((turn.backend.clone(), turn.account.clone(), message, limit))
-            });
+        // turn's: once it is released the user can send and stop another. A
+        // turn Claude began by itself, to report on a background agent, is
+        // continued like any other: the chat would otherwise sit there spent.
+        let limited =
+            usage_limit
+                .filter(|_| !was_cancelled && !success)
+                .and_then(|(resets_at_ms, limit)| {
+                    let message = self.inner.store.latest_user_message(&chat_id).ok()?;
+                    let outcome = self.after_usage_limit(
+                        &chat_id,
+                        &turn.backend,
+                        &turn.account,
+                        resets_at_ms,
+                        limit,
+                    );
+                    Some((outcome, message))
+                });
+        // A chat that goes on elsewhere was not stopped, so the limit is no
+        // error to show: the notice of the move says what happened.
+        let error = error.filter(|_| !matches!(limited, Some((AfterLimit::Switches(_), _))));
         self.finish(
             turn,
             turn_id,
@@ -2731,8 +2769,8 @@ impl TurnRuntime {
             asked,
             context_usage,
         );
-        if let Some((provider, account, message, (resets_at_ms, limit))) = limited {
-            self.after_usage_limit(&chat_id, &provider, &account, message, resets_at_ms, limit);
+        if let Some((outcome, message)) = limited {
+            self.continue_after_limit(&chat_id, outcome, message);
         }
         if keeps_process {
             self.pump_idle(&chat_id);
@@ -4346,6 +4384,120 @@ done
             .filter(|(_, content)| content.starts_with(ACCOUNT_SWITCH_PREFIX))
             .count();
         assert_eq!(notices, 1);
+        runtime.discard_chat(&chat);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Claude can hit the limit in a turn it began by itself, reporting on a
+    /// background agent. The chat moves on all the same, and since it goes on
+    /// elsewhere the limit is neither an error nor a reply in it.
+    #[cfg(unix)]
+    #[test]
+    fn a_limit_in_a_background_report_hands_the_chat_on_without_an_error() {
+        use std::{env, fs, os::unix::fs::PermissionsExt};
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = env::temp_dir().join(format!("xd-runtime-bg-limit-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let resets = crate::accounts::now_ms() / 1000 + 3600;
+        let agent = root.join("claude");
+        fs::write(
+            &agent,
+            format!(
+                r#"#!/bin/sh
+read line
+echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
+echo '{{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_helper","description":"Review","subagent_type":"general-purpose","is_backgrounded":true}}'
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Review started."}}]}}}}'
+echo '{{"type":"result","subtype":"success","result":"Review started."}}'
+sleep 1
+echo '{{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_helper","status":"failed"}}'
+echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
+echo '{{"type":"assistant","error":"rate_limit","message":{{"model":"<synthetic>","content":[{{"type":"text","text":"You have hit your 5-hour limit"}}]}}}}'
+echo '{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":{resets},"rateLimitType":"five_hour"}}}}'
+echo '{{"type":"result","subtype":"success","is_error":true,"api_error_status":429,"result":"You have hit your 5-hour limit"}}'
+read next
+"#
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "claude"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let accounts = crate::accounts::Accounts::with_homes(&root.join("data"), &[]);
+        let second = accounts.begin_adding("claude").unwrap();
+        accounts
+            .finish_adding(
+                "claude",
+                &second,
+                &crate::accounts::Identity {
+                    email: Some("b@example.com".into()),
+                    plan: None,
+                    account_key: Some("b".into()),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let events = Arc::new(EventBus::default());
+        let runtime = TurnRuntime::with_auth(
+            store.clone(),
+            events.clone(),
+            Arc::new(SecretsStore::new(None)),
+            AuthManager::new(events, accounts.clone()),
+        );
+        let continued = Arc::new(Mutex::new(Vec::new()));
+        let asked = continued.clone();
+        runtime.set_account_switch_handler(Box::new(move |chat, last_message| {
+            asked.lock().unwrap().push((chat, last_message));
+        }));
+        let turn = match store
+            .prepare_send(&json!({"chat": chat, "text": "Review it"}))
+            .unwrap()
+        {
+            crate::storage::SendDisposition::Start { turn, .. } => turn,
+            crate::storage::SendDisposition::Queued { .. } => panic!("the message was queued"),
+        };
+        runtime.start(turn).unwrap();
+
+        wait_for("the host to be asked to continue", || {
+            !continued.lock().unwrap().is_empty()
+        });
+        let request = store.latest_user_message(&chat).unwrap();
+        assert_eq!(*continued.lock().unwrap(), [(chat.clone(), request)]);
+        wait_for("the background turn to end", || {
+            runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false
+        });
+        let rows = contents(&store, &chat);
+        assert!(
+            rows.iter()
+                .any(|(_, content)| content.starts_with(ACCOUNT_SWITCH_PREFIX)
+                    && content.ends_with("Continuing there.")),
+            "{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(role, _)| role == "error"),
+            "the limit is no error in a chat that goes on: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(_, content)| content.contains("hit your")),
+            "the limit is not the agent's reply: {rows:?}"
+        );
+        // The continuation is allowed in: the chat is waiting to be resumed.
+        assert_eq!(store.chat(&chat).unwrap()["resumable"], true);
         runtime.discard_chat(&chat);
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };

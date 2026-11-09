@@ -648,6 +648,12 @@ impl ClaudeParser {
                 self.without_superseded_text(events)
             }
             Some("user") => self.user_event(&root),
+            // Claude words a usage limit as a reply of its own. The failed
+            // result after it says the same, so it is not the agent's answer.
+            Some("assistant") if self.limit_rejected => {
+                self.note_replacement_begun();
+                Vec::new()
+            }
             Some("assistant") if !self.saw_streamed_text => {
                 self.note_replacement_begun();
                 let events = self.assistant_event(&root);
@@ -2453,6 +2459,24 @@ mod tests {
             rejected,
             r#"{"type":"result","is_error":true,"api_error_status":500,"result":"Down"}"#,
         ]));
+        // Claude's own wording of the limit is not a reply; the failure says it.
+        let mut parser = ClaudeParser::default();
+        let events = [
+            r#"{"type":"assistant","error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your limit"}]}}"#,
+            r#"{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your limit"}"#,
+        ]
+        .iter()
+        .flat_map(|line| parser.feed(line))
+        .collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TextDelta(_))),
+            "{events:?}"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::Error(text) if text == "You've hit your limit")
+        ));
         let mut parser = ClaudeParser::default();
         parser.feed(rejected);
         parser.feed(r#"{"type":"result","is_error":false,"result":"Fine"}"#);
