@@ -518,6 +518,11 @@ impl Accounts {
                 account.live.checked_at_ms = None;
                 // A reading begun before now may be of the old login.
                 account.live.identity_at_ms = Some(now_ms());
+                // The user's own sign-in is whatever the CLI is signed in to,
+                // which is not known again until it is read.
+                if id == DEFAULT_ACCOUNT {
+                    account.account_key = None;
+                }
             }
             Ok(())
         });
@@ -1019,10 +1024,26 @@ fn choose(
 ) -> Option<Choice> {
     // An added account runs only as a login read since it last signed in or
     // the host started: until then its home could hold anyone's sign-in.
-    let usable = |account: &&Account| {
-        account.live.problem.is_none()
+    // Signed in, running as the login it was added as, and confirmed so.
+    let runs_as_itself = |account: &Account| {
+        account.live.problem != Some("mismatch")
             && signed_in(&account.id)
             && (account.id == DEFAULT_ACCOUNT || account.login_confirmed())
+    };
+    // A repeat is passed over only for an earlier account that can take the
+    // turn itself: a signed-out account's old login blocks nobody.
+    let usable = |account: &&Account| {
+        if !runs_as_itself(account) {
+            return false;
+        }
+        let Some(login) = &account.account_key else {
+            return true;
+        };
+        !state
+            .accounts
+            .iter()
+            .take_while(|earlier| earlier.id != account.id)
+            .any(|earlier| earlier.account_key.as_ref() == Some(login) && runs_as_itself(earlier))
     };
     let choice = |account: &Account| Choice {
         account: account.id.clone(),
@@ -1734,6 +1755,25 @@ mod tests {
                 .iter()
                 .all(|account| account["problem"].is_null())
         );
+    }
+
+    #[test]
+    fn a_signed_out_account_does_not_block_its_repeat() {
+        let data = temp("signed-out-repeat");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "codex", "b@example.com");
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("b@example.com"), 1);
+        assert_eq!(accounts.describe("codex", 2)[1]["problem"], "duplicate");
+        // The user's own sign-in is signed out: the added account takes turns.
+        assert_eq!(
+            accounts
+                .choose("codex", None, |id| id != DEFAULT_ACCOUNT, 3)
+                .account,
+            second
+        );
+        // Signed out through xd, it no longer counts as that login at all.
+        accounts.forget_login_reading("codex", DEFAULT_ACCOUNT);
+        assert_eq!(accounts.describe("codex", 4)[1]["problem"], Value::Null);
     }
 
     #[test]
