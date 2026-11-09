@@ -486,6 +486,7 @@ internal fun ChatScreen(
                 when (row) {
                     is TranscriptRow.Single -> TranscriptRow(row.item, model, answered[row.item.id])
                     is TranscriptRow.Tools -> ToolGroupRow(row)
+                    is TranscriptRow.AccountSwitch -> AccountSwitchNotice(row.sentence)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
                     is TranscriptRow.Subagent -> {
                         val key = row.run.key
@@ -1260,6 +1261,7 @@ private fun rowKey(row: TranscriptRow): String = when (row) {
     is TranscriptRow.Single -> row.item.id
     // Keyed on the run's first call, which is stable as the run grows.
     is TranscriptRow.Tools -> "tools-${row.items.first().id}"
+    is TranscriptRow.AccountSwitch -> "account-switch-${row.item.id}"
     is TranscriptRow.Pipeline -> "pipeline-${row.item.id}"
     is TranscriptRow.Subagent -> "subagent-${row.item.id}"
 }
@@ -1369,6 +1371,29 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * The chat moved to another of the assistant's accounts: quiet, like any
+ * host notice, with no card, and the sentence selectable.
+ */
+@Composable
+private fun AccountSwitchNotice(sentence: String) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            painterResource(com.restartfu.xd.mobile.R.drawable.ic_swap),
+            contentDescription = "Account switched",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp).size(16.dp),
+        )
+        SelectionContainer(Modifier.weight(1f)) {
+            Text(sentence, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }

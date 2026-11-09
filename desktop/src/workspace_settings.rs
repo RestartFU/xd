@@ -1,5 +1,8 @@
 use super::*;
 
+/// The settings section that holds the assistant accounts.
+pub(super) const AGENTS_SECTION: usize = 2;
+
 const SETTINGS_SECTIONS: [(&str, &str); 5] = [
     ("Appearance", "A familiar workspace, in your own light."),
     ("General", "Preferences for your daily work."),
@@ -515,6 +518,9 @@ impl XdDesktop {
                             .hover(|style| style.bg(rgb(colors.surface_high)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.settings_section = index;
+                                if index == AGENTS_SECTION {
+                                    this.request_agent_accounts();
+                                }
                                 cx.notify();
                             }))
                             .child(*name)
@@ -915,19 +921,8 @@ impl XdDesktop {
             }
             2 => {
                 content = content
-                    .child(settings_heading("Accounts and command-line tools", colors))
-                    .child(
-                        settings_row("workspace-settings-accounts", "Assistant accounts", "Manage sign-in and the installed assistant CLIs.", colors)
-                            .child(ui_button("assistant-accounts", ButtonKind::Secondary, colors)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.minimal_theme_open = false;
-                                    this.auth_open = true;
-                                    if let Some(host) = this.active_host() { let _ = host.agent_auth(); let _ = host.agent_clis(); }
-                                    this.focus_minimal_popup(this.minimal_popup_focus.clone(), window, cx);
-                                    cx.notify();
-                                }))
-                                .child("Manage")),
-                    )
+                    .child(settings_heading("Accounts", colors))
+                    .child(self.render_account_settings(colors, cx))
                     .child(settings_heading("Permissions", colors))
                     .child(
                         settings_row("minimal-all-permissions", "All permissions", "New agent tabs skip approvals and sandboxing when the CLI supports it.", colors)

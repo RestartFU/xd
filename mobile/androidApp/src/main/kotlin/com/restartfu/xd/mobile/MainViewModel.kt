@@ -13,6 +13,7 @@ import com.restartfu.xd.credentials.SshHostKey
 import com.restartfu.xd.credentials.parsePairingInvitation
 import com.restartfu.xd.net.ConnectResult
 import com.restartfu.xd.model.DirectAgent
+import com.restartfu.xd.protocol.AgentAccountReply
 import com.restartfu.xd.protocol.AgentAuthProviderReply
 import com.restartfu.xd.protocol.AutoSettleSettingsReply
 import com.restartfu.xd.protocol.BackendReply
@@ -292,8 +293,36 @@ class MainViewModel @JvmOverloads constructor(
     fun installCliUpdate(provider: String) =
         accountsAction("Could not start the update") { client.agentCliUpdates("install", provider) }
 
-    fun signIn(provider: String) =
-        accountsAction("Could not start signing in") { client.agentAuthAction(Ops.AuthAction.START, provider) }
+    /** Signs [account] in again in its own home; the user's own sign-in when left out. */
+    fun signIn(provider: String, account: String? = null) =
+        accountsAction("Could not start signing in") {
+            client.agentAuthAction(Ops.AuthAction.START, provider, account = account?.takeIf { it != AgentAccountReply.DEFAULT })
+        }
+
+    /** Signs a new account in, in a new home; it joins the list once that succeeds. */
+    fun addAccount(provider: String) =
+        accountsAction("Could not start adding an account") { client.agentAuthAction(Ops.AuthAction.ADD, provider) }
+
+    /** Signs the user's own CLI sign-in out. */
+    fun signOut(provider: String) =
+        accountsAction("Could not sign out") { client.agentAuthAction(Ops.AuthAction.LOGOUT, provider) }
+
+    /** Signs an added account out and deletes its saved sign-in from the host. */
+    fun removeAccount(provider: String, account: String) {
+        if (account == AgentAccountReply.DEFAULT) return
+        accountsAction("Could not remove the account") {
+            client.agentAuthAction(Ops.AuthAction.LOGOUT, provider, account = account)
+        }
+    }
+
+    /** Moves the ranked account at [index] one place up or down in the order turns use. */
+    fun moveAccount(provider: AgentAuthProviderReply, index: Int, up: Boolean) {
+        val order = provider.orderMoving(index, up) ?: return
+        accountsAction("Could not change the order") { client.agentAccountsOrder(provider.provider, order) }
+    }
+
+    fun setAccountAutoSwitch(provider: String, enabled: Boolean) =
+        accountsAction("Could not change account switching") { client.agentAccountsAutoSwitch(provider, enabled) }
 
     fun editSignInInput(provider: AgentAuthProviderReply, text: String) {
         val attempt = provider.signInAttempt()
@@ -306,7 +335,7 @@ class MainViewModel @JvmOverloads constructor(
     /** Whether [draft] still belongs to the sign-in the host is running for [provider]. */
     private fun signInLive(provider: String, draft: SignInDraft): Boolean =
         client.agentAuth.value?.get(provider)
-            ?.let { it.state == "signing-in" && it.signInAttempt() == draft.attempt } == true
+            ?.let { it.signingIn() != null && it.signInAttempt() == draft.attempt } == true
 
     /** Sends the typed code, keeping it until the host takes it, so a failure can be sent again. */
     fun sendSignInInput(provider: AgentAuthProviderReply) {
@@ -1483,7 +1512,9 @@ private const val QUEUE_CHANGED = "The queue changed on another device. Open the
 data class SignInDraft(val text: String = "", val sending: Boolean = false, val attempt: String = "")
 
 /**
- * Tells one sign-in attempt from the next: each has its own sign-in page
- * address or device code, so a code typed for one never reaches another.
+ * Tells one sign-in attempt from the next: each is for one account and has
+ * its own sign-in page address or device code, so a code typed for one never
+ * reaches another.
  */
-internal fun AgentAuthProviderReply.signInAttempt(): String = "${loginUrl.orEmpty()}\n${deviceCode.orEmpty()}"
+internal fun AgentAuthProviderReply.signInAttempt(): String =
+    signingIn()?.let { "${it.id}\n${it.loginUrl.orEmpty()}\n${it.deviceCode.orEmpty()}" }.orEmpty()

@@ -3,8 +3,8 @@
 This directory contains xd's production Rust/GPUI desktop client for Linux,
 macOS, and Windows.
 
-The application presents workspace-organized Codex, Claude Code, and JCode
-chats with optional shell panes. It owns navigation, cached UI state, terminal emulation, chat input,
+The application presents workspace-organized Codex and Claude Code chats
+with optional shell panes. It owns navigation, cached UI state, terminal emulation, chat input,
 themes, diffs, and the desktop window. Terminal escape processing is backed by
 the in-process `alacritty_terminal` crate. Persistent chat/workspace
 state and agent orchestration are provided by the bundled `xd-host` process.
@@ -21,7 +21,7 @@ and leaves work running.
   Settings → **Pair a device** starts the listener, creates a one-use code,
   and copies a pairing code containing the certificate fingerprint. The other
   device supplies the address.
-- Codex, Claude Code, and JCode sessions open in native chat. Legacy terminal
+- Codex and Claude Code sessions open in native chat. Legacy terminal
   chats and their saved history are deleted automatically when the database opens.
   Their worktrees are retained.
 - Codex chat uses app-server for streaming, conversation resume, approvals,
@@ -78,9 +78,8 @@ verifies its own and installs everything else automatically.
 Every push to `master` replaces the rolling Linux, macOS, and Windows nightly. Tagged
 releases use the stable application id and install beside the nightly.
 
-The bundle includes the GPUI desktop, `xd-host`, and tmux. Install Codex,
-Claude Code, and/or JCode separately and make the commands
-available on `PATH`.
+The bundle includes the GPUI desktop, `xd-host`, and tmux. Install Codex
+and/or Claude Code separately and make the commands available on `PATH`.
 Stable and nightly installation commands are in the main
 [README](../README.md#install).
 

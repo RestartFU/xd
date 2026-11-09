@@ -14,6 +14,7 @@ use std::{
 
 use serde_json::{Value, json};
 
+mod accounts;
 mod agent;
 mod agent_text;
 mod ask;
@@ -159,7 +160,7 @@ impl Engine {
         Self {
             shutdown: AtomicBool::new(false),
             store: None,
-            auth: AuthManager::new(events.clone()),
+            auth: AuthManager::new(events.clone(), accounts::Accounts::new(None)),
             cli_updates: CliUpdates::new(events.clone()),
             cli_versions: CliVersions::new(events.clone()),
             workflows: WorkflowStatuses::new(events.clone()),
@@ -196,10 +197,17 @@ impl Engine {
     pub fn with_store_and_data(store: StateStore, data_directory: Option<PathBuf>) -> Self {
         let store = Arc::new(store);
         let events = Arc::new(EventBus::with_store(store.clone()));
-        let auth = AuthManager::new(events.clone());
+        // Unit tests keep to the user's own sign-in; a stray data directory
+        // must not give them accounts of their own.
+        let accounts =
+            accounts::Accounts::new(data_directory.as_deref().filter(|_| cfg!(not(test))));
+        let auth = AuthManager::new(events.clone(), accounts.clone());
         let cli_updates = CliUpdates::new(events.clone());
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
+        let runtime =
+            TurnRuntime::with_auth(store.clone(), events.clone(), secrets.clone(), auth.clone());
+        auth.set_releaser(runtime.releaser());
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
         // Unit tests send messages on hosts with no fake assistant behind them, and
         // must not reach a real CLI. The daemon tests cover titles end to end.
@@ -218,17 +226,14 @@ impl Engine {
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
         let engine = Self {
             shutdown: AtomicBool::new(false),
-            runtime: Some(TurnRuntime::new(
-                store.clone(),
-                events.clone(),
-                secrets.clone(),
-            )),
+            runtime: Some(runtime),
             store: Some(store),
             auth,
             cli_updates,
             cli_versions,
             workflows: WorkflowStatuses::new(events.clone()),
-            usage: UsageService::new(events.clone(), data_directory.clone()),
+            usage: UsageService::new(events.clone(), data_directory.clone())
+                .with_accounts(accounts),
             owner_icons: Arc::new(OwnerIcons::new(events.clone())),
             terminals: TerminalManager::new(events.clone()),
             chat_execution: Mutex::new(HashMap::new()),
@@ -388,8 +393,33 @@ impl Engine {
                     reply
                 }
             }
-            Some("agent-auth-start") => {
-                self.auth_mutation(&request, |auth, provider, _| auth.login(provider))
+            Some("agent-auth-start") => self.auth_mutation(&request, |auth, provider, request| {
+                auth.login(provider, request.get("account").and_then(Value::as_str))
+            }),
+            Some("agent-auth-add") => {
+                self.auth_mutation(&request, |auth, provider, _| auth.add(provider))
+            }
+            Some("agent-accounts-order") => {
+                self.auth_mutation(&request, |auth, provider, request| {
+                    let order = request
+                        .get("accounts")
+                        .and_then(Value::as_array)
+                        .ok_or("agent-accounts-order needs an accounts array.")?
+                        .iter()
+                        .map(|id| id.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or("Account ids are strings.")?;
+                    auth.reorder(provider, &order)
+                })
+            }
+            Some("agent-accounts-auto-switch") => {
+                self.auth_mutation(&request, |auth, provider, request| {
+                    let enabled = request
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .ok_or("agent-accounts-auto-switch needs enabled.")?;
+                    auth.set_auto_switch(provider, enabled)
+                })
             }
             Some("agent-auth-input") => self.auth_mutation(&request, |auth, provider, request| {
                 let input = required_string(request, "input", "agent-auth-input needs text.")?;
@@ -398,9 +428,9 @@ impl Engine {
             Some("agent-auth-cancel") => {
                 self.auth_mutation(&request, |auth, provider, _| auth.cancel(provider))
             }
-            Some("agent-auth-logout") => {
-                self.auth_mutation(&request, |auth, provider, _| auth.logout(provider))
-            }
+            Some("agent-auth-logout") => self.auth_mutation(&request, |auth, provider, request| {
+                auth.logout(provider, request.get("account").and_then(Value::as_str))
+            }),
             Some("shortcuts") => self.read(|store| store.shortcuts(&request)),
             Some("chat-title-settings") => self.read(StateStore::chat_title_settings),
             Some("set-chat-title-settings") => {
@@ -1284,6 +1314,70 @@ impl Engine {
         }
     }
 
+    /// Lets a chat whose account ran out continue on the next one, and keeps
+    /// reading every account's limits while an assistant has several. Only the
+    /// daemon does this, since it is what outlives the clients.
+    pub fn start_account_switching(self: &Arc<Self>) {
+        self.auth.start_watch();
+        // Codex sessions from before accounts were kept are filed under the
+        // login Codex has as the host starts, so a later change of login is
+        // caught for them too rather than resumed across.
+        // Off the startup path, so a slow Codex cannot hold up the socket; a
+        // turn about to resume one of them waits for this instead. When the
+        // login cannot be read they are filed as an unknown login: then a
+        // later login never takes them for its own.
+        if let (Some(store), Some(runtime)) = (self.store.clone(), self.runtime.clone()) {
+            runtime.filing();
+            let auth = self.auth.clone();
+            let spawned = thread::Builder::new()
+                .name("xd-file-sessions".into())
+                .spawn({
+                    let runtime = runtime.clone();
+                    move || {
+                        let tag = auth
+                            .read_own_codex_login()
+                            .unwrap_or_else(|| format!("{}#?", accounts::DEFAULT_ACCOUNT));
+                        if let Err(error) = store.claim_unfiled_sessions("codex", &tag) {
+                            eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
+                        }
+                        runtime.filed();
+                    }
+                });
+            if spawned.is_err() {
+                runtime.filed();
+            }
+        }
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        // Weak, since the engine owns the runtime that holds this.
+        let engine = Arc::downgrade(self);
+        runtime.set_account_switch_handler(Box::new(move |chat_id, last_message| {
+            let engine = engine.clone();
+            // Off the turn's thread: continuing takes the chat's own locks.
+            let _ = thread::Builder::new()
+                .name("xd-account-continue".into())
+                .spawn(move || {
+                    let Some(engine) = engine.upgrade() else {
+                        return;
+                    };
+                    let reply = engine.send_message_inner(
+                        &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
+                        Some(Continuation::AfterLimit(last_message)),
+                    );
+                    if reply["ok"] == true {
+                        engine
+                            .events
+                            .publish(json!({"event": "changed", "chat": chat_id}));
+                    } else {
+                        eprintln!(
+                            "xd-host: not continuing chat {chat_id} on another account: {reply}"
+                        );
+                    }
+                });
+        }));
+    }
+
     /// Starts the memory guard; see [`memory_guard`]. It does nothing while the
     /// daemon runs in no cgroup that running out of memory kills as a whole,
     /// but looks again now and then, since a container's limits can change.
@@ -1714,6 +1808,9 @@ impl Engine {
                 store.prepare_continuation(&request, last_message)
             }
             Some(Continuation::Resume) => store.prepare_resume(&request),
+            Some(Continuation::AfterLimit(last_message)) => {
+                store.prepare_after_limit(&request, last_message)
+            }
             None => store.prepare_send(&request),
         };
         if resumes && prepared.is_ok() {

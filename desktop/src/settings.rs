@@ -33,11 +33,13 @@ pub enum AccentPreset {
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GitWriter {
-    #[default]
-    Chat,
     Claude,
     Codex,
-    Jcode,
+    /// Also what a writer xd no longer offers, such as JCode, falls back to,
+    /// so an older settings file still loads. Serde needs it last for that.
+    #[default]
+    #[serde(other)]
+    Chat,
 }
 
 impl GitWriter {
@@ -46,7 +48,6 @@ impl GitWriter {
             Self::Chat => None,
             Self::Claude => Some("claude"),
             Self::Codex => Some("codex"),
-            Self::Jcode => Some("jcode"),
         }
     }
 }
@@ -306,6 +307,14 @@ fn save_to(path: &Path, settings: &AppSettings) -> Result<(), String> {
 mod tests {
     use super::*;
     use xd_desktop::theme::ThemePreset;
+
+    #[test]
+    fn a_retired_git_writer_falls_back_to_the_chat_assistant() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"git_writer":"jcode","theme":"light"}"#).unwrap();
+        assert_eq!(settings.git_writer, GitWriter::Chat);
+        assert_eq!(settings.theme, ThemePreset::Light);
+    }
 
     #[test]
     fn malformed_settings_are_not_replaced_by_defaults() {

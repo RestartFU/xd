@@ -15,7 +15,7 @@ For Ubuntu or Debian:
   sudo apt update
   sudo apt install git tmux openssh-client ca-certificates
 
-Install Codex, Claude Code, JCode, and/or GitHub Copilot CLI inside that same
+Install Codex, Claude Code, and/or GitHub Copilot CLI inside that same
 distribution and make them available on PATH. xd includes its matching Linux
 host; a separate xd installation in WSL is unnecessary. Existing SSH connections
 use the Windows OpenSSH client.

@@ -101,14 +101,12 @@ const CLAUDE_MODELS: &[(&str, &str, i64)] = &[
     ("claude-haiku-4-5", "Claude Haiku 4.5", 0),
     ("claude-opus-4-8", "Claude Opus 4.8", 0),
 ];
-const JCODE_MODELS: &[(&str, &str, i64)] = &[("default", "Automatic", 0)];
 const BASE_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CHAT_TITLES_ENABLED_KEY: &str = "chat_titles_enabled";
 const MAX_CHAT_TITLE_MESSAGE_CHARS: usize = 2_000;
 /// The assistants that can title chats and name worktrees, each with its
 /// low-cost models, newest first. An older one serves a CLI that does not offer
 /// the newest yet. Codex keeps to GPT-6 Luna: an older Luna writes worse names.
-/// JCode has no model choice to make, so its chats keep the name they were given.
 const CHAT_TITLE_MODELS: &[(&str, &[&str])] = &[
     ("codex", &["gpt-6-luna"]),
     (
@@ -226,6 +224,13 @@ pub struct TurnSpec {
     pub context_window: i64,
     pub session_backend: String,
     pub session_id: Option<String>,
+    /// The account `session_id` belongs to.
+    pub session_account: Option<String>,
+    /// The account the turn runs on, chosen when it starts.
+    pub account: String,
+    /// The turn starts a new session in a new process, even if the chat has a
+    /// process it could reuse: its session could not move to `account`.
+    pub fresh_session: bool,
     /// What the user sent, without the note `prompt` may open with.
     pub request: String,
     pub carries_cut_off_note: bool,
@@ -261,6 +266,10 @@ pub(crate) enum Continuation {
     AfterRestart(i64),
     /// The user pressed resume, valid while the chat's latest turn is resumable.
     Resume,
+    /// The host moving a chat to another account after a usage limit. Valid
+    /// while this user message is still the chat's latest and its turn is
+    /// still resumable, so a late continuation cannot restart newer work.
+    AfterLimit(i64),
 }
 
 /// A chat a restart cut off, and the user message it was working on.
@@ -1477,15 +1486,6 @@ impl StateStore {
         let backends = [
             catalog_backend("claude", "Claude Code", CLAUDE_MODELS, "ultracode"),
             catalog_backend("codex", "Codex", CODEX_MODELS, "ultra"),
-            json!({
-                "id": "jcode",
-                "name": "JCode",
-                "default_model": "default",
-                "models": JCODE_MODELS.iter().map(|(id, name, context_window)| {
-                    json!({"id": id, "name": name, "context_window": context_window})
-                }).collect::<Vec<_>>(),
-                "efforts": [],
-            }),
         ];
         Ok(json!({"ok": true, "backends": backends}))
     }
@@ -1505,6 +1505,9 @@ impl StateStore {
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // A retired assistant's chat runs nothing, so it has nothing to set,
+        // and a change would make it the default new chats start on.
+        validate_backend(&previous.0)?;
         if matches!(option, "new-worktree" | "workspace")
             && !workspace_is_unused(&transaction, chat_id)?
         {
@@ -1683,6 +1686,11 @@ impl StateStore {
         let Some((backend, model, effort, used)) = chat else {
             return Ok(());
         };
+        // A chat on a retired assistant has nothing to settle; sending to it
+        // is refused instead.
+        if !supported_backend(&backend) {
+            return Ok(());
+        }
         if used && model.is_some() && effort.is_some() {
             return Ok(());
         }
@@ -1722,6 +1730,24 @@ impl StateStore {
         self.prepare_send_inner(request, Some(Continuation::Resume))
     }
 
+    pub fn prepare_after_limit(
+        &self,
+        request: &Value,
+        last_message: i64,
+    ) -> Result<SendDisposition, StorageError> {
+        self.prepare_send_inner(request, Some(Continuation::AfterLimit(last_message)))
+    }
+
+    /// The id of the chat's newest user message, or 0.
+    pub fn latest_user_message(&self, chat_id: &str) -> Result<i64, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ? AND role = 'user'",
+            [chat_id],
+            |row| row.get::<_, i64>(0),
+        )?)
+    }
+
     fn prepare_send_inner(
         &self,
         request: &Value,
@@ -1742,14 +1768,16 @@ impl StateStore {
         let mut message = self.materialize_message(request, text)?;
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let working = transaction
+        let (working, backend) = transaction
             .query_row(
-                "SELECT host_working FROM chats WHERE id = ?",
+                "SELECT host_working, backend FROM chats WHERE id = ?",
                 [chat_id],
-                |row| row.get::<_, bool>(0),
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
+        // Not even queued: no turn on a retired assistant would ever take it.
+        validate_backend(&backend)?;
         match continues {
             Some(Continuation::AfterRestart(last_message)) => {
                 let latest = transaction.query_row(
@@ -1760,6 +1788,19 @@ impl StateStore {
                 if working || latest != last_message {
                     return Err(StorageError::InvalidRequest(
                         "This chat has already continued.".into(),
+                    ));
+                }
+            }
+            Some(Continuation::AfterLimit(last_message)) => {
+                let (latest, resumable) = transaction.query_row(
+                    "SELECT (SELECT COALESCE(MAX(id), 0) FROM messages \
+                     WHERE chat_id = ?1 AND role = 'user'), turn_resumable FROM chats WHERE id = ?1",
+                    [chat_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+                )?;
+                if working || latest != last_message || !resumable {
+                    return Err(StorageError::InvalidRequest(
+                        "This chat has moved on since its account ran out.".into(),
                     ));
                 }
             }
@@ -2089,8 +2130,8 @@ impl StateStore {
         // A name is a few words, so it goes to the low-cost model that titles
         // chats unless the user chose a Git writer model. When the CLI offers
         // none of those, the worktree is named from the message instead of by
-        // a costlier model. Only an assistant without such models (JCode) uses
-        // the chat's own.
+        // a costlier model. Only an assistant without such models uses the
+        // chat's own.
         let model = match optional_string(request, "worktree_model")? {
             Some(model) => {
                 validate_model(&backend, model)?;
@@ -2479,6 +2520,87 @@ impl StateStore {
         Ok(database.last_insert_rowid())
     }
 
+    /// The account and login a chat's stored session is filed under, if any.
+    pub fn session_account(
+        &self,
+        chat_id: &str,
+        backend: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row(
+                "SELECT account FROM chat_sessions WHERE chat_id = ? AND backend = ?",
+                params![chat_id, backend],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Files every session stored before accounts were kept, and so filed under
+    /// no login, under `tag`. Done once as the host starts: those sessions were
+    /// made by the login the CLI had then, as far as anything can tell.
+    pub fn claim_unfiled_sessions(&self, backend: &str, tag: &str) -> Result<usize, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database.execute(
+            "UPDATE chat_sessions SET account = ? WHERE backend = ? AND account IS NULL \
+             AND session_id IS NOT NULL",
+            params![tag, backend],
+        )?)
+    }
+
+    /// The conversation so far as plain text, newest kept when it is long, for
+    /// an agent that has to start a new session on another account. Leaves out
+    /// the newest user message, which the turn itself carries.
+    pub fn conversation_for_handoff(
+        &self,
+        chat_id: &str,
+        limit: usize,
+    ) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let mut statement = database.prepare(
+            "SELECT role, content FROM messages WHERE chat_id = ? \
+             AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT 400",
+        )?;
+        let rows = statement
+            .query_map([chat_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut kept = Vec::new();
+        let mut size = 0;
+        let mut skipped_request = false;
+        for (role, content) in rows {
+            if !skipped_request && role == "user" {
+                skipped_request = true;
+                continue;
+            }
+            let content = content.trim();
+            if content.is_empty() {
+                continue;
+            }
+            let speaker = if role == "user" { "User" } else { "Assistant" };
+            let entry = format!("{speaker}:\n{content}");
+            if size + entry.len() > limit {
+                if kept.is_empty() {
+                    let mut end = limit.min(entry.len());
+                    while !entry.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    kept.push(format!("{}…", &entry[..end]));
+                }
+                break;
+            }
+            size += entry.len() + 2;
+            kept.push(entry);
+        }
+        if kept.is_empty() {
+            return Ok(None);
+        }
+        kept.reverse();
+        Ok(Some(kept.join("\n\n")))
+    }
+
     pub fn latest_todo_snapshot(&self, chat_id: &str) -> Result<Option<String>, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         database
@@ -2498,12 +2620,14 @@ impl StateStore {
         chat_id: &str,
         backend: &str,
         session_id: &str,
+        account: &str,
     ) -> Result<(), StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         database.execute(
-            "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES (?, ?, ?) \
-             ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id",
-            params![chat_id, backend, session_id],
+            "INSERT INTO chat_sessions (chat_id, backend, session_id, account) VALUES (?, ?, ?, ?) \
+             ON CONFLICT (chat_id, backend) DO UPDATE SET session_id = excluded.session_id, \
+             account = excluded.account",
+            params![chat_id, backend, session_id, account],
         )?;
         // The agent reports its session once it has the turn's request.
         database.execute(
@@ -4101,10 +4225,20 @@ impl StateStore {
             &self.workspace_root,
             folder_id,
         )?);
+        // A folder or the last chat may still name a retired assistant, which
+        // new chats no longer start on.
         let backend = backend_override
             .map(str::to_owned)
-            .or(folder_values.backend)
-            .unwrap_or(defaults.0);
+            .or(folder_values
+                .backend
+                .filter(|backend| supported_backend(backend)))
+            .unwrap_or_else(|| {
+                if supported_backend(&defaults.0) {
+                    defaults.0
+                } else {
+                    "codex".into()
+                }
+            });
         validate_backend(&backend)?;
         let (model, effort) = new_chat_model_and_effort(
             &transaction,
@@ -5466,6 +5600,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
             remove_terminal_chats(database)?;
             ensure_workspace_sessions(database)?;
             ensure_backend_choices(database)?;
+            retire_jcode_defaults(database)?;
             ensure_draft_chunks(database)?;
             return Ok(());
         }
@@ -5500,7 +5635,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
          CREATE TABLE IF NOT EXISTS chat_sessions (chat_id TEXT NOT NULL, backend TEXT NOT NULL, \
            session_id TEXT, last_message_id INTEGER NOT NULL DEFAULT 0, \
            context_used INTEGER NOT NULL DEFAULT 0, context_window INTEGER NOT NULL DEFAULT 0, \
-           context_model TEXT, PRIMARY KEY(chat_id, backend), \
+           context_model TEXT, account TEXT, PRIMARY KEY(chat_id, backend), \
            FOREIGN KEY(chat_id) REFERENCES chats(id) ON DELETE CASCADE); \
          CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, \
            chat_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, raw_json TEXT, \
@@ -5562,6 +5697,7 @@ fn initialize_schema(database: &Connection) -> Result<(), StorageError> {
     remove_terminal_chats(database)?;
     ensure_workspace_sessions(database)?;
     ensure_backend_choices(database)?;
+    retire_jcode_defaults(database)?;
     ensure_draft_chunks(database)?;
     Ok(())
 }
@@ -5652,6 +5788,27 @@ fn remove_terminal_chats(database: &Connection) -> Result<(), StorageError> {
     )?;
     transaction.execute(
         "UPDATE agent_defaults SET backend = 'codex', model = 'gpt-5.6-sol' WHERE backend = 'copilot'",
+        [],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// New chats no longer start on JCode, so the settings that would start them
+/// there fall back to the usual defaults. JCode chats themselves stay, history
+/// and all, but refuse new messages.
+fn retire_jcode_defaults(database: &Connection) -> Result<(), StorageError> {
+    let transaction = database.unchecked_transaction()?;
+    transaction.execute(
+        "UPDATE workspace_folders SET backend = NULL, model = NULL WHERE backend = 'jcode'",
+        [],
+    )?;
+    transaction.execute(
+        "UPDATE agent_defaults SET backend = 'codex', model = 'gpt-5.6-sol' WHERE backend = 'jcode'",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM agent_backend_choices WHERE backend = 'jcode'",
         [],
     )?;
     transaction.commit()?;
@@ -5832,6 +5989,11 @@ fn ensure_chat_session_context_columns(database: &Connection) -> Result<(), Stor
             "ALTER TABLE chat_sessions ADD COLUMN context_model TEXT",
             [],
         )?;
+    }
+    // The account a session was started on. Older rows have none, meaning
+    // the user's own sign-in.
+    if !columns.contains("account") {
+        database.execute("ALTER TABLE chat_sessions ADD COLUMN account TEXT", [])?;
     }
     Ok(())
 }
@@ -6872,9 +7034,20 @@ fn catalog_backend(
     })
 }
 
+/// What a chat on an assistant xd no longer runs is told when asked to do
+/// anything. Its history still opens and lists like any other chat's.
+const JCODE_RETIRED: &str =
+    "JCode is no longer supported. Start a new chat with Codex or Claude Code.";
+
+fn supported_backend(backend: &str) -> bool {
+    matches!(backend, "codex" | "claude")
+}
+
 fn validate_backend(backend: &str) -> Result<(), StorageError> {
-    if matches!(backend, "codex" | "claude" | "jcode") {
+    if supported_backend(backend) {
         Ok(())
+    } else if backend == "jcode" {
+        Err(StorageError::InvalidRequest(JCODE_RETIRED.into()))
     } else {
         Err(StorageError::InvalidRequest("No such assistant.".into()))
     }
@@ -6898,7 +7071,6 @@ fn awaited_default_model(backend: &str) -> String {
 fn fallback_model(backend: &str) -> &'static str {
     match backend {
         "claude" => "claude-opus-5",
-        "jcode" => "default",
         _ => "gpt-5.6-sol",
     }
 }
@@ -7092,7 +7264,6 @@ fn backend_models(backend: &str) -> &'static [(&'static str, &'static str, i64)]
     match backend {
         "codex" => CODEX_MODELS,
         "claude" => CLAUDE_MODELS,
-        "jcode" => JCODE_MODELS,
         _ => &[],
     }
 }
@@ -8513,14 +8684,19 @@ fn prepare_turn(
         chat.5.unwrap_or_else(|| "read-only".into())
     };
     let session_backend = &chat.1;
-    let session_id = transaction
+    let (session_id, session_account) = transaction
         .query_row(
-            "SELECT session_id FROM chat_sessions WHERE chat_id = ? AND backend = ?",
+            "SELECT session_id, account FROM chat_sessions WHERE chat_id = ? AND backend = ?",
             params![chat_id, session_backend],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
         )
         .optional()?
-        .flatten();
+        .unwrap_or_default();
     let system_prompt = effective_instructions(transaction, workspace_root, &chat.0)?
         .map(|instructions| format!("{instructions}\n\n{AGENT_UI_INSTRUCTIONS}"))
         .or_else(|| Some(AGENT_UI_INSTRUCTIONS.into()));
@@ -8559,7 +8735,13 @@ fn prepare_turn(
             .map(|known| known.2)
             .unwrap_or(0),
         session_backend: session_backend.into(),
+        // A session from before accounts ran on the user's own sign-in.
+        session_account: session_id
+            .as_ref()
+            .map(|_| session_account.unwrap_or_else(|| "default".into())),
         session_id,
+        account: "default".into(),
+        fresh_session: false,
         label: format!(
             "{} · {}{}",
             model_label(&chat.1, &model),
@@ -9733,6 +9915,119 @@ mod tests {
     }
 
     #[test]
+    fn legacy_jcode_chats_keep_their_history_but_refuse_new_messages() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let legacy = store
+            .new_chat(&json!({"folder": folder, "title": "Old JCode task", "backend": "codex"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        {
+            let db = store.database.lock().unwrap();
+            db.execute(
+                "UPDATE chats SET backend = 'jcode', model = 'default', effort = NULL WHERE id = ?",
+                [&legacy],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES \
+                 (?1, 'user', 'earlier question', 1), (?1, 'assistant', 'earlier answer', 2)",
+                [&legacy],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE agent_defaults SET backend = 'jcode', model = 'default'",
+                [],
+            )
+            .unwrap();
+            db.execute(
+                "UPDATE workspace_folders SET backend = 'jcode', model = 'default' WHERE id = ?",
+                [&folder],
+            )
+            .unwrap();
+        }
+        // Settings that still name JCode do not start new chats on it, even
+        // before the database is migrated.
+        let fresh = store.new_chat(&json!({"folder": folder})).unwrap();
+        assert_eq!(fresh["backend"], "codex");
+        store.delete_chat(&json!({"chat": fresh["id"]})).unwrap();
+        drop(store);
+
+        for _ in 0..2 {
+            let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+            {
+                let db = store.database.lock().unwrap();
+                let defaults: String = db
+                    .query_row(
+                        "SELECT backend FROM agent_defaults WHERE singleton = 1",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(defaults, "codex");
+                let folder_backend: Option<String> = db
+                    .query_row(
+                        "SELECT backend FROM workspace_folders WHERE id = ?",
+                        [&folder],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(folder_backend, None);
+            }
+
+            // It still lists, opens, and shows its history.
+            assert!(store.tree().unwrap().to_string().contains(&legacy));
+            let chat = store.chat(&legacy).unwrap();
+            assert_eq!(chat["backend"], "jcode");
+            assert_eq!(chat["title"], "Old JCode task");
+            let history = store.messages(&json!({"chat": legacy})).unwrap();
+            assert_eq!(history["total_messages"], 2);
+            assert_eq!(history["messages"][1]["content"], "earlier answer");
+
+            // But a message to it is refused, not stored, and not queued.
+            store.await_chat_defaults(&legacy).unwrap();
+            let refused = store
+                .prepare_send(&json!({"chat": legacy, "text": "one more thing"}))
+                .err()
+                .expect("a JCode chat refuses new messages");
+            assert_eq!(refused.to_string(), JCODE_RETIRED);
+            assert_eq!(
+                JCODE_RETIRED,
+                "JCode is no longer supported. Start a new chat with Codex or Claude Code."
+            );
+            let after = store.messages(&json!({"chat": legacy})).unwrap();
+            assert_eq!(after["total_messages"], 2);
+            let chat = store.chat(&legacy).unwrap();
+            assert_eq!(chat["working"], false);
+            assert_eq!(chat["queue"], json!([]));
+            let refused = store
+                .set_option(&json!({"chat": legacy, "option": "access", "value": "full"}))
+                .expect_err("a JCode chat has no options to set");
+            assert_eq!(refused.to_string(), JCODE_RETIRED);
+
+            // New chats cannot pick it, and the catalog no longer offers it.
+            let refused = store
+                .new_chat(&json!({"folder": folder, "backend": "jcode"}))
+                .expect_err("new chats cannot start on JCode");
+            assert_eq!(refused.to_string(), JCODE_RETIRED);
+            let catalog = store.agent_catalog().unwrap();
+            assert!(
+                catalog["backends"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|backend| backend["id"] != "jcode")
+            );
+            let fresh = store.new_chat(&json!({"folder": folder})).unwrap();
+            assert_eq!(fresh["backend"], "codex");
+            store.delete_chat(&json!({"chat": fresh["id"]})).unwrap();
+        }
+    }
+
+    #[test]
     fn databases_without_session_mode_are_cleaned_up_as_terminal_chats() {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
@@ -10735,10 +11030,10 @@ mod tests {
 
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         store
-            .set_session("chat-1", "codex", "codex-session")
+            .set_session("chat-1", "codex", "codex-session", "default")
             .unwrap();
         store
-            .set_session("chat-1", "claude", "claude-session")
+            .set_session("chat-1", "claude", "claude-session", "default")
             .unwrap();
         let turn = match store
             .prepare_send(&json!({"chat": "chat-1", "text": "hello"}))
@@ -10795,10 +11090,10 @@ mod tests {
 
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         store
-            .set_session("chat-1", "codex", "codex-session")
+            .set_session("chat-1", "codex", "codex-session", "default")
             .unwrap();
         store
-            .set_session("chat-1", "claude-mode", "proxy-session")
+            .set_session("chat-1", "claude-mode", "proxy-session", "default")
             .unwrap();
         let SendDisposition::Start { turn, .. } = store
             .prepare_send(&json!({"chat": "chat-1", "text": "hello"}))
@@ -10901,7 +11196,9 @@ mod tests {
         store
             .set_context_usage("chat-1", "codex", Some("gpt-5"), 16_948, 272_000)
             .unwrap();
-        store.set_session("chat-1", "codex", "thread-1").unwrap();
+        store
+            .set_session("chat-1", "codex", "thread-1", "default")
+            .unwrap();
         let chat = store.chat("chat-1").unwrap();
         assert_eq!(chat["queue"], json!(["First", "Second"]));
         assert_eq!(chat["queued"], "First");
@@ -12023,14 +12320,6 @@ mod tests {
                 .is_none()
         );
 
-        let jcode = new_chat_on(&store, &folder, "jcode");
-        assert!(
-            store
-                .prepare_chat_title(&first_message(&jcode))
-                .unwrap()
-                .is_none()
-        );
-
         let chat = new_chat_on(&store, &folder, "codex");
         let blank = json!({"chat": chat["id"], "text": "   "});
         assert!(store.prepare_chat_title(&blank).unwrap().is_none());
@@ -13118,6 +13407,98 @@ mod tests {
         let finish = store.finish_turn("chat", true, None, 1, false).unwrap();
         assert!(finish.next.is_none());
         assert!(resumable());
+    }
+
+    /// Sessions from before accounts were kept are filed once, under the login
+    /// the CLI has as the host starts; sessions filed since are left alone.
+    #[test]
+    fn unfiled_sessions_are_claimed_once_for_the_current_login() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "old", "folder");
+        fixture.insert_chat(&database, "new", "folder");
+        database
+            .execute(
+                "INSERT INTO chat_sessions (chat_id, backend, session_id) VALUES ('old', 'codex', 'thread-old')",
+                [],
+            )
+            .unwrap();
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        store
+            .set_session("new", "codex", "thread-new", "default#b")
+            .unwrap();
+        assert_eq!(
+            store.claim_unfiled_sessions("codex", "default#a").unwrap(),
+            1
+        );
+        assert_eq!(
+            store.claim_unfiled_sessions("codex", "default#c").unwrap(),
+            0
+        );
+        let account = |chat: &str| -> String {
+            Connection::open(&fixture.database)
+                .unwrap()
+                .query_row(
+                    "SELECT account FROM chat_sessions WHERE chat_id = ?",
+                    [chat],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(account("old"), "default#a");
+        assert_eq!(account("new"), "default#b");
+    }
+
+    /// The host continues a chat on another account only while the turn that
+    /// ran out is still the chat's latest and still resumable.
+    #[test]
+    fn continuing_after_a_usage_limit_needs_the_chat_not_to_have_moved_on() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(fixture.workspaces.join("folder")).unwrap();
+        let database = Connection::open(&fixture.database).unwrap();
+        fixture.schema(&database);
+        fixture.insert_chat(&database, "chat", "folder");
+        drop(database);
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let continuation = json!({"chat": "chat", "text": CONTINUE_PROMPT});
+        let refused = |last: i64| {
+            matches!(
+                store.prepare_after_limit(&continuation, last),
+                Err(StorageError::InvalidRequest(_))
+            )
+        };
+
+        store
+            .prepare_send(&json!({"chat": "chat", "text": "first"}))
+            .unwrap();
+        store.mark_turn_resumable("chat").unwrap();
+        store
+            .finish_turn("chat", false, Some("limit"), 1, false)
+            .unwrap();
+        let ran_out = store.latest_user_message("chat").unwrap();
+        assert!(ran_out > 0);
+
+        // The user spoke again and stopped that turn before the host got here.
+        store
+            .prepare_send(&json!({"chat": "chat", "text": "something else"}))
+            .unwrap();
+        store.mark_turn_resumable("chat").unwrap();
+        store.finish_turn("chat", false, None, 1, false).unwrap();
+        assert!(
+            refused(ran_out),
+            "a late continuation must not restart newer work"
+        );
+
+        let latest = store.latest_user_message("chat").unwrap();
+        assert!(matches!(
+            store.prepare_after_limit(&continuation, latest),
+            Ok(SendDisposition::Start { .. })
+        ));
+        // Now working, so a second continuation is refused too.
+        assert!(refused(store.latest_user_message("chat").unwrap()));
     }
 
     #[test]
@@ -15160,7 +15541,9 @@ mod tests {
         store.clear_cut_off_turn("chat-1").unwrap();
 
         // Once Claude reports the session it has the request, so nothing is lost.
-        store.set_session("chat-1", "claude", "session").unwrap();
+        store
+            .set_session("chat-1", "claude", "session", "default")
+            .unwrap();
         assert_eq!(store.recover_interrupted_turns().unwrap(), ["chat-1"]);
         let next = start("chat-1", "recorded");
         assert_eq!(next.prompt, "recorded");

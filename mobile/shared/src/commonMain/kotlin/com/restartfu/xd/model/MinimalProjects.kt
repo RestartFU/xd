@@ -6,7 +6,6 @@ public enum class DirectAgent(
 ) {
     CODEX("codex", "Codex"),
     CLAUDE("claude", "Claude"),
-    JCODE("jcode", "JCode"),
     ;
 
     public companion object {
@@ -28,7 +27,8 @@ public data class MinimalProject(
 public data class MinimalSession(
     val id: String,
     val title: String,
-    val agent: DirectAgent,
+    /** Null for an assistant this client does not run, such as the retired JCode. */
+    val agent: DirectAgent?,
     val branch: String,
     val working: Boolean,
     val chatIds: List<String> = listOf(id),
@@ -39,6 +39,8 @@ public data class MinimalSession(
     val settledAt: Long? = null,
     /** Kept out of the host's automatic settling. */
     val autoSettleDisabled: Boolean = false,
+    /** The host's backend id, kept when [agent] is null so the chat still lists. */
+    val backend: String = agent?.wire.orEmpty(),
 ) {
     val settled: Boolean get() = settledAt != null
 
@@ -75,10 +77,14 @@ public fun TreeSnapshot.minimalProjects(): List<MinimalProject> = folders.filter
     )
 }
 
-/** Legacy hosts expose each chat as a session; newer hosts group independent tabs. */
+/**
+ * Legacy hosts expose each chat as a session; newer hosts group independent tabs.
+ * A chat on an assistant this client does not know, such as the retired JCode,
+ * still lists so its history stays reachable; the host refuses new messages to it.
+ */
 public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession> {
     val directChats = chats.filter {
-        it.folderId == projectId && DirectAgent.fromBackend(it.backend) != null
+        it.folderId == projectId && it.backend.isNotBlank()
     }
     return directChats.groupBy(ChatSummary::sessionId).map { (id, grouped) ->
         val workspace = sessions.firstOrNull { it.id == id }
@@ -89,7 +95,7 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
         MinimalSession(
             id = id,
             title = (workspace?.title ?: first.title).takeIf(String::isNotBlank) ?: "New Session",
-            agent = checkNotNull(DirectAgent.fromBackend(first.backend)),
+            agent = DirectAgent.fromBackend(first.backend),
             branch = (workspace?.branch ?: first.branch)?.takeIf(String::isNotBlank)
                 ?: "Project directory",
             working = grouped.any { it.working || it.terminalWorking },
@@ -98,6 +104,7 @@ public fun TreeSnapshot.minimalSessions(projectId: String): List<MinimalSession>
             terminalChatId = workspace?.terminalChatId ?: first.id,
             settledAt = workspace?.settledAt,
             autoSettleDisabled = workspace?.autoSettleDisabled ?: false,
+            backend = first.backend,
         )
     }
 }

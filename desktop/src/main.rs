@@ -64,6 +64,7 @@ use xd_desktop::{
     theme::ThemeColors,
 };
 
+mod accounts_view;
 mod browser;
 mod composer;
 mod editor;
@@ -143,7 +144,6 @@ const EMBEDDED_UI_FONTS: [&[u8]; 7] = [
 pub(crate) const MONO: &str = "JetBrains Mono";
 const CLAUDE_ICON: &str = "icons/claude.svg";
 const CODEX_ICON: &str = "icons/codex.svg";
-const JCODE_ICON: &str = "icons/jcode.svg";
 const COPILOT_ICON: &str = "icons/copilot.svg";
 const XD_MARK_ICON: &str = "icons/xd-mark.svg";
 const SEND_ICON: &str = "icons/send.svg";
@@ -177,6 +177,7 @@ const DOWNLOAD_ICON: &str = "icons/download.svg";
 const SEARCH_ICON: &str = "icons/search.svg";
 const MINIMIZE_ICON: &str = "icons/minimize.svg";
 const MAXIMIZE_ICON: &str = "icons/maximize.svg";
+use accounts_view::{AuthAccount, CHEVRON_UP_ICON, COPY_ICON, SWITCH_ICON};
 /// What a chat is called when nobody chose a name for it.
 const DEFAULT_CHAT_TITLE: &str = "New Chat";
 /// File attachments have no byte limit. Images retain the host's image limits.
@@ -797,7 +798,7 @@ fn agent_icon(agent: AgentCli) -> &'static str {
     match agent {
         AgentCli::Codex => CODEX_ICON,
         AgentCli::Claude => CLAUDE_ICON,
-        AgentCli::Jcode => JCODE_ICON,
+        AgentCli::Other => TERMINAL_ICON,
     }
 }
 
@@ -861,6 +862,16 @@ struct AuthProvider {
     login_url: Option<String>,
     #[serde(default)]
     device_code: Option<String>,
+    /// Every account, in the order turns use them. Empty from a host that
+    /// keeps only the user's own sign-in.
+    #[serde(default)]
+    accounts: Vec<AuthAccount>,
+    #[serde(default)]
+    auto_switch: bool,
+    #[serde(default)]
+    adding: bool,
+    #[serde(default)]
+    notice: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1138,20 +1149,6 @@ impl TerminalPanel {
 #[allow(dead_code)]
 fn terminal_tab_title(agent: Option<AgentCli>) -> String {
     agent.map(AgentCli::label).unwrap_or("Terminal").to_owned()
-}
-
-fn jcode_terminal_screen_working(screen: &str) -> Option<bool> {
-    let prompt = screen
-        .lines()
-        .rev()
-        .map(str::trim_start)
-        .find(|line| !line.is_empty())?;
-    let marker = prompt.trim_start_matches(|character: char| character.is_ascii_digit());
-    match marker.chars().next()? {
-        '…' => Some(true),
-        '>' => Some(false),
-        _ => None,
-    }
 }
 
 fn terminal_runtime_event(event: SessionEvent) -> (ChatEndpoint, &'static str, Value) {
@@ -2127,7 +2124,10 @@ struct XdDesktop {
     turn_notifier: notifications::Notifier<TurnNotificationTarget>,
     settings: AppSettings,
     settings_open: bool,
-    auth_open: bool,
+    /// Why the last change to an account failed.
+    account_error: Option<String>,
+    /// The added account whose removal waits for a second press.
+    account_remove_confirm: Option<(String, String)>,
     secrets_panel: Option<SecretsPanel>,
     devices_panel: Option<DevicesPanel>,
     share_panel: Option<SharePanel>,
@@ -2803,7 +2803,8 @@ impl XdDesktop {
             turn_notifier,
             settings,
             settings_open: false,
-            auth_open: false,
+            account_error: None,
+            account_remove_confirm: None,
             secrets_panel: None,
             devices_panel: None,
             share_panel: None,
@@ -3380,7 +3381,8 @@ impl XdDesktop {
         self.workspace_defaults = None;
         self.workspace_clone_status = None;
         self.secrets_panel = None;
-        self.auth_open = false;
+        self.account_error = None;
+        self.account_remove_confirm = None;
         self.auth_providers.clear();
         self.cli_versions.clear();
         self.cli_versions_loading = false;
@@ -3670,7 +3672,7 @@ impl XdDesktop {
                         panel.submitting = false;
                         panel.error = Some("Agent secrets disconnected.".into());
                     }
-                    if self.auth_open {
+                    if self.minimal_theme_open {
                         self.cli_versions_loading = false;
                         self.cli_versions_error = Some("Assistant versions disconnected.".into());
                     }
@@ -4051,7 +4053,7 @@ impl XdDesktop {
                     panel.busy = false;
                     panel.error = Some("The state connection closed. Reconnecting…".into());
                 }
-                if self.auth_open {
+                if self.minimal_theme_open {
                     self.cli_versions_loading = false;
                     self.cli_versions_error = Some("Assistant versions disconnected.".into());
                 }
@@ -4517,6 +4519,15 @@ impl XdDesktop {
                                 .to_owned(),
                         );
                     }
+                }
+                RequestKind::AgentAuthMutation => {
+                    self.account_error = Some(
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("The account change did not go through.")
+                            .to_owned(),
+                    );
                 }
                 RequestKind::AgentClis => {
                     self.cli_versions_loading = false;
@@ -6037,18 +6048,6 @@ impl XdDesktop {
             "terminal-closed" => Self::apply_terminal_closed_event(panel, body),
             _ => false,
         };
-        let terminal_working = (name == "terminal-output" && changed)
-            .then(|| {
-                let terminal_id = terminal_id?;
-                let session = panel
-                    .sessions
-                    .iter()
-                    .find(|session| session.id == terminal_id)?;
-                (session.agent == Some(AgentCli::Jcode)).then(|| {
-                    jcode_terminal_screen_working(&session.screen.rendered_with_cursor().text)
-                })?
-            })
-            .flatten();
         if needs_hydration {
             panel.loading = false;
         }
@@ -6065,9 +6064,6 @@ impl XdDesktop {
             ) {
                 self.sync_terminal_input_mode(cx);
             }
-        }
-        if let (Some(terminal_id), Some(working)) = (terminal_id, terminal_working) {
-            self.apply_terminal_tab_activity(endpoint, &chat_id, terminal_id, Some(working));
         }
         if name == "terminal-closed"
             && let Some(terminal_id) = terminal_id
@@ -6453,6 +6449,17 @@ impl XdDesktop {
         } else {
             self.auth_providers.push(provider);
         }
+        if let Some((provider, account)) = &self.account_remove_confirm
+            && !self.auth_providers.iter().any(|known| {
+                &known.provider == provider
+                    && known
+                        .account_list()
+                        .iter()
+                        .any(|listed| &listed.id == account)
+            })
+        {
+            self.account_remove_confirm = None;
+        }
         self.sync_active_auth_state();
     }
 
@@ -6637,7 +6644,11 @@ impl XdDesktop {
             .iter()
             .find(|provider| provider.provider == active_provider)
         {
-            self.model.auth_state = provider.state.clone();
+            self.model.auth_state = provider
+                .account_list()
+                .into_iter()
+                .find(|account| account.in_use)
+                .map_or_else(|| provider.state.clone(), |account| account.state);
         }
     }
 
@@ -6671,7 +6682,6 @@ impl XdDesktop {
         self.minimal_theme_open
             || self.image_preview.is_some()
             || self.image_viewer.is_some()
-            || self.auth_open
             || self.update_popup_open
             || self.usage_open
             || self.native_option_open.is_some()
@@ -7743,12 +7753,19 @@ impl XdDesktop {
         let Some(provider) = self
             .auth_providers
             .iter()
-            .find(|provider| provider.state == "signing-in" && provider.needs_input)
+            .find(|provider| {
+                provider
+                    .account_list()
+                    .iter()
+                    .any(|account| account.state == "signing-in" && account.needs_input)
+            })
             .map(|provider| provider.provider.clone())
         else {
             return;
         };
         let input = self.auth_input_text.trim().to_owned();
+        // A new attempt: the last one's error no longer applies.
+        self.account_error = None;
         if input.is_empty() {
             return;
         }
@@ -11621,6 +11638,9 @@ impl XdDesktop {
     fn toggle_minimal_theme_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.minimal_theme_open = !self.minimal_theme_open;
         if self.minimal_theme_open {
+            if self.settings_section == workspace_settings::AGENTS_SECTION {
+                self.request_agent_accounts();
+            }
             self.request_chat_title_settings();
             self.request_auto_settle_settings();
             self.request_auto_delete_settings();
@@ -12290,7 +12310,11 @@ impl XdDesktop {
                             colors.muted,
                             colors,
                         ))
-                        .child(presentation::provider_name(agent.protocol_name())),
+                        .child(if agent == AgentCli::Other {
+                            "Unsupported assistant"
+                        } else {
+                            presentation::provider_name(agent.protocol_name())
+                        }),
                 )
             })
             .when_some(branch, |toolbar, branch| {
@@ -14062,7 +14086,7 @@ impl XdDesktop {
                             .line_height(px(21.0))
                             .text_color(rgb(colors.muted))
                             .child(
-                                "Create a workspace, then start a Codex, Claude, or JCode session in it. Sessions keep running when you close the window.",
+                                "Create a workspace, then start a Codex or Claude session in it. Sessions keep running when you close the window.",
                             ),
                     )
                     .child(
@@ -15973,6 +15997,18 @@ impl XdDesktop {
                 let Some(message) = messages.get(index) else {
                     return div().into_any_element();
                 };
+                if let Some(sentence) = accounts_view::switch_notice(message) {
+                    return div()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .w(px(column))
+                                .child(accounts_view::render_switch_notice(sentence, colors)),
+                        )
+                        .into_any_element();
+                }
                 let (subagent, activity) = match message.tool_view() {
                     Some(ToolView::Subagent(view)) => (Some(view.clone()), None),
                     Some(ToolView::Activity(card)) => (
@@ -16247,7 +16283,7 @@ impl XdDesktop {
             .iter()
             .find(|backend| backend.id == self.model.backend)
             .map(|backend| !backend.efforts.is_empty())
-            .unwrap_or(self.model.backend != "jcode");
+            .unwrap_or(matches!(agent, Some(AgentCli::Codex | AgentCli::Claude)));
         let options = [
             ("model", self.model.selected_model_label()),
             (
@@ -18080,129 +18116,6 @@ impl XdDesktop {
                 )
                 .into_any_element()
         });
-        let auth_overlay = self.auth_open.then(|| {
-            let rows = self
-                .auth_providers
-                .clone()
-                .into_iter()
-                .enumerate()
-                .map(|(index, provider)| {
-                    let id = provider.provider.clone();
-                    let signing_in = provider.state == "signing-in";
-                    div()
-                        .id(("assistant-account", index))
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .py_2()
-                        .child(format!(
-                            "{} · {}",
-                            presentation::provider_name(&provider.provider),
-                            presentation::auth_state_name(&provider.state)
-                        ))
-                        .when_some(provider.detail, |row, detail| {
-                            row.child(div().text_xs().text_color(rgb(colors.muted)).child(detail))
-                        })
-                        .when_some(provider.device_code, |row, code| {
-                            row.child(div().font_family(MONO).child(code))
-                        })
-                        .when_some(provider.login_url, |row, url| {
-                            row.child(
-                                div()
-                                    .id(("assistant-login-url", index))
-                                    .py_2()
-                                    .text_color(rgb(colors.accent_ink))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.auth_open = false;
-                                        this.open_browser_url(&url, window, cx);
-                                    }))
-                                    .child("Open sign-in page"),
-                            )
-                        })
-                        .child(
-                            div()
-                                .id(("assistant-login", index))
-                                .py_2()
-                                .text_color(rgb(colors.accent_ink))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(host) = this.active_host()
-                                        && let Err(error) = host.agent_auth_action(
-                                            if signing_in {
-                                                "agent-auth-cancel"
-                                            } else {
-                                                "agent-auth-start"
-                                            },
-                                            &id,
-                                            None,
-                                        )
-                                    {
-                                        this.model.connection_error = Some(error);
-                                    }
-                                    cx.notify();
-                                }))
-                                .child(if signing_in {
-                                    "Cancel sign-in"
-                                } else {
-                                    "Sign in"
-                                }),
-                        )
-                })
-                .collect::<Vec<_>>();
-            div()
-                .occlude()
-                .absolute()
-                .inset_0()
-                .track_focus(&minimal_popup_focus)
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgba(colors.backdrop))
-                .child(
-                    div()
-                        .w(px(480.0))
-                        .p_5()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .rounded_xl()
-                        .bg(rgb(colors.surface))
-                        .text_color(rgb(colors.text))
-                        .child(div().text_size(px(16.0)).child("Assistant accounts"))
-                        .children(rows)
-                        .when(
-                            self.auth_providers
-                                .iter()
-                                .any(|p| p.needs_input && p.state == "signing-in"),
-                            |card| {
-                                card.child(div().h(px(36.0)).child(self.auth_input.clone()))
-                                    .child(
-                                        div()
-                                            .id("submit-assistant-auth")
-                                            .py_2()
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.submit_auth_input(cx)
-                                            }))
-                                            .child("Submit sign-in code"),
-                                    )
-                            },
-                        )
-                        .child(
-                            div()
-                                .id("close-assistant-accounts")
-                                .py_2()
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.auth_open = false;
-                                    cx.notify();
-                                }))
-                                .child("Close"),
-                        ),
-                )
-                .into_any_element()
-        });
         let remote_overlay = self.remote_panel.clone().map(|panel| {
             let can_connect =
                 !panel.submitting && xd_transport::PairingInvite::new(&panel.address, &panel.command).is_ok();
@@ -19094,8 +19007,7 @@ impl XdDesktop {
                     cx.notify();
                     return;
                 }
-                if this.auth_open {
-                    this.auth_open = false;
+                if this.account_remove_confirm.take().is_some() {
                     cx.notify();
                     return;
                 }
@@ -19230,7 +19142,6 @@ impl XdDesktop {
             .when_some(share_overlay, |root, overlay| root.child(overlay))
             .when_some(devices_overlay, |root, overlay| root.child(overlay))
             .when_some(native_option_overlay, |root, overlay| root.child(overlay))
-            .when_some(auth_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_overlay, |root, overlay| root.child(overlay))
             .when_some(sidebar_rename_overlay, |root, overlay| root.child(overlay))
             .when_some(workspace_delete_overlay, |root, overlay| {
@@ -19656,9 +19567,6 @@ impl AssetSource for EmbeddedIcons {
             CODEX_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/codex.svg").as_slice(),
             )),
-            JCODE_ICON => Some(Cow::Borrowed(
-                include_bytes!("../assets/icons/jcode.svg").as_slice(),
-            )),
             COPILOT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/copilot.svg").as_slice(),
             )),
@@ -19782,6 +19690,15 @@ impl AssetSource for EmbeddedIcons {
             MAXIMIZE_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/maximize.svg").as_slice(),
             )),
+            CHEVRON_UP_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/chevron-up.svg").as_slice(),
+            )),
+            COPY_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/copy.svg").as_slice(),
+            )),
+            SWITCH_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/arrow-left-right.svg").as_slice(),
+            )),
             _ => None,
         })
     }
@@ -19790,7 +19707,6 @@ impl AssetSource for EmbeddedIcons {
         Ok(vec![
             CLAUDE_ICON.into(),
             CODEX_ICON.into(),
-            JCODE_ICON.into(),
             COPILOT_ICON.into(),
             XD_MARK_ICON.into(),
             SEND_ICON.into(),
@@ -19814,6 +19730,9 @@ impl AssetSource for EmbeddedIcons {
             SEARCH_ICON.into(),
             MINIMIZE_ICON.into(),
             MAXIMIZE_ICON.into(),
+            CHEVRON_UP_ICON.into(),
+            COPY_ICON.into(),
+            SWITCH_ICON.into(),
         ])
     }
 }
@@ -23964,7 +23883,7 @@ Binary files /dev/null and b/image.png differ\n";
     fn escape_closes_the_image_viewer_before_anything_under_it(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         cx.update_window_entity(&desktop, |desktop, window, cx| {
-            desktop.auth_open = true;
+            desktop.minimal_theme_open = true;
             Arc::make_mut(&mut desktop.message_images)
                 .insert("/kept/a.png".to_owned(), ready_message_image(0));
             desktop.open_image_viewer("/kept/a.png".into(), window, cx);
@@ -23975,7 +23894,7 @@ Binary files /dev/null and b/image.png differ\n";
         cx.dispatch_action(CloseSearch);
         desktop.update(cx, |desktop, _| {
             assert!(desktop.image_viewer.is_none());
-            assert!(desktop.auth_open, "only the viewer closes");
+            assert!(desktop.minimal_theme_open, "only the viewer closes");
         });
     }
 
@@ -24877,13 +24796,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     #[test]
     fn agent_marks_and_selection_icon_are_embedded_and_drawable() {
-        for path in [
-            CLAUDE_ICON,
-            CODEX_ICON,
-            JCODE_ICON,
-            COPILOT_ICON,
-            CHECK_ICON,
-        ] {
+        for path in [CLAUDE_ICON, CODEX_ICON, COPILOT_ICON, CHECK_ICON] {
             let bytes = EmbeddedIcons
                 .load(path)
                 .expect("embedded marks load")
@@ -25472,7 +25385,7 @@ Binary files /dev/null and b/image.png differ\n";
             &mut activity,
             ChatEndpoint::Local,
             chat,
-            "jcode",
+            "shell",
             Some(false),
         ));
         assert!(!update_terminal_activity_state(
@@ -25518,7 +25431,7 @@ Binary files /dev/null and b/image.png differ\n";
                 "terminal-activity",
                 serde_json::json!({
                     "chat": "chat-1",
-                    "terminal": "jcode",
+                    "terminal": "shell",
                     "working": false,
                     "terminal_working": true,
                 }),
@@ -25529,7 +25442,7 @@ Binary files /dev/null and b/image.png differ\n";
                 "terminal-closed",
                 serde_json::json!({
                     "chat": "chat-1",
-                    "terminal": "jcode",
+                    "terminal": "shell",
                 }),
                 None,
                 cx,
@@ -25556,7 +25469,7 @@ Binary files /dev/null and b/image.png differ\n";
                 auto_settle_disabled: false,
             }];
             let generation = desktop.remote_generation;
-            for (terminal, working, aggregate) in [("claude", true, true), ("jcode", false, true)] {
+            for (terminal, working, aggregate) in [("claude", true, true), ("shell", false, true)] {
                 desktop.handle_remote_update(
                     HostUpdate::Event {
                         name: "terminal-activity".into(),
@@ -25580,7 +25493,7 @@ Binary files /dev/null and b/image.png differ\n";
                     name: "terminal-closed".into(),
                     body: serde_json::json!({
                         "chat": "remote-chat",
-                        "terminal": "jcode",
+                        "terminal": "shell",
                     })
                     .as_object()
                     .unwrap()
@@ -26503,22 +26416,6 @@ Binary files /dev/null and b/image.png differ\n";
             .0;
         assert!(!interrupt.contains("TextSelection::selected"));
         assert!(interrupt.contains("self.terminal_bytes(vec![3], cx)"));
-    }
-
-    #[test]
-    fn jcode_prompt_marker_reports_working_and_idle_states() {
-        assert_eq!(
-            jcode_terminal_screen_working("history\n18… 󰌘\n"),
-            Some(true)
-        );
-        assert_eq!(
-            jcode_terminal_screen_working("history\n19> 󰖟\n"),
-            Some(false)
-        );
-        assert_eq!(
-            jcode_terminal_screen_working("ordinary shell output\n"),
-            None
-        );
     }
 
     #[gpui::test]

@@ -141,23 +141,130 @@ public data class FolderSettingsReply(
     @SerialName("effective_workdir") val effectiveWorkdir: String? = null,
 )
 
-/** One assistant's sign-in on the host, as `agent-auth` and `agent-auth-changed` report it. */
+/**
+ * One assistant's sign-ins on the host, as `agent-auth` and
+ * `agent-auth-changed` report them. The top-level sign-in fields describe the
+ * user's own CLI sign-in, the `default` account, as hosts from before
+ * accounts sent them; [accounts] lists every account in priority order.
+ */
 @Serializable
 public data class AgentAuthProviderReply(
     val provider: String,
     @SerialName("display_name") val displayName: String = provider,
-    /** `unknown`, `signed-in`, `signed-out`, `signing-in`, or `failed`. */
+    /** `unknown`, `checking`, `signed-in`, `signed-out`, `signing-in`, `signing-out`, or `failed`. */
     val state: String = "unknown",
     @SerialName("needs_input") val needsInput: Boolean = false,
     val detail: String? = null,
     @SerialName("login_url") val loginUrl: String? = null,
     @SerialName("device_code") val deviceCode: String? = null,
+    /** Empty from a host that keeps only the user's own sign-in. */
+    val accounts: List<AgentAccountReply> = emptyList(),
+    /** Whether a turn turned away for usage continues on the next account. */
+    @SerialName("auto_switch") val autoSwitch: Boolean = false,
+    /** A new account is signing in. */
+    val adding: Boolean = false,
+    /** The outcome of the last attempt to add an account. */
+    val notice: String? = null,
+) {
+    /** Whether the host can keep more than the user's own sign-in. */
+    public val holdsSeveral: Boolean get() = accounts.isNotEmpty()
+
+    /**
+     * Every account, in priority order. A host from before accounts reports
+     * only the user's own sign-in, at the top level, so that is one account.
+     */
+    public fun accountList(): List<AgentAccountReply> = accounts.ifEmpty {
+        listOf(
+            AgentAccountReply(
+                id = AgentAccountReply.DEFAULT,
+                default = true,
+                label = "$displayName sign-in",
+                state = state,
+                detail = detail,
+                loginUrl = loginUrl,
+                deviceCode = deviceCode,
+                needsInput = needsInput,
+                inUse = true,
+            ),
+        )
+    }
+
+    /** The account the provider's one sign-in is running for, if any. */
+    public fun signingIn(): AgentAccountReply? = accountList().firstOrNull { it.state == "signing-in" }
+
+    /** A sign-in or sign-out is running, which holds every other account action back. */
+    public val busy: Boolean
+        get() = accountList().any { it.busy || it.state == "signing-in" || it.state == "signing-out" }
+
+    /** Whether another account can be added now. */
+    public val canAdd: Boolean get() = holdsSeveral && !busy && !adding
+
+    /** The accounts that have a place in the order, without one still signing in for the first time. */
+    public fun rankedAccounts(): List<AgentAccountReply> = accountList().filterNot { it.pending }
+
+    /**
+     * The order with the ranked account at [index] moved one place up or
+     * down, or null when it cannot move that way.
+     */
+    public fun orderMoving(index: Int, up: Boolean): List<String>? {
+        val order = rankedAccounts().map { it.id }.toMutableList()
+        val other = if (up) index - 1 else index + 1
+        if (index !in order.indices || other !in order.indices) return null
+        order[index] = order[other].also { order[other] = order[index] }
+        return order
+    }
+}
+
+/** One of an assistant's accounts on the host. */
+@Serializable
+public data class AgentAccountReply(
+    val id: String,
+    /** The user's own CLI sign-in, in the CLI's usual home. */
+    val default: Boolean = false,
+    /** Still signing in for the first time; it joins the list once that succeeds. */
+    val pending: Boolean = false,
+    /** The address when the host knows it. */
+    val label: String = "",
+    val email: String? = null,
+    val plan: String? = null,
+    val state: String = "unknown",
+    val detail: String? = null,
+    @SerialName("login_url") val loginUrl: String? = null,
+    @SerialName("device_code") val deviceCode: String? = null,
+    @SerialName("needs_input") val needsInput: Boolean = false,
+    /** The account a new chat would start on. */
+    @SerialName("in_use") val inUse: Boolean = false,
+    /** The account the provider's one sign-in or sign-out is running for. */
+    val busy: Boolean = false,
+    /** `mismatch` or `duplicate`: either keeps the account from taking turns. */
+    val problem: String? = null,
+    @SerialName("limited_until_ms") val limitedUntilMs: Long? = null,
+    /** Such as `5-hour limit`. */
+    @SerialName("limited_reason") val limitedReason: String? = null,
+    @SerialName("checked_at_ms") val checkedAtMs: Long? = null,
+    val windows: List<AgentAccountWindowReply> = emptyList(),
+) {
+    public companion object {
+        public const val DEFAULT: String = "default"
+    }
+}
+
+/** One of an account's usage allowances, as the accounts list carries it. */
+@Serializable
+public data class AgentAccountWindowReply(
+    /** `session`, `weekly`, or another window. */
+    val kind: String = "",
+    val label: String = "",
+    @SerialName("used_percent") val usedPercent: Double = 0.0,
+    @SerialName("resets_at_ms") val resetsAtMs: Long? = null,
 )
 
 @Serializable
 public data class AgentAuthReply(
     val ok: Boolean = true,
     val providers: List<AgentAuthProviderReply> = emptyList(),
+    /** False on a host that keeps only the user's own sign-in. */
+    @SerialName("multiple_accounts") val multipleAccounts: Boolean = false,
 )
 
 /** One assistant CLI: its version, the latest release, and any update in progress. */
@@ -303,6 +410,8 @@ public data class UsageAccountReply(
     val windows: List<UsageWindowReply> = emptyList(),
     @SerialName("reset_credits") val resetCredits: ResetCreditsReply? = null,
     val unavailable: UsageUnavailableReply? = null,
+    /** The account's 1-based place in the host's list, sent only when the assistant has several. */
+    @SerialName("account_rank") val accountRank: Int? = null,
 )
 
 /** A model's custom price, in USD per million tokens. */

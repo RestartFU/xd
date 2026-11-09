@@ -5,7 +5,7 @@ import kotlin.test.assertEquals
 
 class MinimalProjectsTest {
     @Test
-    fun projectsSummarizeOnlyDirectAgentSessionsInWorkspaceOrder() {
+    fun projectsSummarizeEverySessionInWorkspaceOrder() {
         val snapshot = TreeSnapshot(
             folders = listOf(
                 Folder("compiler", "Compiler", null),
@@ -14,7 +14,7 @@ class MinimalProjectsTest {
             chats = listOf(
                 chat("one", "compiler", "Fix parser", "codex", working = true),
                 chat("two", "compiler", "Review lexer", "claude"),
-                chat("old", "compiler", "Legacy chat", "other"),
+                chat("old", "compiler", "Legacy chat", "jcode"),
                 chat(
                     "three",
                     "website",
@@ -27,7 +27,7 @@ class MinimalProjectsTest {
 
         assertEquals(
             listOf(
-                MinimalProject("compiler", "Compiler", sessions = 2, working = 1),
+                MinimalProject("compiler", "Compiler", sessions = 3, working = 1),
                 MinimalProject("website", "Website", sessions = 1, working = 1),
             ),
             snapshot.minimalProjects(),
@@ -41,7 +41,7 @@ class MinimalProjectsTest {
                 chat("one", "compiler", "Fix parser", "codex", branch = "fix/parser"),
                 chat("two", "compiler", "", "claude"),
                 chat("three", "website", "Elsewhere", "codex"),
-                chat("old", "compiler", "Legacy chat", "other"),
+                chat("old", "compiler", "Legacy chat", "jcode"),
             ),
         )
 
@@ -60,6 +60,15 @@ class MinimalProjectsTest {
                     agent = DirectAgent.CLAUDE,
                     branch = "Project directory",
                     working = false,
+                ),
+                // A retired assistant's chat still lists, with no agent of its own.
+                MinimalSession(
+                    id = "old",
+                    title = "Legacy chat",
+                    agent = null,
+                    branch = "Project directory",
+                    working = false,
+                    backend = "jcode",
                 ),
             ),
             snapshot.minimalSessions("compiler"),

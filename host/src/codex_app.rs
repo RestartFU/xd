@@ -376,7 +376,14 @@ impl CodexAppParser {
 fn codex_failure(error: &Value, fallback: &str) -> Vec<AgentEvent> {
     let failure = AgentEvent::Error(error["message"].as_str().unwrap_or(fallback).into());
     if codex_usage_limited(&error["codexErrorInfo"]) {
-        vec![AgentEvent::Resumable, failure]
+        vec![
+            AgentEvent::UsageLimit {
+                resets_at_ms: None,
+                limit: None,
+            },
+            AgentEvent::Resumable,
+            failure,
+        ]
     } else {
         vec![failure]
     }

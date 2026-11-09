@@ -1,6 +1,6 @@
 # xd
 
-A local-first desktop workspace for user-installed Codex, Claude Code, and JCode.
+A local-first desktop workspace for user-installed Codex and Claude Code.
 
 ![xd sessions](docs/assets/xd-sessions.png)
 
@@ -14,7 +14,7 @@ A local-first desktop workspace for user-installed Codex, Claude Code, and JCode
 
 ## Highlights
 
-- Native chat for Codex, Claude Code, and JCode, with streamed replies, activity cards, queues, and optional shell panes.
+- Native chat for Codex and Claude Code, with streamed replies, activity cards, queues, and optional shell panes.
 - Attach files to a message with the paperclip, by dropping them on the chat, or by pasting an image. PNGs go to the agent as images; any other file is saved on the host and the agent reads it from there.
 - Agents can show you images: a screenshot or chart they name in a reply appears in the chat, on desktop and Android, even after the original file is gone.
 - Live subagent cards: each delegated agent shows its model, current step, tools, tokens, and elapsed time, and keeps its task, steps, and report once it finishes. Claude agents can be stopped or sent to the background from the card.

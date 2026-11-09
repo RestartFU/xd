@@ -82,6 +82,7 @@ const FREEZE_PASSES: usize = 50;
 const FREEZE_WAIT: Duration = Duration::from_millis(200);
 /// Processes never stopped, by command name, whoever started them: agent CLIs
 /// another daemon or the user started, and xd itself.
+// JCode stays here though xd no longer runs it: a user can still run it themselves.
 const PROTECTED_NAMES: [&str; 5] = ["claude", "codex", "jcode", "xd-host", "xd"];
 
 /// The cgroup, the daemon's own or one above it, whose memory limit would kill
@@ -973,7 +974,7 @@ mod tests {
             // An agent another daemon started, under a shell of its own.
             process(60, 1, "bash", 0),
             process(61, 60, "codex", 9),
-            process(70, 1, "jcode", 9),
+            process(70, 1, "claude", 9),
         ];
         assert_eq!(choose_victim(&processes, &scope(&owners)), None);
     }

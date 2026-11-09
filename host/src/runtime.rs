@@ -15,8 +15,10 @@ use serde_json::{Value, json};
 
 use crate::{
     EventBus, StateStore,
+    accounts::{Choice, provider_name},
     agent::{AgentCommand, AgentEvent, AgentParser, TodoItem, TodoUpdate},
     ask::{self, Ask},
+    auth::AuthManager,
     reply_images::ReplyImages,
     secrets::SecretsStore,
     storage::TurnSpec,
@@ -29,6 +31,18 @@ const PARK_STREAMED_REPLY_EVERY: Duration = Duration::from_millis(500);
 
 /// What the chat shows for a stopped turn the agent never recorded.
 const CUT_OFF_TURN: &str = "Stopped before this turn was saved. Its work is lost, and the agent only knows what you asked.";
+
+/// How long until a moment, as a chat notice says it: "2 h 5 min", "12 min".
+fn until(at_ms: i64) -> String {
+    let minutes = ((at_ms - crate::accounts::now_ms()).max(0) + 59_999) / 60_000;
+    match (minutes / (24 * 60), minutes / 60 % 24, minutes % 60) {
+        (0, 0, minutes) => format!("{} min", minutes.max(1)),
+        (0, hours, 0) => format!("{hours} h"),
+        (0, hours, minutes) => format!("{hours} h {minutes} min"),
+        (days, 0, _) => format!("{days} d"),
+        (days, hours, _) => format!("{days} d {hours} h"),
+    }
+}
 
 /// How much of a process's stderr is kept for the message that reports it.
 const STDERR_KEPT_BYTES: usize = 64 * 1024;
@@ -54,7 +68,30 @@ struct RuntimeInner {
     /// Tool records rewritten in place -- subagent cards, a turn's diff -- by
     /// chat, so a later report updates the card it belongs to.
     records: Mutex<HashMap<String, ChatRecords>>,
+    /// Sign-ins, and which account each turn runs on.
+    auth: AuthManager,
+    /// Continues a chat after its account ran out and another took over.
+    on_account_switch: Mutex<Option<AccountSwitchHandler>>,
+    /// Chats whose move to another account was already explained to the user.
+    explained_switches: Mutex<HashSet<String>>,
+    /// False while sessions from before accounts were kept are being filed as
+    /// the host starts; a turn about to resume one of them waits for it.
+    filing: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    /// Held to read while a turn starts, from choosing its account until its
+    /// process is registered, and to write while an account is freed for
+    /// removal, so removal never misses a turn starting on it.
+    account_gate: std::sync::RwLock<()>,
 }
+
+/// Continues a chat on another account. Takes the chat and its newest user
+/// message, which must still be its newest for the continuation to go ahead.
+pub(crate) type AccountSwitchHandler = Box<dyn Fn(String, i64) + Send + Sync>;
+
+/// Marks a `tool` row that says a chat moved to another account. A client that
+/// does not know it shows the sentence after it as a small tool row.
+pub(crate) const ACCOUNT_SWITCH_PREFIX: &str = "account_switch\n";
+/// How much of a chat's text a new Codex session on another account is given.
+const HANDOFF_LIMIT: usize = 48 * 1024;
 
 /// Records kept per chat before the oldest are forgotten. A forgotten record
 /// stays in the transcript; it just stops receiving updates.
@@ -372,6 +409,10 @@ struct AgentSession {
     /// another model, another directory -- needs its own process, because all
     /// of it was fixed in argv when this one started.
     fingerprint: String,
+    /// The account and login the process runs as; see
+    /// [`crate::accounts::Accounts::session_tag`]. A process stays signed in
+    /// as whoever it started as, so a turn for another login needs its own.
+    account: String,
     /// Filled by a drain thread for the process's whole life: stderr has to be
     /// read continuously or it fills and the agent blocks on it.
     complaint: Arc<Mutex<String>>,
@@ -451,10 +492,21 @@ pub struct LiveTurn {
 }
 
 impl TurnRuntime {
+    #[cfg(test)]
     pub(crate) fn new(
         store: Arc<StateStore>,
         events: Arc<EventBus>,
         secrets: Arc<SecretsStore>,
+    ) -> Self {
+        let auth = AuthManager::new(events.clone(), crate::accounts::Accounts::new(None));
+        Self::with_auth(store, events, secrets, auth)
+    }
+
+    pub(crate) fn with_auth(
+        store: Arc<StateStore>,
+        events: Arc<EventBus>,
+        secrets: Arc<SecretsStore>,
+        auth: AuthManager,
     ) -> Self {
         Self {
             inner: Arc::new(RuntimeInner {
@@ -470,7 +522,346 @@ impl TurnRuntime {
                 next_interaction: AtomicU64::new(1),
                 interaction_epoch: uuid::Uuid::new_v4().to_string(),
                 records: Mutex::new(HashMap::new()),
+                auth,
+                on_account_switch: Mutex::new(None),
+                explained_switches: Mutex::new(HashSet::new()),
+                account_gate: std::sync::RwLock::new(()),
+                filing: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
             }),
+        }
+    }
+
+    /// What [`AuthManager::set_releaser`] takes: frees an account for removal.
+    pub(crate) fn releaser(&self) -> crate::auth::Releaser {
+        let inner = Arc::downgrade(&self.inner);
+        Box::new(move |_provider, account| match inner.upgrade() {
+            Some(inner) => TurnRuntime { inner }.release_account(account),
+            None => Ok(()),
+        })
+    }
+
+    /// Refuses while a chat is working on the account; otherwise stops the
+    /// processes kept running as it, which would outlive its home.
+    fn release_account(&self, account: &str) -> Result<(), String> {
+        let _gate = self
+            .inner
+            .account_gate
+            .write()
+            .map_err(|_| "Agent sessions are unavailable.".to_owned())?;
+        // The user's own sign-in changes as it always could; only turns that
+        // were choosing an account when it began are waited for, above.
+        if account == crate::accounts::DEFAULT_ACCOUNT {
+            return Ok(());
+        }
+        let mut sessions = self
+            .inner
+            .sessions
+            .lock()
+            .map_err(|_| "Agent sessions are unavailable.".to_owned())?;
+        let held = sessions
+            .iter()
+            .filter(|(_, session)| crate::accounts::tag_account(&session.account) == account)
+            .map(|(chat, session)| (chat.clone(), session.router.clone()))
+            .collect::<Vec<_>>();
+        if held
+            .iter()
+            .any(|(_, router)| router.lock().map_or(true, |router| router.sink.is_some()))
+        {
+            return Err(
+                "A chat is working on this account. Stop it or let it finish, then try again."
+                    .into(),
+            );
+        }
+        for (chat, _) in held {
+            if let Some(gone) = sessions.remove(&chat)
+                && let Ok(mut child) = gone.child.lock()
+            {
+                let _ = terminate_agent(&mut child);
+            }
+        }
+        Ok(())
+    }
+
+    /// Marks earlier sessions as being filed until [`Self::filed`].
+    pub(crate) fn filing(&self) {
+        if let Ok(mut done) = self.inner.filing.0.lock() {
+            *done = false;
+        }
+    }
+
+    pub(crate) fn filed(&self) {
+        if let Ok(mut done) = self.inner.filing.0.lock() {
+            *done = true;
+        }
+        self.inner.filing.1.notify_all();
+    }
+
+    pub(crate) fn set_account_switch_handler(&self, handler: AccountSwitchHandler) {
+        if let Ok(mut current) = self.inner.on_account_switch.lock() {
+            *current = Some(handler);
+        }
+    }
+
+    /// Picks the account for a turn and moves the chat's session to it when
+    /// it changed. A Claude session follows the chat to any account. A Codex
+    /// session cannot: its reasoning is sealed to the account that wrote it,
+    /// so the new account starts a session with the conversation's text.
+    fn place_on_account(&self, turn: &mut TurnSpec) -> Result<(), String> {
+        // A Codex session from before accounts were kept is being filed as the
+        // host starts: wait for that, then read where it was filed.
+        if turn.backend == "codex"
+            && turn.session_id.is_some()
+            && turn
+                .session_account
+                .as_deref()
+                .is_some_and(|stored| !stored.contains('#'))
+        {
+            let (done, filed) = &*self.inner.filing;
+            if let Ok(done) = done.lock() {
+                let _ = filed.wait_timeout_while(done, Duration::from_secs(30), |done| !*done);
+            }
+            if let Ok(Some(filed)) = self
+                .inner
+                .store
+                .session_account(&turn.chat_id, &turn.session_backend)
+            {
+                turn.session_account = Some(filed);
+            }
+        }
+        let chat_account = turn
+            .session_account
+            .as_deref()
+            .map(crate::accounts::tag_account);
+        // An added Codex account not read since the host started is read now,
+        // before the choice passes it over and the chat loses its session.
+        if turn.backend == "codex"
+            && turn.session_id.is_some()
+            && let Some(own) = chat_account.filter(|own| *own != crate::accounts::DEFAULT_ACCOUNT)
+        {
+            self.inner.auth.confirm_login(&turn.backend, own);
+        }
+        let mut choice = self.inner.auth.choose(&turn.backend, chat_account);
+        // A Codex session about to be resumed must be resumed as the login
+        // that wrote it, so that login is read again first when it may be
+        // stale. If it cannot be read, the session is not resumed.
+        // A new chat reads it too, so its session is filed under a known login.
+        let mut unconfirmed = false;
+        // The login could not be read, so whatever runs is filed as unknown,
+        // never as a login read earlier that may no longer be the one signed in.
+        let mut login_unknown = false;
+        if turn.backend == "codex" {
+            // Until the account chosen is the one whose login was just read:
+            // reading can take long enough for the choice to change.
+            for _ in 0..3 {
+                let confirmed = self
+                    .inner
+                    .auth
+                    .confirm_login(&turn.backend, &choice.account);
+                login_unknown = !confirmed;
+                unconfirmed = !confirmed && turn.session_id.is_some();
+                let again = self.inner.auth.choose(&turn.backend, chat_account);
+                let settled = again.account == choice.account;
+                choice = again;
+                if settled {
+                    break;
+                }
+                login_unknown = true;
+                unconfirmed = turn.session_id.is_some();
+            }
+        }
+        // The user's own Claude settings reach an added account before a new
+        // process starts as it, while nothing else runs as it: Claude writes
+        // the same file without a lock xd can take. Process starts register
+        // under the sessions lock, so none can begin during the copy.
+        if turn.backend == "claude" && choice.account != crate::accounts::DEFAULT_ACCOUNT {
+            self.share_claude_settings(&turn.backend, &choice.account);
+        }
+        if choice.unavailable {
+            return Err(format!(
+                "No {} account can take this turn right now. It may be signing in or out; \
+                 otherwise sign in again in Settings, Agents, Accounts.",
+                provider_name(&turn.backend)
+            ));
+        }
+        // The account decides the home; a secret cannot point a turn at another
+        // one, where it would run as a login nothing here has checked.
+        turn.environment
+            .retain(|(name, _)| !matches!(name.as_str(), "CODEX_HOME" | "CLAUDE_CONFIG_DIR"));
+        turn.environment.extend(choice.environment.iter().cloned());
+        // Filed with the login, so a session never follows the user's own
+        // sign-in to another login under the same account.
+        turn.account = if login_unknown {
+            format!("{}#?", choice.account)
+        } else {
+            self.inner
+                .auth
+                .accounts()
+                .session_tag(&turn.backend, &choice.account)
+        };
+        let moved = turn.session_id.is_some()
+            && (unconfirmed
+                || !turn
+                    .session_account
+                    .as_deref()
+                    .is_some_and(|stored| crate::accounts::same_login(stored, &turn.account)));
+        if !moved {
+            return Ok(());
+        }
+        // A Claude session begun before its login was known can resume as any
+        // login, so learning it is not news. A Codex one cannot be trusted to.
+        let learned_login = turn.session_account.as_deref().is_some_and(|stored| {
+            stored.strip_suffix("#?") == Some(crate::accounts::tag_account(&turn.account))
+        });
+        if learned_login && turn.backend != "codex" && !unconfirmed {
+            return Ok(());
+        }
+        let explained = self
+            .inner
+            .explained_switches
+            .lock()
+            .is_ok_and(|mut explained| explained.remove(&turn.chat_id));
+        if !explained {
+            let sentence = if unconfirmed {
+                "xd could not confirm which login Codex is signed in to, so it started a new \
+                 session with this chat's messages."
+                    .to_owned()
+            } else {
+                self.switch_sentence(&turn.backend, &choice)
+            };
+            self.post_account_notice(&turn.chat_id, &sentence);
+        }
+        if turn.backend != "codex" {
+            return Ok(());
+        }
+        turn.session_id = None;
+        turn.fresh_session = true;
+        let conversation = self
+            .inner
+            .store
+            .conversation_for_handoff(&turn.chat_id, HANDOFF_LIMIT)
+            .ok()
+            .flatten();
+        if let Some(conversation) = conversation {
+            turn.prompt = format!(
+                "<xd-note>\nThis chat moved to another Codex account, which cannot open the \
+                 earlier session. Here is the conversation so far, oldest first. Tool calls and \
+                 their output are not included; check the workspace for what was done.\n\n\
+                 {conversation}\n</xd-note>\n\n{}",
+                turn.prompt
+            );
+        }
+        Ok(())
+    }
+
+    /// Copies the user's own Claude settings into an added account before a
+    /// new process starts as it. Claude writes that file without a lock xd
+    /// can take, so this happens only while nothing runs as the account: a
+    /// check running as it is waited for (outside any lock), and process
+    /// starts register under the sessions lock held during the copy. When
+    /// another chat's process runs as the account, the copy waits for a later
+    /// start.
+    fn share_claude_settings(&self, provider: &str, account: &str) {
+        let accounts = self.inner.auth.accounts();
+        for _ in 0..3 {
+            accounts.wait_unleased(account, Duration::from_secs(25));
+            let Ok(sessions) = self.inner.sessions.lock() else {
+                return;
+            };
+            if sessions
+                .values()
+                .any(|session| crate::accounts::tag_account(&session.account) == account)
+            {
+                return;
+            }
+            if accounts.share_settings_while_idle(provider, account) {
+                return;
+            }
+        }
+    }
+
+    fn switch_sentence(&self, provider: &str, choice: &Choice) -> String {
+        let accounts = self.inner.auth.accounts();
+        let to = accounts.label(provider, &choice.account);
+        let mut sentence = match &choice.passed_over {
+            Some(passed) => format!(
+                "Switched to {to}: {} {}{}.",
+                passed.from,
+                passed.reason,
+                passed
+                    .resets_at_ms
+                    .map(|at| format!(" (back in {})", until(at)))
+                    .unwrap_or_default()
+            ),
+            None => format!("This chat now runs on {to}."),
+        };
+        if provider == "codex" {
+            sentence.push_str(
+                " Codex sessions cannot move between accounts, so it started a new one with \
+                 this chat's messages.",
+            );
+        }
+        sentence
+    }
+
+    fn post_account_notice(&self, chat_id: &str, sentence: &str) {
+        let text = format!("{ACCOUNT_SWITCH_PREFIX}{sentence}");
+        if self
+            .inner
+            .store
+            .append_turn_message(chat_id, "tool", &text, None)
+            .is_ok()
+        {
+            self.inner
+                .events
+                .publish(json!({"event": "changed", "chat": chat_id}));
+        }
+    }
+
+    /// A turn was turned away for usage. Holds the account back until its
+    /// limit resets and, when another account has room and switching is on,
+    /// continues the chat there.
+    fn after_usage_limit(
+        &self,
+        chat_id: &str,
+        provider: &str,
+        account: &str,
+        last_message: i64,
+        resets_at_ms: Option<i64>,
+        limit: Option<String>,
+    ) {
+        let auth = &self.inner.auth;
+        let account = crate::accounts::tag_account(account);
+        if !auth.accounts().has_several(provider) {
+            return;
+        }
+        auth.note_limited(provider, account, resets_at_ms, limit.as_deref());
+        if !auth.accounts().auto_switch(provider) {
+            return;
+        }
+        let choice = auth.choose(provider, Some(account));
+        if choice.account == account {
+            if let Some(back) = choice.all_spent_until {
+                self.post_account_notice(
+                    chat_id,
+                    &format!(
+                        "Every {} account is out of usage. The first is back in {}.",
+                        provider_name(provider),
+                        until(back)
+                    ),
+                );
+            }
+            return;
+        }
+        let sentence = self.switch_sentence(provider, &choice);
+        self.post_account_notice(chat_id, &format!("{sentence} Continuing there."));
+        if let Ok(mut explained) = self.inner.explained_switches.lock() {
+            explained.insert(chat_id.to_owned());
+        }
+        let handler = self.inner.on_account_switch.lock();
+        if let Ok(handler) = handler
+            && let Some(handler) = handler.as_ref()
+        {
+            handler(chat_id.to_owned(), last_message);
         }
     }
 
@@ -920,6 +1311,11 @@ impl TurnRuntime {
     }
 
     pub fn start(&self, mut turn: TurnSpec) -> Result<(), String> {
+        let _gate = self
+            .inner
+            .account_gate
+            .read()
+            .map_err(|_| "Agent sessions are unavailable.".to_owned())?;
         let lineage = self
             .inner
             .store
@@ -927,6 +1323,8 @@ impl TurnRuntime {
             .map_err(|error| error.to_string())?;
         let secrets = self.inner.secrets.effective(&lineage)?;
         turn.environment = secrets.environment;
+        // After the secrets, so a secret cannot point the turn at another home.
+        self.place_on_account(&mut turn)?;
         if let Some(secret_prompt) = secrets.prompt {
             turn.system_prompt = Some(match turn.system_prompt.take() {
                 Some(prompt) if !prompt.is_empty() => format!("{prompt}\n\n{secret_prompt}"),
@@ -952,6 +1350,7 @@ impl TurnRuntime {
         let keeps_process = app_server || AgentCommand::keeps_its_process(&command_backend);
         // Everything baked into argv when a process starts. A turn that wants
         // any of it different cannot be answered by the process already up.
+        // The account's login is checked beside it, in `session_for`.
         let fingerprint = format!(
             "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{}\x01{:?}",
             turn.access,
@@ -1447,7 +1846,14 @@ impl TurnRuntime {
                 .ok()
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_some();
-            if !dead && session.fingerprint == fingerprint {
+            // Exactly the same login: a process whose login was not known when
+            // it started cannot be taken to be the one known now. A turn that
+            // must start a new session never reuses the process either.
+            if !dead
+                && !turn.fresh_session
+                && session.fingerprint == fingerprint
+                && session.account == turn.account
+            {
                 let router = session.router.clone();
                 let mut router = router
                     .lock()
@@ -1568,6 +1974,7 @@ impl TurnRuntime {
                 stdin,
                 router,
                 fingerprint: fingerprint.to_owned(),
+                account: turn.account.clone(),
                 complaint: complaint.clone(),
             },
         );
@@ -1771,6 +2178,7 @@ impl TurnRuntime {
         let mut completed = false;
         let mut latest_error = None;
         let mut cut_short = false;
+        let mut usage_limit = None;
         let mut had_activity = false;
         let mut recorded = false;
         let mut streamed_text = String::new();
@@ -1906,6 +2314,10 @@ impl TurnRuntime {
                         match event {
                             AgentEvent::Completed => completed = true,
                             AgentEvent::Resumable => cut_short = true,
+                            AgentEvent::UsageLimit {
+                                resets_at_ms,
+                                limit,
+                            } => usage_limit = Some((resets_at_ms, limit)),
                             AgentEvent::Error(error) => latest_error = Some(error),
                             _ => {}
                         }
@@ -1988,6 +2400,7 @@ impl TurnRuntime {
                             &turn.chat_id,
                             &turn.session_backend,
                             &session,
+                            &turn.account,
                         ) {
                             latest_error = Some(error.to_string());
                         }
@@ -2151,6 +2564,10 @@ impl TurnRuntime {
                         latest_error = None;
                     }
                     AgentEvent::Resumable => cut_short = true,
+                    AgentEvent::UsageLimit {
+                        resets_at_ms,
+                        limit,
+                    } => usage_limit = Some((resets_at_ms, limit)),
                     AgentEvent::Error(error) => latest_error = Some(error),
                     AgentEvent::SteerRejected(steer) => self.return_steer(
                         &turn.chat_id,
@@ -2295,6 +2712,14 @@ impl TurnRuntime {
         if was_cancelled || cut_short {
             let _ = self.inner.store.mark_turn_resumable(&chat_id);
         }
+        // The message the turn answered, read while the chat is still this
+        // turn's: once it is released the user can send and stop another.
+        let limited = usage_limit
+            .filter(|_| !was_cancelled && !background)
+            .and_then(|limit| {
+                let message = self.inner.store.latest_user_message(&chat_id).ok()?;
+                Some((turn.backend.clone(), turn.account.clone(), message, limit))
+            });
         self.finish(
             turn,
             turn_id,
@@ -2306,6 +2731,9 @@ impl TurnRuntime {
             asked,
             context_usage,
         );
+        if let Some((provider, account, message, (resets_at_ms, limit))) = limited {
+            self.after_usage_limit(&chat_id, &provider, &account, message, resets_at_ms, limit);
+        }
         if keeps_process {
             self.pump_idle(&chat_id);
         }
@@ -3790,6 +4218,230 @@ read release
                 },
             );
         assert!(!fixture.runtime.steer(&fixture.chat, "Do this instead"));
+    }
+
+    /// A Claude turn turned away for usage moves the chat to the next account:
+    /// the account is held back, the chat says why, the host is asked to
+    /// continue, and the next turn resumes the same session as the new account.
+    #[cfg(unix)]
+    #[test]
+    fn a_spent_account_hands_the_chat_to_the_next_one() {
+        use std::{env, fs, os::unix::fs::PermissionsExt};
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = env::temp_dir().join(format!("xd-runtime-accounts-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let resets = crate::accounts::now_ms() / 1000 + 3600;
+        let agent = root.join("claude");
+        fs::write(
+            &agent,
+            format!(
+                r#"#!/bin/sh
+echo "${{CLAUDE_CONFIG_DIR:-default}} $*" >> '{log}'
+while read line; do
+  echo '{{"type":"system","subtype":"init","session_id":"s1"}}'
+  if [ -z "$CLAUDE_CONFIG_DIR" ]; then
+    echo '{{"type":"rate_limit_event","rate_limit_info":{{"status":"rejected","resetsAt":{resets},"rateLimitType":"five_hour"}}}}'
+    echo '{{"type":"result","is_error":true,"api_error_status":429,"result":"You have hit your limit."}}'
+  else
+    echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Carried on."}}]}}}}'
+    echo '{{"type":"result","subtype":"success","result":"Carried on."}}'
+  fi
+done
+"#,
+                log = root.join("runs").display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &agent) };
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "claude"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let accounts = crate::accounts::Accounts::with_homes(&root.join("data"), &[]);
+        let second = accounts.begin_adding("claude").unwrap();
+        accounts
+            .finish_adding(
+                "claude",
+                &second,
+                &crate::accounts::Identity {
+                    email: Some("b@example.com".into()),
+                    plan: None,
+                    account_key: Some("b".into()),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let events = Arc::new(EventBus::default());
+        let runtime = TurnRuntime::with_auth(
+            store.clone(),
+            events.clone(),
+            Arc::new(SecretsStore::new(None)),
+            AuthManager::new(events, accounts.clone()),
+        );
+        let continued = Arc::new(Mutex::new(Vec::new()));
+        let asked = continued.clone();
+        runtime.set_account_switch_handler(Box::new(move |chat, _| {
+            asked.lock().unwrap().push(chat);
+        }));
+        let send = |text: &str| match store
+            .prepare_send(&json!({"chat": chat, "text": text}))
+            .unwrap()
+        {
+            crate::storage::SendDisposition::Start { turn, .. } => runtime.start(turn).unwrap(),
+            crate::storage::SendDisposition::Queued { .. } => panic!("{text} was queued"),
+        };
+        let idle =
+            || runtime.live_turn(&chat).is_none() && store.chat(&chat).unwrap()["working"] == false;
+
+        send("Build it");
+        wait_for("the first turn to end", idle);
+        wait_for("the host to be asked to continue", || {
+            !continued.lock().unwrap().is_empty()
+        });
+        assert_eq!(*continued.lock().unwrap(), std::slice::from_ref(&chat));
+        let notice = contents(&store, &chat)
+            .into_iter()
+            .find_map(|(_, content)| {
+                content
+                    .strip_prefix(ACCOUNT_SWITCH_PREFIX)
+                    .map(str::to_owned)
+            })
+            .expect("the chat says it switched");
+        assert!(
+            notice.starts_with(
+                "Switched to b@example.com: Claude Code sign-in reached its 5-hour limit (back in "
+            ),
+            "{notice}"
+        );
+        assert!(notice.ends_with("Continuing there."), "{notice}");
+
+        send(crate::storage::CONTINUE_PROMPT);
+        wait_for("the turn on the second account to end", || {
+            idle()
+                && contents(&store, &chat)
+                    .iter()
+                    .any(|(_, content)| content == "Carried on.")
+        });
+        let runs = fs::read_to_string(root.join("runs")).unwrap();
+        let home = accounts.home("claude", &second).unwrap();
+        let second_run = runs
+            .lines()
+            .find(|run| run.starts_with(&home.display().to_string()))
+            .unwrap_or_else(|| panic!("no run as the second account in {runs}"));
+        assert!(second_run.contains("--resume s1"), "{second_run}");
+        // The switch was explained once, when it happened.
+        let notices = contents(&store, &chat)
+            .iter()
+            .filter(|(_, content)| content.starts_with(ACCOUNT_SWITCH_PREFIX))
+            .count();
+        assert_eq!(notices, 1);
+        runtime.discard_chat(&chat);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") };
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Codex cannot open a session another account wrote, so a Codex chat that
+    /// moves starts a new session carrying the conversation as text.
+    #[test]
+    fn a_codex_chat_that_moves_account_starts_over_with_its_conversation() {
+        use std::{env, fs};
+
+        let root = env::temp_dir().join(format!("xd-runtime-handoff-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("Workspaces")).unwrap();
+        let store =
+            Arc::new(StateStore::open(root.join("chats.db"), root.join("Workspaces")).unwrap());
+        let folder = store.new_folder(&json!({"name": "project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let chat = store
+            .new_chat(&json!({"folder": folder, "backend": "codex"}))
+            .unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        store
+            .append_turn_message(&chat, "user", "Rename the parser.", None)
+            .unwrap();
+        store
+            .append_turn_message(&chat, "assistant", "Renamed it to Reader.", None)
+            .unwrap();
+        store
+            .set_session(&chat, "codex", "thread-a", "default")
+            .unwrap();
+        let accounts = crate::accounts::Accounts::with_homes(&root.join("data"), &[]);
+        let second = accounts.begin_adding("codex").unwrap();
+        accounts
+            .finish_adding("codex", &second, &crate::accounts::Identity::default())
+            .unwrap()
+            .unwrap();
+        accounts.note_limited(
+            "codex",
+            "default",
+            None,
+            Some("weekly limit"),
+            crate::accounts::now_ms(),
+        );
+        let events = Arc::new(EventBus::default());
+        let runtime = TurnRuntime::with_auth(
+            store.clone(),
+            events.clone(),
+            Arc::new(SecretsStore::new(None)),
+            AuthManager::new(events, accounts.clone()),
+        );
+        let crate::storage::SendDisposition::Start { mut turn, .. } = store
+            .prepare_send(&json!({"chat": chat, "text": "Now add tests."}))
+            .unwrap()
+        else {
+            panic!("the message was queued");
+        };
+        assert_eq!(turn.session_id.as_deref(), Some("thread-a"));
+        runtime.place_on_account(&mut turn).unwrap();
+        assert_eq!(crate::accounts::tag_account(&turn.account), second);
+        assert_eq!(turn.session_id, None);
+        assert_eq!(
+            turn.environment,
+            vec![(
+                "CODEX_HOME".to_owned(),
+                accounts
+                    .home("codex", &second)
+                    .unwrap()
+                    .display()
+                    .to_string()
+            )]
+        );
+        assert!(turn.prompt.starts_with("<xd-note>"), "{}", turn.prompt);
+        assert!(
+            turn.prompt
+                .contains("User:\nRename the parser.\n\nAssistant:\nRenamed it to Reader.")
+        );
+        assert!(turn.prompt.ends_with("</xd-note>\n\nNow add tests."));
+        let notice = contents(&store, &chat)
+            .into_iter()
+            .find_map(|(_, content)| {
+                content
+                    .strip_prefix(ACCOUNT_SWITCH_PREFIX)
+                    .map(str::to_owned)
+            })
+            .unwrap();
+        assert!(
+            notice.contains("Codex sign-in reached its weekly limit"),
+            "{notice}"
+        );
+        assert!(notice.contains("started a new one"), "{notice}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// A chat with a fake Claude behind it, cleaned up when the test ends.

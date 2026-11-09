@@ -76,6 +76,7 @@ for line in sys.stdin:
     elif method == 'model/list':
         time.sleep(0.3)
         print(json.dumps({'id':2,'result':{'data':[{'model':'cli-default','isDefault':True,'defaultReasoningEffort':'low'},{'model':'gpt-5.5','defaultReasoningEffort':'medium'}]}}), flush=True)
+    elif method == 'account/read': print(json.dumps({'id':frame['id'],'result':{'account':{'email':'fixture@example.com','planType':'pro'}}}), flush=True)
     elif method in ('thread/start','thread/resume'): print(json.dumps({'id':2,'result':{'thread':{'id':'thread-test'}}}), flush=True)
     elif method == 'turn/start':
         print(json.dumps({'id':3,'result':{'turn':{'id':'turn-test'}}}), flush=True)

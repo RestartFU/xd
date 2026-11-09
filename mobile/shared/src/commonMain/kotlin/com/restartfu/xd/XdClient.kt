@@ -572,9 +572,27 @@ public class XdClient(
         }
     }
 
-    /** Starts, feeds, or cancels a sign-in; progress arrives through [agentAuth]. */
-    public suspend fun agentAuthAction(action: Ops.AuthAction, provider: String, input: String? = null) {
-        actor.call(Ops.agentAuthAction(action, provider, input))
+    /**
+     * Starts, feeds, or cancels a sign-in, adds an account, or signs one out;
+     * progress arrives through [agentAuth].
+     */
+    public suspend fun agentAuthAction(
+        action: Ops.AuthAction,
+        provider: String,
+        input: String? = null,
+        account: String? = null,
+    ) {
+        actor.call(Ops.agentAuthAction(action, provider, input, account))
+    }
+
+    /** Sets the order turns use [provider]'s accounts in; the change arrives through [agentAuth]. */
+    public suspend fun agentAccountsOrder(provider: String, accounts: List<String>) {
+        actor.call(Ops.agentAccountsOrder(provider, accounts))
+    }
+
+    /** Turns automatic account switching on or off; the change arrives through [agentAuth]. */
+    public suspend fun agentAccountsAutoSwitch(provider: String, enabled: Boolean) {
+        actor.call(Ops.agentAccountsAutoSwitch(provider, enabled))
     }
 
     /** `status` or `check` the assistant CLIs, or `install` one [provider]'s update, into [agentClis]. */

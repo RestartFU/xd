@@ -413,8 +413,18 @@ public object Ops {
 
     public fun agentAuth(): JsonObject = op("agent-auth")
 
-    /** Starts, feeds, or cancels an assistant's sign-in on the host. */
-    public fun agentAuthAction(action: AuthAction, provider: String, input: String? = null): JsonObject = buildJsonObject {
+    /**
+     * Starts, feeds, or cancels an assistant's sign-in on the host, adds an
+     * account, or signs one out. [account] names the account to sign in again
+     * or sign out, the user's own sign-in when left out; any other account is
+     * removed when signed out.
+     */
+    public fun agentAuthAction(
+        action: AuthAction,
+        provider: String,
+        input: String? = null,
+        account: String? = null,
+    ): JsonObject = buildJsonObject {
         require(provider in AUTH_PROVIDERS) { "Unknown assistant: $provider" }
         put("op", action.wire)
         put("provider", provider)
@@ -422,12 +432,37 @@ public object Ops {
             require(!input.isNullOrEmpty()) { "Sign-in input must not be empty" }
             put("input", input)
         }
+        if (account != null) {
+            require(action == AuthAction.START || action == AuthAction.LOGOUT) { "Only signing in or out names an account" }
+            require(account.isNotBlank()) { "Account must not be blank" }
+            put("account", account)
+        }
     }
 
     public enum class AuthAction(public val wire: String) {
         START("agent-auth-start"),
+        ADD("agent-auth-add"),
         INPUT("agent-auth-input"),
         CANCEL("agent-auth-cancel"),
+        LOGOUT("agent-auth-logout"),
+    }
+
+    /** Sets the order turns use an assistant's accounts in; [accounts] names each account once. */
+    public fun agentAccountsOrder(provider: String, accounts: List<String>): JsonObject = buildJsonObject {
+        require(provider in AUTH_PROVIDERS) { "Unknown assistant: $provider" }
+        require(accounts.isNotEmpty() && accounts.none(String::isBlank)) { "The order must name each account" }
+        require(accounts.toSet().size == accounts.size) { "The order must name each account once" }
+        put("op", "agent-accounts-order")
+        put("provider", provider)
+        put("accounts", buildJsonArray { accounts.forEach { add(JsonPrimitive(it)) } })
+    }
+
+    /** Turns moving a chat to the next account when one runs out on or off. */
+    public fun agentAccountsAutoSwitch(provider: String, enabled: Boolean): JsonObject = buildJsonObject {
+        require(provider in AUTH_PROVIDERS) { "Unknown assistant: $provider" }
+        put("op", "agent-accounts-auto-switch")
+        put("provider", provider)
+        put("enabled", enabled)
     }
 
     /** `status`, `check`, or `install` (which needs a [provider]). */

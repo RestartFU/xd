@@ -789,6 +789,21 @@ impl HostHandle {
         self.send(RequestKind::AgentAuthMutation, body)
     }
 
+    /// An account change: `operation` with the provider and `extra` members,
+    /// such as the account it is for.
+    pub fn agent_account_action(
+        &self,
+        operation: &str,
+        provider: &str,
+        extra: Value,
+    ) -> Result<(), String> {
+        let mut body = json!({"op": operation, "provider": provider});
+        if let (Some(body), Value::Object(extra)) = (body.as_object_mut(), extra) {
+            body.extend(extra);
+        }
+        self.send(RequestKind::AgentAuthMutation, body)
+    }
+
     pub fn agent_secrets(&self, folder_id: Option<&str>) -> Result<(), String> {
         let mut body = json!({"op": "agent-secrets"});
         if let Some(folder_id) = folder_id {

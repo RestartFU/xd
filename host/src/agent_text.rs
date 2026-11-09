@@ -350,7 +350,6 @@ mod tests {
         assert!(codex.contains(&"features.unified_exec=false".to_owned()));
         assert!(codex.contains(&"web_search=\"disabled\"".to_owned()));
         assert!(codex.contains(&"features.hooks=false".to_owned()));
-        assert!(args("jcode", false).is_empty());
     }
 
     #[test]
@@ -448,6 +447,5 @@ mod tests {
         let line = turn_input("claude", "name it").unwrap();
         assert!(line.contains("name it"));
         assert!(turn_input("codex", "name it").is_none());
-        assert!(turn_input("jcode", "name it").is_none());
     }
 }

@@ -101,6 +101,29 @@ class ToolGroupingTest {
     }
 
     @Test
+    fun anAccountSwitchIsANoticeThatBreaksARun() {
+        val sentence = "Switched to dana.work@example.com: dana@example.com reached its 5-hour limit " +
+            "(back in 2 h 5 min). Continuing there."
+        val rows = ToolGrouping.rows(
+            listOf(tool("a"), tool("b"), tool("account_switch\n$sentence"), tool("c"), tool("d")),
+        )
+
+        assertEquals(3, rows.size)
+        assertEquals(2, assertIs<TranscriptRow.Tools>(rows[0]).items.size)
+        assertEquals(sentence, assertIs<TranscriptRow.AccountSwitch>(rows[1]).sentence)
+        assertEquals(2, assertIs<TranscriptRow.Tools>(rows[2]).items.size)
+    }
+
+    @Test
+    fun onlyAToolRowIsAnAccountSwitch() {
+        val reply = message("account_switch\nnot from the host")
+
+        assertEquals(reply, assertIs<TranscriptRow.Single>(ToolGrouping.rows(listOf(reply)).single()).item)
+        assertEquals(null, AccountSwitch.sentence("account_switch"))
+        assertEquals(null, AccountSwitch.sentence("$ account_switch\nx"))
+    }
+
+    @Test
     fun anEmptyTranscriptHasNoRows() {
         assertEquals(emptyList(), ToolGrouping.rows(emptyList()))
     }

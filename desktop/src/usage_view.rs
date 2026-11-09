@@ -455,7 +455,7 @@ fn flyout_track(colors: ThemeColors) -> u32 {
     ink(colors.text, colors.chrome, 14)
 }
 
-fn flyout_bar(share: f64, tone: u32, height: f32, colors: ThemeColors) -> gpui::Div {
+pub(super) fn flyout_bar(share: f64, tone: u32, height: f32, colors: ThemeColors) -> gpui::Div {
     div()
         .w_full()
         .h(px(height))

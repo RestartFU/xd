@@ -309,6 +309,15 @@ private fun UsageChart(summary: UsageSummaryReply, metric: String) {
     }
 }
 
+/**
+ * The assistant, and which of its accounts on the host this is when there are
+ * several, by its place in the host's list in Assistant accounts.
+ */
+internal fun limitsTitle(account: UsageAccountReply): String {
+    val name = if (account.provider == "claude") "Claude" else "Codex"
+    return account.accountRank?.let { "$name · account $it" } ?: name
+}
+
 @Composable
 private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled: Boolean, onReset: () -> Unit) {
     val signals = LocalXdSignals.current
@@ -323,9 +332,11 @@ private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             BackendIcon(account.provider, size = 16.dp)
             Text(
-                if (account.provider == "claude") "Claude" else "Codex",
+                limitsTitle(account),
                 modifier = Modifier.weight(1f),
                 fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             account.plan?.let { Text(it, color = signals.faint, style = MaterialTheme.typography.labelMedium) }
         }

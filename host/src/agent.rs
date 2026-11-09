@@ -43,6 +43,12 @@ pub enum AgentEvent {
     /// The error that follows left work unfinished rather than failing it: a
     /// usage limit or an interruption. Offered to the user as something to resume.
     Resumable,
+    /// The account's usage limit turned the turn away. Comes with `Resumable`.
+    /// Says when the limit resets and which one it was, where the agent says.
+    UsageLimit {
+        resets_at_ms: Option<i64>,
+        limit: Option<String>,
+    },
     Usage {
         input: u64,
         output: u64,
@@ -114,7 +120,6 @@ pub enum AgentParser {
     AppServer(crate::codex_app::CodexAppParser),
     Codex(CodexParser),
     Claude(ClaudeParser),
-    Jcode(JcodeParser),
 }
 
 impl AgentParser {
@@ -122,7 +127,6 @@ impl AgentParser {
         match backend {
             "codex" => Ok(Self::Codex(CodexParser::default())),
             "claude" => Ok(Self::Claude(ClaudeParser::default())),
-            "jcode" => Ok(Self::Jcode(JcodeParser::default())),
             _ => Err(format!("Unknown assistant backend: {backend}")),
         }
     }
@@ -132,7 +136,6 @@ impl AgentParser {
             Self::AppServer(parser) => parser.feed(line),
             Self::Codex(parser) => parser.feed(line),
             Self::Claude(parser) => parser.feed(line),
-            Self::Jcode(parser) => parser.feed(line),
         }
     }
 
@@ -145,7 +148,7 @@ impl AgentParser {
             Self::Claude(parser) => parser
                 .begin_steer(steer)
                 .then(|| AgentCommand::encode_steer(prompt)),
-            Self::Codex(_) | Self::Jcode(_) => None,
+            Self::Codex(_) => None,
         }
     }
 
@@ -156,7 +159,7 @@ impl AgentParser {
         match self {
             Self::AppServer(parser) => parser.settling(),
             Self::Claude(parser) => parser.settling,
-            Self::Codex(_) | Self::Jcode(_) => false,
+            Self::Codex(_) => false,
         }
     }
 
@@ -171,7 +174,7 @@ impl AgentParser {
                     Vec::new()
                 }
             }
-            Self::Codex(_) | Self::Jcode(_) => Vec::new(),
+            Self::Codex(_) => Vec::new(),
         }
     }
 
@@ -181,7 +184,7 @@ impl AgentParser {
         match self {
             Self::AppServer(parser) => parser.take_unread_steers(),
             Self::Claude(parser) => parser.unread_steers.drain(..).collect(),
-            Self::Codex(_) | Self::Jcode(_) => Vec::new(),
+            Self::Codex(_) => Vec::new(),
         }
     }
 }
@@ -339,7 +342,6 @@ impl AgentCommand<'_> {
     pub fn build(&self) -> Command {
         let mut command = match self.backend {
             "claude" => self.build_claude(),
-            "jcode" => self.build_jcode(),
             _ => self.build_codex(),
         };
         command.envs(self.environment.iter().map(|(name, value)| (name, value)));
@@ -452,173 +454,6 @@ impl AgentCommand<'_> {
         command.current_dir(self.workdir);
         command
     }
-
-    fn build_jcode(&self) -> Command {
-        let mut command = crate::background_process::command(resolve_jcode());
-        command.args(["--quiet", "--no-update", "-C", self.workdir]);
-        if self.model != "default" {
-            command.args(["--model", self.model]);
-        }
-        if let Some(session_id) = self.session_id {
-            command.args(["--resume", session_id]);
-        }
-        // JCode does not currently expose a filesystem sandbox in `run` mode.
-        // Keep read and plan chats genuinely non-mutating by exposing only its
-        // read-only built-ins. Edit/full chats use the user's normal JCode tool
-        // configuration.
-        if !matches!(self.access, "edit" | "full") {
-            command.args([
-                "--tools",
-                "read,agentgrep,ls,webfetch,websearch,jcode_docs,todo",
-            ]);
-        }
-        command.args(["run", "--ndjson"]);
-        if let Some(system_prompt) = self.system_prompt.filter(|prompt| !prompt.is_empty()) {
-            command.arg(format!(
-                "<system-instructions>\n{system_prompt}\n</system-instructions>\n\n{}",
-                self.prompt
-            ));
-        } else {
-            command.arg(self.prompt);
-        }
-        command.current_dir(self.workdir);
-        command
-    }
-}
-
-#[derive(Default)]
-pub struct JcodeParser {
-    streamed_text: String,
-    pending_tools: HashMap<String, PendingJcodeTool>,
-    active_tool_id: Option<String>,
-}
-
-struct PendingJcodeTool {
-    name: String,
-    input: String,
-}
-
-impl JcodeParser {
-    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        let Ok(root) = serde_json::from_str::<Value>(line) else {
-            return Vec::new();
-        };
-        match root.get("type").and_then(Value::as_str) {
-            Some("start") => root
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(|id| vec![AgentEvent::Session(id.to_owned())])
-                .unwrap_or_default(),
-            Some("session") => root
-                .get("session_id")
-                .and_then(Value::as_str)
-                .map(|id| vec![AgentEvent::Session(id.to_owned())])
-                .unwrap_or_default(),
-            Some("text_delta") => root
-                .get("text")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .map(|text| {
-                    self.streamed_text.push_str(text);
-                    vec![AgentEvent::TextDelta(text.to_owned())]
-                })
-                .unwrap_or_default(),
-            Some("text_replace") => {
-                let Some(text) = root.get("text").and_then(Value::as_str) else {
-                    return Vec::new();
-                };
-                // A replacement commonly extends a provider-retried prefix. We
-                // can stream that suffix without duplicating text already shown.
-                // If it rewrites an earlier prefix, retain the final replacement
-                // for the `done` event instead of publishing corrupt deltas.
-                if let Some(suffix) = text.strip_prefix(&self.streamed_text) {
-                    self.streamed_text = text.to_owned();
-                    (!suffix.is_empty())
-                        .then(|| AgentEvent::TextDelta(suffix.to_owned()))
-                        .into_iter()
-                        .collect()
-                } else {
-                    self.streamed_text = text.to_owned();
-                    Vec::new()
-                }
-            }
-            Some("tool_start") => {
-                if let (Some(id), Some(name)) = (
-                    root.get("id").and_then(Value::as_str),
-                    root.get("name").and_then(Value::as_str),
-                ) {
-                    self.pending_tools.insert(
-                        id.to_owned(),
-                        PendingJcodeTool {
-                            name: name.to_owned(),
-                            input: String::new(),
-                        },
-                    );
-                    self.active_tool_id = Some(id.to_owned());
-                }
-                Vec::new()
-            }
-            Some("tool_input") => {
-                if let Some(delta) = root.get("delta").and_then(Value::as_str)
-                    && let Some(tool) = self
-                        .active_tool_id
-                        .as_ref()
-                        .and_then(|id| self.pending_tools.get_mut(id))
-                    && tool.input.len() < tool_diff::LIMIT
-                {
-                    let kept = (tool_diff::LIMIT - tool.input.len()).min(delta.len());
-                    let kept = floor_char_boundary(delta, kept);
-                    tool.input.push_str(&delta[..kept]);
-                }
-                Vec::new()
-            }
-            Some("tool_done") => {
-                let id = root.get("id").and_then(Value::as_str).unwrap_or_default();
-                if self.active_tool_id.as_deref() == Some(id) {
-                    self.active_tool_id = None;
-                }
-                let tool = self.pending_tools.remove(id).or_else(|| {
-                    root.get("name")
-                        .and_then(Value::as_str)
-                        .map(|name| PendingJcodeTool {
-                            name: name.to_owned(),
-                            input: String::new(),
-                        })
-                });
-                tool.map(|tool| {
-                    let input = serde_json::from_str::<Value>(&tool.input).ok();
-                    let summary = tool_diff::build(&tool.name, input.as_ref())
-                        .unwrap_or_else(|| tool.name.clone());
-                    vec![AgentEvent::Tool(summary)]
-                })
-                .unwrap_or_default()
-            }
-            Some("tokens") => vec![AgentEvent::Usage {
-                input: root.get("input").and_then(Value::as_u64).unwrap_or(0),
-                output: root.get("output").and_then(Value::as_u64).unwrap_or(0),
-                window: 0,
-            }],
-            Some("done") => {
-                let mut events = Vec::new();
-                if self.streamed_text.is_empty()
-                    && let Some(text) = root.get("text").and_then(Value::as_str)
-                    && !text.is_empty()
-                {
-                    events.push(AgentEvent::TextDelta(text.to_owned()));
-                }
-                events.push(AgentEvent::Completed);
-                events
-            }
-            Some("error") => vec![AgentEvent::Error(
-                root.get("message")
-                    .and_then(Value::as_str)
-                    .filter(|message| !message.is_empty())
-                    .unwrap_or("JCode turn failed")
-                    .to_owned(),
-            )],
-            _ => Vec::new(),
-        }
-    }
 }
 
 fn append_system_prompt(command: &mut Command, prompt: Option<&str>) {
@@ -638,6 +473,9 @@ pub struct ClaudeParser {
     saw_text: bool,
     /// The account's limit turned this turn away, as far as Claude has said.
     limit_rejected: bool,
+    /// What Claude last said about the limit that turned the turn away.
+    limit_resets_at_ms: Option<i64>,
+    limit_kind: Option<String>,
     /// Newlines the text so far already ends with, so a new block is separated
     /// by a blank line rather than running into the previous one.
     trailing_newlines: usize,
@@ -671,6 +509,19 @@ fn claude_limit_rejected(root: &Value) -> Option<bool> {
     ) || info.get("isUsingOverage").and_then(Value::as_bool) == Some(true)
         || info.get("overageInUse").and_then(Value::as_bool) == Some(true);
     Some(status == "rejected" && !overage)
+}
+
+/// How Claude's `rateLimitType` reads in a sentence.
+fn claude_limit_name(kind: &str) -> String {
+    match kind {
+        "five_hour" => "5-hour limit".into(),
+        "seven_day" => "weekly limit".into(),
+        "overage" => "extra usage limit".into(),
+        other => match other.strip_prefix("seven_day_") {
+            Some(model) => format!("weekly {model} limit"),
+            None => "usage limit".into(),
+        },
+    }
 }
 
 /// Whether a failed result was the usage limit. A rejected limit only explains
@@ -751,6 +602,18 @@ impl ClaudeParser {
             Some("rate_limit_event") => {
                 if let Some(rejected) = claude_limit_rejected(&root) {
                     self.limit_rejected = rejected;
+                    if !rejected {
+                        self.limit_resets_at_ms = None;
+                        self.limit_kind = None;
+                    }
+                    if rejected {
+                        let info = &root["rate_limit_info"];
+                        self.limit_resets_at_ms = info["resetsAt"]
+                            .as_f64()
+                            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                            .map(|seconds| (seconds * 1000.0) as i64);
+                        self.limit_kind = info["rateLimitType"].as_str().map(claude_limit_name);
+                    }
                 }
                 Vec::new()
             }
@@ -793,6 +656,9 @@ impl ClaudeParser {
             Some("result") => {
                 let mut events = Vec::new();
                 let limit_rejected = std::mem::take(&mut self.limit_rejected);
+                // What Claude said about the limit belongs to this result only.
+                let limit_resets_at_ms = self.limit_resets_at_ms.take();
+                let limit_kind = self.limit_kind.take();
                 // A steer ends the run it interrupts with one of these, which
                 // is not the end of the turn however it is flagged.
                 if !self.unread_steers.is_empty()
@@ -827,6 +693,10 @@ impl ClaudeParser {
                 }
                 if failed {
                     if claude_usage_limited(&root, limit_rejected) {
+                        events.push(AgentEvent::UsageLimit {
+                            resets_at_ms: limit_resets_at_ms,
+                            limit: limit_kind,
+                        });
                         events.push(AgentEvent::Resumable);
                     }
                     events.push(AgentEvent::Error(
@@ -1613,21 +1483,6 @@ pub(crate) fn resolve_claude() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("claude"))
 }
 
-pub(crate) fn resolve_jcode() -> PathBuf {
-    env::var_os("XD_JCODE_EXECUTABLE")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("jcode"))
-}
-
-fn floor_char_boundary(value: &str, index: usize) -> usize {
-    let mut index = index.min(value.len());
-    while !value.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
 fn claude_tool_summary(name: &str, arguments: Option<&Value>) -> String {
     // A file-editing call carries its own diff, so the row shows the change
     // rather than the path alone.
@@ -1934,11 +1789,12 @@ mod tests {
         ));
         fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-        let previous = env::var_os("XD_JCODE_EXECUTABLE");
-        // SAFETY: no other agent tests mutate the JCode executable override.
-        unsafe { env::set_var("XD_JCODE_EXECUTABLE", &executable) };
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let previous = env::var_os("XD_CLAUDE_EXECUTABLE");
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", &executable) };
         let mut child = AgentCommand {
-            backend: "jcode",
+            backend: "claude",
             prompt: "test",
             system_prompt: None,
             workdir: "/tmp",
@@ -1953,8 +1809,8 @@ mod tests {
         .spawn()
         .unwrap();
         match previous {
-            Some(previous) => unsafe { env::set_var("XD_JCODE_EXECUTABLE", previous) },
-            None => unsafe { env::remove_var("XD_JCODE_EXECUTABLE") },
+            Some(previous) => unsafe { env::set_var("XD_CLAUDE_EXECUTABLE", previous) },
+            None => unsafe { env::remove_var("XD_CLAUDE_EXECUTABLE") },
         }
 
         let pid = child.id() as libc::pid_t;
@@ -1971,68 +1827,6 @@ mod tests {
         // `codex exec` reads stdin as the initial prompt only, so there is
         // nothing to keep and nothing to send down it a second time.
         assert!(!AgentCommand::keeps_its_process("codex"));
-        assert!(!AgentCommand::keeps_its_process("jcode"));
-    }
-
-    #[test]
-    fn builds_a_resumable_read_only_jcode_run() {
-        let command = AgentCommand {
-            backend: "jcode",
-            prompt: "inspect this",
-            system_prompt: Some("Keep the answer concise."),
-            workdir: "/tmp/project",
-            model: "default",
-            effort: "high",
-            access: "read",
-            fast: false,
-            session_id: Some("session-1"),
-            environment: &[],
-        }
-        .build();
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--resume", "session-1"])
-        );
-        assert!(args.windows(2).any(|pair| pair == ["run", "--ndjson"]));
-        assert!(args.contains(&"--tools".to_owned()));
-        assert!(!args.contains(&"--model".to_owned()));
-        assert!(args.last().is_some_and(|prompt| {
-            prompt.contains("Keep the answer concise.") && prompt.ends_with("inspect this")
-        }));
-    }
-
-    #[test]
-    fn parses_jcode_ndjson_streams_and_tool_diffs() {
-        let mut parser = JcodeParser::default();
-        let events = [
-            r#"{"type":"start","session_id":"session-1","provider":"openai","model":"gpt"}"#,
-            r#"{"type":"text_delta","text":"Working"}"#,
-            r#"{"type":"tool_start","id":"tool-1","name":"write"}"#,
-            r#"{"type":"tool_input","delta":"{\"path\":\"note.txt\",\"content\":\"hello\\n\"}"}"#,
-            r#"{"type":"tool_done","id":"tool-1","name":"write","output":"ok","error":null}"#,
-            r#"{"type":"tokens","input":12,"output":4,"cache_read_input":0,"cache_creation_input":0}"#,
-            r#"{"type":"done","session_id":"session-1","text":"Working"}"#,
-        ]
-        .into_iter()
-        .flat_map(|line| parser.feed(line))
-        .collect::<Vec<_>>();
-
-        assert_eq!(events[0], AgentEvent::Session("session-1".into()));
-        assert_eq!(events[1], AgentEvent::TextDelta("Working".into()));
-        assert!(matches!(&events[2], AgentEvent::Tool(text) if text.starts_with("file_change\n")));
-        assert_eq!(
-            events[3],
-            AgentEvent::Usage {
-                input: 12,
-                output: 4,
-                window: 0,
-            }
-        );
-        assert_eq!(events[4], AgentEvent::Completed);
     }
 
     #[test]
@@ -2459,10 +2253,11 @@ mod tests {
 
     #[test]
     fn agents_without_a_live_process_cannot_be_steered() {
-        let mut jcode = AgentParser::new("jcode").unwrap();
-        assert_eq!(jcode.steer_frame(1, "Instead"), None);
-        assert!(!jcode.settling());
-        assert_eq!(jcode.take_settled(), []);
+        let mut codex = AgentParser::new("codex").unwrap();
+        assert_eq!(codex.steer_frame(1, "Instead"), None);
+        assert!(!codex.settling());
+        assert_eq!(codex.take_settled(), []);
+        assert!(AgentParser::new("jcode").is_err());
     }
 
     #[test]
