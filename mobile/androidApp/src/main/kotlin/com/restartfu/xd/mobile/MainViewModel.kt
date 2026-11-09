@@ -1121,7 +1121,15 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * Queues the draft behind the running turn.
+     *
+     * The queue op carries text alone, so a draft with images goes as a send
+     * instead: the host queues a message that arrives mid-turn with its images
+     * saved and referenced, which is how the desktop queues one too.
+     */
     fun enqueue() {
+        if (_attachments.value.isNotEmpty()) return send()
         val text = _draft.value
         launchGuarded(_sending) {
             session.enqueue(text)
