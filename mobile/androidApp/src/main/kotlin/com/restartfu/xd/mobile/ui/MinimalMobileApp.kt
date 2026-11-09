@@ -523,7 +523,7 @@ internal fun MinimalMobileApp(
             retryCatalog = model::loadCreationCatalog,
             chatTab = true,
             onDismiss = { createChatIn = null },
-            onCreate = { title, agent, _, effort, access, plan ->
+            onCreate = { title, agent, _, _, effort, access, plan ->
                 createChatIn = null
                 activeProject?.let { project -> model.createDirectSession(project.id, title, agent, session.id, effort = effort, access = access, plan = plan) }
             },
@@ -828,9 +828,9 @@ private fun MinimalProjectsHome(
             retryCatalog = model::loadCreationCatalog,
             places = { NewSessionPlaces.load(model.client, creatingIn.id) },
             onDismiss = { createSessionIn = null },
-            onCreate = { title, agent, worktree, effort, access, plan ->
+            onCreate = { title, agent, worktree, startFromRemote, effort, access, plan ->
                 createSessionIn = null
-                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree, effort = effort, access = access, plan = plan)
+                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree, startFromRemote = startFromRemote, effort = effort, access = access, plan = plan)
             },
         )
     }
@@ -1953,7 +1953,7 @@ internal fun NewSessionDialog(
     /** Where a new session can work; null for a chat joining an existing session. */
     places: (suspend () -> NewSessionPlaces)? = null,
     onDismiss: () -> Unit,
-    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?, String?, String?, Boolean?) -> Unit,
+    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?, Boolean, String?, String?, Boolean?) -> Unit,
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val drafts = remember(context) { context.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE) }
@@ -1963,6 +1963,7 @@ internal fun NewSessionDialog(
     var effort by rememberSaveable(draftKey) { mutableStateOf(restored.optString("effort").takeIf(String::isNotBlank)) }
     var access by rememberSaveable(draftKey) { mutableStateOf(restored.optString("access").takeIf(String::isNotBlank)) }
     var plan by rememberSaveable(draftKey) { mutableStateOf(restored.optBoolean("plan")) }
+    var startFromRemote by rememberSaveable(draftKey) { mutableStateOf(restored.optBoolean("startFromRemote", true)) }
     var loaded by remember { mutableStateOf<NewSessionPlaces?>(null) }
     var placesError by remember { mutableStateOf<String?>(null) }
     var worktree by rememberSaveable(draftKey, stateSaver = WorktreeChoiceSaver) {
@@ -1977,10 +1978,10 @@ internal fun NewSessionDialog(
             }
         }.getOrNull())
     }
-    androidx.compose.runtime.LaunchedEffect(draftKey, title, agent, effort, access, plan, worktree) {
+    androidx.compose.runtime.LaunchedEffect(draftKey, title, agent, effort, access, plan, worktree, startFromRemote) {
         draftKey?.let { key ->
             drafts.edit().putString(key, org.json.JSONObject().put("title", title).put("agent", agent.wire)
-                .put("effort", effort).put("access", access).put("plan", plan)
+                .put("effort", effort).put("access", access).put("plan", plan).put("startFromRemote", startFromRemote)
                 .put("worktree", worktree?.let { choice ->
                     org.json.JSONObject().apply {
                         when (choice) {
@@ -2050,6 +2051,14 @@ internal fun NewSessionDialog(
                 }
                 CreationOption("Chat mode", if (plan) "Plan" else "Build", listOf("Build", "Plan")) { plan = it == "Plan" }
                 if (places != null) {
+                    if (worktree is Ops.NewSessionWorktree.Branch) {
+                        SettingSwitch(
+                            title = "Start from remote",
+                            detail = "Use the latest remote branch when available.",
+                            checked = startFromRemote,
+                            onCheckedChange = { startFromRemote = it },
+                        )
+                    }
                     WorkspacePicker(
                         places = loaded,
                         error = placesError,
@@ -2061,7 +2070,7 @@ internal fun NewSessionDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onCreate(title.trim(), agent, worktree, effort?.takeIf { it in backends.firstOrNull { b -> b.id == agent.wire }?.efforts.orEmpty() }, access, plan) },
+                onClick = { onCreate(title.trim(), agent, worktree, startFromRemote, effort?.takeIf { it in backends.firstOrNull { b -> b.id == agent.wire }?.efforts.orEmpty() }, access, plan) },
                 // Wait for the choices, as the desktop does; if they cannot be
                 // read, the host's own default checkout still works.
                 // Only once this opening's choices have loaded, even if a choice

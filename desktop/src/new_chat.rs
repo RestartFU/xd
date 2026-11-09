@@ -1595,7 +1595,7 @@ mod choice_tests {
                 // Another project keeps its own, and a model the agent no
                 // longer offers is not carried over.
                 desktop.begin_chat_create("other".into(), window, cx);
-                assert!(!desktop.new_chat_remote);
+                assert!(desktop.new_chat_remote);
                 assert!(desktop.new_chat_model.is_none());
                 folder_settings(desktop, "other", cx);
                 assert!(matches!(
@@ -1666,7 +1666,10 @@ mod start_tests {
         assert!(sent.bottom() <= status.top() && status.bottom() < composer.top());
         assert!(sent.right() > composer.center().x);
         desktop.read_with(cx, |desktop, _| {
-            assert_eq!(desktop.new_chat_status(), "Creating a worktree from dev");
+            assert_eq!(
+                desktop.new_chat_status(),
+                "Creating a worktree from the latest dev"
+            );
             assert!(desktop.anything_working());
         });
 

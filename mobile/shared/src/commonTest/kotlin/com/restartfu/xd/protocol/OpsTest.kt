@@ -36,6 +36,16 @@ class OpsTest {
     }
 
     @Test
+    fun branchSessionsStartFromRemoteUnlessDisabled() {
+        val branch = Ops.NewSessionWorktree.Branch("refs/heads/main", "abc")
+        assertTrue(Ops.newChat("f", worktree = branch)["start_from_remote"]!!.jsonPrimitive.boolean)
+        assertFalse(Ops.newChat("f", worktree = branch, startFromRemote = false)["start_from_remote"]!!.jsonPrimitive.boolean)
+        for (choice in listOf(null, Ops.NewSessionWorktree.New, Ops.NewSessionWorktree.Existing("/repo"), Ops.NewSessionWorktree.PullRequest(1, "abc"))) {
+            assertFalse("start_from_remote" in Ops.newChat("f", worktree = choice))
+        }
+    }
+
+    @Test
     fun commitsTrimTheMessageAndRefuseOnesTheHostWould() {
         assertEquals("Fix login", Ops.gitCommit("c", "  Fix login \n")["message"]!!.jsonPrimitive.content)
         assertFailsWith<IllegalArgumentException> { Ops.gitCommit("c", "   ") }

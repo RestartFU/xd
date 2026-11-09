@@ -565,6 +565,7 @@ class MainViewModel @JvmOverloads constructor(
         agent: DirectAgent,
         sessionId: String? = null,
         worktree: Ops.NewSessionWorktree? = null,
+        startFromRemote: Boolean = true,
         effort: String? = null,
         access: String? = null,
         plan: Boolean? = null,
@@ -581,6 +582,7 @@ class MainViewModel @JvmOverloads constructor(
                     sessionId = sessionId,
                     worktree = worktree,
                     effort = effort, access = access, plan = plan,
+                    startFromRemote = startFromRemote,
                 )
                 getApplication<Application>().getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE)
                     .edit().remove("$folderId/${sessionId ?: "new"}").apply()

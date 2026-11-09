@@ -343,6 +343,7 @@ public object Ops {
         backend: String? = null,
         sessionId: String? = null,
         worktree: NewSessionWorktree? = null,
+        startFromRemote: Boolean = true,
         effort: String? = null,
         access: String? = null,
         plan: Boolean? = null,
@@ -362,6 +363,7 @@ public object Ops {
         if (!title.isNullOrBlank()) put("title", title)
         if (!backend.isNullOrBlank()) put("backend", backend)
         if (worktree != null) put("worktree", worktree.wire())
+        if (worktree is NewSessionWorktree.Branch) put("start_from_remote", startFromRemote)
     }
 
     /**

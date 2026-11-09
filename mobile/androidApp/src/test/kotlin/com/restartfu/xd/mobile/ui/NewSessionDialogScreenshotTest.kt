@@ -13,6 +13,7 @@ import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.ui.platform.ViewRootForTest
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -53,7 +54,7 @@ class NewSessionDialogScreenshotTest {
             activity.setContent {
                 MaterialTheme {
                     NewSessionDialog(projectName = "Draft test", draftKey = "draft-reopen/new",
-                        onDismiss = {}, onCreate = { _, _, _, _, _, _ -> })
+                        onDismiss = {}, onCreate = { _, _, _, _, _, _, _ -> })
                 }
             }
             repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
@@ -76,6 +77,7 @@ class NewSessionDialogScreenshotTest {
     private fun shoot(name: String, theme: MinimalThemePreset) {
         // A plain activity: the compose test rule waits for an idleness this
         // dialog never reaches under Robolectric.
+        var createdRemote: Boolean? = null
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
         activity.setContent {
             CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
@@ -86,7 +88,7 @@ class NewSessionDialogScreenshotTest {
                             backends = listOf(com.restartfu.xd.protocol.BackendReply("codex", "Codex", efforts = listOf("low", "medium", "high"))),
                             places = { PLACES },
                             onDismiss = {},
-                            onCreate = { _, _, _, _, _, _ -> },
+                            onCreate = { _, _, _, remote, _, _, _ -> createdRemote = remote },
                         )
                     }
                 }
@@ -103,6 +105,12 @@ class NewSessionDialogScreenshotTest {
         val branch = topOf(dialog, "fix/reconnect-backoff")
         assertTrue("New worktree is listed before the checkouts", newWorktree < checkout)
         assertTrue("Checkouts are listed before branches", checkout < branch)
+        val branchNode = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
+            .first { it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == "fix/reconnect-backoff" } == true }
+        var clickable: SemanticsNode? = branchNode
+        while (clickable != null && clickable.config.getOrNull(SemanticsActions.OnClick) == null) clickable = clickable.parent
+        check(clickable?.config?.getOrNull(SemanticsActions.OnClick)?.action?.invoke() == true)
+        repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
         out?.let { dir ->
             dir.mkdirs()
             val bitmap = Bitmap.createBitmap(screen.width, screen.height, Bitmap.Config.ARGB_8888)
@@ -113,6 +121,17 @@ class NewSessionDialogScreenshotTest {
             dialog.draw(canvas)
             File(dir, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
         }
+        val toggle = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
+            .single { it.config.getOrNull(SemanticsProperties.ToggleableState) != null }
+        check(toggle.config[SemanticsProperties.ToggleableState] == androidx.compose.ui.state.ToggleableState.On)
+        check(toggle.config[SemanticsActions.OnClick].action?.invoke() == true)
+        repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
+        val create = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
+            .first { it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == "Create session" } == true }
+        var button: SemanticsNode? = create
+        while (button != null && button.config.getOrNull(SemanticsActions.OnClick) == null) button = button.parent
+        check(button?.config?.getOrNull(SemanticsActions.OnClick)?.action?.invoke() == true)
+        check(createdRemote == false)
     }
 
     /** The unclipped top edge of the first node in [root]'s Compose tree showing [text]. */
