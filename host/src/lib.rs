@@ -2013,7 +2013,15 @@ impl Engine {
                 // Nothing to continue: the chat moved on, or its turn is still
                 // stopping. Let the queue go on, and leave the turn to resume
                 // from the chat. Unpaused first, so a turn ending meanwhile
-                // hands the queue on itself; an idle chat starts it here.
+                // hands the queue on itself; an idle chat starts it here. All
+                // under the gate, so a pause-all since is either seen here or
+                // stops what this starts.
+                let Ok(gate) = self.chat_execution_gate(&chat_id) else {
+                    continue;
+                };
+                let Ok(_execution) = gate.lock() else {
+                    continue;
+                };
                 if !store.unpause_chat(&chat_id).unwrap_or(false) {
                     continue;
                 }
@@ -2023,7 +2031,7 @@ impl Engine {
                     .ok()
                     .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
                 if let Some(text) = queued
-                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, false, true)
+                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, true, true)
                 {
                     eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
                     continue;
