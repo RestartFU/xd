@@ -821,7 +821,25 @@ impl AuthManager {
             self.publish(provider);
             return;
         }
-        let Some(session) = self.release_slot(provider, serial) else {
+        // A sign-in or sign-out of an account in the list settles that account's
+        // state before giving up the slot: once given up, another sign-in can
+        // hold the provider and nothing would settle this one.
+        let settled = |session: &AuthSession| -> Option<AuthSnapshot> {
+            if !matches!(session.kind, SessionKind::SignIn | SessionKind::SignOut) {
+                return None;
+            }
+            Some(match (&result, session.cancelled) {
+                (_, true) => failed("Sign-in canceled.".into()),
+                (Err(error), false) => failed(error.clone()),
+                (Ok(()), false) if session.kind == SessionKind::SignIn => AuthSnapshot {
+                    state: "signed-in".into(),
+                    detail: Some("Signed in.".into()),
+                    ..Default::default()
+                },
+                (Ok(()), false) => signed_out(),
+            })
+        };
+        let Some(session) = self.settle_and_release(provider, serial, settled) else {
             return;
         };
         let account = session.account.as_str();
@@ -843,16 +861,42 @@ impl AuthManager {
             (SessionKind::Add, Ok(())) => {}
             // Removed above, before the slot was released.
             (SessionKind::Remove, _) => {}
+            // Settled above, before the slot was released.
             (_, Ok(())) | (_, Err(_)) if session.cancelled => {
-                self.set_snapshot_if_idle(provider, account, failed("Sign-in canceled.".into()));
                 self.refresh_account(provider, account);
             }
             (_, Ok(())) => {
                 self.refresh_account(provider, account);
                 self.check_soon(provider, account);
             }
-            (_, Err(error)) => self.set_snapshot_if_idle(provider, account, failed(error)),
+            (_, Err(_)) => {}
         }
+    }
+
+    /// Gives up the provider's slot if it is still this session's, first
+    /// installing the state `settle` gives the session's account, if any.
+    fn settle_and_release(
+        &self,
+        provider: &str,
+        serial: u64,
+        settle: impl FnOnce(&AuthSession) -> Option<AuthSnapshot>,
+    ) -> Option<AuthSession> {
+        let session = {
+            let mut sessions = self.inner.sessions.lock().ok()?;
+            let session = sessions
+                .get(provider)
+                .filter(|session| session.serial == serial)?;
+            if let Some(mut snapshot) = settle(session)
+                && let Ok(mut states) = self.inner.states.lock()
+            {
+                snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+                snapshot.settled = Some(snapshot.state.clone());
+                states.insert(key(provider, &session.account), snapshot);
+            }
+            sessions.remove(provider)
+        };
+        self.publish(provider);
+        session
     }
 
     /// Checks who a new sign-in belongs to before it joins the list.
@@ -1001,33 +1045,6 @@ impl AuthManager {
         if let Ok(mut states) = self.inner.states.lock() {
             states.remove(&key(provider, account));
         }
-    }
-
-    /// Like [`Self::set_snapshot`], unless a newer sign-in or sign-out for the
-    /// provider has begun since: then the state is that one's to set.
-    fn set_snapshot_if_idle(&self, provider: &str, account: &str, mut snapshot: AuthSnapshot) {
-        {
-            let Ok(sessions) = self.inner.sessions.lock() else {
-                return;
-            };
-            if sessions.contains_key(provider) {
-                return;
-            }
-            let Ok(mut states) = self.inner.states.lock() else {
-                return;
-            };
-            snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
-            let entry = key(provider, account);
-            snapshot.settled = if AuthSnapshot::established(&snapshot.state) {
-                Some(snapshot.state.clone())
-            } else {
-                states
-                    .get(&entry)
-                    .and_then(|previous| previous.settled.clone())
-            };
-            states.insert(entry, snapshot);
-        }
-        self.publish(provider);
     }
 
     fn set_snapshot(&self, provider: &str, account: &str, mut snapshot: AuthSnapshot) {
