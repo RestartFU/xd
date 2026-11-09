@@ -2463,6 +2463,23 @@ impl StateStore {
         Ok(database.last_insert_rowid())
     }
 
+    /// The account and login a chat's stored session is filed under, if any.
+    pub fn session_account(
+        &self,
+        chat_id: &str,
+        backend: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        Ok(database
+            .query_row(
+                "SELECT account FROM chat_sessions WHERE chat_id = ? AND backend = ?",
+                params![chat_id, backend],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Files every session stored before accounts were kept, and so filed under
     /// no login, under `tag`. Done once as the host starts: those sessions were
     /// made by the login the CLI had then, as far as anything can tell.

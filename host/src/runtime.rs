@@ -74,6 +74,9 @@ struct RuntimeInner {
     on_account_switch: Mutex<Option<AccountSwitchHandler>>,
     /// Chats whose move to another account was already explained to the user.
     explained_switches: Mutex<HashSet<String>>,
+    /// False while sessions from before accounts were kept are being filed as
+    /// the host starts; a turn about to resume one of them waits for it.
+    filing: Arc<(Mutex<bool>, std::sync::Condvar)>,
     /// Held to read while a turn starts, from choosing its account until its
     /// process is registered, and to write while an account is freed for
     /// removal, so removal never misses a turn starting on it.
@@ -523,6 +526,7 @@ impl TurnRuntime {
                 on_account_switch: Mutex::new(None),
                 explained_switches: Mutex::new(HashSet::new()),
                 account_gate: std::sync::RwLock::new(()),
+                filing: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
             }),
         }
     }
@@ -578,6 +582,20 @@ impl TurnRuntime {
         Ok(())
     }
 
+    /// Marks earlier sessions as being filed until [`Self::filed`].
+    pub(crate) fn filing(&self) {
+        if let Ok(mut done) = self.inner.filing.0.lock() {
+            *done = false;
+        }
+    }
+
+    pub(crate) fn filed(&self) {
+        if let Ok(mut done) = self.inner.filing.0.lock() {
+            *done = true;
+        }
+        self.inner.filing.1.notify_all();
+    }
+
     pub(crate) fn set_account_switch_handler(&self, handler: AccountSwitchHandler) {
         if let Ok(mut current) = self.inner.on_account_switch.lock() {
             *current = Some(handler);
@@ -589,10 +607,39 @@ impl TurnRuntime {
     /// session cannot: its reasoning is sealed to the account that wrote it,
     /// so the new account starts a session with the conversation's text.
     fn place_on_account(&self, turn: &mut TurnSpec) -> Result<(), String> {
+        // A Codex session from before accounts were kept is being filed as the
+        // host starts: wait for that, then read where it was filed.
+        if turn.backend == "codex"
+            && turn.session_id.is_some()
+            && turn
+                .session_account
+                .as_deref()
+                .is_some_and(|stored| !stored.contains('#'))
+        {
+            let (done, filed) = &*self.inner.filing;
+            if let Ok(done) = done.lock() {
+                let _ = filed.wait_timeout_while(done, Duration::from_secs(30), |done| !*done);
+            }
+            if let Ok(Some(filed)) = self
+                .inner
+                .store
+                .session_account(&turn.chat_id, &turn.session_backend)
+            {
+                turn.session_account = Some(filed);
+            }
+        }
         let chat_account = turn
             .session_account
             .as_deref()
             .map(crate::accounts::tag_account);
+        // An added Codex account not read since the host started is read now,
+        // before the choice passes it over and the chat loses its session.
+        if turn.backend == "codex"
+            && turn.session_id.is_some()
+            && let Some(own) = chat_account.filter(|own| *own != crate::accounts::DEFAULT_ACCOUNT)
+        {
+            self.inner.auth.confirm_login(&turn.backend, own);
+        }
         let mut choice = self.inner.auth.choose(&turn.backend, chat_account);
         // A Codex session about to be resumed must be resumed as the login
         // that wrote it, so that login is read again first when it may be

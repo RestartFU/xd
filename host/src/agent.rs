@@ -602,6 +602,10 @@ impl ClaudeParser {
             Some("rate_limit_event") => {
                 if let Some(rejected) = claude_limit_rejected(&root) {
                     self.limit_rejected = rejected;
+                    if !rejected {
+                        self.limit_resets_at_ms = None;
+                        self.limit_kind = None;
+                    }
                     if rejected {
                         let info = &root["rate_limit_info"];
                         self.limit_resets_at_ms = info["resetsAt"]
@@ -652,6 +656,9 @@ impl ClaudeParser {
             Some("result") => {
                 let mut events = Vec::new();
                 let limit_rejected = std::mem::take(&mut self.limit_rejected);
+                // What Claude said about the limit belongs to this result only.
+                let limit_resets_at_ms = self.limit_resets_at_ms.take();
+                let limit_kind = self.limit_kind.take();
                 // A steer ends the run it interrupts with one of these, which
                 // is not the end of the turn however it is flagged.
                 if !self.unread_steers.is_empty()
@@ -687,8 +694,8 @@ impl ClaudeParser {
                 if failed {
                     if claude_usage_limited(&root, limit_rejected) {
                         events.push(AgentEvent::UsageLimit {
-                            resets_at_ms: self.limit_resets_at_ms.take(),
-                            limit: self.limit_kind.take(),
+                            resets_at_ms: limit_resets_at_ms,
+                            limit: limit_kind,
                         });
                         events.push(AgentEvent::Resumable);
                     }

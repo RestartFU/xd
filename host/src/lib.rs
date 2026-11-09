@@ -1321,17 +1321,29 @@ impl Engine {
         // Codex sessions from before accounts were kept are filed under the
         // login Codex has as the host starts, so a later change of login is
         // caught for them too rather than resumed across.
-        // Before any request is served, so no turn can prepare one of them
-        // while it is still unfiled. A local read, quick when Codex answers.
-        // When the login cannot be read they are filed as an unknown login:
-        // then a later login never takes them for its own.
-        if let Some(store) = self.store.as_ref() {
-            let tag = self
-                .auth
-                .read_own_codex_login()
-                .unwrap_or_else(|| format!("{}#?", accounts::DEFAULT_ACCOUNT));
-            if let Err(error) = store.claim_unfiled_sessions("codex", &tag) {
-                eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
+        // Off the startup path, so a slow Codex cannot hold up the socket; a
+        // turn about to resume one of them waits for this instead. When the
+        // login cannot be read they are filed as an unknown login: then a
+        // later login never takes them for its own.
+        if let (Some(store), Some(runtime)) = (self.store.clone(), self.runtime.clone()) {
+            runtime.filing();
+            let auth = self.auth.clone();
+            let spawned = thread::Builder::new()
+                .name("xd-file-sessions".into())
+                .spawn({
+                    let runtime = runtime.clone();
+                    move || {
+                        let tag = auth
+                            .read_own_codex_login()
+                            .unwrap_or_else(|| format!("{}#?", accounts::DEFAULT_ACCOUNT));
+                        if let Err(error) = store.claim_unfiled_sessions("codex", &tag) {
+                            eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
+                        }
+                        runtime.filed();
+                    }
+                });
+            if spawned.is_err() {
+                runtime.filed();
             }
         }
         let Some(runtime) = self.runtime.as_ref() else {

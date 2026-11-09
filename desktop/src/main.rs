@@ -7764,6 +7764,8 @@ impl XdDesktop {
             return;
         };
         let input = self.auth_input_text.trim().to_owned();
+        // A new attempt: the last one's error no longer applies.
+        self.account_error = None;
         if input.is_empty() {
             return;
         }
