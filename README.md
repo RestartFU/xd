@@ -1,155 +1,150 @@
-# xd
+<p align="center">
+  <img src="data/icons/hicolor/scalable/apps/com.restartfu.Xd.svg" width="88" alt="xd">
+</p>
 
-A local-first desktop workspace for user-installed Codex and Claude Code.
+<h1 align="center">xd</h1>
 
-![xd sessions](docs/assets/xd-sessions.png)
+<p align="center">
+  A local-first desktop workspace for user-installed Codex and Claude Code.
+  <br>
+  Run many agents across projects and worktrees, side by side with their diffs, terminals, and browser.
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#features">Features</a> ·
+  <a href="#documentation">Docs</a> ·
+  <a href="https://github.com/RestartFU/xd/releases/latest">Latest release</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/workspace-redesign/desktop-workbench-dark-after.png" alt="xd with a chat, its pending changes, and a shell terminal open together">
+</p>
+
+xd doesn't ship a model or an agent. It wraps the CLIs, logins, and configuration
+you already have in one persistent workspace. A single daemon owns every session,
+so work keeps running when you close the window, and you can reach it from another
+computer or your Android phone.
+
+## Features
+
+### Chat with your agents
+
+- **Native chat** for Codex and Claude Code: streamed replies, activity cards for
+  tool calls and shell runs, queued messages, and inline approvals and questions
+  showing the command or diff they would apply.
+- **Live subagent cards** show each delegated agent's model, current step, tools,
+  tokens, and elapsed time, and keep its report once it finishes. Stop a Claude
+  agent or send it to the background from its card.
+- **Background work stays visible.** A chat whose agent still has background agents
+  or shells running shows as waiting on them, with each task's latest output.
+- **Attachments both ways.** Attach files with the paperclip, by dropping them, or
+  by pasting an image. Images an agent names in a reply appear in the chat.
+
+### Work side by side
+
+- **Project → session → chat tabs.** Each session gets its own branch or Git
+  worktree, and its chat tabs share that workspace.
+- **Side pane and terminal** next to every chat: an integrated browser, files, and
+  changes on the side, a shell below, all resizable and remembered per chat.
+- **Pull requests in place.** Projects, worktrees, branches, and pull requests live
+  in one sidebar.
+- **Settle finished sessions** with one click. Idle and merged sessions settle by
+  themselves, even while the app is closed.
+
+### Anywhere, on your terms
+
+- **One persistent daemon** owns local and remote sessions; clients come and go.
+- **Direct remote connections** over pinned TLS, with expiring pairing codes and
+  revocable devices. No relay, no SSH.
+- **An Android app** with the same projects, chats, approvals, terminal, and usage.
+- **Usage and limits** (<kbd>Ctrl</kbd>+<kbd>U</kbd>): cost and tokens by provider,
+  model, and day, plus your Codex and Claude subscription limits across accounts.
+- **Uses your own tools.** xd discovers your installed CLIs and reuses their
+  authentication and configuration. Dark and light themes included.
 
 <table>
   <tr>
-    <td><img src="docs/assets/xd-projects.png" alt="Projects and sessions"></td>
-    <td><img src="docs/assets/xd-terminal.png" alt="Persistent terminal"></td>
+    <td width="78%"><img src="docs/assets/usage-limits/desktop-cost-full-page-dark-after.png" alt="The Usage page with daily cost by provider and a breakdown by model"></td>
+    <td width="22%"><img src="docs/assets/workspace-redesign/android-phone-chat-dark-after.png" alt="The same chat in the Android app"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Cost and tokens on the Usage page</sub></td>
+    <td align="center"><sub>The same chat on Android</sub></td>
   </tr>
 </table>
 
-
-## Highlights
-
-- Native chat for Codex and Claude Code, with streamed replies, activity cards, queues, and optional shell panes.
-- Attach files to a message with the paperclip, by dropping them on the chat, or by pasting an image. PNGs go to the agent as images; any other file is saved on the host and the agent reads it from there.
-- Agents can show you images: a screenshot or chart they name in a reply appears in the chat, on desktop and Android, even after the original file is gone.
-- Live subagent cards: each delegated agent shows its model, current step, tools, tokens, and elapsed time, and keeps its task, steps, and report once it finishes. Claude agents can be stopped or sent to the background from the card.
-- A chat whose turn has ended while its Claude agent still runs background agents or shells shows as waiting on them, with how many, until the last one finishes or the agent stops. Expand the waiting row to see each task’s description, elapsed time and latest output, with errors highlighted. Output refreshes while expanded. This shows on desktop and Android.
-- Tool approvals and questions inline in the chat, with the command or diff they would apply, on desktop and Android.
-- One persistent daemon owns local and remote sessions; work continues when clients disconnect.
-- Direct remote connections over pinned TLS, with expiring pairing codes and revocable devices.
-- Projects, Git worktrees, branches, and pull requests in one workspace.
-- Settle finished sessions with one click: they move to a Settled shelf and come back when you message them. Idle and merged sessions settle by themselves, even while the app is closed.
-- An integrated browser with separate tabs for each chat and shared site data.
-  Swipe horizontally on a supported touchpad to go back or forward.
-- Uses your installed CLI tools, authentication, and configuration.
-- A Usage page beside Settings (Ctrl+U), and in the Android app: cost and tokens by provider, model, and day, plus your Codex and Claude subscription limits.
-- Dark and light themes, chosen in Settings.
-
-Each chat remembers its browser pages and whether the side pane is open. The
-session header has two layout controls: side pane and bottom terminal. The side
-pane starts with a browser page; use its `+` menu to add another page, Files, or
-Changes. The bottom control opens a shell terminal below the chat. Both panes
-can stay open together, and hiding them keeps their content. Hover over either
-layout icon to see its label.
-
-Hover over a session in the sidebar and press its check mark to settle it, or use
-its right-click menu. The session moves to the **Settled** shelf below your
-projects without being deleted, and **Undo** appears beside the sidebar's Settings
-button for five seconds. If it was the open session, the next one down opens. A
-session can't be settled while it is running, has a queued message, or is waiting
-on an approval or question.
-
-Press a settled session's undo arrow to bring it back. Sending it a message does
-the same, and hands it back to the automatic rules. By default the host settles
-sessions after three days without activity and when their pull request merges or
-closes; change this in **Settings → General → Auto-settle**. Those rules belong to
-the host, so they keep running while the app is closed, and each host keeps its
-own. To keep one session out of them, choose **Disable auto-settle** from its
-right-click menu. Settling only changes where a session is listed: its terminals
-and anything its agent is still doing keep running. The host stops an agent's
-process once it has nothing left to do, within two minutes of settling or after 30
-idle minutes otherwise, and the next message resumes the conversation. On Android,
-settle a session from its **⋮** menu or the chat tab menu; the **Settled** shelf
-sits below the projects, and the auto-settle rules are in Settings.
-
-The host can also delete sessions for you. In **Settings → General →
-Auto-delete**, turn on **Auto-delete inactive sessions** and choose how many
-days a session may sit idle; it is off until you do, because deleting can't be
-undone. The session goes with its chats and terminals, and so does the worktree
-xd made for it, but its branch and every commit on it stay in the repository. A
-worktree with uncommitted changes or untracked files keeps its whole session
-until you commit or clean it up, and so do commits on a detached HEAD that no
-branch holds. Using a session's terminal counts as activity. Sessions you've kept out of auto-settle are not
-deleted, and neither is one you brought back from the **Settled** shelf, until
-it sees new activity.
-
-## Memory limits
-
-On Linux, a container's memory limit can be set to stop every process in it at
-once when it runs out (cgroup v2 `memory.oom.group`). There, a single heavy
-build would take down the daemon, every chat and every terminal. When the host
-runs in such a container, it watches the memory the kernel cannot reclaim (page
-cache does not count) and, once that reaches 92% of the limit, stops the
-largest process tree of the same user in the container, such as a compiler or
-build tool, whether or not xd started it, and never an agent, a terminal shell
-or xd itself. The host log, and the chat the work ran under when there is one,
-say what was stopped. Set `XD_MEMORY_GUARD_PERCENT` to a
-value from 50 to 99 to change the threshold, or to `off` to turn this off.
-
 ## Install
 
-Linux x86_64:
+**Linux** (x86_64)
 
 ```sh
 curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install.sh | sh -s -- --release
 ```
 
-macOS:
+**macOS**
 
 ```sh
 curl -fsSL https://github.com/RestartFU/xd/releases/latest/download/install-macos.sh | sh -s -- --release
 ```
 
-Windows x86_64: download `xd-windows-x86_64.zip` from the
+**Windows** (x86_64): download `xd-windows-x86_64.zip` from the
 [latest release](https://github.com/RestartFU/xd/releases/latest), extract the
-whole archive, and run `xd.exe`. The desktop and browser run natively;
-local projects and persistent sessions run in your default WSL distribution.
-Install git, tmux, CA certificates, and your assistant CLIs
-inside WSL first. The included README has setup instructions and a WebView2
-Runtime installer helper. Set `XD_WSL_DISTRIBUTION` to select another distro.
+whole archive, and run `xd.exe`.
 
-Nightly desktop builds are available from the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly). The Android APK is included when signing credentials are configured.
-The Linux and macOS installers need no root access. Install the assistants you use separately and keep their commands on `PATH`.
+The Linux and macOS installers need no root access. Nightly desktop builds are on
+the [nightly release](https://github.com/RestartFU/xd/releases/tag/nightly), along
+with the Android APK when signing credentials are configured.
 
-## Installed assistants and updates
+<details>
+<summary><b>Windows notes</b></summary>
 
-Install and sign in to your assistant CLI on the machine running the xd host.
-xd discovers tools through your login shell and reuses their existing configuration
-and login state. For remote sessions, the CLI and login belong on the remote
-machine. Settings → **Assistant accounts** refreshes the CLI's current status.
-Agent binaries and separate copies of their credentials are not included in xd.
+The desktop and browser run natively; local projects and persistent sessions run in
+your default WSL distribution. Install git, tmux, CA certificates, and your
+assistant CLIs inside WSL first. The included README has setup instructions and a
+WebView2 Runtime installer helper. Set `XD_WSL_DISTRIBUTION` to select another
+distro.
 
-Installed Linux and macOS builds check their own release channel for app updates
-shortly after startup and every four minutes: nightly builds follow the nightly
-release and release builds follow tagged releases. Dev builds check the latest
-`master` commit every minute, and confirming an update builds that commit on your
-machine, which needs Docker on Linux. xd also compares installed Codex and
-Claude Code versions with their npm releases every 30 minutes; only the package
-names are sent. When something is out of date, an **Update** button appears beside
-the terminal and Settings buttons. It lists what will change, and nothing is
-installed until you confirm. **Settings → Updates** checks manually. Restart is
-blocked while chats are running, a chat's background agents or shells are still at
-work, or terminal tabs are open; close the terminal tabs first. Stored conversations can resume afterward. Turn on **Settings → General →
-Resume chats after a restart** to have xd continue any turn that a crash, reboot, or
-daemon stop cut off, the next time the app connects to that daemon, local or paired. With
-the setting off, connecting drops those waiting chats instead, so a later change of mind
-does not restart old work; the play button below still works. It posts a
-visible message in the chat and the agent continues with no prompt from you, so it
-is off by default. A resumed turn that is cut off again waits for you. After a turn is
-stopped, cut off, or ended by a usage limit, the composer's send button becomes a play
-button while the composer is empty; pressing it continues the chat. Updates always target the local
-machine, including while you are viewing a remote workspace. Source builds and
-Windows installations require a manual app update. Set `XD_DISABLE_AUTO_UPDATE=1`
-to disable background checks.
+</details>
 
-The CLI discovery and update behavior adapt portions of
-[T3 Code](https://github.com/pingdotgg/t3code) for xd's Rust backend.
-Its MIT notice is included in `data/licenses/t3code-LICENSE` and packaged builds.
+## Getting started
 
-## Build
+1. **Install your assistants.** Install and sign in to Codex and/or Claude Code on
+   the machine running the xd host, and keep their commands on `PATH`. Agent
+   binaries and credentials are not included in xd.
+2. **Add a project.** Press `+` beside **Projects** in the sidebar and choose a folder or repository.
+3. **Start a session** in it and send a message. Open more chat tabs, the side
+   pane, or the terminal as you go.
+4. **Pair another device** (optional): **Settings → Pair a device** on the host,
+   then paste the code into the remote desktop or Android app.
+
+Installed Linux and macOS builds update themselves: an **Update** button appears
+when a new xd, Codex, or Claude Code release is out, and nothing installs until you
+confirm.
+
+## Documentation
+
+| Guide | What it covers |
+| --- | --- |
+| [Sessions and layout](docs/sessions.md) | Side pane and terminal, settling, auto-settle, and auto-delete |
+| [The host](docs/host.md) | Assistant discovery, updates, resuming cut-off turns, memory limits |
+| [Remote connections](docs/remote.md) | Pairing devices, switching hosts, shared sessions, device management |
+| [Mobile development](docs/mobile.md) | The Android client and how it talks to the daemon |
+| [Protocol](docs/protocol.md) | The client–daemon wire protocol |
+
+## Build from source
 
 ```sh
 ./scripts/build.sh
 ./scripts/test.sh
 ```
 
-See [mobile development](docs/mobile.md) and [remote usage](docs/remote.md) for details.
-
 Windows builds use `scripts/build-windows.ps1` with a matching static Linux host
-from `scripts/build-windows-host.sh`. The `windows` GitHub Actions workflow
-builds and checks both parts, including a real Windows-to-WSL connection.
+from `scripts/build-windows-host.sh`. The `windows` GitHub Actions workflow builds
+and checks both parts, including a real Windows-to-WSL connection.
+
+## Acknowledgements
+
+The CLI discovery and update behavior adapt portions of
+[T3 Code](https://github.com/pingdotgg/t3code) for xd's Rust backend. Its MIT
+notice is included in `data/licenses/t3code-LICENSE` and packaged builds.
