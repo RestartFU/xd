@@ -62,8 +62,6 @@ import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -275,6 +273,12 @@ internal fun MinimalMobileApp(
     val showBottomNavigation = !expanded && !imeVisible && !chatOpen
     // The floating bar is drawn over the page, which keeps this much of its bottom clear.
     val barInset = if (showBottomNavigation) FloatingBarClearance else 0.dp
+    // Projects also stands in for a session that went away, so this follows the page shown.
+    val projectsShown = when (mobileDestination) {
+        MobileDestination.TERMINAL, MobileDestination.USAGE -> false
+        MobileDestination.SESSIONS -> activeSession == null
+        MobileDestination.PROJECTS -> true
+    }
 
     LaunchedEffect(operationError) {
         operationError?.let { snackbar.showSnackbar(it) }
@@ -394,7 +398,7 @@ internal fun MinimalMobileApp(
                     }
                     else -> MinimalProjectsHome(
                         model, settings, link, projects, tree.loading, tree.error, showTerminal,
-                        newSessionBesideBar = showBottomNavigation,
+                        newSessionAboveBar = showBottomNavigation,
                         actions = sessionActions,
                         onRenameProject = { renamingProjectId = it.id },
                         onDeleteProject = { deletingProject = it },
@@ -409,15 +413,10 @@ internal fun MinimalMobileApp(
                     )
                 }
                 if (showBottomNavigation) {
-                    BoxWithConstraints(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
-                        // Centred, unless that would run into Projects' New session button on a narrow window.
-                        val reserved = if (mobileDestination == MobileDestination.PROJECTS) FloatingBarClearance else 0.dp
-                        val overlap = (maxWidth + FloatingBarWidth) / 2 - (maxWidth - reserved)
-                        XdNavigationBar(
-                            mobileDestination, showProjects, showTerminal, showUsage,
-                            Modifier.align(Alignment.BottomCenter).offset(x = -overlap.coerceAtLeast(0.dp)),
-                        )
-                    }
+                    XdNavigationBar(
+                        mobileDestination, showProjects, showTerminal, showUsage,
+                        Modifier.align(Alignment.BottomCenter),
+                    )
                 }
             }
         }
@@ -427,7 +426,15 @@ internal fun MinimalMobileApp(
         Modifier
             .align(Alignment.BottomCenter)
             .navigationBarsPadding()
-            .padding(horizontal = 16.dp, vertical = if (showBottomNavigation) FloatingBarClearance else 24.dp),
+            .padding(
+                horizontal = 16.dp,
+                vertical = when {
+                    // Above Projects' New session button, as Material places snackbars over a FAB.
+                    showBottomNavigation && projectsShown -> NewSessionBottom + FloatingBarHeight + 8.dp
+                    showBottomNavigation -> FloatingBarClearance
+                    else -> 24.dp
+                },
+            ),
     )
     }
     if (settingsOpen) {
@@ -560,7 +567,7 @@ private fun MinimalProjectsHome(
     loading: Boolean,
     treeError: String?,
     onTerminal: () -> Unit,
-    newSessionBesideBar: Boolean,
+    newSessionAboveBar: Boolean,
     actions: SessionActions,
     onRenameProject: (MinimalProject) -> Unit,
     onDeleteProject: (MinimalProject) -> Unit,
@@ -644,7 +651,7 @@ private fun MinimalProjectsHome(
 
             else -> Box(Modifier.fillMaxSize()) { LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(12.dp, 14.dp, 12.dp, 96.dp),
+                contentPadding = PaddingValues(12.dp, 14.dp, 12.dp, if (newSessionAboveBar) NewSessionBottom + FloatingBarHeight + 12.dp else 96.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 (treeError ?: operationError)?.let { error ->
@@ -738,10 +745,10 @@ private fun MinimalProjectsHome(
                     }
                 }
             }
-            if (selected != null && newSessionBesideBar) {
-                // Level with the floating bar, so the page keeps one row of controls at its foot.
+            if (selected != null && newSessionAboveBar) {
+                // Just above the floating bar's right end, clear of it at any width.
                 // The tooltip's own layout drops alignment, so a plain box places it.
-                Box(Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
+                Box(Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = NewSessionBottom)) {
                     IconTooltip("New session") {
                         FloatingActionButton(
                             onClick = { createSessionIn = selected.id },
@@ -1114,18 +1121,18 @@ private fun ProductHeader(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
-/** Height of the floating bar and of the New session button beside it. */
+/** Height of the floating bar, and the size of the round New session button above it. */
 private val FloatingBarHeight = 60.dp
 
 /** What the floating bar covers at the foot of a page: its margin, its height, and a gap above it. */
 private val FloatingBarClearance = 16.dp + FloatingBarHeight + 12.dp
 
+/** Where the New session button's bottom sits: 8dp above the floating bar. */
+private val NewSessionBottom = 16.dp + FloatingBarHeight + 8.dp
+
 private val FloatingTabWidth = 56.dp
 private val FloatingTabGap = 4.dp
 private val FloatingBarPadding = 6.dp
-
-/** The bar's width with its three tabs. */
-private val FloatingBarWidth = FloatingBarPadding * 2 + FloatingTabWidth * 3 + FloatingTabGap * 2
 
 /**
  * Icon tabs between the top-level places, floating over the page on phones.

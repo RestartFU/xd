@@ -94,19 +94,15 @@ class ProjectsScreenshotTest {
         check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New session"), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
     }
 
-    /** A common narrow phone fits the bar and the round button side by side. */
     @Test @Config(qualifiers = "w360dp-h780dp-420dpi")
     fun narrowPhone() = longList("narrow-dark", MinimalThemePreset.DARK)
 
-    /** The narrowest phone window moves the bar aside rather than covering the button. */
     @Test @Config(qualifiers = "w320dp-h640dp-320dpi")
     fun narrowestPhone() = longList("narrowest-dark", MinimalThemePreset.DARK)
 
-    @Test fun barStaysCentredWithoutTheButton() = shoot("terminal-centred-dark", MinimalThemePreset.DARK) {
+    @Test fun barStaysCentredOnTerminal() = shoot("terminal-centred-dark", MinimalThemePreset.DARK) {
         click("Terminal")
-        val root = bounds { isRoot() }
-        val bar = bounds { hasContentDescription("Projects") }.left to bounds { hasContentDescription("Usage") }.right
-        check(kotlin.math.abs((bar.first - root.left) - (root.right - bar.second)) < 2f) { "bar $bar in $root" }
+        checkBarCentred()
     }
 
     @Test fun longListDark() = longList("long-list-dark", MinimalThemePreset.DARK)
@@ -123,12 +119,11 @@ class ProjectsScreenshotTest {
         try {
             shoot(name, theme) {
                 check(shows("Quota bars") && shows("New session"))
-                // The bar's last tab ends before the round button starts, so neither covers the other.
+                // The round button sits above the bar at any width, so neither covers the other.
                 val usage = bounds { hasContentDescription("Usage") }
                 val button = bounds { hasContentDescription("New session") }
-                check(usage.right < button.left && bounds { isRoot() }.left <= bounds { hasContentDescription("Projects") }.left) {
-                    "Usage tab $usage, New session $button"
-                }
+                check(button.bottom < usage.top) { "Usage tab $usage, New session $button" }
+                checkBarCentred()
             }
         } finally {
             longTree = false
@@ -257,6 +252,14 @@ class ProjectsScreenshotTest {
 
         /** Where the one node [matcher] picks sits on screen, merged with its children. */
         fun bounds(matcher: () -> SemanticsMatcher) = compose.onNode(matcher()).fetchSemanticsNode().boundsInRoot
+
+        /** The floating bar sits in the middle of the window. */
+        fun checkBarCentred() {
+            val root = bounds { isRoot() }
+            val left = bounds { hasContentDescription("Projects") }.left - root.left
+            val right = root.right - bounds { hasContentDescription("Usage") }.right
+            check(kotlin.math.abs(left - right) < 2f) { "bar is $left from the left and $right from the right" }
+        }
 
         fun shows(label: String): Boolean = matching(label).fetchSemanticsNodes().isNotEmpty()
 
