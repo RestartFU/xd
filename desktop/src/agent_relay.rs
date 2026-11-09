@@ -30,16 +30,20 @@ pub fn format(description: &str, address: &str, text: &str) -> String {
     )
 }
 
-/// The message to an agent that `content` carries, if it is one.
+/// The message to an agent that `content` carries, if it is one. Only the
+/// whole form counts, footer included, so a message that merely quotes the
+/// header stays an ordinary message.
 pub fn parse(content: &str) -> Option<Relay> {
-    let (first, rest) = content.split_once('\n').unwrap_or((content, ""));
+    let (first, rest) = content.split_once('\n')?;
     let header = first.strip_prefix(OPENING)?.strip_suffix(']')?;
     let (description, address) = header.rsplit_once(SEPARATOR)?;
     if address.is_empty() || address.contains(char::is_whitespace) {
         return None;
     }
-    let text = rest.trim_end();
-    let text = text.strip_suffix(FOOTER).unwrap_or(text).trim();
+    let text = rest.trim_end().strip_suffix(FOOTER)?.trim();
+    if text.is_empty() {
+        return None;
+    }
     Some(Relay {
         description: description.to_owned(),
         address: address.to_owned(),
@@ -91,12 +95,17 @@ mod tests {
     fn only_the_relay_form_is_a_relay() {
         assert_eq!(parse("Check tests too"), None);
         assert_eq!(parse("[xd: message for agent \"x\"]\nhi"), None);
-        assert_eq!(parse("[xd: message for agent \"x\" · id ]\nhi"), None);
+        assert_eq!(parse(&format("x", "", "hi")), None);
+        assert_eq!(parse(&format("x", "a b", "hi")), None);
         // Whitespace after the footer does not keep it in the words.
         let trailing = format!("{}\n  \n", format("x", "a1", "hi"));
         assert_eq!(parse(&trailing).unwrap().text, "hi");
-        // Without the footer, as someone might type it, it still reads.
-        let relay = parse("[xd: message for agent \"a · id b\" · id c]\nhi").unwrap();
+        // Quoting the header, or the form without its footer or words, is
+        // an ordinary message.
+        assert_eq!(parse("[xd: message for agent \"x\" · id a1]"), None);
+        assert_eq!(parse("[xd: message for agent \"x\" · id a1]\nhi"), None);
+        assert_eq!(parse(&format("x", "a1", "")), None);
+        let relay = parse(&format("a · id b", "c", "hi")).unwrap();
         assert_eq!(relay.description, "a · id b");
         assert_eq!(relay.address, "c");
         assert_eq!(relay.text, "hi");

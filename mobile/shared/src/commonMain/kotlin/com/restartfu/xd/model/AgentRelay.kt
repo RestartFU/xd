@@ -36,18 +36,24 @@ public data class AgentRelay(
 
         /** The relay a user message carries, or null when it is an ordinary message. */
         public fun parse(message: String): AgentRelay? {
+            // Only the whole form counts, footer included, so a message that
+            // merely quotes the header stays an ordinary message.
             val newline = message.indexOf('\n')
-            val head = if (newline < 0) message else message.substring(0, newline)
+            if (newline < 0) return null
+            val head = message.substring(0, newline)
             if (!head.startsWith(PREFIX) || !head.endsWith("]")) return null
             val separator = head.lastIndexOf(SEPARATOR)
             if (separator < PREFIX.length) return null
             val address = head.substring(separator + SEPARATOR.length, head.length - 1)
             if (address.isEmpty() || address.any { it.isWhitespace() }) return null
-            val body = if (newline < 0) "" else message.substring(newline + 1)
+            val body = message.substring(newline + 1).trimEnd()
+            if (!body.endsWith(FOOTER)) return null
+            val text = body.removeSuffix(FOOTER).trim()
+            if (text.isEmpty()) return null
             return AgentRelay(
                 description = head.substring(PREFIX.length, separator),
                 address = address,
-                text = body.trimEnd().removeSuffix(FOOTER).trim(),
+                text = text,
             )
         }
     }

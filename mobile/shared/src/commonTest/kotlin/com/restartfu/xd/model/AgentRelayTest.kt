@@ -39,8 +39,8 @@ class AgentRelayTest {
 
     @Test
     fun needsAnAddressWithoutSpaces() {
-        assertEquals(null, AgentRelay.parse("[xd: message for agent \"x\" · id ]\nhi"))
-        assertEquals(null, AgentRelay.parse("[xd: message for agent \"x\" · id a b]\nhi"))
+        assertEquals(null, AgentRelay.parse(AgentRelay.format("x", "", "hi")))
+        assertEquals(null, AgentRelay.parse(AgentRelay.format("x", "a b", "hi")))
     }
 
     @Test
@@ -51,17 +51,19 @@ class AgentRelayTest {
 
     @Test
     fun readsTheAddressAfterTheLastSeparator() {
-        val relay = AgentRelay.parse("[xd: message for agent \"a\" · id b\" · id c]\nhello")!!
+        val relay = AgentRelay.parse(AgentRelay.format("a\" · id b", "c", "hello").replace("a' · id b", "a\" · id b"))!!
         assertEquals("a\" · id b", relay.description)
         assertEquals("c", relay.address)
         assertEquals("hello", relay.text)
     }
 
     @Test
-    fun keepsABodyWithoutTheFooter() {
-        val relay = AgentRelay.parse("[xd: message for agent \"x\" · id 1]\n  just this  \n")!!
-        assertEquals("just this", relay.text)
-        assertEquals("", AgentRelay.parse("[xd: message for agent \"x\" · id 1]")!!.text)
+    fun needsTheWholeForm() {
+        // Quoting the header, or the form without its footer or words, is an
+        // ordinary message.
+        assertNull(AgentRelay.parse("[xd: message for agent \"x\" · id 1]"))
+        assertNull(AgentRelay.parse("[xd: message for agent \"x\" · id 1]\n  just this  \n"))
+        assertNull(AgentRelay.parse(AgentRelay.format("x", "1", "  ")))
     }
 
     @Test
