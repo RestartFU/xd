@@ -1202,16 +1202,24 @@ impl BrowserTab {
         }
         match NativeBrowser::create(window, self.display.events.clone()) {
             Ok(native) => {
-                *self.display.native.borrow_mut() = Some(Rc::new(native));
+                let native = Rc::new(native);
+                *self.display.native.borrow_mut() = Some(native.clone());
                 self.engine_failed = false;
                 self.error = None;
-                match self.url.clone() {
-                    Some(url) => self.navigate(&url, cx),
-                    None => {
-                        self.refresh_visibility();
-                        cx.notify();
-                    }
+                // Load the tab's page without touching the address field, which
+                // the user may be editing.
+                if let Some(url) = self.url.clone() {
+                    let events = self.display.events.clone();
+                    native.with_view(move |view| {
+                        if let Err(error) = view.load_url(&url) {
+                            events
+                                .send(NativeEvent::Error(format!("Could not open page: {error}")));
+                        }
+                    });
+                    self.start_loading(cx);
                 }
+                self.refresh_visibility();
+                cx.notify();
                 false
             }
             Err(error) => {
