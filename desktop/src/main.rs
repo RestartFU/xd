@@ -2130,6 +2130,9 @@ struct XdDesktop {
     agent_input: Entity<FileEditor>,
     /// What is typed to each agent, by record key.
     agent_drafts: HashMap<String, String>,
+    /// The agent whose draft the box holds. Every agent shares one box, so
+    /// it is filled from `agent_drafts` whenever it is drawn for another.
+    agent_input_key: Option<String>,
     agent_scroll: ScrollHandle,
     /// Holds focus in an agent tab that has no box to type in, so actions
     /// dispatched from it still reach the window.
@@ -2458,7 +2461,7 @@ impl XdDesktop {
         let agent_input = cx.new(|cx| FileEditor::message(cx, "Message this agent…"));
         cx.subscribe(&agent_input, |this, _, event, cx| match event {
             EditorEvent::Changed(text) => {
-                if let Some((_, key)) = this.open_agent.clone() {
+                if let Some(key) = this.agent_input_key.clone() {
                     this.agent_drafts.insert(key, text.clone());
                 }
                 cx.notify();
@@ -2830,6 +2833,7 @@ impl XdDesktop {
             open_agent: None,
             agent_input,
             agent_drafts: HashMap::new(),
+            agent_input_key: None,
             agent_scroll: ScrollHandle::new(),
             agent_view_focus: cx.focus_handle(),
             pending_minimal_session: None,
@@ -10501,7 +10505,7 @@ impl XdDesktop {
                 format!("{text}\n{since}")
             };
             self.agent_drafts.insert(key.clone(), draft.clone());
-            if self.open_agent_key() == Some(key.as_str()) {
+            if self.agent_input_key.as_deref() == Some(key.as_str()) {
                 self.agent_input
                     .update(cx, |input, cx| input.set_text(draft, cx));
             }
@@ -15862,13 +15866,11 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let draft = self.agent_drafts.get(&key).cloned().unwrap_or_default();
         let can_message = self
             .find_agent(&key)
             .is_some_and(|view| agent_relay::address(&view).is_ok());
+        self.load_agent_input(&key, cx);
         self.open_agent = Some((chat, key));
-        self.agent_input
-            .update(cx, |input, cx| input.set_text(draft, cx));
         if can_message {
             window.focus(&self.agent_input.read(cx).focus_handle(cx));
         } else {
@@ -15876,6 +15878,14 @@ impl XdDesktop {
         }
         self.agent_scroll.scroll_to_bottom();
         cx.notify();
+    }
+
+    /// Fills the shared box with what is typed to the agent at `key`.
+    fn load_agent_input(&mut self, key: &str, cx: &mut Context<Self>) {
+        let draft = self.agent_drafts.get(key).cloned().unwrap_or_default();
+        self.agent_input_key = Some(key.to_owned());
+        self.agent_input
+            .update(cx, |input, cx| input.set_text(draft, cx));
     }
 
     fn close_agent_tab(&mut self, key: &str, cx: &mut Context<Self>) {
@@ -15887,6 +15897,9 @@ impl XdDesktop {
         }
         if self.open_agent_key() == Some(key) {
             self.open_agent = None;
+        }
+        if self.agent_input_key.as_deref() == Some(key) {
+            self.agent_input_key = None;
         }
         self.agent_drafts.remove(key);
         cx.notify();
@@ -15994,6 +16007,9 @@ impl XdDesktop {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
+        if can_message && self.agent_input_key.as_deref() != Some(key) {
+            self.load_agent_input(key, cx);
+        }
         if can_message && (composer_focused || self.agent_view_focus.is_focused(window)) {
             window.focus(&input_focus);
         } else if !can_message && (composer_focused || input_focus.is_focused(window)) {
@@ -22355,13 +22371,20 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(relay.description, "Read the 'parser'");
         assert_eq!(relay.text, "Check the lexer too");
         desktop.update(cx, |desktop, cx| {
-            // A send the host turns away puts the words back in the agent's box.
+            // A send the host turns away puts the words back in the agent's
+            // box, even while another chat is in front.
             desktop
                 .agent_drafts
                 .insert("toolu_1".into(), "typed since".into());
+            let shown = desktop.open_agent.take();
             desktop.restore_pending_send(cx);
+            desktop.open_agent = shown;
             assert_eq!(
                 desktop.agent_drafts["toolu_1"],
+                "Check the lexer too\ntyped since"
+            );
+            assert_eq!(
+                desktop.agent_input.read(cx).text(),
                 "Check the lexer too\ntyped since"
             );
             assert!(desktop.composer.is_empty());
