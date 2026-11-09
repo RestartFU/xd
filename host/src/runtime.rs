@@ -122,6 +122,8 @@ enum Feed {
     /// A message for the running turn. It travels with the output so the turn
     /// handles it in order, between one line and the next.
     Steer(String),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Subagent(Box<SubagentPatch>),
     End,
 }
 
@@ -185,6 +187,7 @@ enum LineSource {
 enum NextLine {
     Line,
     Steer(String),
+    Subagent(Box<SubagentPatch>),
     End,
     Quiet,
     Failed,
@@ -220,6 +223,7 @@ impl LineSource {
                         NextLine::Line
                     }
                     Feed::Steer(prompt) => NextLine::Steer(prompt),
+                    Feed::Subagent(patch) => NextLine::Subagent(patch),
                     Feed::End => NextLine::End,
                 }
             }
@@ -1180,6 +1184,45 @@ impl TurnRuntime {
         }
     }
 
+    /// Observe script-launched assistants even while stdout is silent or the
+    /// parent turn has ended. The session owns this observer, not any one turn.
+    #[cfg(target_os = "linux")]
+    fn spawn_process_observer(
+        inner: Weak<RuntimeInner>,
+        chat_id: String,
+        router: Arc<Mutex<Router>>,
+        pid: u32,
+    ) {
+        let _ = thread::Builder::new().name(format!("xd-agent-processes-{chat_id}"))
+            .spawn(move || {
+                let mut tracker = crate::process_delegation::Tracker::default();
+                loop {
+                    thread::sleep(Duration::from_millis(500));
+                    let snapshot = tracker.poll(pid);
+                    let Some(inner) = inner.upgrade() else { return; };
+                    let runtime = TurnRuntime { inner };
+                    let Ok(router) = router.lock() else { return; };
+                    if router.released || !router.child.lock().is_ok_and(|mut child| {
+                        matches!(child.try_wait(), Ok(None))
+                    }) { return; }
+                    let Some((started, ended)) = snapshot else { continue; };
+                    let patches = started.into_iter().map(|(key, agent)| {
+                        agent.started(&key, "Codex", None)
+                    }).chain(ended.into_iter().map(|key| SubagentPatch {
+                        status: Some(SubagentStatus::Completed),
+                        summary: Some("Process exited. Its result and exit status were not reported to xd.".into()),
+                        ..SubagentPatch::new(key)
+                    }));
+                    for patch in patches {
+                        if let Some(sink) = &router.sink
+                            && sink.send(Feed::Subagent(Box::new(patch.clone()))).is_ok()
+                        { continue; }
+                        runtime.idle_subagent(&chat_id, &router.template.workdir, patch);
+                    }
+                }
+            });
+    }
+
     /// Reads a kept process for its whole life.
     fn spawn_reader(
         inner: Weak<RuntimeInner>,
@@ -1284,6 +1327,9 @@ impl TurnRuntime {
             match feed {
                 Feed::Line(line) => unread.push(line),
                 Feed::Steer(prompt) => steers.push(prompt),
+                Feed::Subagent(patch) => {
+                    self.idle_subagent(chat_id, &router.template.workdir, *patch)
+                }
                 Feed::End => break,
             }
         }
@@ -1492,6 +1538,15 @@ impl TurnRuntime {
             released: false,
             tasks: crate::background_tasks::Tasks::default(),
         }));
+        #[cfg(target_os = "linux")]
+        if backend == "codex" {
+            Self::spawn_process_observer(
+                Arc::downgrade(&self.inner),
+                chat_id.to_owned(),
+                router.clone(),
+                pid,
+            );
+        }
         Self::spawn_reader(
             Arc::downgrade(&self.inner),
             chat_id.to_owned(),
@@ -1784,8 +1839,9 @@ impl TurnRuntime {
             } else {
                 source.next(&mut line)
             };
-            match next {
-                NextLine::Line => {}
+            let observed = match next {
+                NextLine::Subagent(patch) => Some(AgentEvent::Subagent(*patch)),
+                NextLine::Line => None,
                 NextLine::Steer(prompt) => {
                     close_segment!();
                     // Whatever the agent was saying no longer stands, so a
@@ -1860,9 +1916,9 @@ impl TurnRuntime {
                     latest_error = Some(format!("Cannot read {} output.", turn.backend));
                     break;
                 }
-            }
+            };
             let line = line.trim_end_matches(['\r', '\n']).to_owned();
-            for event in parser.feed(&line) {
+            for event in observed.map_or_else(|| parser.feed(&line), |event| vec![event]) {
                 match event {
                     AgentEvent::Ready => {
                         progress.ready.store(true, Ordering::Release);
@@ -3854,6 +3910,55 @@ echo '{"type":"result","subtype":"success","result":"Answer."}'"#;
             unsafe { std::env::remove_var("XD_CLAUDE_EXECUTABLE") };
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn script_agent_updates_reach_active_and_idle_chats() {
+        let agent = KeptAgent::new(&format!(
+            "read turn\n{}\npython3 \"$ROOT/wrapper.py\" \"$ROOT\" &\nwhile [ ! -f \"$ROOT/end-turn\" ]; do sleep 0.05; done\n{}\nwhile read turn; do :; done",
+            KeptAgent::INIT,
+            KeptAgent::ANSWER,
+        ));
+        std::fs::write(agent.root.join("wrapper.py"), r#"
+import pathlib, subprocess, sys, time
+p = subprocess.Popen(['claude', '-p', '-c', 'read -r line'], executable='/bin/bash', stdin=subprocess.PIPE)
+while not (pathlib.Path(sys.argv[1]) / 'end-child').exists():
+    time.sleep(0.05)
+p.communicate(b'done\n')
+"#).unwrap();
+        agent.send("review");
+        let router = agent.runtime.router(&agent.chat).unwrap();
+        let pid = agent.child().lock().unwrap().id();
+        TurnRuntime::spawn_process_observer(
+            Arc::downgrade(&agent.runtime.inner),
+            agent.chat.clone(),
+            router,
+            pid,
+        );
+        let records = || {
+            contents(&agent.store, &agent.chat)
+                .into_iter()
+                .filter_map(|(_, text)| crate::subagent::decode(&text))
+                .collect::<Vec<_>>()
+        };
+        wait_for("the running script agent", || {
+            records().iter().any(|r| r["status"] == "running")
+        });
+        assert!(agent.runtime.live_turn(&agent.chat).is_some());
+        std::fs::write(agent.root.join("end-turn"), "").unwrap();
+        agent.wait_for_turn_end();
+        std::fs::write(agent.root.join("end-child"), "").unwrap();
+        wait_for("the idle completion", || {
+            records().iter().any(|r| r["status"] == "completed")
+        });
+        assert_eq!(records().len(), 1);
+        assert!(
+            records()[0]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("not reported")
+        );
     }
 
     #[cfg(unix)]

@@ -34,6 +34,8 @@ mod model_catalog;
 mod owner_icon;
 mod pairing;
 mod private_fs;
+#[cfg(target_os = "linux")]
+mod process_delegation;
 mod process_tree;
 mod reply_images;
 mod repository_monitor;

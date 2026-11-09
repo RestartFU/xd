@@ -56,6 +56,19 @@ pub fn detect(command: &str) -> Option<Delegation> {
     detect_within(command, 0)
 }
 
+/// Classifies an actual argv without interpreting spaces or metacharacters in
+/// its arguments as shell syntax. Shell executables still unwrap their script.
+#[cfg(target_os = "linux")]
+pub(crate) fn detect_argv(args: &[String]) -> Option<Delegation> {
+    classify(
+        &Segment {
+            words: args.to_vec(),
+            ..Segment::default()
+        },
+        0,
+    )
+}
+
 fn detect_within(script: &str, depth: usize) -> Option<Delegation> {
     if depth > 2 {
         return None;
