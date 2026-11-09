@@ -615,6 +615,22 @@ impl TurnRuntime {
                 unconfirmed = turn.session_id.is_some();
             }
         }
+        // The user's own Claude settings reach an added account before a new
+        // process starts as it, while nothing else runs as it: Claude writes
+        // the same file without a lock xd can take. Process starts register
+        // under the sessions lock, so none can begin during the copy.
+        if turn.backend == "claude"
+            && choice.account != crate::accounts::DEFAULT_ACCOUNT
+            && let Ok(sessions) = self.inner.sessions.lock()
+            && !sessions
+                .values()
+                .any(|session| crate::accounts::tag_account(&session.account) == choice.account)
+        {
+            self.inner
+                .auth
+                .accounts()
+                .share_settings_while_idle(&turn.backend, &choice.account);
+        }
         if choice.unavailable {
             return Err(format!(
                 "No {} account can take this turn. Sign in again in Settings, Agents, Accounts.",

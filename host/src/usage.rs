@@ -2488,6 +2488,7 @@ pub(crate) fn read_codex_login(environment: &[(String, String)]) -> Option<Ident
 /// Probes an account and records what it found. Returns who is signed in.
 pub(crate) fn check_account(accounts: &Accounts, provider: &str, id: &str) -> Option<Identity> {
     let now = now_ms();
+    let _lease = accounts.lease(provider, id)?;
     let environment = accounts.environment(provider, id);
     let account = probe_account(provider, &environment, now, Tz::UTC)?;
     let (identity, windows) = probe_reading(&account)?;
@@ -2686,8 +2687,10 @@ impl UsageService {
                         .map(move |(index, id)| (*provider, id, several.then_some(index + 1)))
                 })
                 .map(|(provider, id, rank)| {
+                    let lease = known.lease(provider, &id);
                     let environment = known.environment(provider, &id);
                     let probe = thread::spawn(move || {
+                        let _lease = lease?;
                         probe_account(provider, &environment, now, zone)
                     });
                     (provider, id, rank, probe)
@@ -2747,12 +2750,20 @@ impl UsageService {
             .ok_or_else(|| "A reset needs the account it was confirmed for.".to_owned())?
             .to_owned();
         let events = self.events.clone();
-        let environment = self
-            .accounts
-            .with_key("codex", &expected)
+        let account = self.accounts.with_key("codex", &expected);
+        let lease = match &account {
+            Some(id) => Some(
+                self.accounts
+                    .lease("codex", id)
+                    .ok_or_else(|| "That account was removed.".to_owned())?,
+            ),
+            None => None,
+        };
+        let environment = account
             .map(|id| self.accounts.environment("codex", &id))
             .unwrap_or_default();
         self.spawn("xd-usage-reset", move || {
+            let _lease = lease;
             let mut command = crate::background_process::command(crate::agent::resolve_codex());
             command.envs(environment.iter().map(|(name, value)| (name, value)));
             let event = match consume_codex_reset_credit(command, &key, Some(&expected)) {

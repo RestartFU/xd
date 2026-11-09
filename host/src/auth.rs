@@ -199,6 +199,15 @@ impl AuthManager {
         let spawned = thread::Builder::new()
             .name(format!("xd-auth-{provider}"))
             .spawn(move || {
+                // A removed account is not checked: the check would run in a
+                // home that is being deleted.
+                let Some(_lease) = manager
+                    .inner
+                    .accounts
+                    .lease(&checked_provider, &checked_account)
+                else {
+                    return;
+                };
                 let environment = manager
                     .inner
                     .accounts
@@ -289,6 +298,9 @@ impl AuthManager {
         if fresh || cfg!(test) {
             return true;
         }
+        let Some(_lease) = accounts.lease(provider, account) else {
+            return false;
+        };
         let environment = accounts.environment(provider, account);
         let started = now_ms();
         match crate::usage::read_codex_login(&environment) {
@@ -319,7 +331,9 @@ impl AuthManager {
     pub(crate) fn login(&self, provider: &str, account: Option<&str>) -> Result<(), String> {
         let provider = known_provider(provider)?;
         let account = account.unwrap_or(DEFAULT_ACCOUNT);
-        if !self.inner.accounts.exists(provider, account) {
+        if !self.inner.accounts.exists(provider, account)
+            || self.inner.accounts.pending(provider).as_deref() == Some(account)
+        {
             return Err("No such account.".into());
         }
         self.begin_session(provider, account, SessionKind::SignIn)
@@ -715,12 +729,26 @@ impl AuthManager {
     }
 
     fn finish_session(&self, provider: &str, serial: u64, result: Result<(), String>) {
-        let session = self.inner.sessions.lock().ok().and_then(|mut sessions| {
+        // A new account is checked before the provider's slot is given up, so
+        // no other sign-in can start in its home or race its outcome.
+        let adding = self.inner.sessions.lock().ok().and_then(|sessions| {
             sessions
-                .remove(provider)
+                .get(provider)
                 .filter(|session| session.serial == serial)
+                .filter(|session| session.kind == SessionKind::Add && !session.cancelled)
+                .map(|session| session.account.clone())
         });
-        let Some(session) = session else {
+        if let Some(account) = adding.filter(|_| result.is_ok()) {
+            self.inner.accounts.forget_login_reading(provider, &account);
+            let added = self.adopt(provider, &account);
+            self.release_slot(provider, serial);
+            self.publish(provider);
+            if added {
+                self.refresh_account(provider, &account);
+            }
+            return;
+        }
+        let Some(session) = self.release_slot(provider, serial) else {
             return;
         };
         let account = session.account.as_str();
@@ -738,7 +766,8 @@ impl AuthManager {
                 self.forget_snapshot(provider, account);
                 self.set_notice(provider, format!("Sign-in failed: {error}"));
             }
-            (SessionKind::Add, Ok(())) => self.adopt(provider, account),
+            // Adopted above, before the slot was released.
+            (SessionKind::Add, Ok(())) => {}
             (SessionKind::Remove, outcome) => {
                 // The home goes even if the CLI could not sign out, so no
                 // credential is left behind.
@@ -762,7 +791,8 @@ impl AuthManager {
     }
 
     /// Checks who a new sign-in belongs to before it joins the list.
-    fn adopt(&self, provider: &str, account: &str) {
+    /// Returns whether the account joined the list.
+    fn adopt(&self, provider: &str, account: &str) -> bool {
         self.set_snapshot(
             provider,
             account,
@@ -795,7 +825,7 @@ impl AuthManager {
                         accounts.label(provider, &existing)
                     ),
                 );
-                return;
+                return false;
             }
         }
         // An account whose login cannot be read is never taken in: it could be
@@ -810,7 +840,7 @@ impl AuthManager {
                 "xd could not confirm which account signed in, so it was not added. Try again."
                     .into(),
             );
-            return;
+            return false;
         };
         // Shared while the account is still pending: nothing can run as it yet,
         // so this cannot race Claude's own writes to the file.
@@ -821,9 +851,9 @@ impl AuthManager {
                     provider,
                     format!("Added {}.", accounts.label(provider, account)),
                 );
-                // Clears "checking" so the status check below really runs.
+                // Clears "checking" so the status check that follows really runs.
                 self.set_snapshot(provider, account, AuthSnapshot::unknown());
-                self.refresh_account(provider, account);
+                true
             }
             Ok(Err(existing)) => {
                 // Signing the duplicate out could sign the original out too,
@@ -834,11 +864,13 @@ impl AuthManager {
                     provider,
                     format!("{existing} is already in the list, so it was not added again."),
                 );
+                false
             }
             Err(error) => {
                 accounts.forget(provider, account);
                 self.forget_snapshot(provider, account);
                 self.set_notice(provider, error);
+                false
             }
         }
     }
@@ -858,6 +890,19 @@ impl AuthManager {
                 crate::usage::check_account(&manager.inner.accounts, &provider, &account);
                 manager.publish(&provider);
             });
+    }
+
+    /// Gives up the provider's sign-in slot if it is still this session's.
+    fn release_slot(&self, provider: &str, serial: u64) -> Option<AuthSession> {
+        let mut sessions = self.inner.sessions.lock().ok()?;
+        if sessions
+            .get(provider)
+            .is_some_and(|session| session.serial == serial)
+        {
+            sessions.remove(provider)
+        } else {
+            None
+        }
     }
 
     fn set_notice(&self, provider: &str, notice: String) {

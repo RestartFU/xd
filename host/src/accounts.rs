@@ -19,7 +19,8 @@ use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
+    time::Duration,
 };
 
 use serde_json::{Value, json};
@@ -287,6 +288,33 @@ struct Inner {
     providers: Mutex<HashMap<&'static str, Provider>>,
     /// Where the user's own provider homes are. Tests point these elsewhere.
     homes: Mutex<HashMap<&'static str, PathBuf>>,
+    /// Probes and checks running as each added account; see [`Lease`].
+    leases: Mutex<HashMap<String, usize>>,
+    released: Condvar,
+}
+
+/// Held while something other than a turn runs a CLI as an added account, so
+/// removing the account waits for it before deleting the home it writes to.
+pub(crate) struct Lease {
+    accounts: Option<Accounts>,
+    id: String,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let Some(accounts) = &self.accounts else {
+            return;
+        };
+        if let Ok(mut leases) = accounts.inner.leases.lock() {
+            if let Some(count) = leases.get_mut(&self.id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    leases.remove(&self.id);
+                }
+            }
+            accounts.inner.released.notify_all();
+        }
+    }
 }
 
 impl Accounts {
@@ -323,7 +351,42 @@ impl Accounts {
                 directory,
                 providers: Mutex::new(providers),
                 homes: Mutex::new(HashMap::new()),
+                leases: Mutex::new(HashMap::new()),
+                released: Condvar::new(),
             }),
+        }
+    }
+
+    /// A lease to run a CLI as the account, or `None` once it is gone.
+    pub(crate) fn lease(&self, provider: &str, id: &str) -> Option<Lease> {
+        if id == DEFAULT_ACCOUNT {
+            return Some(Lease {
+                accounts: None,
+                id: id.into(),
+            });
+        }
+        // Under the lease lock, so removal cannot slip between the check and
+        // the count it waits on.
+        let mut leases = self.inner.leases.lock().ok()?;
+        if !self.exists(provider, id) {
+            return None;
+        }
+        *leases.entry(id.to_owned()).or_default() += 1;
+        Some(Lease {
+            accounts: Some(self.clone()),
+            id: id.into(),
+        })
+    }
+
+    /// Shares the user's Claude settings with an added account while no check
+    /// runs as it. Holding the lease lock keeps one from starting meanwhile;
+    /// the caller makes sure no turn process runs as it.
+    pub(crate) fn share_settings_while_idle(&self, provider: &str, id: &str) {
+        let Ok(leases) = self.inner.leases.lock() else {
+            return;
+        };
+        if !leases.contains_key(id) {
+            self.share_settings(provider, id);
         }
     }
 
@@ -551,6 +614,10 @@ impl Accounts {
         let Some(home) = self.home(provider, id) else {
             return Vec::new();
         };
+        // A removed account's home stays gone: nothing is linked or made.
+        if !self.exists(provider, id) {
+            return Vec::new();
+        }
         // Found on first use: it waits on the user's login shell.
         let source = self.inner.homes.lock().ok().and_then(|mut homes| {
             let provider = PROVIDERS.iter().find(|known| **known == provider)?;
@@ -675,17 +742,32 @@ impl Accounts {
         if id == DEFAULT_ACCOUNT {
             return;
         }
-        let _ = self.update(provider, |state| {
-            state.accounts.retain(|account| account.id != id);
-            if state
-                .pending
-                .as_ref()
-                .is_some_and(|pending| pending.id == id)
-            {
-                state.pending = None;
+        // Out of the list under the lease lock: no new lease after this.
+        if let Ok(_leases) = self.inner.leases.lock() {
+            let _ = self.update(provider, |state| {
+                state.accounts.retain(|account| account.id != id);
+                if state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.id == id)
+                {
+                    state.pending = None;
+                }
+                Ok(())
+            });
+        }
+        // Probes time out well within this.
+        if let Ok(leases) = self.inner.leases.lock() {
+            let waited =
+                self.inner
+                    .released
+                    .wait_timeout_while(leases, Duration::from_secs(30), |leases| {
+                        leases.contains_key(id)
+                    });
+            if waited.is_ok_and(|(_, timeout)| timeout.timed_out()) {
+                eprintln!("xd: removing a {provider} account while a check still runs as it");
             }
-            Ok(())
-        });
+        }
         if let Some(home) = self.home(provider, id)
             && let Err(error) = fs::remove_dir_all(&home)
             && error.kind() != io::ErrorKind::NotFound
@@ -1532,6 +1614,29 @@ mod tests {
             accounts.choose("codex", None, |_| true, 5).account,
             DEFAULT_ACCOUNT
         );
+    }
+
+    #[test]
+    fn removal_waits_for_checks_and_hands_out_no_more_leases() {
+        let data = temp("lease");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let id = added(&accounts, "codex", "b@example.com");
+        let home = accounts.home("codex", &id).unwrap();
+        let lease = accounts.lease("codex", &id).unwrap();
+        assert!(accounts.inner.leases.lock().unwrap().contains_key(&id));
+        let removing = {
+            let accounts = accounts.clone();
+            let id = id.clone();
+            std::thread::spawn(move || accounts.forget("codex", &id))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(home.is_dir(), "the home stays while a check runs as it");
+        assert!(accounts.lease("codex", &id).is_none());
+        drop(lease);
+        removing.join().unwrap();
+        assert!(!home.exists());
+        assert!(accounts.environment("codex", &id).is_empty());
+        assert!(!home.exists(), "a late check does not make the home again");
     }
 
     #[test]

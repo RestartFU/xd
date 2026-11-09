@@ -873,6 +873,10 @@ Each account added in xd gets a private home under the host's data directory
 (`CODEX_HOME` or `CLAUDE_CONFIG_DIR`), where the CLI keeps its own credentials;
 the host never reads or sends a token. Everything else in the user's home
 (configuration, MCP servers, skills, session transcripts) is linked in and shared.
+Claude's `.claude.json` belongs to each account; the user's MCP servers and
+project settings are copied into it when the account is added and again before
+a new Claude process starts as it while nothing else runs as it. Removing an
+account waits for any check running as it before its home is deleted.
 
 Each provider in `agent-auth` and each `agent-auth-changed` event has the
 pre-accounts members `provider`, `display_name`, `state`, `needs_input`, and
