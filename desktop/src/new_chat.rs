@@ -1684,6 +1684,18 @@ mod start_tests {
             })
         });
         assert_closed(&desktop, &pane, cx);
+
+        // A browser closed by its toggle just before, with no frame drawn in
+        // between, does not take the focus from the message box either.
+        desktop.update(cx, |desktop, cx| desktop.cancel_chat_create(cx));
+        let pane = open_browser(&desktop, cx);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.toggle_browser(cx);
+                desktop.begin_chat_create("atlas".into(), window, cx)
+            })
+        });
+        assert_closed(&desktop, &pane, cx);
     }
 
     #[gpui::test]
