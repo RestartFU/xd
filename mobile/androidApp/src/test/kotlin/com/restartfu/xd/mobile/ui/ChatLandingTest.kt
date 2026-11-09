@@ -16,9 +16,11 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.swipe
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.XdClient
@@ -97,16 +99,39 @@ class ChatLandingTest {
     }
 
     @Test
-    fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = withApp {
-        click(TITLE)
-        waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
-        // A short, slow swipe, as a reader scrolls back inside the long reply:
-        // its rows stay in view, and only the reader's own scrolling stops the follow.
+    fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives {
+        // A short, slow swipe, as a reader scrolls back inside the long reply.
         compose.onNode(hasScrollToIndexAction()).performTouchInput {
             swipe(center, center + Offset(0f, 400f), durationMillis = 1000)
         }
+    }
+
+    @Test
+    fun aScreenReaderScrollBackIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives {
+        // TalkBack scrolls the list through its semantics action, not a gesture.
+        compose.onNode(hasScrollToIndexAction()).performSemanticsAction(SemanticsActions.ScrollBy) { it(0f, -400f) }
+    }
+
+    @Test
+    fun aJumpBackToAnEarlierRowIsLeftThereWhenAReplyArrives() = scrolledBackThenReplyArrives(insideReply = false) {
+        // Accessibility services can also jump to a row, which moves the
+        // list without any scrolling gesture at all.
+        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
+    }
+
+    /**
+     * Lands on the newest reply, scrolls back with [scrollBack] (inside that
+     * reply, or past it), and checks that a reply arriving then leaves the
+     * list where it was.
+     */
+    private fun scrolledBackThenReplyArrives(insideReply: Boolean = true, scrollBack: () -> Unit) = withApp {
+        click(TITLE)
+        waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
+        scrollBack()
         settle()
-        check(!endOnScreen(LAST_LINE_OF_LATEST) && shows(LAST_LINE_OF_LATEST)) { "The swipe did not scroll back inside the reply" }
+        check(!endOnScreen(LAST_LINE_OF_LATEST) && shows(LAST_LINE_OF_LATEST) == insideReply) {
+            "Did not scroll back to where the test meant to"
+        }
         val before = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode()
             .config[SemanticsProperties.VerticalScrollAxisRange].value()
         arrive()

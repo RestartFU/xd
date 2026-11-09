@@ -1,10 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
 import android.app.Activity
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalUriHandler
@@ -47,6 +43,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListLayoutInfo
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -75,6 +72,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -227,18 +225,20 @@ internal fun ChatScreen(
     val waitingOn = if (state.working) 0 else backgroundTasks
     val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
-    // Whether new output keeps the end in view. Only the reader's own drags
-    // and flings change it (scrolling from code is not nested scrolling), so
-    // a follow still animating when the next words arrive keeps following,
-    // and a reader who scrolled back inside a long reply is left there.
+    // Whether new output keeps the end in view. It stops when the list moves
+    // back from the end with nothing else changed: following only ever
+    // scrolls forward, so that is the reader, by touch, wheel, keyboard or
+    // accessibility action. It resumes whenever the end is in view again. A
+    // follow still animating when the next words arrive keeps following, and
+    // a reader who scrolled back inside a long reply is left there.
     // Saved, so a rotation does not pull a reader who scrolled away back down.
     val following = rememberSaveable(state.chatId) { mutableStateOf(true) }
-    val followReader = remember(listState, following) {
-        object : NestedScrollConnection {
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                following.value = !listState.canScrollForward
-                return Offset.Zero
-            }
+    LaunchedEffect(listState, following) {
+        var before: EndView? = null
+        snapshotFlow { listState.layoutInfo.endView() }.collect { now ->
+            if (now.readerMovedBackFrom(before)) following.value = false
+            else if (now.atEnd) following.value = true
+            before = now
         }
     }
 
@@ -456,8 +456,7 @@ internal fun ChatScreen(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
-                .nestedScroll(followReader),
+                .padding(padding),
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -1232,6 +1231,44 @@ private fun AnalysisDisclosure(
             }
         }
     }
+}
+
+/**
+ * Where the end of a list's content sits against the end of its viewport.
+ * [left] is how far the last item reaches past the viewport, or null while
+ * the last item is out of view.
+ */
+private data class EndView(
+    val count: Int,
+    val viewportEnd: Int,
+    val lastKey: Any?,
+    val lastSize: Int,
+    val left: Int?,
+) {
+    val atEnd get() = left != null && left <= 0
+
+    /**
+     * Whether the list moved back from the end since [before] with the same
+     * items in the same viewport. Content that grows or arrives changes the
+     * last item or the count, so it never reads as the reader moving.
+     */
+    fun readerMovedBackFrom(before: EndView?): Boolean {
+        if (before?.left == null || count != before.count || viewportEnd != before.viewportEnd) return false
+        if (left == null) return true
+        return lastKey == before.lastKey && lastSize == before.lastSize && left > before.left + 1
+    }
+}
+
+private fun LazyListLayoutInfo.endView(): EndView {
+    val last = visibleItemsInfo.lastOrNull()?.takeIf { it.index == totalItemsCount - 1 }
+    val end = viewportEndOffset - afterContentPadding
+    return EndView(
+        count = totalItemsCount,
+        viewportEnd = end,
+        lastKey = last?.key,
+        lastSize = last?.size ?: 0,
+        left = last?.let { it.offset + it.size - end },
+    )
 }
 
 /**
