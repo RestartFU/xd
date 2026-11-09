@@ -1131,8 +1131,11 @@ are not handled and stay text.
 
 ### Tagged questions
 
-Structured assistant turns run non-interactively, so a question is a block in the
-reply rather than a prompt:
+Claude asks with its own `AskUserQuestion` tool, at every access level. The host
+turns it into an `item/tool/requestUserInput` interaction (see the chat snapshot's
+`interactions`), and clients show it as a question card. Codex only offers its
+`request_user_input` tool in Plan mode, so in other modes the host asks Codex to
+put a question in its reply as a block instead:
 
 ```
 <ask>

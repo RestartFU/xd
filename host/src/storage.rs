@@ -33,15 +33,18 @@ const MAX_SEARCH_RESULTS: i64 = 40;
 const SEARCH_SNIPPET_CHARS: usize = 120;
 const MAX_DEVICE_NAME_BYTES: usize = 80;
 const EMPTY_GIT_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-const AGENT_UI_INSTRUCTIONS: &str = r#"This client is noninteractive. When you genuinely need the user to choose from a short list, put exactly one block at the end of your reply in this form:
+/// How Codex asks the user to choose. Its own `request_user_input` tool is only
+/// offered in Plan mode until Codex's `default_mode_request_user_input` feature
+/// is stable. Claude asks with its `AskUserQuestion` tool instead, which comes to
+/// xd as a question card over the control channel.
+const ASK_BLOCK_INSTRUCTIONS: &str = r#"This client is noninteractive. When you genuinely need the user to choose from a short list, put exactly one block at the end of your reply in this form:
 <ask>
 Which approach should I take?
 - First complete answer
 - Second complete answer
 </ask>
-Use two to six options. When the answer must be free-form text, put <input> on its own line inside the block; options and <input> may be combined. Do not ask more than one question per reply.
-
-To show the user an image file from this machine, such as a screenshot or chart you made, put it on a line of its own in your reply, outside any code block, in exactly this form:
+Use two to six options. When the answer must be free-form text, put <input> on its own line inside the block; options and <input> may be combined. Do not ask more than one question per reply."#;
+const AGENT_UI_INSTRUCTIONS: &str = r#"To show the user an image file from this machine, such as a screenshot or chart you made, put it on a line of its own in your reply, outside any code block, in exactly this form:
 [image: /absolute/path/to/image.png]
 The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files.
 
@@ -6852,6 +6855,16 @@ fn nullable_directory_setting(
     Ok(value)
 }
 
+/// What an agent is told about this client. Only Codex is asked to write
+/// `<ask>` blocks.
+fn agent_ui_instructions(backend: &str) -> String {
+    if backend == "claude" {
+        AGENT_UI_INSTRUCTIONS.into()
+    } else {
+        format!("{ASK_BLOCK_INSTRUCTIONS}\n\n{AGENT_UI_INSTRUCTIONS}")
+    }
+}
+
 fn effective_instructions(
     database: &Connection,
     root: &Path,
@@ -8693,9 +8706,10 @@ fn prepare_turn(
         )
         .optional()?
         .unwrap_or_default();
+    let ui_instructions = agent_ui_instructions(&chat.1);
     let system_prompt = effective_instructions(transaction, workspace_root, &chat.0)?
-        .map(|instructions| format!("{instructions}\n\n{AGENT_UI_INSTRUCTIONS}"))
-        .or_else(|| Some(AGENT_UI_INSTRUCTIONS.into()));
+        .map(|instructions| format!("{instructions}\n\n{ui_instructions}"))
+        .or(Some(ui_instructions));
     let now = now_seconds();
     transaction.execute(
         "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, 'user', ?, ?)",
@@ -13221,8 +13235,40 @@ mod tests {
         };
         assert_eq!(
             turn.system_prompt.unwrap(),
-            format!("Parent rules\n\nChild rules\n\n{AGENT_UI_INSTRUCTIONS}")
+            format!(
+                "Parent rules\n\nChild rules\n\n{}",
+                agent_ui_instructions(&turn.backend)
+            )
         );
+    }
+
+    /// Claude asks with its own question tool; Codex still writes `<ask>` blocks.
+    #[test]
+    fn only_codex_is_asked_to_write_ask_blocks() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = store.new_folder(&json!({"name": "Project"})).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for (backend, asks) in [("claude", false), ("codex", true)] {
+            let chat = store
+                .new_chat(&json!({"folder": folder, "backend": backend}))
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let SendDisposition::Start { turn, .. } = store
+                .prepare_send(&json!({"chat": chat, "text": "hello"}))
+                .unwrap()
+            else {
+                panic!("first message unexpectedly queued");
+            };
+            assert_eq!(turn.backend, backend);
+            let prompt = turn.system_prompt.unwrap();
+            assert_eq!(prompt.contains("<ask>"), asks, "{backend}");
+            assert!(prompt.contains("[image: /absolute/path/to/image.png]"));
+        }
     }
 
     #[test]

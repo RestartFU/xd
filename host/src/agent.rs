@@ -444,10 +444,10 @@ impl AgentCommand<'_> {
             claude_permission_mode(self.access),
         ]);
         // Anything that would prompt comes to xd as a control request, so the
-        // user sees an approval card instead of a silent denial.
-        if self.access != "full" {
-            command.args(["--permission-prompt-tool", "stdio"]);
-        }
+        // user sees an approval card instead of a silent denial. Full access
+        // needs it too: without it Claude drops its AskUserQuestion tool, and
+        // bypassPermissions still runs every other tool without asking.
+        command.args(["--permission-prompt-tool", "stdio"]);
         if let Some(system_prompt) = self.system_prompt.filter(|prompt| !prompt.is_empty()) {
             command.args(["--append-system-prompt", system_prompt]);
         }
@@ -2344,6 +2344,37 @@ mod tests {
         assert_eq!(
             command.get_current_dir(),
             Some(std::path::Path::new("/workspace"))
+        );
+    }
+
+    /// Without a prompt tool Claude drops AskUserQuestion, so full access keeps
+    /// the control channel while bypassing every permission prompt.
+    #[test]
+    fn full_access_claude_can_still_ask_questions() {
+        let command = AgentCommand {
+            backend: "claude",
+            prompt: "continue",
+            system_prompt: None,
+            workdir: "/workspace",
+            model: "claude-opus-5",
+            effort: "xhigh",
+            access: "full",
+            fast: false,
+            session_id: None,
+            environment: &[],
+        }
+        .build();
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--permission-mode", "bypassPermissions"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--permission-prompt-tool", "stdio"])
         );
     }
 
