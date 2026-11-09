@@ -589,7 +589,7 @@ impl BrowserPane {
         if tab.url.is_none() {
             tab.address.read(cx).focus_handle(cx).focus(window);
         } else if tab.display.native_visible.get()
-            && let Some(native) = &tab.display.native
+            && let Some(native) = tab.display.native()
         {
             native.with_view(|view| {
                 let _ = view.focus();
@@ -797,6 +797,10 @@ struct BrowserTab {
     can_back: bool,
     can_forward: bool,
     error: Option<String>,
+    /// The engine could not start for this tab, so it has no view yet.
+    engine_failed: bool,
+    /// A retry is scheduled for an engine another process kept from starting.
+    waiting_for_engine: bool,
     colors: ThemeColors,
     #[cfg(target_os = "linux")]
     last_history_gesture: Option<std::time::Instant>,
@@ -826,9 +830,15 @@ impl BrowserTab {
                 Err(error) => (None, Some(error)),
             }
         };
+        let engine_failed = error.is_some();
+        let waiting_for_engine = engine_failed && engine_may_start_later();
+        if waiting_for_engine {
+            Self::wait_for_engine(window, cx);
+        }
         let mut pane = Self {
             display: Rc::new(TabDisplay {
-                native,
+                native: RefCell::new(native),
+                shut_down: Cell::new(false),
                 events,
                 bounds: Rc::new(Cell::new(None)),
                 visible: Cell::new(false),
@@ -852,6 +862,8 @@ impl BrowserTab {
             can_back: false,
             can_forward: false,
             error,
+            engine_failed,
+            waiting_for_engine,
             colors,
             #[cfg(target_os = "linux")]
             last_history_gesture: None,
@@ -936,7 +948,7 @@ impl BrowserTab {
         self.address_dirty = false;
         self.address
             .update(cx, |input, cx| input.set_text(url.clone(), cx));
-        let Some(native) = self.display.native.as_ref() else {
+        let Some(native) = self.display.native() else {
             self.record_url(url, cx);
             self.refresh_visibility();
             cx.notify();
@@ -1083,7 +1095,7 @@ impl BrowserTab {
         if !self.display.visible.get() {
             return;
         }
-        let Some(native) = self.display.native.as_ref() else {
+        let Some(native) = self.display.native() else {
             return;
         };
         let events = self.display.events.clone();
@@ -1121,7 +1133,7 @@ impl BrowserTab {
     }
 
     fn history(&mut self, back: bool, cx: &mut Context<Self>) {
-        if let Some(native) = &self.display.native {
+        if let Some(native) = self.display.native() {
             let events = self.display.events.clone();
             native.with_view(move |view| {
                 let result = if back {
@@ -1146,7 +1158,7 @@ impl BrowserTab {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        if let Some(native) = &self.display.native {
+        if let Some(native) = self.display.native() {
             if native.is_disposed() {
                 return;
             }
@@ -1164,7 +1176,15 @@ impl BrowserTab {
     }
 
     /// Back to the page behind an error, whose address may be one that failed.
-    fn retry(&mut self, cx: &mut Context<Self>) {
+    /// A tab whose engine never started tries to start it again instead.
+    fn retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.engine_failed {
+            if self.start_native(window, cx) && !self.waiting_for_engine {
+                self.waiting_for_engine = true;
+                Self::wait_for_engine(window, cx);
+            }
+            return;
+        }
         if let Some(url) = self.url.clone() {
             self.draft = url.clone();
             self.address_dirty = false;
@@ -1172,6 +1192,62 @@ impl BrowserTab {
         }
         self.error = None;
         self.reload(cx);
+    }
+
+    /// Start the engine for a tab that could not start it, and open the tab's
+    /// page in it. Returns whether a later try could still succeed.
+    fn start_native(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.engine_failed || self.display.shut_down.get() {
+            return false;
+        }
+        match NativeBrowser::create(window, self.display.events.clone()) {
+            Ok(native) => {
+                let native = Rc::new(native);
+                *self.display.native.borrow_mut() = Some(native.clone());
+                self.engine_failed = false;
+                self.error = None;
+                // Load the tab's page without touching the address field, which
+                // the user may be editing.
+                if let Some(url) = self.url.clone() {
+                    let events = self.display.events.clone();
+                    native.with_view(move |view| {
+                        if let Err(error) = view.load_url(&url) {
+                            events
+                                .send(NativeEvent::Error(format!("Could not open page: {error}")));
+                        }
+                    });
+                    self.start_loading(cx);
+                }
+                self.refresh_visibility();
+                cx.notify();
+                false
+            }
+            Err(error) => {
+                self.error = Some(error);
+                self.refresh_visibility();
+                cx.notify();
+                engine_may_start_later()
+            }
+        }
+    }
+
+    /// Another xd holding the browser profile is often one still exiting,
+    /// such as the one this xd restarted from. Start once it lets go.
+    fn wait_for_engine(window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                Timer::after(ENGINE_RETRY_INTERVAL).await;
+                let again = this.update_in(cx, |pane, window, cx| {
+                    let again = pane.start_native(window, cx);
+                    pane.waiting_for_engine = again;
+                    again
+                });
+                if !matches!(again, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn button(
@@ -1249,12 +1325,20 @@ impl Render for BrowserTab {
                             })),
                     )
                     .child(
-                        self.button("browser-reload", crate::ROTATE_CW_ICON, has_page)
-                            .on_click(cx.listener(move |pane, _, _, cx| {
-                                if has_page {
+                        self.button(
+                            "browser-reload",
+                            crate::ROTATE_CW_ICON,
+                            has_page || self.engine_failed,
+                        )
+                        .on_click(cx.listener(
+                            move |pane, _, window, cx| {
+                                if pane.engine_failed {
+                                    pane.retry(window, cx);
+                                } else if has_page {
                                     pane.reload(cx);
                                 }
-                            })),
+                            },
+                        )),
                     )
                     .child(
                         div()
@@ -1325,15 +1409,15 @@ impl Render for BrowserTab {
                         state.child(
                             crate::ui_button("browser-retry", crate::ButtonKind::Secondary, colors)
                                 .h(px(28.))
-                                .on_click(cx.listener(|pane, _, _, cx| pane.retry(cx)))
+                                .on_click(cx.listener(|pane, _, window, cx| pane.retry(window, cx)))
                                 .child("Reload"),
                         )
                     }),
             );
         } else if has_page {
-            if let Some(native) = &self.display.native {
+            if let Some(native) = self.display.native() {
                 let surface = NativeSurface {
-                    native: native.clone(),
+                    native,
                     bounds: self.display.bounds.clone(),
                     events: self.display.events.clone(),
                     visible: self.display.native_visible.get(),
@@ -1421,7 +1505,10 @@ impl Render for BrowserTab {
 
 /// Shared native visibility permits pane changes without mutating child entities.
 struct TabDisplay {
-    native: Option<Rc<NativeBrowser>>,
+    /// Empty when the engine could not start; see [`BrowserTab::start_native`].
+    native: RefCell<Option<Rc<NativeBrowser>>>,
+    /// Set once the tab is shut down, after which no view may be created.
+    shut_down: Cell<bool>,
     events: NativeEvents,
     bounds: Rc<Cell<Option<NativeAllocation>>>,
     visible: Cell<bool>,
@@ -1441,6 +1528,10 @@ struct TabDisplay {
 }
 
 impl TabDisplay {
+    fn native(&self) -> Option<Rc<NativeBrowser>> {
+        self.native.borrow().clone()
+    }
+
     fn set_visible(&self, visible: bool) {
         self.set_state(visible, self.covered.get());
     }
@@ -1476,7 +1567,7 @@ impl TabDisplay {
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
         self.awaiting_picture.set(capture.then_some(generation));
-        let Some(native) = &self.native else {
+        let Some(native) = self.native() else {
             return;
         };
         let events = self.events.clone();
@@ -1545,8 +1636,9 @@ impl TabDisplay {
     }
 
     fn shutdown(&self) {
+        self.shut_down.set(true);
         self.set_visible(false);
-        if let Some(native) = &self.native {
+        if let Some(native) = self.native() {
             native.dispose();
         }
     }
@@ -1710,6 +1802,21 @@ pub fn shutdown_engine() {
 /// The system web views on macOS and Windows need no engine shutdown.
 #[cfg(not(target_os = "linux"))]
 pub fn shutdown_engine() {}
+
+/// Whether an engine that failed to start may start on a later try, because
+/// another process held its profile.
+#[cfg(target_os = "linux")]
+fn engine_may_start_later() -> bool {
+    chromium::profile_held_elsewhere()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn engine_may_start_later() -> bool {
+    false
+}
+
+/// How often a tab waiting for another process's browser checks again.
+const ENGINE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long closing a view waits for CEF. Shorter than GPUI's own wait, so a
 /// stuck close still answers GPUI before it gives up on the browser thread.
@@ -2236,11 +2343,11 @@ mod tests {
                 cx,
             )
         });
-        cx.update(|_, cx| {
+        cx.update(|window, cx| {
             tab.update(cx, |tab, cx| {
                 tab.navigate("ftp://example.invalid/", cx);
                 assert!(tab.error.is_some());
-                tab.retry(cx);
+                tab.retry(window, cx);
                 assert!(tab.error.is_none());
                 assert_eq!(tab.draft, "http://localhost:3000/");
                 assert_eq!(tab.current_url().as_deref(), Some("http://localhost:3000/"));
