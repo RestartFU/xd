@@ -26,6 +26,21 @@ const EXPIRE_TIMEOUT: i32 = 10_000;
 /// When xd closes a notification itself: some servers keep one past its
 /// expiry, GNOME while the screen is locked for one.
 const CLOSE_AFTER: Duration = Duration::from_secs(10);
+/// How long a `Notify` call may go unanswered, as D-Bus's own default
+/// method-call timeout: after that the notification is not shown late.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// How long the worker waits before acting on its own; shorter in tests.
+#[derive(Clone, Copy)]
+struct Timing {
+    close_after: Duration,
+    reply_timeout: Duration,
+}
+
+const TIMING: Timing = Timing {
+    close_after: CLOSE_AFTER,
+    reply_timeout: REPLY_TIMEOUT,
+};
 
 /// A notification the user clicked.
 #[derive(Debug, PartialEq)]
@@ -86,31 +101,43 @@ impl<T: Send + 'static> Notifier<T> {
 
 enum Input<T> {
     Request(Request<T>),
+    /// The notifier is gone: nothing more will be shown.
+    RequestsClosed,
     Bus(zbus::Result<Message>),
     BusClosed,
+    Due(Due),
+}
+
+/// Something a timer brings back to the worker.
+enum Due {
     /// A shown notification whose time is up, by its key and the `Notify`
     /// call that showed it.
     Close(Key, NonZeroU32),
+    /// A `Notify` call left unanswered for too long.
+    Unanswered(NonZeroU32),
+}
+
+/// Sends `due` back to the worker once `after` has passed.
+fn after(delay: Duration, timers: &Sender<Due>, due: Due) {
+    let timers = timers.clone();
+    thread::spawn(move || {
+        thread::sleep(delay);
+        let _ = timers.try_send(due);
+    });
 }
 
 async fn run<T>(
     requests: Receiver<Request<T>>,
     activations: Sender<Activation<T>>,
 ) -> zbus::Result<()> {
-    serve(
-        Connection::session().await?,
-        requests,
-        activations,
-        CLOSE_AFTER,
-    )
-    .await
+    serve(Connection::session().await?, requests, activations, TIMING).await
 }
 
 async fn serve<T>(
     connection: Connection,
     requests: Receiver<Request<T>>,
     activations: Sender<Activation<T>>,
-    close_after: Duration,
+    timing: Timing,
 ) -> zbus::Result<()> {
     // One stream carries the replies to `Notify` as well as the signals, in bus
     // order, so a click can never be seen before the id it refers to.
@@ -134,10 +161,13 @@ async fn serve<T>(
     let messages = messages
         .map(Input::Bus)
         .chain(stream::once(ready(Input::BusClosed)));
-    let (due, closes) = async_channel::unbounded();
+    let requests = requests
+        .map(Input::Request)
+        .chain(stream::once(ready(Input::RequestsClosed)));
+    let (timers, dues) = async_channel::unbounded();
     let mut inputs = pin!(stream::select(
-        stream::select(requests.map(Input::Request), messages),
-        closes.map(|(key, serial)| Input::Close(key, serial)),
+        stream::select(requests, messages),
+        dues.map(Input::Due),
     ));
     while let Some(input) = inputs.next().await {
         match input {
@@ -146,7 +176,9 @@ async fn serve<T>(
                 let serial = message.primary_header().serial_num();
                 tracker.sent.insert(serial, target);
                 connection.send(&message).await?;
+                after(timing.reply_timeout, &timers, Due::Unanswered(serial));
             }
+            Input::RequestsClosed => return Ok(()),
             Input::Bus(Ok(message)) => {
                 let Some(event) = decode(&message) else {
                     continue;
@@ -162,11 +194,8 @@ async fn serve<T>(
                 } = &event
                     && tracker.sent.contains_key(serial)
                 {
-                    let (due, key, serial) = (due.clone(), (sender.clone(), *id), *serial);
-                    thread::spawn(move || {
-                        thread::sleep(close_after);
-                        let _ = due.try_send((key, serial));
-                    });
+                    let key = (sender.clone(), *id);
+                    after(timing.close_after, &timers, Due::Close(key, *serial));
                 }
                 if let Some(activation) = tracker.apply(event, sender.as_deref()) {
                     let _ = activations.send(activation).await;
@@ -177,7 +206,10 @@ async fn serve<T>(
             // Only while the id is still that notification's: one clicked or
             // closed is gone. Sent to the server connection that showed it, so
             // a server that has taken over the service never closes its own.
-            Input::Close(key, serial) => {
+            Input::Due(Due::Unanswered(serial)) => {
+                tracker.sent.remove(&serial);
+            }
+            Input::Due(Due::Close(key, serial)) => {
                 if tracker.shows(&key, serial) {
                     tracker.shown.remove(&key);
                     let (owner, id) = key;
@@ -615,7 +647,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let notifier = Box::pin(serve(client, received, activations, CLOSE_AFTER));
+        let notifier = Box::pin(serve(client, received, activations, TIMING));
         let shell = Box::pin(async {
             let notify = loop {
                 let message = calls.next().await.unwrap()?;
@@ -659,6 +691,10 @@ mod tests {
     }
 
     const TEST_CLOSE_AFTER: Duration = Duration::from_millis(400);
+    const TEST_TIMING: Timing = Timing {
+        close_after: TEST_CLOSE_AFTER,
+        reply_timeout: Duration::from_millis(300),
+    };
 
     /// Waits without holding up the other futures on the same executor.
     async fn sleep(duration: Duration) {
@@ -714,7 +750,7 @@ mod tests {
         let client = zbus::connection::Builder::address(address)?.build().await?;
         let (requests, received) = async_channel::unbounded();
         let (activations, clicked) = async_channel::unbounded();
-        let notifier = Box::pin(serve(client, received, activations, TEST_CLOSE_AFTER));
+        let notifier = Box::pin(serve(client, received, activations, TEST_TIMING));
         match futures_util::future::select(notifier, Box::pin(server(requests, clicked))).await {
             futures_util::future::Either::Left((result, _)) => panic!("notifier ended: {result:?}"),
             futures_util::future::Either::Right((outcome, _)) => outcome,
@@ -887,6 +923,56 @@ mod tests {
     }
 
     #[test]
+    fn a_notification_answered_too_late_is_not_shown() {
+        // A server that stopped answering: when its reply finally comes, the
+        // completion it was for is old news, and clicking it opens nothing.
+        let click = on_a_private_bus(|address| {
+            zbus::block_on(async move {
+                let (server, mut calls) = notification_server(&address).await?;
+                against_notifier(&address, |requests, clicked| async move {
+                    requests.send(request("first")).await.unwrap();
+                    let first = next_call(&mut calls, "Notify").await?;
+                    sleep(TEST_TIMING.reply_timeout * 2).await;
+                    server.reply(&first.header(), &7u32).await?;
+                    server
+                        .emit_signal(
+                            None::<()>,
+                            OBJECT_PATH,
+                            SERVICE,
+                            "ActionInvoked",
+                            &(7u32, DEFAULT_ACTION),
+                        )
+                        .await?;
+                    sleep(Duration::from_millis(200)).await;
+                    Ok(clicked.try_recv().ok().map(|click| click.target))
+                })
+                .await
+            })
+        });
+        if let Some(click) = click {
+            assert_eq!(click, None);
+        }
+    }
+
+    #[test]
+    fn the_worker_ends_with_the_notifier() {
+        let ended = on_a_private_bus(|address| {
+            zbus::block_on(async move {
+                let client = zbus::connection::Builder::address(address.as_str())?
+                    .build()
+                    .await?;
+                let (requests, received) = async_channel::unbounded::<Request<&str>>();
+                let (activations, _clicked) = async_channel::unbounded();
+                drop(requests);
+                serve(client, received, activations, TEST_TIMING).await
+            })
+        });
+        if let Some(ended) = ended {
+            assert_eq!(ended, ());
+        }
+    }
+
+    #[test]
     fn a_click_comes_back_over_a_real_bus() {
         let Some(bus) = PrivateBus::start() else {
             eprintln!("skipped: dbus-daemon is not available");
@@ -925,7 +1011,7 @@ mod tests {
                 let connection = zbus::connection::Builder::address(address.as_str())?
                     .build()
                     .await?;
-                serve(connection, received, activations, CLOSE_AFTER).await
+                serve(connection, received, activations, TIMING).await
             });
             let _ = ended.send(());
         });
