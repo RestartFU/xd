@@ -507,9 +507,6 @@ impl AuthManager {
         account: &str,
         kind: SessionKind,
     ) -> Result<(), String> {
-        // Whatever login the account had is about to change; a reading of it no
-        // longer confirms anything.
-        self.inner.accounts.forget_login_reading(provider, account);
         let serial = self.inner.next_session.fetch_add(1, Ordering::Relaxed);
         {
             let mut sessions = self
@@ -634,6 +631,10 @@ impl AuthManager {
                 return;
             }
         }
+        // Whatever login the account had is about to change; a reading of it no
+        // longer confirms anything. Only now: a refused or rejected request
+        // changes nothing.
+        self.inner.accounts.forget_login_reading(provider, account);
         let login = matches!(kind, SessionKind::SignIn | SessionKind::Add);
         let mut command = match provider {
             "claude" => {
