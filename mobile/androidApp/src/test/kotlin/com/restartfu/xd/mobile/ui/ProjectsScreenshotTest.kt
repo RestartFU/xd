@@ -74,6 +74,58 @@ class ProjectsScreenshotTest {
 
     @Test fun projectsLight() = shoot("projects-light", MinimalThemePreset.LIGHT)
 
+    @Test fun projectsOpenOnTheirOwn() = shoot("projects-open-dark", MinimalThemePreset.DARK) {
+        // Every project starts open, so sessions in two projects show at once.
+        check(shows("Reconnect backoff") && shows("Landing copy") && shows("No sessions yet"))
+        click("xd")
+        check(!shows("Reconnect backoff") && !shows("Usage page") && shows("Landing copy"))
+        click("xd")
+        check(shows("Reconnect backoff") && shows("Landing copy"))
+    }
+
+    @Test fun newSessionAsksForAProject() = shoot("new-session-picker-dark", MinimalThemePreset.DARK) {
+        click("New session")
+        check(shows("Which project?") && shows("2 sessions") && shows("acme · 1 session") &&
+            shows("acme / Clients · 1 session") && !shows("Start session"))
+    }
+
+    @Test fun pickingAProjectOpensItsForm() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
+        click("New session")
+        val before = SENT.size
+        // Nothing waits on the next dialog: its title field never lets Compose go idle.
+        // The checkouts it reads say which project it is for.
+        click("acme / Clients · 1 session")
+        awaitPlaces(before)
+        check(placesRead(before) == listOf("shop")) { placesRead(before).toString() }
+    }
+
+    @Test fun anOpenProjectsPlusOpensItsForm() = shoot("new-session-here-dark", MinimalThemePreset.DARK) {
+        check(shows("New session in web") && shows("New session in xd"))
+        val before = SENT.size
+        click("New session in web")
+        awaitPlaces(before)
+        check(placesRead(before) == listOf("web")) { placesRead(before).toString() }
+    }
+
+    /**
+     * Waits for the form to ask for a project's checkouts, which it does as it
+     * opens. Its effects run on the main looper, which Robolectric only runs
+     * when told to.
+     */
+    private fun Screen.awaitPlaces(from: Int) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (placesRead(from).isEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
+    }
+
+    /** The projects whose checkouts the app asked for since request [from]. */
+    private fun placesRead(from: Int): List<String> = synchronized(SENT) { SENT.drop(from) }
+        .map { Json.parseToJsonElement(it).jsonObject }
+        .filter { it["op"]?.jsonPrimitive?.content == "folder-settings" }
+        .mapNotNull { it["folder"]?.jsonPrimitive?.content }
+
     @Test fun newMenu() = shoot("new-menu-dark", MinimalThemePreset.DARK) {
         click("New")
         check(shows("New project") && shows("New folder"))
@@ -170,7 +222,9 @@ class ProjectsScreenshotTest {
                 dir.mkdirs()
                 File(dir, "$name-failed.png").outputStream().use { screen.capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
-            throw AssertionError("${failure.message}; showing ${screen.labels()}", failure)
+            // A dialog holding a text field never lets Compose go idle, so its labels may not be readable.
+            val shown = runCatching { screen.labels().toString() }.getOrDefault("(screen not idle)")
+            throw AssertionError("${failure.message}; showing $shown", failure)
         }
         out?.let { dir ->
             dir.mkdirs()

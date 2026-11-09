@@ -48,6 +48,31 @@ class ProjectTreeTest {
     }
 
     @Test
+    fun newSessionChoicesListEveryProjectWithItsFolders() {
+        // A closed folder still offers what it holds: the picker hides nothing.
+        val choices = snapshot.projectChoices()
+        assertEquals(listOf("notes", "web", "site"), choices.map { it.project.name })
+        assertEquals(listOf(emptyList(), listOf("acme"), listOf("acme", "Clients")), choices.map { it.path })
+    }
+
+    @Test
+    fun theLastUsedProjectComesFirst() {
+        assertEquals(listOf("site", "notes", "web"), snapshot.projectChoices(lastUsed = "site").map { it.project.name })
+        // A project that has gone away changes nothing.
+        assertEquals(listOf("notes", "web", "site"), snapshot.projectChoices(lastUsed = "gone").map { it.project.name })
+    }
+
+    @Test
+    fun choicesMatchOnNameOrFolder() {
+        val choices = snapshot.projectChoices()
+        assertEquals(listOf("web", "site"), choices.matching(" ACME ").map { it.project.name })
+        assertEquals(listOf("site"), choices.matching("clie").map { it.project.name })
+        assertEquals(listOf("notes"), choices.matching("not").map { it.project.name })
+        assertEquals(choices, choices.matching("  "))
+        assertTrue(choices.matching("nothing like it").isEmpty())
+    }
+
+    @Test
     fun projectsLeaveFoldersOut() {
         assertEquals(listOf("notes", "web", "site"), snapshot.minimalProjects().map { it.name })
         assertEquals("acme", snapshot.minimalProjects().last().owner)
