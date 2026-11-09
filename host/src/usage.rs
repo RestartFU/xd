@@ -2503,11 +2503,12 @@ pub(crate) fn read_codex_login(environment: &[(String, String)]) -> Option<Ident
 pub(crate) fn check_account(accounts: &Accounts, provider: &str, id: &str) -> Option<Identity> {
     let now = now_ms();
     let _lease = accounts.lease(provider, id)?;
+    let ticket = accounts.ticket();
     let environment = accounts.environment(provider, id);
     let account = probe_account(provider, &environment, now, Tz::UTC)?;
     let (identity, windows) = probe_reading(&account)?;
     // Filed by when the reading began, which orders it among other readings.
-    accounts.record_probe(provider, id, &identity, windows, now);
+    accounts.record_probe_from(ticket, provider, id, &identity, windows, now);
     Some(identity)
 }
 
@@ -2702,16 +2703,17 @@ impl UsageService {
                 })
                 .map(|(provider, id, rank)| {
                     let lease = known.lease(provider, &id);
+                    let ticket = known.ticket();
                     let environment = known.environment(provider, &id);
                     let probe = thread::spawn(move || {
                         let _lease = lease?;
                         probe_account(provider, &environment, now, zone)
                     });
-                    (provider, id, rank, probe)
+                    (provider, id, rank, ticket, probe)
                 })
                 .collect();
             let mut accounts = Vec::new();
-            for (provider, id, rank, probe) in probes {
+            for (provider, id, rank, ticket, probe) in probes {
                 let Some(mut account) = probe.join().ok().flatten() else {
                     continue;
                 };
@@ -2720,7 +2722,7 @@ impl UsageService {
                     account["account_rank"] = json!(rank);
                 }
                 if let Some((identity, windows)) = probe_reading(&account) {
-                    known.record_probe(provider, &id, &identity, windows, now);
+                    known.record_probe_from(ticket, provider, &id, &identity, windows, now);
                 }
                 // `account_key` is a hash, so no address crosses the wire.
                 if let Some(fields) = account.as_object_mut() {

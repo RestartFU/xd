@@ -626,17 +626,8 @@ impl TurnRuntime {
         // process starts as it, while nothing else runs as it: Claude writes
         // the same file without a lock xd can take. Process starts register
         // under the sessions lock, so none can begin during the copy.
-        if turn.backend == "claude"
-            && choice.account != crate::accounts::DEFAULT_ACCOUNT
-            && let Ok(sessions) = self.inner.sessions.lock()
-            && !sessions
-                .values()
-                .any(|session| crate::accounts::tag_account(&session.account) == choice.account)
-        {
-            self.inner
-                .auth
-                .accounts()
-                .share_settings_while_idle(&turn.backend, &choice.account);
+        if turn.backend == "claude" && choice.account != crate::accounts::DEFAULT_ACCOUNT {
+            self.share_claude_settings(&turn.backend, &choice.account);
         }
         if choice.unavailable {
             return Err(format!(
@@ -713,6 +704,32 @@ impl TurnRuntime {
             );
         }
         Ok(())
+    }
+
+    /// Copies the user's own Claude settings into an added account before a
+    /// new process starts as it. Claude writes that file without a lock xd
+    /// can take, so this happens only while nothing runs as the account: a
+    /// check running as it is waited for (outside any lock), and process
+    /// starts register under the sessions lock held during the copy. When
+    /// another chat's process runs as the account, the copy waits for a later
+    /// start.
+    fn share_claude_settings(&self, provider: &str, account: &str) {
+        let accounts = self.inner.auth.accounts();
+        for _ in 0..3 {
+            accounts.wait_unleased(account, Duration::from_secs(25));
+            let Ok(sessions) = self.inner.sessions.lock() else {
+                return;
+            };
+            if sessions
+                .values()
+                .any(|session| crate::accounts::tag_account(&session.account) == account)
+            {
+                return;
+            }
+            if accounts.share_settings_while_idle(provider, account) {
+                return;
+            }
+        }
     }
 
     fn switch_sentence(&self, provider: &str, choice: &Choice) -> String {

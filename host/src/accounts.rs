@@ -116,8 +116,9 @@ struct Live {
     checked_at_ms: Option<i64>,
     /// When the login alone was last read, before a Codex session was resumed.
     login_read_at_ms: Option<i64>,
-    /// When the newest reading of the login began, by probe or on its own.
-    identity_at_ms: Option<i64>,
+    /// The ticket of the newest reading of the login, or of the sign-in that
+    /// made earlier readings worthless; see [`Accounts::ticket`].
+    identity_ticket: u64,
     /// When a turn last ran into a limit. Only a reading begun after it can
     /// lift the hold early.
     limited_at_ms: Option<i64>,
@@ -295,6 +296,9 @@ struct Inner {
     /// Probes and checks running as each added account; see [`Lease`].
     leases: Mutex<HashMap<String, usize>>,
     released: Condvar,
+    /// Orders readings of logins by when they began, which a clock cannot:
+    /// two can begin in the same millisecond.
+    tickets: std::sync::atomic::AtomicU64,
 }
 
 /// Held while something other than a turn runs a CLI as an added account, so
@@ -357,7 +361,26 @@ impl Accounts {
                 homes: Mutex::new(HashMap::new()),
                 leases: Mutex::new(HashMap::new()),
                 released: Condvar::new(),
+                tickets: std::sync::atomic::AtomicU64::new(1),
             }),
+        }
+    }
+
+    /// Taken just before a login is read; a reading whose ticket is older than
+    /// the account's newest never replaces it.
+    pub(crate) fn ticket(&self) -> u64 {
+        self.inner
+            .tickets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Waits, up to `limit`, until nothing holds a lease on the account.
+    pub(crate) fn wait_unleased(&self, id: &str, limit: Duration) {
+        if let Ok(leases) = self.inner.leases.lock() {
+            let _ = self
+                .inner
+                .released
+                .wait_timeout_while(leases, limit, |leases| leases.contains_key(id));
         }
     }
 
@@ -385,13 +408,16 @@ impl Accounts {
     /// Shares the user's Claude settings with an added account while no check
     /// runs as it. Holding the lease lock keeps one from starting meanwhile;
     /// the caller makes sure no turn process runs as it.
-    pub(crate) fn share_settings_while_idle(&self, provider: &str, id: &str) {
+    /// Returns whether it shared them, or `false` when a check holds a lease.
+    pub(crate) fn share_settings_while_idle(&self, provider: &str, id: &str) -> bool {
         let Ok(leases) = self.inner.leases.lock() else {
-            return;
+            return false;
         };
-        if !leases.contains_key(id) {
-            self.share_settings(provider, id);
+        if leases.contains_key(id) {
+            return false;
         }
+        self.share_settings(provider, id);
+        true
     }
 
     #[cfg(test)]
@@ -464,6 +490,7 @@ impl Accounts {
     }
 
     /// Takes in a login read on its own, without limits.
+    #[cfg(test)]
     pub(crate) fn record_login(
         &self,
         provider: &str,
@@ -471,17 +498,28 @@ impl Accounts {
         identity: &Identity,
         read_at_ms: i64,
     ) {
+        let ticket = self.ticket();
+        self.record_login_from(ticket, provider, id, identity, read_at_ms);
+    }
+
+    /// [`Self::record_login`] for a reading that took `ticket` when it began.
+    pub(crate) fn record_login_from(
+        &self,
+        ticket: u64,
+        provider: &str,
+        id: &str,
+        identity: &Identity,
+        read_at_ms: i64,
+    ) {
         let _ = self.update(provider, |state| {
-            if state.account(id).is_some_and(|account| {
-                account
-                    .live
-                    .identity_at_ms
-                    .is_some_and(|newer| newer > read_at_ms)
-            }) {
+            if state
+                .account(id)
+                .is_some_and(|account| account.live.identity_ticket > ticket)
+            {
                 return Ok(());
             }
             if let Some(account) = state.account_mut(id) {
-                account.live.identity_at_ms = Some(read_at_ms);
+                account.live.identity_ticket = ticket;
             }
             let Some(account) = state.account_mut(id) else {
                 return Ok(());
@@ -519,7 +557,7 @@ impl Accounts {
                 account.live.login_read_at_ms = None;
                 account.live.checked_at_ms = None;
                 // A reading begun before now may be of the old login.
-                account.live.identity_at_ms = Some(now_ms());
+                account.live.identity_ticket = self.ticket();
                 // The user's own sign-in is whatever the CLI is signed in to,
                 // which is not known again until it is read.
                 if id == DEFAULT_ACCOUNT {
@@ -817,6 +855,7 @@ impl Accounts {
     /// Takes in what a usage probe of the account found. Checks that the
     /// account is still the one it was added as, and that no two accounts are
     /// the same login.
+    #[cfg(test)]
     pub(crate) fn record_probe(
         &self,
         provider: &str,
@@ -825,22 +864,34 @@ impl Accounts {
         windows: Vec<Headroom>,
         checked_at_ms: i64,
     ) {
+        let ticket = self.ticket();
+        self.record_probe_from(ticket, provider, id, identity, windows, checked_at_ms);
+    }
+
+    /// [`Self::record_probe`] for a probe that took `ticket` when it began.
+    pub(crate) fn record_probe_from(
+        &self,
+        ticket: u64,
+        provider: &str,
+        id: &str,
+        identity: &Identity,
+        windows: Vec<Headroom>,
+        checked_at_ms: i64,
+    ) {
         let _ = self.update(provider, |state| {
-            // Readings land in the order they were taken: one that began
-            // before a newer reading of this login must not undo it.
-            if state.account(id).is_some_and(|account| {
-                account
-                    .live
-                    .identity_at_ms
-                    .is_some_and(|newer| newer > checked_at_ms)
-            }) {
+            // Readings land in the order they began: one that began before a
+            // newer reading of this login, or before a sign-in, must not undo it.
+            if state
+                .account(id)
+                .is_some_and(|account| account.live.identity_ticket > ticket)
+            {
                 return Ok(());
             }
             // Only a reading that names the login says anything about it.
             // Limits read without it update the limits and nothing else.
             let named = identity.account_key.is_some();
             if named && let Some(account) = state.account_mut(id) {
-                account.live.identity_at_ms = Some(checked_at_ms);
+                account.live.identity_ticket = ticket;
             }
             let Some(account) = state.account_mut(id) else {
                 return Ok(());
@@ -1444,19 +1495,34 @@ mod tests {
     fn an_older_reading_never_undoes_a_newer_one() {
         let data = temp("order-of-readings");
         let accounts = Accounts::with_homes(&data, &[]);
+        // A probe begins, then a login read begins and finishes first.
+        let probe = accounts.ticket();
         accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("b@example.com"), 10);
-        // A probe that began before that login read finishes after it.
-        accounts.record_probe(
+        accounts.record_probe_from(
+            probe,
             "codex",
             DEFAULT_ACCOUNT,
             &identity("a@example.com"),
             vec![],
-            5,
+            10,
         );
         assert_eq!(
             accounts.session_tag("codex", DEFAULT_ACCOUNT),
             "default#key-b@example.com"
         );
+        // A probe that began in the same millisecond as a sign-in, but before
+        // it, is from before it too.
+        let before = accounts.ticket();
+        accounts.forget_login_reading("codex", DEFAULT_ACCOUNT);
+        accounts.record_probe_from(
+            before,
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("b@example.com"),
+            vec![],
+            10,
+        );
+        assert_eq!(accounts.login_read_at("codex", DEFAULT_ACCOUNT), None);
         accounts.record_probe(
             "codex",
             DEFAULT_ACCOUNT,
