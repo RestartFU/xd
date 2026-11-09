@@ -599,6 +599,9 @@ impl TurnRuntime {
         // stale. If it cannot be read, the session is not resumed.
         // A new chat reads it too, so its session is filed under a known login.
         let mut unconfirmed = false;
+        // The login could not be read, so whatever runs is filed as unknown,
+        // never as a login read earlier that may no longer be the one signed in.
+        let mut login_unknown = false;
         if turn.backend == "codex" {
             // Until the account chosen is the one whose login was just read:
             // reading can take long enough for the choice to change.
@@ -607,6 +610,7 @@ impl TurnRuntime {
                     .inner
                     .auth
                     .confirm_login(&turn.backend, &choice.account);
+                login_unknown = !confirmed;
                 unconfirmed = !confirmed && turn.session_id.is_some();
                 let again = self.inner.auth.choose(&turn.backend, chat_account);
                 let settled = again.account == choice.account;
@@ -614,6 +618,7 @@ impl TurnRuntime {
                 if settled {
                     break;
                 }
+                login_unknown = true;
                 unconfirmed = turn.session_id.is_some();
             }
         }
@@ -647,11 +652,14 @@ impl TurnRuntime {
         turn.environment.extend(choice.environment.iter().cloned());
         // Filed with the login, so a session never follows the user's own
         // sign-in to another login under the same account.
-        turn.account = self
-            .inner
-            .auth
-            .accounts()
-            .session_tag(&turn.backend, &choice.account);
+        turn.account = if login_unknown {
+            format!("{}#?", choice.account)
+        } else {
+            self.inner
+                .auth
+                .accounts()
+                .session_tag(&turn.backend, &choice.account)
+        };
         let moved = turn.session_id.is_some()
             && (unconfirmed
                 || !turn
