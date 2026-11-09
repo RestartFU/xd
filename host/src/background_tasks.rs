@@ -499,15 +499,24 @@ fn tail(path: &Path) -> std::io::Result<(Vec<Value>, bool)> {
         return Err(std::io::Error::other("Not a regular file"));
     }
     let start = metadata.len().saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start))?;
+    // One byte more, before the window, to tell whether it starts a line.
+    let from = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(from))?;
     let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes)?;
-    // Discard a clipped first line. If a single line exceeds the byte limit,
-    // keep its suffix so a long, still-being-written error is visible.
-    if start > 0
-        && let Some(end) = bytes.iter().position(|b| *b == b'\n')
-    {
-        bytes.drain(..=end);
+    file.take(TAIL_BYTES + (start - from))
+        .read_to_end(&mut bytes)?;
+    if start > from {
+        if bytes.first() == Some(&b'\n') {
+            // The window starts a line: keep all of it.
+            bytes.remove(0);
+        } else if let Some(end) = bytes.iter().position(|b| *b == b'\n') {
+            // Discard a clipped first line.
+            bytes.drain(..=end);
+        } else {
+            // A single line longer than the limit: keep its last bytes, so a
+            // long, still-being-written error is visible.
+            bytes.remove(0);
+        }
     }
     let text = String::from_utf8_lossy(&bytes);
     let lines = text.lines().collect::<Vec<_>>();
@@ -708,6 +717,18 @@ mod tests {
             reported_id("Command was moved to the background (ID: b2) after running for 2s."),
             Some("b2".into())
         );
+    }
+
+    #[test]
+    fn a_tail_that_starts_a_line_keeps_it() {
+        let path = std::env::temp_dir().join(format!("xd-tail-{}", uuid::Uuid::new_v4()));
+        let newest = "a".repeat(TAIL_BYTES as usize - 1);
+        fs::write(&path, format!("x\n{newest}\n")).unwrap();
+        let (lines, truncated) = tail(&path).unwrap();
+        assert!(truncated);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["text"], newest.as_str());
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]
