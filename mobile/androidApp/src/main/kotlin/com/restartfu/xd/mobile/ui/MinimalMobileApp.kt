@@ -569,7 +569,9 @@ private fun MinimalProjectsHome(
     val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
     val rows = tree.projectTree(collapsed)
-    val folders = tree.projectTree().mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
+    // Every row, as if no folder were closed: built once per tree, since building it reads every chat.
+    val openTree = remember(tree) { tree.projectTree() }
+    val folders = openTree.mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
     val shownProjects = rows.mapNotNull { (it as? ProjectTreeRow.ProjectRow)?.project }
     // Opens the folders [id] sits in, and [id] itself, so what lands there is in view.
     val reveal = { id: String? ->
@@ -650,7 +652,7 @@ private fun MinimalProjectsHome(
                                 open = row.open,
                                 icon = ownerIcons[row.folder.owner],
                                 // A closed folder hides its projects, so it carries their signals.
-                                signals = if (row.open) emptyList() else tree.projectsInside(row.folder.id)
+                                signals = if (row.open) emptyList() else openTree.projectsInside(row.folder.id)
                                     .flatMap { tree.activeSessions(it).map(signalOf) },
                                 modifier = indent,
                                 toggle = { settings.setFolderOpen(row.folder.id, !row.open) },

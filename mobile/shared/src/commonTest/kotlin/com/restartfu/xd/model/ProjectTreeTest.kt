@@ -68,11 +68,12 @@ class ProjectTreeTest {
 
     @Test
     fun aFolderHoldsTheProjectsNestedBeneathItAndNothingAfter() {
-        assertEquals(listOf("web", "site"), snapshot.projectsInside("acme"))
-        assertEquals(listOf("site"), snapshot.projectsInside("clients"))
+        val tree = snapshot.projectTree()
+        assertEquals(listOf("web", "site"), tree.projectsInside("acme"))
+        assertEquals(listOf("site"), tree.projectsInside("clients"))
         // A project is not a folder of projects, and an unknown id holds nothing.
-        assertEquals(emptyList(), snapshot.projectsInside("notes"))
-        assertEquals(emptyList(), snapshot.projectsInside("missing"))
+        assertEquals(emptyList(), tree.projectsInside("notes"))
+        assertEquals(emptyList(), tree.projectsInside("missing"))
     }
 
     @Test
