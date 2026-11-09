@@ -1874,6 +1874,9 @@ fn shell_word(text: &str) -> Option<String> {
                             word.push(c);
                         }
                     },
+                    // The outer shell would expand these before the inner
+                    // one ran, so the script is not what this text shows.
+                    '$' | '`' => return None,
                     c => word.push(c),
                 }
             },
@@ -2977,6 +2980,8 @@ mod tests {
             "/bin/bash -lc $SCRIPT",
             "/bin/bash -lc 'ls' # note",
             "/bin/bash -lc *.sh",
+            r#"/bin/bash -lc "printf '%s\n' '$HOME'""#,
+            r#"/bin/bash -lc "echo `date`""#,
         ] {
             assert_eq!(shell_script(command), command);
         }
