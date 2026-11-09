@@ -21,7 +21,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{EventBus, StateStore, runtime::TurnRuntime};
+use crate::{EventBus, StateStore, runtime::TurnRuntime, storage::LinkState};
 
 pub(crate) const DEFAULT_AFTER_DAYS: i64 = 3;
 pub(crate) const MIN_AFTER_DAYS: i64 = 1;
@@ -311,18 +311,18 @@ fn sweep(
         let settled_at = match without_lookup {
             Some(settled_at) => Some(settled_at),
             None => {
-                let Some((found, linked)) = pull_requests_for(store, &candidate, pull_requests)
+                let Some((found, links)) = pull_requests_for(store, &candidate, pull_requests)
                 else {
                     continue;
                 };
-                links_seen = Some(linked);
+                links_seen = Some(links);
                 auto_settled_at(&candidate, &found, now, &settings)
             }
         };
         let Some(settled_at) = settled_at else {
             continue;
         };
-        if store.auto_settle_session(&candidate, settled_at, &settings, links_seen.as_deref())? {
+        if store.auto_settle_session(&candidate, settled_at, &settings, links_seen.as_ref())? {
             settled += 1;
         }
     }
@@ -332,17 +332,27 @@ fn sweep(
 /// The session's pull requests: its branch's, unless the user removed that
 /// one from every chat in it, and those linked to its chats. `None` when a
 /// lookup failed and the session has to wait for a sweep that can tell. Also
-/// returns the linked addresses it read.
+/// returns the links it decided from, read once before any lookup, which the
+/// settling update checks again.
 fn pull_requests_for(
     store: &StateStore,
     candidate: &SettlementCandidate,
     cache: &mut PullRequestCache,
-) -> Option<(Vec<PullRequestSnapshot>, Vec<String>)> {
+) -> Option<(Vec<PullRequestSnapshot>, LinkState)> {
+    let links = match store.link_state(&candidate.chats) {
+        Ok(links) => links,
+        Err(error) => {
+            eprintln!("xd: cannot read linked pull requests: {error}");
+            return None;
+        }
+    };
     let mut found = Vec::new();
+    let mut branch_seen = None;
     if let Some(workdir) = &candidate.workdir
         && let Some(branch) = store.checked_out_branch(workdir)
     {
         let key = (workdir.clone(), branch);
+        branch_seen = Some(key.clone());
         let known = match cache.branches.get(&key) {
             Some((_, known)) => known.clone(),
             None => match store.branch_pull_request(workdir) {
@@ -373,23 +383,15 @@ fn pull_requests_for(
             },
         };
         if let Some((url, snapshot)) = known {
-            let removed = url.as_deref().is_some_and(|url| {
-                store
-                    .pull_request_dismissed(&candidate.chats, url)
-                    .unwrap_or(false)
-            });
+            let removed = url
+                .as_deref()
+                .is_some_and(|url| links.removed_everywhere(&candidate.chats, url));
             if !removed {
                 found.push(snapshot);
             }
         }
     }
-    let linked = match store.linked_pull_request_urls(&candidate.chats) {
-        Ok(linked) => linked,
-        Err(error) => {
-            eprintln!("xd: cannot read linked pull requests: {error}");
-            return None;
-        }
-    };
+    let linked = links.linked();
     // gh picks the host and account from the directory it runs in.
     let directory = candidate
         .workdir
@@ -417,7 +419,14 @@ fn pull_requests_for(
         };
         found.extend(snapshot);
     }
-    Some((found, linked))
+    // The lookups above take a while. If the checkout moved meanwhile, the
+    // branch's answer is for a branch the session has left.
+    if let Some((workdir, branch)) = &branch_seen
+        && store.checked_out_branch(workdir).as_ref() != Some(branch)
+    {
+        return None;
+    }
+    Some((found, links))
 }
 
 #[cfg(test)]
@@ -1035,10 +1044,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.age(10);
         let candidate = fixture.store.settlement_candidates().unwrap().remove(0);
-        let seen = fixture
-            .store
-            .linked_pull_request_urls(&candidate.chats)
-            .unwrap();
+        let seen = fixture.store.link_state(&candidate.chats).unwrap();
         fixture
             .store
             .link_pull_requests(
@@ -1054,10 +1060,7 @@ mod tests {
                 .auto_settle_session(&candidate, candidate.activity_at, &settings, Some(&seen))
                 .unwrap()
         );
-        let now_seen = fixture
-            .store
-            .linked_pull_request_urls(&candidate.chats)
-            .unwrap();
+        let now_seen = fixture.store.link_state(&candidate.chats).unwrap();
         assert!(
             fixture
                 .store
@@ -1069,6 +1072,34 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn a_link_removed_after_the_sweep_read_the_links_stops_it_settling() {
+        let fixture = Fixture::new();
+        let url = "https://github.com/o/r/pull/9".to_owned();
+        fixture
+            .store
+            .link_pull_requests(&fixture.chat, std::slice::from_ref(&url), LinkSource::User)
+            .unwrap();
+        fixture.age(10);
+        let candidate = fixture.store.settlement_candidates().unwrap().remove(0);
+        let seen = fixture.store.link_state(&candidate.chats).unwrap();
+        assert!(!seen.removed_everywhere(&candidate.chats, &url));
+        fixture
+            .store
+            .unlink_pull_request(&fixture.chat, &url)
+            .unwrap();
+        let settings = AutoSettleSettings::default();
+        assert!(
+            !fixture
+                .store
+                .auto_settle_session(&candidate, candidate.activity_at, &settings, Some(&seen))
+                .unwrap()
+        );
+        let now_seen = fixture.store.link_state(&candidate.chats).unwrap();
+        assert!(now_seen.removed_everywhere(&candidate.chats, &url));
+        assert!(now_seen.linked().is_empty());
     }
 
     #[test]

@@ -240,6 +240,42 @@ pub struct TurnSpec {
     pub environment: Vec<(String, String)>,
 }
 
+/// One link of a chat, as settling reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LinkRow {
+    pub(crate) chat: String,
+    pub(crate) url: String,
+    pub(crate) dismissed: bool,
+}
+
+/// Every link of a session's chats, removed ones too. A settling decision is
+/// made from one of these and holds only while the links still read the same.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LinkState(pub(crate) Vec<LinkRow>);
+
+impl LinkState {
+    /// The linked pull requests, each once, oldest first per chat.
+    pub(crate) fn linked(&self) -> Vec<String> {
+        let mut urls = Vec::new();
+        for link in &self.0 {
+            if !link.dismissed && !urls.contains(&link.url) {
+                urls.push(link.url.clone());
+            }
+        }
+        urls
+    }
+
+    /// Whether the user removed `url` from every one of `chats`.
+    pub(crate) fn removed_everywhere(&self, chats: &[String], url: &str) -> bool {
+        !chats.is_empty()
+            && chats.iter().all(|chat| {
+                self.0
+                    .iter()
+                    .any(|link| link.chat == *chat && link.url == url && link.dismissed)
+            })
+    }
+}
+
 /// What linking pull requests to a chat did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct PullRequestLinks {
@@ -3635,34 +3671,19 @@ impl StateStore {
     }
 
     /// The pull requests linked to any of these chats, each once.
+    #[cfg(test)]
     pub(crate) fn linked_pull_request_urls(
         &self,
         chats: &[String],
     ) -> Result<Vec<String>, StorageError> {
-        let database = self.reader()?;
-        linked_urls(&database, chats)
+        Ok(self.link_state(chats)?.linked())
     }
 
-    /// Whether the user removed this pull request from every one of these chats.
-    pub(crate) fn pull_request_dismissed(
-        &self,
-        chats: &[String],
-        url: &str,
-    ) -> Result<bool, StorageError> {
+    /// Every link of these chats, removed ones too, as a settling decision
+    /// reads them. See [`LinkState`].
+    pub(crate) fn link_state(&self, chats: &[String]) -> Result<LinkState, StorageError> {
         let database = self.reader()?;
-        for chat in chats {
-            let dismissed = database
-                .query_row(
-                    "SELECT dismissed FROM chat_pull_requests WHERE chat_id = ? AND url = ?",
-                    params![chat, url],
-                    |row| row.get::<_, bool>(0),
-                )
-                .optional()?;
-            if dismissed != Some(true) {
-                return Ok(false);
-            }
-        }
-        Ok(!chats.is_empty())
+        read_link_state(&database, chats)
     }
 
     /// Records a pull request's state on every chat that links it. Returns
@@ -5056,21 +5077,21 @@ impl StateStore {
     /// the sweep looked: what the user does always outranks the rules. One
     /// statement both checks and updates, so no message can land between them,
     /// and the rules the sweep decided under must still be the ones in force.
-    /// `links_seen`, when given, is the session's linked pull requests the
-    /// decision looked at. A link added or removed since then voids it.
+    /// `links_seen`, when given, is the session's links as the decision read
+    /// them. A link added, removed or restored since then voids it.
     pub(crate) fn auto_settle_session(
         &self,
         candidate: &SettlementCandidate,
         settled_at: i64,
         decided_under: &AutoSettleSettings,
-        links_seen: Option<&[String]>,
+        links_seen: Option<&LinkState>,
     ) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         if read_auto_settle_settings(&database)? != *decided_under {
             return Ok(false);
         }
         if let Some(links_seen) = links_seen
-            && linked_urls(&database, &candidate.chats)? != links_seen
+            && read_link_state(&database, &candidate.chats)? != *links_seen
         {
             return Ok(false);
         }
@@ -9653,23 +9674,24 @@ fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// The pull requests linked to any of `chats`, each once, in the order the
-/// chats and their links come.
-fn linked_urls(database: &Connection, chats: &[String]) -> Result<Vec<String>, StorageError> {
+/// Every link of some chats, removed ones too, in a fixed order.
+fn read_link_state(database: &Connection, chats: &[String]) -> Result<LinkState, StorageError> {
     let mut statement = database.prepare_cached(
-        "SELECT url FROM chat_pull_requests WHERE chat_id = ? AND dismissed = 0 \
+        "SELECT url, dismissed FROM chat_pull_requests WHERE chat_id = ? \
          ORDER BY created_at, rowid",
     )?;
-    let mut urls = Vec::new();
+    let mut links = Vec::new();
     for chat in chats {
-        for url in statement.query_map([chat], |row| row.get::<_, String>(0))? {
-            let url = url?;
-            if !urls.contains(&url) {
-                urls.push(url);
-            }
+        for row in statement.query_map([chat], |row| Ok((row.get(0)?, row.get(1)?)))? {
+            let (url, dismissed) = row?;
+            links.push(LinkRow {
+                chat: chat.clone(),
+                url,
+                dismissed,
+            });
         }
     }
-    Ok(urls)
+    Ok(LinkState(links))
 }
 
 /// Pull requests linked to each chat. A link the user removed stays, marked
