@@ -2221,7 +2221,6 @@ struct XdDesktop {
     sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
     /// Drawers other than the current project that the user opened by hand.
-    opened_drawers: HashSet<String>,
     /// Filters the catalog to projects and sessions whose names match.
     catalog_find_input: Entity<ComposerInput>,
     catalog_query: String,
@@ -2889,7 +2888,6 @@ impl XdDesktop {
             sidebar_move_submitting: false,
             sidebar_move_destination: None,
             collapsed_folders,
-            opened_drawers: HashSet::new(),
             catalog_find_input,
             catalog_query: String::new(),
             creating_workspace: false,
@@ -12605,15 +12603,11 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn toggle_drawer(&mut self, project_id: String, current: bool, cx: &mut Context<Self>) {
-        if current {
-            self.toggle_folder_collapsed(project_id, cx);
-        } else {
-            if !self.opened_drawers.remove(&project_id) {
-                self.opened_drawers.insert(project_id);
-            }
-            cx.notify();
-        }
+    /// Whether a project shows its sessions. Every project opens and closes on
+    /// its own, like a folder, and starts open; what is closed is saved per
+    /// connection, so it stays as it was left after a restart, as on Android.
+    fn project_open(&self, project_id: &str, finding: bool) -> bool {
+        finding || !self.collapsed_folders.contains(project_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -13450,12 +13444,7 @@ impl XdDesktop {
                 }
             }
             matches += 1;
-            let open = finding
-                || if current {
-                    !self.collapsed_folders.contains(&project.id)
-                } else {
-                    self.opened_drawers.contains(&project.id)
-                };
+            let open = self.project_open(&project.id, finding);
             let signals = sessions
                 .iter()
                 .map(|session| self.session_signal(session))
@@ -13516,7 +13505,7 @@ impl XdDesktop {
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_drawer(toggle_project.clone(), current, cx);
+                    this.toggle_folder_collapsed(toggle_project.clone(), cx);
                 }))
                 .when(self.model.folder_reorder_supported, |header| {
                     header.on_drag(drag_payload, move |drag, position, _, cx| {
@@ -25865,7 +25854,6 @@ Binary files /dev/null and b/image.png differ\n";
             "minimal-project-list",
             "minimal-new-project",
             "truncating_label(session.branch)",
-            "self.toggle_folder_collapsed(project_id, cx)",
             "this.begin_chat_create",
             "signal_tab(signal, colors)",
             "drawer_tabs(&signals, colors)",
@@ -25874,7 +25862,8 @@ Binary files /dev/null and b/image.png differ\n";
         }
         assert!(!home.contains("minimal-new-session"));
         assert!(!board.contains("this.minimal_route ="));
-        assert!(board.contains("this.toggle_drawer(toggle_project.clone(), current, cx)"));
+        assert!(board.contains("this.toggle_folder_collapsed(toggle_project.clone(), cx)"));
+        assert!(!production.contains("opened_drawers"));
         assert!(home.contains("minimal-project-content"));
         assert!(home.contains("Welcome to xd"));
         assert!(!home.contains("self.render_catalog("));
@@ -26358,6 +26347,38 @@ Binary files /dev/null and b/image.png differ\n";
             );
 
             assert!(desktop.terminal_panel.as_ref().unwrap().sessions.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn every_project_opens_on_its_own_and_stays_as_left(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.settings.remote_ssh_command = Some("ssh dev.example -p 22".into());
+            desktop.collapsed_folders.clear();
+            // Projects start open, the current one or not, so several show at once.
+            assert!(desktop.project_open("project-a", false));
+            assert!(desktop.project_open("project-b", false));
+
+            desktop.toggle_folder_collapsed("project-b".into(), cx);
+            assert!(desktop.project_open("project-a", false));
+            assert!(!desktop.project_open("project-b", false));
+            assert!(
+                desktop.project_open("project-b", true),
+                "a search still shows what it finds"
+            );
+
+            // A restart restores what was closed, and only that.
+            desktop.collapsed_folders.clear();
+            desktop.restore_collapsed_folders();
+            assert!(desktop.project_open("project-a", false));
+            assert!(!desktop.project_open("project-b", false));
+
+            desktop.toggle_folder_collapsed("project-b".into(), cx);
+            desktop.collapsed_folders.clear();
+            desktop.restore_collapsed_folders();
+            assert!(desktop.project_open("project-b", false));
         });
     }
 
