@@ -1,5 +1,6 @@
 package com.restartfu.xd.mobile.ui
 
+import android.app.Activity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalUriHandler
@@ -39,7 +40,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -227,26 +231,33 @@ internal fun ChatScreen(
         }
     }
 
-    // Opening a chat lands on the newest message, not the oldest. This cannot
-    // be inferred from the list state: by the time an effect runs the items
-    // are already laid out, so "nothing measured yet" reads as a full list and
-    // the jump never happens. Track the first load for this chat instead.
-    // Saved, so a rotation does not re-land and throw away the scroll position
-    // rememberLazyListState just restored.
-    var landed by rememberSaveable(state.chatId) { mutableStateOf(false) }
+    // Going into a chat lands on the newest message, not the oldest. This
+    // cannot be inferred from the list state: by the time an effect runs the
+    // items are already laid out, so "nothing measured yet" reads as a full
+    // list and the jump never happens. Track whether this visit has landed.
+    // Kept on the chat's model rather than in saved state: each chat's saved
+    // state outlives leaving it, which would bring a reader back to wherever
+    // they last were. A rotation keeps the flag, so it does not re-land and
+    // throw away the scroll position rememberLazyListState just restored.
+    val activity = LocalContext.current as? Activity
+    DisposableEffect(model) {
+        onDispose {
+            if (activity?.isChangingConfigurations != true) model.landed = false
+        }
+    }
 
     LaunchedEffect(state.chatId, items.isNotEmpty()) {
-        if (!landed && items.isNotEmpty()) {
+        if (!model.landed && items.isNotEmpty()) {
             // Jumped, not animated: scrolling through a loaded history on open
             // is motion the reader did not ask for.
-            listState.scrollToItem(lastTranscriptIndex)
-            landed = true
+            listState.scrollToEnd(lastTranscriptIndex)
+            model.landed = true
         }
     }
 
     LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount, trailingItemCount) {
-        if (landed && items.isNotEmpty() && atBottom) {
-            listState.animateScrollToItem(lastTranscriptIndex)
+        if (model.landed && items.isNotEmpty() && atBottom) {
+            listState.scrollToEnd(lastTranscriptIndex, animated = true)
         }
     }
 
@@ -1207,6 +1218,20 @@ private fun AnalysisDisclosure(
                 )
             }
         }
+    }
+}
+
+/**
+ * Shows the end of the item at [index]. Scrolling to an item alone puts its
+ * top at the top of the list, so a last message taller than the screen would
+ * show its start with the rest of it still below.
+ */
+private suspend fun LazyListState.scrollToEnd(index: Int, animated: Boolean = false) {
+    if (animated) animateScrollToItem(index) else scrollToItem(index)
+    while (canScrollForward) {
+        val step = layoutInfo.viewportSize.height.coerceAtLeast(1).toFloat()
+        val moved = if (animated) animateScrollBy(step) else scrollBy(step)
+        if (moved <= 0f) break
     }
 }
 
