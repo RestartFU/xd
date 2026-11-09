@@ -39,6 +39,8 @@ import com.restartfu.xd.protocol.HostUpdateReply
 import com.restartfu.xd.protocol.DirectoryListReply
 import com.restartfu.xd.protocol.DoneReply
 import com.restartfu.xd.protocol.FolderSettingsReply
+import com.restartfu.xd.protocol.LinkPullRequestsReply
+import com.restartfu.xd.protocol.UnlinkPullRequestReply
 import com.restartfu.xd.protocol.NewChatSourcesReply
 import com.restartfu.xd.protocol.Ops
 import com.restartfu.xd.protocol.RemoteProtocolException
@@ -552,6 +554,25 @@ public class XdClient(
     public suspend fun setSessionAutoSettle(sessionId: String, enabled: Boolean) {
         actor.call(Ops.setSessionAutoSettle(sessionId, enabled))
         requestTreeRefresh()
+    }
+
+    /**
+     * Links pull requests to [chatId]; see [Ops.linkPullRequests]. The list
+     * itself comes back through [tree], which the host broadcasts.
+     */
+    public suspend fun linkPullRequests(chatId: String, urls: List<String>): LinkPullRequestsReply {
+        val value = actor.call(Ops.linkPullRequests(chatId, urls))
+        val reply = actor.decodeReply(value) { it.decodeReply<LinkPullRequestsReply>() }
+        if (reply.linked.isNotEmpty()) requestTreeRefresh()
+        return reply
+    }
+
+    /** Removes a linked pull request from [chatId]; true when it was linked. */
+    public suspend fun unlinkPullRequest(chatId: String, url: String): Boolean {
+        val value = actor.call(Ops.unlinkPullRequest(chatId, url))
+        val changed = actor.decodeReply(value) { it.decodeReply<UnlinkPullRequestReply>() }.changed
+        if (changed) requestTreeRefresh()
+        return changed
     }
 
     /** Asks each assistant for its sign-in state, into [agentAuth]. */

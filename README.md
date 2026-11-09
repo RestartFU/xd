@@ -23,6 +23,7 @@ A local-first desktop workspace for user-installed Codex and Claude Code.
 - One persistent daemon owns local and remote sessions; work continues when clients disconnect.
 - Direct remote connections over pinned TLS, with expiring pairing codes and revocable devices.
 - Projects, Git worktrees, branches, and pull requests in one workspace.
+- Link any number of pull requests to a chat. The chat's branch PR, PRs opened from xd and PRs the agent opens with `gh pr create` are linked by themselves; agents link others through xd's `link_pull_requests` tool, and you can add or remove links from the session header on desktop or the chat menu on Android. A session settles once all of its pull requests have merged or closed.
 - Settle finished sessions with one click: they move to a Settled shelf and come back when you message them. Idle and merged sessions settle by themselves, even while the app is closed.
 - An integrated browser with separate tabs for each chat and shared site data.
   Swipe horizontally on a supported touchpad to go back or forward.

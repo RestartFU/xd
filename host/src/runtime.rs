@@ -1362,6 +1362,14 @@ impl TurnRuntime {
                 _ => secret_prompt,
             });
         }
+        let link_tool = crate::agent_tools::offered(&turn.backend);
+        if link_tool {
+            let hint = crate::agent_tools::HINT;
+            turn.system_prompt = Some(match turn.system_prompt.take() {
+                Some(prompt) if !prompt.is_empty() => format!("{prompt}\n\n{hint}"),
+                _ => hint.to_owned(),
+            });
+        }
         let command_backend = turn.backend.clone();
         let command_model = turn.model.clone();
         let command_effort = turn.effort.clone();
@@ -1395,6 +1403,9 @@ impl TurnRuntime {
         } else {
             specification.build()
         };
+        if link_tool {
+            crate::agent_tools::add_link_tool(&mut command, &command_backend, &turn.chat_id);
+        }
         let (child, source, complaint) = if keeps_process {
             self.session_for(
                 &turn.chat_id,
@@ -2478,6 +2489,15 @@ impl TurnRuntime {
                         if turn.carries_cut_off_note && !background {
                             let _ = self.inner.store.clear_cut_off_turn(&turn.chat_id);
                         }
+                    }
+                    AgentEvent::PullRequests(urls) => {
+                        crate::link_pull_requests(
+                            &self.inner.store,
+                            &self.inner.events,
+                            &turn.chat_id,
+                            &urls,
+                            crate::pull_requests::LinkSource::Command,
+                        );
                     }
                     AgentEvent::Commands(commands) => {
                         if let Ok(mut cached) = self.inner.commands.lock() {

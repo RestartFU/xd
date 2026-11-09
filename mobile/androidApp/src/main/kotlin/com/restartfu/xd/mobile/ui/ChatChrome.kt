@@ -40,6 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.restartfu.xd.mobile.R
 import com.restartfu.xd.model.ChatSummary
+import com.restartfu.xd.model.LinkedPullRequest
 
 /** The open session's chats, and what can be done to them and to the session. */
 internal class SessionChats(
@@ -106,6 +107,13 @@ internal fun CompactChatBar(
     onChatSettings: () -> Unit,
     chats: SessionChats,
     agents: AgentTabs = AgentTabs(),
+    /**
+     * The chat's linked pull requests, on a host that keeps them; null on an
+     * older one, which shows the branch's [pullRequest] alone.
+     */
+    linkedPullRequests: List<LinkedPullRequest>? = null,
+    /** Opens the Pull requests list; null where the host cannot link them. */
+    showPullRequests: (() -> Unit)? = null,
 ) {
     var choosingChat by remember { mutableStateOf(false) }
     var choosingPane by remember { mutableStateOf(false) }
@@ -157,15 +165,26 @@ internal fun CompactChatBar(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        // The branch's pull request, as the desktop's session header shows it.
-                        pullRequest?.let { url ->
-                            Text(
-                                pullRequestLabel(url),
-                                modifier = Modifier.clickable(role = Role.Button) { openPullRequest(url) },
+                        if (linkedPullRequests != null) {
+                            // Every pull request linked to the chat, as the desktop's header lists them.
+                            LinkedPullRequestChips(
+                                pullRequests = linkedPullRequests,
+                                limit = PullRequestChipLimit.PHONE,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = LocalXdSignals.current.link,
-                                textDecoration = TextDecoration.Underline,
+                                open = openPullRequest,
+                                showAll = { showPullRequests?.invoke() },
                             )
+                        } else {
+                            // The branch's pull request, as the desktop's session header shows it.
+                            pullRequest?.let { url ->
+                                Text(
+                                    pullRequestLabel(url),
+                                    modifier = Modifier.clickable(role = Role.Button) { openPullRequest(url) },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = LocalXdSignals.current.link,
+                                    textDecoration = TextDecoration.Underline,
+                                )
+                            }
                         }
                     }
                 }
@@ -275,6 +294,9 @@ internal fun CompactChatBar(
                         HorizontalDivider()
                         DropdownMenuItem(text = { Text("Close chat") }, onClick = { more = false; chats.close(selected.id) })
                         DropdownMenuItem(text = { Text("Rename chat") }, onClick = { more = false; chats.rename(selected) })
+                        showPullRequests?.let { show ->
+                            DropdownMenuItem(text = { Text("Pull requests") }, onClick = { more = false; show() })
+                        }
                         DropdownMenuItem(
                             text = { Text("Delete chat…", color = MaterialTheme.colorScheme.error) },
                             onClick = { more = false; chats.delete(selected) },

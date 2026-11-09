@@ -42,6 +42,51 @@ class RepliesTest {
     }
 
     @Test
+    fun treeListsEachChatsLinkedPullRequestsOnHostsThatKeepThem() {
+        val older = WireJson.parseToJsonElement(
+            """{"ok":true,"folders":[],"chats":[{"id":"one","folder":"p","title":"One","backend":"codex","working":false}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertFalse(older.linkedPullRequests)
+        assertEquals(emptyList(), older.chats.single().pullRequests)
+
+        val current = WireJson.parseToJsonElement(
+            """{"ok":true,"linked_pull_requests":true,"folders":[],"chats":[""" +
+                """{"id":"one","folder":"p","title":"One","backend":"codex","working":false,"pull_requests":[""" +
+                """{"url":"https://github.com/o/r/pull/7","state":"merged"},{"url":"https://github.com/o/r/pull/9"}]},""" +
+                """{"id":"two","folder":"p","title":"Two","backend":"codex","working":false}]}""",
+        ).jsonObject.decodeReply<TreeReply>()
+        assertTrue(current.linkedPullRequests)
+        assertEquals(
+            listOf(
+                LinkedPullRequestReply("https://github.com/o/r/pull/7", "merged"),
+                LinkedPullRequestReply("https://github.com/o/r/pull/9", null),
+            ),
+            current.chats.first().pullRequests,
+        )
+        assertEquals(emptyList(), current.chats.last().pullRequests)
+    }
+
+    @Test
+    fun linkingAnswersWhatItKeptAndWhatItRefused() {
+        val linked = WireJson.parseToJsonElement(
+            """{"ok":true,"linked":["https://github.com/o/r/pull/7"],"invalid":["nope"]}""",
+        ).jsonObject.decodeReply<LinkPullRequestsReply>()
+        assertEquals(listOf("https://github.com/o/r/pull/7"), linked.linked)
+        assertEquals(listOf("nope"), linked.invalid)
+        val bare = WireJson.parseToJsonElement("""{"ok":true}""").jsonObject.decodeReply<LinkPullRequestsReply>()
+        assertEquals(emptyList(), bare.linked)
+        assertEquals(emptyList(), bare.invalid)
+        val refused = runCatching {
+            WireJson.parseToJsonElement("""{"ok":false,"error":"unknown chat"}""").jsonObject.decodeReply<LinkPullRequestsReply>()
+        }.exceptionOrNull()
+        assertTrue(refused is RemoteRefusedException)
+        assertEquals("unknown chat", refused.message)
+
+        assertTrue(WireJson.parseToJsonElement("""{"ok":true,"changed":true}""").jsonObject.decodeReply<UnlinkPullRequestReply>().changed)
+        assertFalse(WireJson.parseToJsonElement("""{"ok":true,"changed":false}""").jsonObject.decodeReply<UnlinkPullRequestReply>().changed)
+    }
+
+    @Test
     fun workflowStatusCarriesRunAndJobClocks() {
         val reply = WireJson.parseToJsonElement(
             """

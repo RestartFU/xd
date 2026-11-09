@@ -214,6 +214,30 @@ pub fn read_output(path: &str) -> Option<String> {
     Some(text.to_owned())
 }
 
+/// The words of each simple command a shell script runs, in order. Heredoc
+/// bodies and the bodies of functions it only defines are left out; commands
+/// run by substitutions inside double quotes are included.
+pub(crate) fn simple_commands(script: &str) -> Vec<Vec<String>> {
+    fn collect(script: &str, depth: usize, commands: &mut Vec<Vec<String>>) {
+        for segment in segments(script) {
+            if segment.defined {
+                continue;
+            }
+            if depth < 4 {
+                for substitution in &segment.substitutions {
+                    collect(substitution, depth + 1, commands);
+                }
+            }
+            if !segment.words.is_empty() {
+                commands.push(segment.words);
+            }
+        }
+    }
+    let mut commands = Vec::new();
+    collect(script, 0, &mut commands);
+    commands
+}
+
 /// One simple command: its words, and what a heredoc or here-string feeds it.
 #[derive(Debug, Default)]
 struct Segment {

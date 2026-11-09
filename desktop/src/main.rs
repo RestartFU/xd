@@ -53,8 +53,8 @@ use xd_desktop::{
     markdown,
     model::{
         AppModel, Attachment, AutoDeleteRules, AutoSettleRules, BackgroundTaskOutput, ChatSummary,
-        Folder, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage, MessagePageDirection,
-        PauseAllAction, SentFrom, ToolView, Worktree,
+        Folder, LinkedPullRequest, MAX_MESSAGE_IMAGE_BYTES, Message, MessageImage,
+        MessagePageDirection, PauseAllAction, PullRequestState, SentFrom, ToolView, Worktree,
     },
     paired::{self, RemoteBridge, RemoteError, RemoteSession},
     presentation,
@@ -1412,6 +1412,65 @@ fn pull_request_label(url: &str) -> String {
     }
 }
 
+/// How many linked pull requests the session header names before `+N`.
+const HEADER_PULL_REQUEST_CHIPS: usize = 3;
+
+const NOT_A_PULL_REQUEST_LINK: &str = "That is not a pull request link.";
+
+/// The session header's "Pull requests" popover, for one chat on one host.
+struct PullRequestPanel {
+    endpoint: ChatEndpoint,
+    chat_id: String,
+    text: String,
+    /// The link request still awaiting its answer.
+    linking: Option<u64>,
+    /// The field's text when that request went out. Its answer rewrites the
+    /// field only if the user has not typed since.
+    sent: String,
+    error: Option<String>,
+}
+
+/// Tints a pull request's icon by its state, so merged and closed ones read
+/// apart from open ones at a glance.
+fn pull_request_state_color(state: Option<PullRequestState>, colors: ThemeColors) -> u32 {
+    match state {
+        Some(PullRequestState::Open) => colors.working,
+        Some(PullRequestState::Merged) => colors.done,
+        Some(PullRequestState::Closed) => colors.danger,
+        None => colors.muted,
+    }
+}
+
+fn pull_request_state_label(state: PullRequestState) -> &'static str {
+    match state {
+        PullRequestState::Open => "Open",
+        PullRequestState::Merged => "Merged",
+        PullRequestState::Closed => "Closed",
+    }
+}
+
+fn pull_request_chip_tooltip(state: Option<PullRequestState>) -> &'static str {
+    match state {
+        Some(PullRequestState::Merged) => "Open pull request (merged)",
+        Some(PullRequestState::Closed) => "Open pull request (closed)",
+        Some(PullRequestState::Open) | None => "Open pull request",
+    }
+}
+
+/// How many addresses a host links in one request.
+const MAX_PULL_REQUESTS_PER_LINK: usize = 16;
+/// How many rows the Pull requests popover shows before its list scrolls.
+const PULL_REQUEST_PANEL_MAX_ROWS: f32 = 8.0;
+
+/// The addresses in what was pasted into the link field: one or several,
+/// apart by spaces, commas or lines.
+fn pasted_pull_request_urls(text: &str) -> Vec<String> {
+    text.split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 struct PendingSend {
     chat_id: String,
     text: String,
@@ -2305,6 +2364,9 @@ struct XdDesktop {
     new_chat_worktree_picked: Option<bool>,
     chat_create_pull_requests: Vec<NewSessionPullRequest>,
     chat_pull_requests: HashMap<(ChatEndpoint, String), ChatPullRequest>,
+    pull_request_panel: Option<PullRequestPanel>,
+    pull_request_generation: u64,
+    pull_request_input: Entity<ComposerInput>,
     chat_create_sources_loading: bool,
     chat_create_sources_error: Option<String>,
     workspace_context_folder: Option<String>,
@@ -2490,6 +2552,13 @@ impl XdDesktop {
         cx.subscribe(&sidebar_edit_input, |this, _, event, cx| match event {
             ComposerEvent::Changed(text) => this.sidebar_edit_changed(text.clone(), cx),
             ComposerEvent::Submit => this.save_sidebar_edit(cx),
+            ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
+        })
+        .detach();
+        let pull_request_input = cx.new(|cx| ComposerInput::new(cx, "Paste a pull request link"));
+        cx.subscribe(&pull_request_input, |this, _, event, cx| match event {
+            ComposerEvent::Changed(text) => this.pull_request_text_changed(text.clone(), cx),
+            ComposerEvent::Submit => this.link_pasted_pull_requests(cx),
             ComposerEvent::Bytes(_) | ComposerEvent::PasteImage { .. } => {}
         })
         .detach();
@@ -2981,6 +3050,9 @@ impl XdDesktop {
             new_chat_worktree_picked: None,
             chat_create_pull_requests: Vec::new(),
             chat_pull_requests: HashMap::new(),
+            pull_request_panel: None,
+            pull_request_generation: 0,
+            pull_request_input,
             chat_create_sources_loading: false,
             chat_create_sources_error: None,
             workspace_context_folder: None,
@@ -3286,6 +3358,8 @@ impl XdDesktop {
                 | RequestKind::GitDraft { .. }
                 | RequestKind::GitPullRequestStatus { .. }
                 | RequestKind::GitPullRequestCreate { .. }
+                | RequestKind::LinkPullRequests { .. }
+                | RequestKind::UnlinkPullRequest { .. }
                 | RequestKind::FileBrowseList { .. }
                 | RequestKind::FileBrowseRead { .. }
                 | RequestKind::FileBrowseWrite { .. }
@@ -4174,6 +4248,8 @@ impl XdDesktop {
                     | RequestKind::GitDraft { .. }
                     | RequestKind::GitPullRequestStatus { .. }
                     | RequestKind::GitPullRequestCreate { .. }
+                    | RequestKind::LinkPullRequests { .. }
+                    | RequestKind::UnlinkPullRequest { .. }
                     | RequestKind::FileBrowseList { .. }
                     | RequestKind::FileBrowseRead { .. }
                     | RequestKind::FileBrowseWrite { .. }
@@ -4457,6 +4533,21 @@ impl XdDesktop {
                             .get("error")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
+                    }
+                }
+                RequestKind::LinkPullRequests {
+                    chat_id,
+                    generation,
+                } => self.apply_pull_request_link_reply(chat_id, *generation, &value, cx),
+                RequestKind::UnlinkPullRequest { chat_id, .. } => {
+                    if let Some(panel) = self.pull_request_panel_for(chat_id) {
+                        panel.error = Some(
+                            value
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Could not remove the pull request.")
+                                .to_owned(),
+                        );
                     }
                 }
                 RequestKind::TerminalOpen { chat_id, agent, .. }
@@ -5293,6 +5384,12 @@ impl XdDesktop {
                         .map(str::to_owned);
                 }
             }
+            RequestKind::LinkPullRequests {
+                chat_id,
+                generation,
+            } => self.apply_pull_request_link_reply(&chat_id, generation, &value, cx),
+            // The host broadcasts the tree that no longer lists it.
+            RequestKind::UnlinkPullRequest { .. } => {}
             RequestKind::GitPullRequestCreate {
                 chat_id: _,
                 generation,
@@ -6710,6 +6807,7 @@ impl XdDesktop {
             || self.sidebar_context_menu.is_some()
             || self.pending_sidebar_delete.is_some()
             || self.creating_chat_folder.is_some()
+            || self.pull_request_panel.is_some()
     }
 
     fn focus_minimal_popup(
@@ -9823,6 +9921,175 @@ impl XdDesktop {
         }
     }
 
+    /// The chat the session header shows, when the host lists its linked
+    /// pull requests.
+    fn linked_pull_request_chat(&self) -> Option<&ChatSummary> {
+        let MinimalRoute::Cli { chat_id, .. } = &self.minimal_route else {
+            return None;
+        };
+        self.model
+            .chats
+            .iter()
+            .find(|chat| &chat.id == chat_id)
+            .filter(|_| self.model.linked_pull_requests_supported)
+    }
+
+    fn open_pull_request_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.linked_pull_request_chat().map(|chat| chat.id.clone()) else {
+            return;
+        };
+        self.pull_request_panel = Some(PullRequestPanel {
+            endpoint: self.active_endpoint,
+            chat_id,
+            text: String::new(),
+            linking: None,
+            sent: String::new(),
+            error: None,
+        });
+        self.pull_request_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        let focus = self.pull_request_input.read(cx).focus_handle(cx);
+        self.focus_minimal_popup(focus, window, cx);
+        cx.notify();
+    }
+
+    fn close_pull_request_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pull_request_panel = None;
+        self.restore_minimal_popup_focus(window);
+        cx.notify();
+    }
+
+    /// The popover stays only while the header still shows its chat.
+    fn pull_request_panel_is_stale(&self) -> bool {
+        self.pull_request_panel.as_ref().is_some_and(|panel| {
+            panel.endpoint != self.active_endpoint
+                || self
+                    .linked_pull_request_chat()
+                    .is_none_or(|chat| chat.id != panel.chat_id)
+        })
+    }
+
+    fn pull_request_panel_for(&mut self, chat_id: &str) -> Option<&mut PullRequestPanel> {
+        let endpoint = self.active_endpoint;
+        self.pull_request_panel
+            .as_mut()
+            .filter(|panel| panel.endpoint == endpoint && panel.chat_id == chat_id)
+    }
+
+    fn pull_request_text_changed(&mut self, text: String, cx: &mut Context<Self>) {
+        if let Some(panel) = &mut self.pull_request_panel
+            && panel.text != text
+        {
+            panel.text = text;
+            panel.error = None;
+            cx.notify();
+        }
+    }
+
+    fn link_pasted_pull_requests(&mut self, cx: &mut Context<Self>) {
+        let Some(panel) = &self.pull_request_panel else {
+            return;
+        };
+        let urls = pasted_pull_request_urls(&panel.text);
+        if panel.linking.is_some() || urls.is_empty() {
+            return;
+        }
+        if urls.len() > MAX_PULL_REQUESTS_PER_LINK {
+            if let Some(panel) = &mut self.pull_request_panel {
+                panel.error = Some(format!(
+                    "Link at most {MAX_PULL_REQUESTS_PER_LINK} pull requests at a time."
+                ));
+            }
+            cx.notify();
+            return;
+        }
+        let (endpoint, chat_id) = (panel.endpoint, panel.chat_id.clone());
+        self.pull_request_generation += 1;
+        let generation = self.pull_request_generation;
+        let sent = match self.endpoint_host(endpoint) {
+            Some(host) => host.link_pull_requests(&chat_id, &urls, generation),
+            None => Err("xd is not connected to a host.".into()),
+        };
+        if let Some(panel) = &mut self.pull_request_panel {
+            match sent {
+                Ok(()) => {
+                    panel.linking = Some(generation);
+                    panel.sent = panel.text.clone();
+                    panel.error = None;
+                }
+                Err(error) => panel.error = Some(error),
+            }
+        }
+        cx.notify();
+    }
+
+    fn unlink_pull_request(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Some(panel) = &self.pull_request_panel else {
+            return;
+        };
+        let (endpoint, chat_id) = (panel.endpoint, panel.chat_id.clone());
+        self.pull_request_generation += 1;
+        let generation = self.pull_request_generation;
+        let sent = match self.endpoint_host(endpoint) {
+            Some(host) => host.unlink_pull_request(&chat_id, url, generation),
+            None => Err("xd is not connected to a host.".into()),
+        };
+        if let Some(panel) = &mut self.pull_request_panel {
+            panel.error = sent.err();
+        }
+        cx.notify();
+    }
+
+    /// Clears the field once every address was linked. Whatever the host
+    /// would not take stays in the field under the error, to be corrected.
+    fn apply_pull_request_link_reply(
+        &mut self,
+        chat_id: &str,
+        generation: u64,
+        value: &Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(panel) = self
+            .pull_request_panel_for(chat_id)
+            .filter(|panel| panel.linking == Some(generation))
+        else {
+            return;
+        };
+        panel.linking = None;
+        if value.get("ok").and_then(Value::as_bool) != Some(true) {
+            panel.error = Some(
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .filter(|error| !error.trim().is_empty())
+                    .unwrap_or(NOT_A_PULL_REQUEST_LINK)
+                    .to_owned(),
+            );
+            cx.notify();
+            return;
+        }
+        let invalid = value
+            .get("invalid")
+            .and_then(Value::as_array)
+            .map(|invalid| {
+                invalid
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        panel.error = (!invalid.is_empty()).then(|| NOT_A_PULL_REQUEST_LINK.to_owned());
+        // Text typed while the request was out is the user's next one, so
+        // it stays.
+        if panel.text == panel.sent {
+            panel.text = invalid.clone();
+            self.pull_request_input
+                .update(cx, |input, cx| input.set_text(invalid, cx));
+        }
+        cx.notify();
+    }
+
     fn request_chat(&mut self, chat_id: &str) {
         if let Some(host) = self.active_host()
             && let Err(error) = host.chat(chat_id)
@@ -12381,12 +12648,18 @@ impl XdDesktop {
             .unwrap_or(DEFAULT_CHAT_TITLE)
             .to_owned();
         let branch = chat.and_then(|chat| chat.branch.clone());
-        let pull_request_url = chat.and_then(|chat| {
-            self.chat_pull_requests
-                .get(&(self.active_endpoint, chat.id.clone()))?
-                .url_for(chat.branch.as_deref()?)
-                .map(str::to_owned)
-        });
+        // A host that keeps links lists them all, the branch's included.
+        let linked_pull_requests = chat
+            .filter(|_| self.model.linked_pull_requests_supported)
+            .map(|chat| chat.pull_requests.clone());
+        let pull_request_url = chat
+            .filter(|_| linked_pull_requests.is_none())
+            .and_then(|chat| {
+                self.chat_pull_requests
+                    .get(&(self.active_endpoint, chat.id.clone()))?
+                    .url_for(chat.branch.as_deref()?)
+                    .map(str::to_owned)
+            });
         let signal = chat
             .map(|chat| {
                 SessionSignal::of(
@@ -12521,6 +12794,9 @@ impl XdDesktop {
                         .child(label),
                 )
             })
+            .when_some(linked_pull_requests, |toolbar, links| {
+                toolbar.child(self.render_linked_pull_requests(links, colors, cx))
+            })
             .child(div().flex_1())
             .when(signal != SessionSignal::Idle, |toolbar| {
                 toolbar.child(stamp(signal.label(), signal.color(colors)))
@@ -12583,6 +12859,335 @@ impl XdDesktop {
                             .child(div().size(px(9.0)).rounded(px(1.5)).bg(rgb(colors.danger)))
                             .child("Stop"),
                     )
+            })
+            .into_any_element()
+    }
+
+    /// The chat's linked pull requests, the button that links more, and the
+    /// popover listing them all.
+    fn render_linked_pull_requests(
+        &mut self,
+        links: Vec<LinkedPullRequest>,
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let chip = |id: gpui::ElementId| {
+            div()
+                .id(id)
+                .h(px(22.0))
+                .px(px(8.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .rounded_full()
+                .bg(rgb(colors.surface_high))
+                .font_family(MONO)
+                .text_size(px(11.5))
+                .text_color(rgb(colors.muted))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(colors.selected_surface)))
+        };
+        let hidden = links.len().saturating_sub(HEADER_PULL_REQUEST_CHIPS);
+        let chips = links
+            .iter()
+            .take(HEADER_PULL_REQUEST_CHIPS)
+            .enumerate()
+            .map(|(index, link)| {
+                let url = link.url.clone();
+                let tooltip = pull_request_chip_tooltip(link.state);
+                chip(("minimal-session-pull-request", index).into())
+                    .debug_selector(move || format!("minimal-session-pull-request-{index}"))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| PaneTooltip {
+                            label: tooltip,
+                            colors,
+                        })
+                        .into()
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_browser_url(&url, window, cx);
+                    }))
+                    .child(icon(
+                        GIT_PULL_REQUEST_ICON,
+                        12.0,
+                        pull_request_state_color(link.state, colors),
+                    ))
+                    .child(pull_request_label(&link.url))
+            })
+            .collect::<Vec<_>>();
+        let panel_open = self.pull_request_panel.is_some();
+        let panel = panel_open.then(|| self.render_pull_request_panel(&links, colors, cx));
+        div()
+            .relative()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .children(chips)
+            .when(hidden > 0, |group| {
+                group.child(
+                    chip("minimal-session-pull-requests-more".into())
+                        .debug_selector(|| "minimal-session-pull-requests-more".into())
+                        .when(panel_open, |chip| chip.bg(rgb(colors.selected_surface)))
+                        // A tooltip would linger over the open popover.
+                        .when(!panel_open, |chip| {
+                            chip.tooltip(move |_, cx| {
+                                cx.new(|_| PaneTooltip {
+                                    label: "Show all pull requests",
+                                    colors,
+                                })
+                                .into()
+                            })
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_pull_request_panel(window, cx);
+                        }))
+                        .child(format!("+{hidden}")),
+                )
+            })
+            .child(
+                if panel_open {
+                    ui_button(
+                        "minimal-session-link-pull-request",
+                        ButtonKind::Ghost,
+                        colors,
+                    )
+                    .px_0()
+                    .rounded(px(6.0))
+                    .bg(rgb(colors.selected_surface))
+                    .child(icon(GIT_PULL_REQUEST_ICON, 16.0, colors.text))
+                } else {
+                    pane_icon_button(
+                        "minimal-session-link-pull-request",
+                        "Link pull request",
+                        GIT_PULL_REQUEST_ICON,
+                        false,
+                        colors,
+                    )
+                }
+                .debug_selector(|| "minimal-session-link-pull-request".into())
+                .w(px(24.0))
+                .h(px(24.0))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_pull_request_panel(window, cx);
+                })),
+            )
+            .when_some(panel, |group, panel| {
+                // Drawn last, over the transcript, just under the header.
+                group.child(
+                    div().absolute().top_full().left_0().child(
+                        gpui::deferred(
+                            gpui::anchored()
+                                .snap_to_window_with_margin(px(8.0))
+                                .child(panel),
+                        )
+                        .with_priority(1),
+                    ),
+                )
+            })
+    }
+
+    fn render_pull_request_panel(
+        &mut self,
+        links: &[LinkedPullRequest],
+        colors: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let (linking, error, can_link) = self
+            .pull_request_panel
+            .as_ref()
+            .map(|panel| {
+                (
+                    panel.linking.is_some(),
+                    panel.error.clone(),
+                    panel.linking.is_none() && !pasted_pull_request_urls(&panel.text).is_empty(),
+                )
+            })
+            .unwrap_or_default();
+        let rows = links
+            .iter()
+            .enumerate()
+            .map(|(index, link)| {
+                let open_url = link.url.clone();
+                let remove_url = link.url.clone();
+                div()
+                    .id(("pull-request-panel-row", index))
+                    .debug_selector(move || format!("pull-request-panel-row-{index}"))
+                    .h(px(32.0))
+                    .pl_2()
+                    .pr_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(6.0))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.close_pull_request_panel(window, cx);
+                        this.open_browser_url(&open_url, window, cx);
+                    }))
+                    .child(icon(
+                        GIT_PULL_REQUEST_ICON,
+                        14.0,
+                        pull_request_state_color(link.state, colors),
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(MONO)
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.text))
+                            .child(pull_request_label(&link.url)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.muted))
+                            .child(link.repository().unwrap_or(&link.url).to_owned()),
+                    )
+                    .when_some(link.state, |row, state| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.5))
+                                .text_color(rgb(colors.faint))
+                                .child(pull_request_state_label(state)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("pull-request-panel-remove", index))
+                            .debug_selector(move || format!("pull-request-panel-remove-{index}"))
+                            .size(px(22.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(colors.selected_surface)))
+                            .tooltip(move |_, cx| {
+                                cx.new(|_| PaneTooltip {
+                                    label: "Remove",
+                                    colors,
+                                })
+                                .into()
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.unlink_pull_request(&remove_url, cx);
+                            }))
+                            .child(icon(CLOSE_ICON, 12.0, colors.muted)),
+                    )
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id("pull-request-panel")
+            .debug_selector(|| "pull-request-panel".into())
+            .occlude()
+            .mt(px((browser::SESSION_HEADER_HEIGHT - 24.0) / 2.0 + 4.0))
+            .w(px(360.0))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgb(colors.border))
+            .bg(rgb(colors.chrome))
+            .shadow_lg()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .pb_1()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.text))
+                    .child("Pull requests"),
+            )
+            .when(rows.is_empty(), |panel| {
+                panel.child(
+                    div()
+                        .px_2()
+                        .py_2()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.muted))
+                        .child("No pull requests linked yet."),
+                )
+            })
+            .when(!rows.is_empty(), |panel| {
+                // A chat can link 32, more than fit, so the list scrolls and
+                // the field below it stays in reach.
+                panel.child(
+                    div()
+                        .id("pull-request-panel-rows")
+                        .max_h(px(PULL_REQUEST_PANEL_MAX_ROWS * 36.0))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(rows),
+                )
+            })
+            .child(div().h(px(1.0)).my_1().bg(rgb(colors.rule)))
+            .child(
+                div()
+                    .px_1()
+                    .pb_1()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(30.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(rgb(if error.is_some() {
+                                colors.danger
+                            } else {
+                                colors.border
+                            }))
+                            .bg(rgb(colors.background))
+                            .child(self.pull_request_input.clone()),
+                    )
+                    .child(
+                        ui_button(
+                            "pull-request-panel-link",
+                            if can_link {
+                                ButtonKind::Primary
+                            } else {
+                                ButtonKind::Secondary
+                            },
+                            colors,
+                        )
+                        .when(!can_link, |button| {
+                            button.cursor_default().text_color(rgb(colors.faint))
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.link_pasted_pull_requests(cx)))
+                        .child(if linking { "Linking…" } else { "Link" }),
+                    ),
+            )
+            .when_some(error, |panel, error| {
+                panel.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .text_size(px(12.0))
+                        .text_color(rgb(colors.danger))
+                        .child(error),
+                )
             })
             .into_any_element()
     }
@@ -18262,6 +18867,7 @@ impl XdDesktop {
             self.new_chat_search.clone(),
             self.catalog_find_input.clone(),
             self.sidebar_edit_input.clone(),
+            self.pull_request_input.clone(),
             self.workspace_create_input.clone(),
             self.workspace_repo_input.clone(),
             self.workspace_clone_input.clone(),
@@ -18291,6 +18897,9 @@ impl XdDesktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if self.pull_request_panel_is_stale() {
+            self.pull_request_panel = None;
+        }
         self.restore_minimal_popup_focus(window);
         let minimal_popup_open = self.minimal_popup_is_open();
         let minimal_popup_focus = self.minimal_popup_focus.clone();
@@ -18366,6 +18975,22 @@ impl XdDesktop {
             }
         };
         let titlebar = self.render_minimal_titlebar(colors, custom_titlebar, cx);
+        // The popover itself draws in the session header, above this.
+        let pull_request_backdrop = self.pull_request_panel.is_some().then(|| {
+            div()
+                .id("pull-request-panel-backdrop")
+                .occlude()
+                .absolute()
+                .inset_0()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_pull_request_panel(window, cx)),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, _, window, cx| this.close_pull_request_panel(window, cx)),
+                )
+        });
         let session_context_overlay = self.sidebar_context_menu.clone().map(|menu| {
             let rename_target = menu.target.clone();
             let rename_title = menu.title.clone();
@@ -19868,6 +20493,10 @@ impl XdDesktop {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, window, cx| {
+                if this.pull_request_panel.is_some() {
+                    this.close_pull_request_panel(window, cx);
+                    return;
+                }
                 if this.new_chat_menu.take().is_some() {
                     let focus = this.new_chat_input.read(cx).focus_handle(cx);
                     window.focus(&focus);
@@ -20021,6 +20650,7 @@ impl XdDesktop {
                     })
                     .when_some(catalog_resize, |row, handle| row.child(handle)),
             )
+            .when_some(pull_request_backdrop, |root, overlay| root.child(overlay))
             .when_some(session_context_overlay, |root, overlay| root.child(overlay))
             .when_some(project_add_overlay, |root, overlay| root.child(overlay))
             .when_some(theme_overlay, |root, overlay| root.child(overlay))
@@ -23928,6 +24558,342 @@ Binary files /dev/null and b/image.png differ\n";
         assert!(cx.opened_url().is_none(), "it stays inside the app");
     }
 
+    fn show_linked_pull_requests(
+        desktop: &mut XdDesktop,
+        links: serde_json::Value,
+        cx: &mut Context<XdDesktop>,
+    ) {
+        desktop.active_endpoint = ChatEndpoint::Local;
+        desktop.set_browser_open(false);
+        desktop.settings.browser_sessions.clear();
+        let tree = serde_json::json!({
+            "folders": [{"id": "pr-project", "name": "Pull requests"}],
+            "chats": [{
+                "id": "pr-chat",
+                "folder": "pr-project",
+                "backend": "codex",
+                "branch": "feature",
+                "pull_requests": links,
+            }],
+            "linked_pull_requests": true,
+        });
+        desktop.model.apply_tree(&tree).unwrap();
+        desktop.model.select_chat("pr-chat");
+        desktop.minimal_route = MinimalRoute::Cli {
+            project_id: "pr-project".into(),
+            chat_id: "pr-chat".into(),
+            agent: AgentCli::Codex,
+        };
+        cx.notify();
+    }
+
+    #[test]
+    fn pasted_pull_request_links_split_on_spaces_commas_and_lines() {
+        assert_eq!(
+            pasted_pull_request_urls(
+                " https://github.com/o/r/pull/1,https://github.com/o/r/pull/2\nx "
+            ),
+            [
+                "https://github.com/o/r/pull/1",
+                "https://github.com/o/r/pull/2",
+                "x"
+            ]
+        );
+        assert!(pasted_pull_request_urls("  \n ").is_empty());
+        assert_eq!(pasted_pull_request_urls(&"a ".repeat(20)).len(), 20);
+    }
+
+    #[gpui::test]
+    fn the_session_header_names_a_few_linked_pull_requests_and_counts_the_rest(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            show_linked_pull_requests(
+                desktop,
+                serde_json::json!([
+                    {"url": "http://localhost:3000/o/r/pull/1", "state": "merged"},
+                    {"url": "http://localhost:3000/o/r/pull/2", "state": "open"},
+                    {"url": "http://localhost:3000/o/r/pull/3", "state": "closed"},
+                    {"url": "http://localhost:3000/o/r/pull/4"},
+                    {"url": "http://localhost:3000/o/r/pull/5"},
+                ]),
+                cx,
+            );
+            // What the branch lookup found no longer has a chip of its own.
+            let mut known = ChatPullRequest::default();
+            known.branch = Some("feature".into());
+            known.url = Some("http://localhost:3000/o/r/pull/9".into());
+            desktop
+                .chat_pull_requests
+                .insert((ChatEndpoint::Local, "pr-chat".into()), known);
+        });
+        cx.run_until_parked();
+
+        for chip in [
+            "minimal-session-pull-request-0",
+            "minimal-session-pull-request-1",
+            "minimal-session-pull-request-2",
+        ] {
+            assert!(cx.debug_bounds(chip).is_some(), "{chip}");
+        }
+        assert!(cx.debug_bounds("minimal-session-pull-request-3").is_none());
+        assert!(cx.debug_bounds("minimal-session-pull-request").is_none());
+        assert!(
+            cx.debug_bounds("minimal-session-pull-requests-more")
+                .is_some()
+        );
+        assert!(
+            cx.debug_bounds("minimal-session-link-pull-request")
+                .is_some()
+        );
+
+        let chip = cx
+            .debug_bounds("minimal-session-pull-request-1")
+            .expect("the second chip");
+        cx.simulate_click(chip.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, cx| {
+            let pane = desktop.browser_panes["local/chat/pr-chat"].clone();
+            assert_eq!(
+                pane.read(cx).current_url().as_deref(),
+                Some("http://localhost:3000/o/r/pull/2")
+            );
+            assert!(desktop.pull_request_panel.is_none());
+        });
+
+        let more = cx
+            .debug_bounds("minimal-session-pull-requests-more")
+            .expect("the +2 chip");
+        cx.simulate_click(more.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            let panel = desktop.pull_request_panel.as_ref().expect("it opens");
+            assert_eq!(panel.chat_id, "pr-chat");
+            assert!(desktop.minimal_popup_is_open());
+        });
+        for row in [
+            "pull-request-panel-row-0",
+            "pull-request-panel-row-1",
+            "pull-request-panel-row-2",
+            "pull-request-panel-row-3",
+            "pull-request-panel-row-4",
+        ] {
+            assert!(
+                cx.debug_bounds(row).is_some(),
+                "the popover lists every link: {row}"
+            );
+        }
+
+        cx.dispatch_action(CloseSearch);
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.pull_request_panel.is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn the_pull_request_popover_links_and_reports_what_the_host_refused(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            show_linked_pull_requests(desktop, serde_json::json!(null), cx);
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("minimal-session-pull-request-0").is_none(),
+            "no links, no chips"
+        );
+        let button = cx
+            .debug_bounds("minimal-session-link-pull-request")
+            .expect("linking is offered with nothing linked yet");
+        cx.simulate_click(button.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("pull-request-panel").is_some());
+        assert!(cx.debug_bounds("pull-request-panel-row-0").is_none());
+
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(
+                desktop
+                    .pull_request_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "ready to paste into"
+            );
+            let too_many = (1..=17)
+                .map(|number| format!("https://github.com/o/r/pull/{number}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            desktop.pull_request_text_changed(too_many.clone(), cx);
+            desktop.link_pasted_pull_requests(cx);
+            let panel = desktop.pull_request_panel.as_ref().unwrap();
+            assert_eq!(
+                panel.error.as_deref(),
+                Some("Link at most 16 pull requests at a time."),
+                "nothing is dropped without a word"
+            );
+            assert_eq!(panel.text, too_many);
+            assert_eq!(panel.linking, None);
+            desktop
+                .pull_request_text_changed("https://github.com/o/r/pull/7 not-a-link".into(), cx);
+            // Nothing is connected in tests, so the request cannot go out.
+            desktop.link_pasted_pull_requests(cx);
+            let panel = desktop.pull_request_panel.as_mut().unwrap();
+            assert_eq!(
+                panel.error.as_deref(),
+                Some("xd is not connected to a host.")
+            );
+            panel.linking = Some(7);
+            panel.sent = panel.text.clone();
+            desktop.handle_reply(
+                RequestKind::LinkPullRequests {
+                    chat_id: "pr-chat".into(),
+                    generation: 6,
+                },
+                serde_json::from_value(serde_json::json!({"ok": true, "invalid": []})).unwrap(),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop.pull_request_panel.as_ref().unwrap().linking,
+                Some(7),
+                "an older answer is ignored"
+            );
+            desktop.handle_reply(
+                RequestKind::LinkPullRequests {
+                    chat_id: "pr-chat".into(),
+                    generation: 7,
+                },
+                serde_json::from_value(serde_json::json!({
+                    "ok": true,
+                    "linked": ["https://github.com/o/r/pull/7"],
+                    "invalid": ["not-a-link"],
+                }))
+                .unwrap(),
+                None,
+                cx,
+            );
+            let panel = desktop.pull_request_panel.as_mut().unwrap();
+            assert_eq!(panel.linking, None);
+            assert_eq!(panel.error.as_deref(), Some(NOT_A_PULL_REQUEST_LINK));
+            assert_eq!(panel.text, "not-a-link", "the refused address stays");
+
+            panel.linking = Some(9);
+            panel.sent = "https://github.com/o/r/pull/8".into();
+            panel.text = "https://github.com/o/r/pull/9 typed meanwhile".into();
+            desktop.handle_reply(
+                RequestKind::LinkPullRequests {
+                    chat_id: "pr-chat".into(),
+                    generation: 9,
+                },
+                serde_json::from_value(serde_json::json!({
+                    "ok": true,
+                    "linked": ["https://github.com/o/r/pull/8"],
+                    "invalid": [],
+                }))
+                .unwrap(),
+                None,
+                cx,
+            );
+            let panel = desktop.pull_request_panel.as_mut().unwrap();
+            assert_eq!(
+                panel.text, "https://github.com/o/r/pull/9 typed meanwhile",
+                "what was typed while the request was out stays"
+            );
+
+            panel.linking = Some(8);
+            desktop.handle_reply(
+                RequestKind::LinkPullRequests {
+                    chat_id: "pr-chat".into(),
+                    generation: 8,
+                },
+                serde_json::from_value(serde_json::json!({
+                    "ok": false,
+                    "error": "this chat already has 32 pull requests",
+                }))
+                .unwrap(),
+                None,
+                cx,
+            );
+            assert_eq!(
+                desktop
+                    .pull_request_panel
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .as_deref(),
+                Some("this chat already has 32 pull requests")
+            );
+            assert!(
+                desktop.model.connection_error.is_none(),
+                "the popover reports it"
+            );
+
+            desktop.pull_request_text_changed("https://github.com/o/r/pull/8".into(), cx);
+            let panel = desktop.pull_request_panel.as_mut().unwrap();
+            assert!(panel.error.is_none(), "editing clears the error");
+            panel.linking = Some(9);
+            desktop.handle_reply(
+                RequestKind::LinkPullRequests {
+                    chat_id: "pr-chat".into(),
+                    generation: 9,
+                },
+                serde_json::from_value(serde_json::json!({
+                    "ok": true,
+                    "linked": ["https://github.com/o/r/pull/8"],
+                    "invalid": [],
+                }))
+                .unwrap(),
+                None,
+                cx,
+            );
+            let panel = desktop.pull_request_panel.as_ref().unwrap();
+            assert!(panel.error.is_none());
+            assert!(panel.text.is_empty(), "a linked address leaves the field");
+        });
+
+        // A click outside closes it and hands focus back.
+        cx.simulate_click(point(px(600.0), px(500.0)), gpui::Modifiers::default());
+        cx.run_until_parked();
+        desktop.update(cx, |desktop, _| {
+            assert!(desktop.pull_request_panel.is_none())
+        });
+    }
+
+    #[gpui::test]
+    fn an_older_host_keeps_the_single_branch_pull_request_and_offers_no_linking(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            show_linked_pull_requests(desktop, serde_json::json!(null), cx);
+            // No `linked_pull_requests`: links it might list mean nothing.
+            let tree = serde_json::json!({
+                "folders": [{"id": "pr-project", "name": "Pull requests"}],
+                "chats": [{"id": "pr-chat", "folder": "pr-project", "backend": "codex",
+                    "branch": "feature",
+                    "pull_requests": [{"url": "http://localhost:3000/o/r/pull/1"}]}],
+            });
+            desktop.model.apply_tree(&tree).unwrap();
+            let mut known = ChatPullRequest::default();
+            known.branch = Some("feature".into());
+            known.url = Some("http://localhost:3000/o/r/pull/9".into());
+            desktop
+                .chat_pull_requests
+                .insert((ChatEndpoint::Local, "pr-chat".into()), known);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("minimal-session-pull-request").is_some());
+        assert!(cx.debug_bounds("minimal-session-pull-request-0").is_none());
+        assert!(
+            cx.debug_bounds("minimal-session-link-pull-request")
+                .is_none()
+        );
+    }
+
     #[gpui::test]
     fn opening_links_preserves_the_chats_open_tabs(cx: &mut gpui::TestAppContext) {
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
@@ -24380,6 +25346,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: Some(index),
                     auto_settle_disabled: false,
                     paused: false,
+                    pull_requests: Vec::new(),
                 })
                 .collect();
             desktop.settled_visible = 60;
@@ -24729,6 +25696,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                pull_requests: Vec::new(),
             }];
             for chat_id in ["kept", "removed"] {
                 desktop.minimal_route = MinimalRoute::Cli {
@@ -25012,6 +25980,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    pull_requests: Vec::new(),
                 },
                 ChatSummary {
                     id: "chat-b".into(),
@@ -25025,6 +25994,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    pull_requests: Vec::new(),
                 },
             ];
             desktop.model.selected_chat = Some("chat-a".into());
@@ -25188,6 +26158,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                pull_requests: Vec::new(),
             }];
 
             desktop.open_minimal_session(
@@ -25378,6 +26349,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                pull_requests: Vec::new(),
             }];
 
             // Tree loading primes an empty, non-loading panel before the chat
@@ -26226,6 +27198,7 @@ Binary files /dev/null and b/image.png differ\n";
             settled_at: None,
             auto_settle_disabled: false,
             paused: false,
+            pull_requests: Vec::new(),
         };
         let mut chats = vec![
             chat("a", "workspace"),
@@ -26306,6 +27279,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    pull_requests: Vec::new(),
                 },
                 ChatSummary {
                     id: "background".into(),
@@ -26319,6 +27293,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    pull_requests: Vec::new(),
                 },
             ];
 
@@ -26360,6 +27335,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    pull_requests: Vec::new(),
                 },
                 ChatSummary {
                     id: "background".into(),
@@ -26373,6 +27349,7 @@ Binary files /dev/null and b/image.png differ\n";
                     settled_at: None,
                     auto_settle_disabled: false,
                     paused: false,
+                    pull_requests: Vec::new(),
                 },
             ];
 
@@ -26465,6 +27442,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                pull_requests: Vec::new(),
             }];
 
             desktop.handle_event(
@@ -26519,6 +27497,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                pull_requests: Vec::new(),
             }];
             let generation = desktop.remote_generation;
             for (terminal, working, aggregate) in [("claude", true, true), ("shell", false, true)] {
@@ -26582,6 +27561,7 @@ Binary files /dev/null and b/image.png differ\n";
                 settled_at: None,
                 auto_settle_disabled: false,
                 paused: false,
+                pull_requests: Vec::new(),
             }],
             ..Default::default()
         };
