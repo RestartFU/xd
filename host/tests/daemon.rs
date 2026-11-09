@@ -593,6 +593,35 @@ fn pausing_all_holds_working_chats_until_they_resume() {
     });
     assert!(paused_in_tree(&mut client).is_empty());
 
+    // Steering a paused chat whose agent fails to start keeps it paused.
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    for text in ["first held", "second held"] {
+        let reply = client.call(json!({"op":"send", "chat":busy, "text":text}));
+        assert_eq!(reply["queued"], true, "{reply}");
+    }
+    let reply = client.call(json!({"op":"pause-all"}));
+    assert_eq!(reply["paused"], json!([busy]), "{reply}");
+    let chat = client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false
+    });
+    fs::rename(&agent, &hidden).unwrap();
+    let reply = client.call(
+        json!({"op":"steer-queue", "chat":busy, "index":0, "text":"first held", "queue_revision":chat["queue_revision"]}),
+    );
+    assert_eq!(reply["ok"], false, "{reply}");
+    fs::rename(&hidden, &agent).unwrap();
+    assert_eq!(paused_in_tree(&mut client), vec![busy.clone()]);
+    let chat = client.call(json!({"op":"chat", "chat":busy}));
+    assert_eq!(chat["resumable"], true, "{chat}");
+    assert_eq!(chat["queue"], json!(["second held"]), "{chat}");
+    let reply = client.call(json!({"op":"resume-all"}));
+    assert_eq!(reply["resumed"], json!([busy]), "{reply}");
+    client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false && reply["queue"] == json!([])
+    });
+    assert_eq!(user_messages(&mut client, "second held"), 1);
+
     // Resuming while the pause is still stopping the turn: however the two
     // meet, the queue runs and nothing stays paused.
     for round in 0..5 {

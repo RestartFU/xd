@@ -58,7 +58,7 @@ struct RuntimeInner {
     active: Mutex<HashMap<String, ActiveProcess>>,
     /// Held by a chat's ending turn from the moment it leaves `active` until
     /// the queued turn after it, if any, has started, and by
-    /// [`TurnRuntime::stop_chat`]. Stopping a chat therefore sees either the
+    /// [`TurnRuntime::stop_chat_if`]. Stopping a chat therefore sees either the
     /// turn that ends or the one that follows it, never the gap between.
     successions: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     next_turn: AtomicU64,
@@ -1804,18 +1804,28 @@ impl TurnRuntime {
         killed
     }
 
-    /// Stops all of the chat's work: its turn, and the kept process with any
-    /// background agents and shells it runs between turns. True when a turn
-    /// was running.
-    pub(crate) fn stop_chat(&self, chat_id: &str) -> bool {
+    /// Stops all of the chat's work if `decide` says to: its turn, and the
+    /// kept process with any background agents and shells it runs between
+    /// turns. `decide` learns whether the chat has background tasks, and runs
+    /// with the chat's succession lock held, so no turn can end, hand over to
+    /// the next, or leave background work behind between its answer and the
+    /// stop. `None` when it declined; otherwise whether a turn was running.
+    pub(crate) fn stop_chat_if(
+        &self,
+        chat_id: &str,
+        decide: impl FnOnce(bool) -> bool,
+    ) -> Option<bool> {
         let succession = self.succession(chat_id);
         let _succession = succession.lock().unwrap_or_else(|error| error.into_inner());
+        if !decide(self.background_tasks(chat_id) > 0) {
+            return None;
+        }
         let killed = self.cancel(chat_id);
         if !killed {
             self.drop_session(chat_id);
             self.publish_background_tasks(chat_id);
         }
-        killed
+        Some(killed)
     }
 
     fn succession(&self, chat_id: &str) -> Arc<Mutex<()>> {

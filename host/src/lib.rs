@@ -1932,17 +1932,21 @@ impl Engine {
         let mut pause = |chat_id: String, gate: std::sync::MutexGuard<'_, ()>| {
             // The gate is held so no message can start a turn between marking
             // the chat and stopping it: the stop would take the new turn instead.
-            match store.pause_chat(&chat_id, background.contains_key(&chat_id)) {
-                Ok(true) => {}
-                Ok(false) => return,
-                Err(error) => {
-                    eprintln!("xd-host: cannot pause chat {chat_id}: {error}");
-                    return;
+            let stopped = runtime.stop_chat_if(&chat_id, |background| {
+                store
+                    .pause_chat(&chat_id, background)
+                    .unwrap_or_else(|error| {
+                        eprintln!("xd-host: cannot pause chat {chat_id}: {error}");
+                        false
+                    })
+            });
+            match stopped {
+                None => return,
+                // As with stop: a turn that died with a previous host still ends.
+                Some(false) => {
+                    let _ = store.clear_interrupted_turn(&chat_id);
                 }
-            }
-            // As with stop: a turn that died with a previous host still ends.
-            if !runtime.stop_chat(&chat_id) {
-                let _ = store.clear_interrupted_turn(&chat_id);
+                Some(true) => {}
             }
             drop(gate);
             self.events
@@ -2040,7 +2044,8 @@ impl Engine {
                 let text = request["text"].as_str().unwrap_or_default();
                 // Steering asks for this message now, so a paused chat goes on:
                 // a turn still stopping for the pause then hands it over.
-                if store.unpause_chat(chat_id).unwrap_or(false) {
+                let unpaused = store.unpause_chat(chat_id).unwrap_or(false);
+                if unpaused {
                     self.events.publish(json!({"event": "tree"}));
                 }
                 let steered = self
@@ -2055,7 +2060,7 @@ impl Engine {
                     if let Some(runtime) = &self.runtime {
                         runtime.cancel(chat_id);
                     }
-                    if let Err(error) = self.start_queued_if_idle(chat_id, text, gated, false) {
+                    if let Err(error) = self.start_queued_if_idle(chat_id, text, gated, unpaused) {
                         return error_reply(error);
                     }
                 }
