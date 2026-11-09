@@ -124,20 +124,6 @@ async fn serve<T>(
             &format!("type='signal',sender='{SERVICE}',interface='{SERVICE}',path='{OBJECT_PATH}'"),
         )
         .await?;
-    // A notification server that restarts forgets what it showed, and hands
-    // out ids again, possibly to other applications.
-    connection
-        .call_method(
-            Some("org.freedesktop.DBus"),
-            "/org/freedesktop/DBus",
-            Some("org.freedesktop.DBus"),
-            "AddMatch",
-            &format!(
-                "type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',\
-                 member='NameOwnerChanged',arg0='{SERVICE}'"
-            ),
-        )
-        .await?;
     let desktop_entry = xd_desktop::channel::app_id();
     let mut tracker = Tracker::default();
     // The requests alone must not keep this going: `Notifier::show` can only
@@ -162,6 +148,19 @@ async fn serve<T>(
                 let Some(event) = decode(&message) else {
                     continue;
                 };
+                let sender = message.header().sender().map(|sender| sender.to_string());
+                if let Some(id) = event.notification()
+                    && !tracker.heard_from(id, sender.as_deref())
+                {
+                    continue;
+                }
+                let shown_as = match &event {
+                    BusEvent::Reply {
+                        serial,
+                        id: Some(id),
+                    } if tracker.sent.contains_key(serial) => Some(*id),
+                    _ => None,
+                };
                 // A notification of ours was shown: close it when its time is up.
                 if let BusEvent::Reply {
                     serial,
@@ -178,15 +177,24 @@ async fn serve<T>(
                 if let Some(activation) = tracker.apply(event) {
                     let _ = activations.send(activation).await;
                 }
+                if let Some(shown) = shown_as.and_then(|id| tracker.shown.get_mut(&id)) {
+                    shown.owner = sender;
+                }
             }
             Input::Bus(Err(error)) => return Err(error),
             Input::BusClosed => return Ok(()),
             // Only while the id is still that notification's: one clicked or
             // closed is gone, and a notification server that restarted can
             // give the same id to a newer one.
+            // Sent to the server that showed it, so a server that has taken
+            // over the service since never closes one of its own.
             Input::Close(id, serial) => {
-                if tracker.shows(id, serial) {
-                    connection.send(&close_message(id)?).await?;
+                if tracker.shows(id, serial)
+                    && let Some(shown) = tracker.shown.remove(&id)
+                {
+                    connection
+                        .send(&close_message(id, shown.owner.as_deref())?)
+                        .await?;
                 }
             }
         }
@@ -218,32 +226,29 @@ fn notify_message(body: &str, desktop_entry: &str) -> zbus::Result<Message> {
         ))
 }
 
-fn close_message(id: u32) -> zbus::Result<Message> {
+fn close_message(id: u32, owner: Option<&str>) -> zbus::Result<Message> {
     Message::method_call(OBJECT_PATH, "CloseNotification")?
-        .destination(SERVICE)?
+        .destination(owner.unwrap_or(SERVICE))?
         .interface(SERVICE)?
         .build(&(id,))
 }
 
 #[derive(Debug, PartialEq)]
 enum BusEvent {
-    Reply {
-        serial: NonZeroU32,
-        id: Option<u32>,
-    },
-    Token {
-        id: u32,
-        token: String,
-    },
-    Action {
-        id: u32,
-        key: String,
-    },
-    Closed {
-        id: u32,
-    },
-    /// The notification server changed hands: the ids it gave are no longer ours.
-    ServerChanged,
+    Reply { serial: NonZeroU32, id: Option<u32> },
+    Token { id: u32, token: String },
+    Action { id: u32, key: String },
+    Closed { id: u32 },
+}
+
+impl BusEvent {
+    /// The notification a signal is about.
+    fn notification(&self) -> Option<u32> {
+        match self {
+            Self::Reply { .. } => None,
+            Self::Token { id, .. } | Self::Action { id, .. } | Self::Closed { id } => Some(*id),
+        }
+    }
 }
 
 fn decode(message: &Message) -> Option<BusEvent> {
@@ -275,13 +280,6 @@ fn decode(message: &Message) -> Option<BusEvent> {
                 _ => None,
             }
         }
-        Type::Signal
-            if header.interface()?.as_str() == "org.freedesktop.DBus"
-                && header.member()?.as_str() == "NameOwnerChanged" =>
-        {
-            let (name, _old, _new): (String, String, String) = body.deserialize().ok()?;
-            (name == SERVICE).then_some(BusEvent::ServerChanged)
-        }
         _ => None,
     }
 }
@@ -291,6 +289,10 @@ struct Shown<T> {
     token: Option<String>,
     /// The `Notify` call that showed it.
     serial: NonZeroU32,
+    /// The unique bus name of the server that showed it. Ids are only that
+    /// server's: one that restarts, or replaces it, hands them out again,
+    /// possibly to other applications.
+    owner: Option<String>,
 }
 
 /// What is known about each notification between sending it and it closing.
@@ -317,6 +319,15 @@ impl<T> Tracker<T> {
             .is_some_and(|shown| shown.serial == serial)
     }
 
+    /// Whether a signal from `sender` can be about notification `id`: only
+    /// the server that showed it speaks for it.
+    fn heard_from(&self, id: u32, sender: Option<&str>) -> bool {
+        self.shown
+            .get(&id)
+            .and_then(|shown| shown.owner.as_deref())
+            .is_none_or(|owner| sender.is_none_or(|sender| sender == owner))
+    }
+
     fn apply(&mut self, event: BusEvent) -> Option<Activation<T>> {
         match event {
             BusEvent::Reply { serial, id } => {
@@ -327,6 +338,7 @@ impl<T> Tracker<T> {
                             target,
                             token: None,
                             serial,
+                            owner: None,
                         },
                     );
                 }
@@ -348,12 +360,6 @@ impl<T> Tracker<T> {
             BusEvent::Action { .. } => None,
             BusEvent::Closed { id } => {
                 self.shown.remove(&id);
-                None
-            }
-            // Clicks for them cannot come, and their timers must not close
-            // whatever a new server gives the same ids to.
-            BusEvent::ServerChanged => {
-                self.shown.clear();
                 None
             }
         }
@@ -713,16 +719,16 @@ mod tests {
     /// asked to show `shown` notifications, until `server` finishes.
     async fn against_notifier<F, R>(
         address: &str,
-        server: impl FnOnce(Sender<Request<&'static str>>) -> F,
+        server: impl FnOnce(Sender<Request<&'static str>>, Receiver<Activation<&'static str>>) -> F,
     ) -> zbus::Result<R>
     where
         F: std::future::Future<Output = zbus::Result<R>>,
     {
         let client = zbus::connection::Builder::address(address)?.build().await?;
         let (requests, received) = async_channel::unbounded();
-        let (activations, _clicked) = async_channel::unbounded();
+        let (activations, clicked) = async_channel::unbounded();
         let notifier = Box::pin(serve(client, received, activations, TEST_CLOSE_AFTER));
-        match futures_util::future::select(notifier, Box::pin(server(requests))).await {
+        match futures_util::future::select(notifier, Box::pin(server(requests, clicked))).await {
             futures_util::future::Either::Left((result, _)) => panic!("notifier ended: {result:?}"),
             futures_util::future::Either::Right((outcome, _)) => outcome,
         }
@@ -772,7 +778,7 @@ mod tests {
         let outcome = on_a_private_bus(|address| {
             zbus::block_on(async move {
                 let (server, mut calls) = notification_server(&address).await?;
-                against_notifier(&address, |requests| async move {
+                against_notifier(&address, |requests, _clicked| async move {
                     requests.send(request("first")).await.unwrap();
                     let first = next_call(&mut calls, "Notify").await?;
                     server.reply(&first.header(), &7u32).await?;
@@ -802,24 +808,38 @@ mod tests {
 
     #[test]
     fn notifications_of_a_server_that_restarted_are_left_alone() {
-        // The ids a restarted server hands out may be another application's.
+        // The ids a restarted server hands out may be another application's:
+        // neither the first one's timer nor a click on the new server's
+        // notification with the same id acts on it.
         let closes = on_a_private_bus(|address| {
             zbus::block_on(async move {
                 let (server, mut calls) = notification_server(&address).await?;
                 let restart_at = address.clone();
-                against_notifier(&address, |requests| async move {
+                against_notifier(&address, |requests, clicked| async move {
                     requests.send(request("first")).await.unwrap();
                     let first = next_call(&mut calls, "Notify").await?;
                     server.reply(&first.header(), &7u32).await?;
                     server.release_name(SERVICE).await?;
-                    let (_restarted, mut calls) = notification_server(&restart_at).await?;
-                    closes_during(&mut calls, TEST_CLOSE_AFTER * 2).await
+                    let (restarted, mut calls) = notification_server(&restart_at).await?;
+                    // Its own notification 7, clicked.
+                    restarted
+                        .emit_signal(
+                            None::<()>,
+                            OBJECT_PATH,
+                            SERVICE,
+                            "ActionInvoked",
+                            &(7u32, DEFAULT_ACTION),
+                        )
+                        .await?;
+                    let closes = closes_during(&mut calls, TEST_CLOSE_AFTER * 2).await?;
+                    Ok((closes, clicked.try_recv().ok()))
                 })
                 .await
             })
         });
-        if let Some(closes) = closes {
+        if let Some((closes, click)) = closes {
             assert_eq!(closes, Vec::<u32>::new());
+            assert_eq!(click, None);
         }
     }
 
