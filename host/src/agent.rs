@@ -476,6 +476,9 @@ pub struct ClaudeParser {
     /// What Claude last said about the limit that turned the turn away.
     limit_resets_at_ms: Option<i64>,
     limit_kind: Option<String>,
+    /// Claude's own wording of the limit, kept for a failed result that
+    /// carries no text of its own.
+    limit_message: Option<String>,
     /// Newlines the text so far already ends with, so a new block is separated
     /// by a blank line rather than running into the previous one.
     trailing_newlines: usize,
@@ -648,6 +651,26 @@ impl ClaudeParser {
                 self.without_superseded_text(events)
             }
             Some("user") => self.user_event(&root),
+            // Claude words a usage limit as a reply of its own. The failed
+            // result after it says the same, so it is not the agent's answer;
+            // it is kept in case the result says nothing.
+            Some("assistant") if self.limit_rejected => {
+                self.note_replacement_begun();
+                let text = root
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !text.is_empty() {
+                    self.limit_message = Some(text);
+                }
+                Vec::new()
+            }
             Some("assistant") if !self.saw_streamed_text => {
                 self.note_replacement_begun();
                 let events = self.assistant_event(&root);
@@ -659,6 +682,7 @@ impl ClaudeParser {
                 // What Claude said about the limit belongs to this result only.
                 let limit_resets_at_ms = self.limit_resets_at_ms.take();
                 let limit_kind = self.limit_kind.take();
+                let limit_message = self.limit_message.take();
                 // A steer ends the run it interrupts with one of these, which
                 // is not the end of the turn however it is flagged.
                 if !self.unread_steers.is_empty()
@@ -703,8 +727,9 @@ impl ClaudeParser {
                         root.get("result")
                             .and_then(Value::as_str)
                             .filter(|text| !text.is_empty())
-                            .unwrap_or("Claude turn failed")
-                            .to_owned(),
+                            .map(str::to_owned)
+                            .or(limit_message)
+                            .unwrap_or_else(|| "Claude turn failed".to_owned()),
                     ));
                 } else {
                     if let Some(usage) = claude_usage(&root) {
@@ -2484,6 +2509,54 @@ mod tests {
             rejected,
             r#"{"type":"result","is_error":true,"api_error_status":500,"result":"Down"}"#,
         ]));
+        // Claude's own wording of the limit is not a reply; the failure says it.
+        let mut parser = ClaudeParser::default();
+        let events = [
+            r#"{"type":"assistant","error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your limit"}]}}"#,
+            r#"{"type":"result","is_error":true,"api_error_status":429,"result":"You've hit your limit"}"#,
+        ]
+        .iter()
+        .flat_map(|line| parser.feed(line))
+        .collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TextDelta(_))),
+            "{events:?}"
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::Error(text) if text == "You've hit your limit")
+        ));
+        // A failed result with no text of its own keeps Claude's wording, reset
+        // time included, rather than a bare failure.
+        let mut parser = ClaudeParser::default();
+        let events = [
+            r#"{"type":"assistant","error":"rate_limit","message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your 5-hour limit · resets 7:50pm (UTC)"}]}}"#,
+            r#"{"type":"result","is_error":true,"api_error_status":429}"#,
+        ]
+        .iter()
+        .flat_map(|line| parser.feed(line))
+        .collect::<Vec<_>>();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::UsageLimit { .. }))
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Error(text) if text == "You've hit your 5-hour limit · resets 7:50pm (UTC)"
+            )),
+            "{events:?}"
+        );
+        // It belongs to that result only.
+        let later = parser.feed(r#"{"type":"result","is_error":true}"#);
+        assert!(
+            later.iter().any(
+                |event| matches!(event, AgentEvent::Error(text) if text == "Claude turn failed")
+            ),
+            "{later:?}"
+        );
         let mut parser = ClaudeParser::default();
         parser.feed(rejected);
         parser.feed(r#"{"type":"result","is_error":false,"result":"Fine"}"#);
