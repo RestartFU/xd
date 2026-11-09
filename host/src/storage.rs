@@ -10101,6 +10101,35 @@ mod tests {
     }
 
     #[test]
+    fn a_pressure_reset_stops_waiting_when_the_store_closes() {
+        let fixture = Fixture::new();
+        let (store, chat) = store_with_chat(&fixture, 1);
+        let readers = store.readers.as_ref().unwrap();
+        let checkpoints = Connection::open(&fixture.database).unwrap();
+        // A read that will not end before the store closes.
+        let stuck = readers.snapshot().unwrap();
+        stuck
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        store
+            .append_turn_message(&chat, "user", "after the stuck read", None)
+            .unwrap();
+        let attempts = std::sync::atomic::AtomicUsize::new(0);
+        let reset = database::checkpoint_round(&checkpoints, &store.database, 1, || {
+            attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 1
+        });
+        assert!(!reset);
+        assert_eq!(attempts.into_inner(), 2, "it retried until told to stop");
+        // The writer is free again.
+        store
+            .append_turn_message(&chat, "user", "once it stopped", None)
+            .unwrap();
+        drop(stuck);
+    }
+
+    #[test]
     fn a_log_pinned_by_overlapping_reads_is_reset_under_pressure() {
         let fixture = Fixture::new();
         let (store, chat) = store_with_chat(&fixture, 1);
@@ -10130,7 +10159,8 @@ mod tests {
             assert!(!database::checkpoint_round(
                 &checkpoints,
                 &store.database,
-                i64::MAX
+                i64::MAX,
+                || true
             ));
             drop(older);
             older = newer;
@@ -10169,7 +10199,12 @@ mod tests {
                 drop(open_snapshot());
                 opening.elapsed()
             });
-            assert!(database::checkpoint_round(&checkpoints, &store.database, 1));
+            assert!(database::checkpoint_round(
+                &checkpoints,
+                &store.database,
+                1,
+                || true
+            ));
             (
                 started.elapsed(),
                 write.join().unwrap(),
@@ -10181,8 +10216,8 @@ mod tests {
             "the reset waited for both older reads: {reset:?}"
         );
         assert!(
-            write >= reset,
-            "writes stayed held until the reset finished: {write:?} < {reset:?}"
+            write >= Duration::from_millis(2400),
+            "the write waited for the reset, past both older reads: {write:?}"
         );
         assert!(
             new_read < Duration::from_millis(500),

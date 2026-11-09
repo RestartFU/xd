@@ -17,7 +17,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use rusqlite::{Connection, OpenFlags};
@@ -36,8 +36,6 @@ const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
 /// while commits land can keep a passive checkpoint from ever letting the
 /// log start over, so past this size it resets the log on the writer.
 pub(crate) const PRESSURE_FRAMES: i64 = 16_384;
-/// Longest a pressure reset keeps writes waiting for older reads to finish.
-const PRESSURE_WAIT: Duration = Duration::from_secs(30);
 
 /// Switches a freshly opened writable connection to write-ahead logging and
 /// reports whether that worked. Opening the database first replays any
@@ -300,7 +298,9 @@ impl Checkpointer {
                     if worker_stop.load(Ordering::Acquire) {
                         break;
                     }
-                    checkpoint_round(&connection, &writer, PRESSURE_FRAMES);
+                    checkpoint_round(&connection, &writer, PRESSURE_FRAMES, || {
+                        !worker_stop.load(Ordering::Acquire)
+                    });
                 }
             })?;
         Ok(Self {
@@ -317,12 +317,16 @@ impl Checkpointer {
 /// wait instead of failing as busy, and stops the log growing, so retrying
 /// TRUNCATE only has to outlast the reads that began before the log was
 /// copied back: reads that start after that no longer use it, and new reads
-/// keep starting throughout. Writes wait at most [`PRESSURE_WAIT`].
-/// Reports whether the log was reset that way.
+/// keep starting throughout. Writes keep waiting until the reset succeeds,
+/// or until `keep_trying` says the store is closing: a read that never ends
+/// then holds writes up, as it did when reads shared the writer, rather
+/// than letting the log grow without bound. Reports whether the log was
+/// reset that way.
 pub(crate) fn checkpoint_round(
     connection: &Connection,
     writer: &Mutex<Connection>,
     pressure_frames: i64,
+    keep_trying: impl Fn() -> bool,
 ) -> bool {
     let log_frames = connection
         .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
@@ -335,7 +339,6 @@ pub(crate) fn checkpoint_round(
     let Ok(writer) = writer.lock() else {
         return false;
     };
-    let started = Instant::now();
     loop {
         // Each busy attempt has already waited out the connection's busy
         // timeout for the reads still on the old log.
@@ -343,7 +346,7 @@ pub(crate) fn checkpoint_round(
             row.get::<_, i64>(0)
         }) {
             Ok(0) => return true,
-            Ok(_) if started.elapsed() < PRESSURE_WAIT => {}
+            Ok(_) if keep_trying() => {}
             _ => return false,
         }
     }
