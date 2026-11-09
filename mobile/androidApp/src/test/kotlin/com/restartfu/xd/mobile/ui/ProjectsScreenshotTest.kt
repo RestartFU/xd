@@ -195,7 +195,9 @@ class ProjectsScreenshotTest {
                 dir.mkdirs()
                 File(dir, "$name-failed.png").outputStream().use { screen.capture().compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
-            throw AssertionError("${failure.message}; showing ${screen.labels()}", failure)
+            // A dialog holding a text field never lets Compose go idle, so its labels may not be readable.
+            val shown = runCatching { screen.labels().toString() }.getOrDefault("(screen not idle)")
+            throw AssertionError("${failure.message}; showing $shown", failure)
         }
         out?.let { dir ->
             dir.mkdirs()
