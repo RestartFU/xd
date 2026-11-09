@@ -47,6 +47,9 @@ struct AuthInner {
     releaser: Mutex<Option<Releaser>>,
     next_session: AtomicU64,
     next_generation: AtomicU64,
+    /// Counts sign-ins and sign-outs begun, by provider, so a reading can tell
+    /// whether one began while it ran.
+    changes: Mutex<HashMap<String, u64>>,
     events: Arc<EventBus>,
 }
 
@@ -128,6 +131,7 @@ impl AuthManager {
                 releaser: Mutex::new(None),
                 next_session: AtomicU64::new(1),
                 next_generation: AtomicU64::new(1),
+                changes: Mutex::new(HashMap::new()),
                 events,
             }),
         }
@@ -336,16 +340,31 @@ impl AuthManager {
         }
     }
 
-    /// Reads the login of the user's own Codex sign-in and records it, giving
-    /// the session tag it files sessions under.
+    /// Reads the login of the user's own Codex sign-in, giving the session tag
+    /// of the login read: `None` when it cannot be read, or when a sign-in or
+    /// sign-out began while it was read, since the answer may then be either.
     pub(crate) fn read_own_codex_login(&self) -> Option<String> {
         let accounts = &self.inner.accounts;
+        let before = self.changes("codex");
         let ticket = accounts.ticket();
         let started = now_ms();
         let identity = crate::usage::read_codex_login(&[])?;
-        identity.account_key.as_ref()?;
+        let key = identity.account_key.clone()?;
         accounts.record_login_from(ticket, "codex", DEFAULT_ACCOUNT, &identity, started);
-        Some(accounts.session_tag("codex", DEFAULT_ACCOUNT))
+        let settled = !matches!(
+            self.snapshot("codex", DEFAULT_ACCOUNT).state.as_str(),
+            "signing-in" | "signing-out"
+        );
+        (settled && self.changes("codex") == before).then(|| format!("{DEFAULT_ACCOUNT}#{key}"))
+    }
+
+    fn changes(&self, provider: &str) -> u64 {
+        self.inner
+            .changes
+            .lock()
+            .ok()
+            .and_then(|changes| changes.get(provider).copied())
+            .unwrap_or(0)
     }
 
     /// Sign-in state as a chat shows it: that of the account a new turn would use.
@@ -554,6 +573,9 @@ impl AuthManager {
                     || (pending != (kind == SessionKind::Add)))
             {
                 return Err("No such account.".into());
+            }
+            if let Ok(mut changes) = self.inner.changes.lock() {
+                *changes.entry(provider.to_owned()).or_default() += 1;
             }
             sessions.insert(
                 provider.to_owned(),
