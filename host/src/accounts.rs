@@ -31,6 +31,9 @@ const MAX_ACCOUNTS: usize = 8;
 /// A limit at or past this share is spent: the CLI rounds, and a turn started
 /// at 99.6% fails as surely as one at 100%.
 const SPENT_PERCENT: f64 = 99.5;
+/// A limit a turn ran into is lifted early only when a reading shows every
+/// main limit below this share.
+const LIFT_PERCENT: f64 = 95.0;
 /// How long an account that hit a limit with no stated reset is left alone
 /// before it is tried again. A probe usually replaces this with the real time.
 const UNTIMED_LIMIT_MS: i64 = 30 * 60 * 1000;
@@ -137,6 +140,17 @@ impl Account {
             added_at_ms: now,
             live: Live::default(),
         }
+    }
+
+    /// Whether the latest reading shows every main limit well short of spent.
+    fn has_clear_room(&self) -> bool {
+        let main = self
+            .live
+            .windows
+            .iter()
+            .filter(|window| matches!(window.kind.as_str(), "session" | "weekly" | "monthly"))
+            .collect::<Vec<_>>();
+        !main.is_empty() && main.iter().all(|window| window.used_percent < LIFT_PERCENT)
     }
 
     /// When the account can next take a turn, if it cannot now.
@@ -645,12 +659,14 @@ impl Accounts {
                 }
                 account.live.windows = windows;
                 account.live.checked_at_ms = Some(checked_at_ms);
-                // A fresh reading with room left lifts a limit a turn hit.
-                if account.blocked_until(checked_at_ms).is_none()
-                    || account
-                        .live
-                        .limited_until_ms
-                        .is_some_and(|until| until <= checked_at_ms)
+                // A fresh reading with clear room left lifts a limit a turn hit,
+                // such as after a reset credit. Near the limit it stays held: a
+                // reading can lag the limit that just turned a turn away.
+                if account
+                    .live
+                    .limited_until_ms
+                    .is_none_or(|until| until <= checked_at_ms)
+                    || account.has_clear_room()
                 {
                     account.live.limited_until_ms = None;
                     account.live.limited_label = None;
@@ -1221,6 +1237,42 @@ mod tests {
         // Both are spent: stay put and say when the first comes back.
         assert_eq!(choice.account, DEFAULT_ACCOUNT);
         assert_eq!(choice.all_spent_until, Some(now + UNTIMED_LIMIT_MS));
+    }
+
+    #[test]
+    fn a_reading_with_clear_room_lifts_a_limit_a_turn_ran_into() {
+        let data = temp("lift");
+        let accounts = Accounts::with_homes(&data, &[]);
+        added(&accounts, "codex", "b@example.com");
+        let reading = |used: f64| Headroom {
+            kind: "session".into(),
+            label: "Session".into(),
+            used_percent: used,
+            resets_at_ms: Some(10 * HOUR),
+        };
+        accounts.note_limited("codex", DEFAULT_ACCOUNT, Some(5 * HOUR), None, 0);
+        // Near the limit: the reading may lag, so the hold stays.
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("a@example.com"),
+            vec![reading(97.0)],
+            1,
+        );
+        assert!(accounts.describe("codex", 2)[0]["limited_until_ms"].is_i64());
+        // A reset credit spent: clear room, so the account is back at once.
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("a@example.com"),
+            vec![reading(3.0)],
+            3,
+        );
+        assert!(accounts.describe("codex", 4)[0]["limited_until_ms"].is_null());
+        assert_eq!(
+            accounts.choose("codex", None, |_| true, 4).account,
+            DEFAULT_ACCOUNT
+        );
     }
 
     #[test]

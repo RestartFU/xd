@@ -172,7 +172,14 @@ impl AuthManager {
                     .accounts
                     .environment(&checked_provider, &checked_account);
                 let snapshot = check_status(&checked_provider, &environment);
-                if let Ok(mut states) = manager.inner.states.lock() {
+                // A sign-in or sign-out that began meanwhile owns the state now;
+                // this answer is from before it.
+                let superseded = manager.inner.sessions.lock().map_or(true, |sessions| {
+                    sessions
+                        .get(&checked_provider)
+                        .is_some_and(|session| session.account == checked_account)
+                });
+                if !superseded && let Ok(mut states) = manager.inner.states.lock() {
                     states.insert(key(&checked_provider, &checked_account), snapshot);
                 }
                 manager.publish(&checked_provider);
@@ -311,15 +318,7 @@ impl AuthManager {
             .accounts
             .note_limited(provider, account, resets_at_ms, label, now_ms());
         self.publish(provider);
-        let manager = self.clone();
-        let provider = provider.to_owned();
-        let account = account.to_owned();
-        let _ = thread::Builder::new()
-            .name("xd-account-check".into())
-            .spawn(move || {
-                crate::usage::check_account(&manager.inner.accounts, &provider, &account);
-                manager.publish(&provider);
-            });
+        self.check_soon(provider, account);
     }
 
     /// Reads every account's limits now and then while an assistant has
@@ -719,6 +718,11 @@ impl AuthManager {
     }
 
     fn check_soon(&self, provider: &str, account: &str) {
+        // Unit tests never reach a CLI from a thread that outlives them: it
+        // would run whatever the executable override names by then.
+        if cfg!(test) {
+            return;
+        }
         let manager = self.clone();
         let provider = provider.to_owned();
         let account = account.to_owned();

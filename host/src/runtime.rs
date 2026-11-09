@@ -627,6 +627,7 @@ impl TurnRuntime {
         chat_id: &str,
         provider: &str,
         account: &str,
+        last_message: i64,
         resets_at_ms: Option<i64>,
         limit: Option<String>,
     ) {
@@ -658,9 +659,6 @@ impl TurnRuntime {
         if let Ok(mut explained) = self.inner.explained_switches.lock() {
             explained.insert(chat_id.to_owned());
         }
-        let Ok(last_message) = self.inner.store.latest_user_message(chat_id) else {
-            return;
-        };
         let handler = self.inner.on_account_switch.lock();
         if let Ok(handler) = handler
             && let Some(handler) = handler.as_ref()
@@ -1149,13 +1147,17 @@ impl TurnRuntime {
         let keeps_process = app_server || AgentCommand::keeps_its_process(&command_backend);
         // Everything baked into argv when a process starts. A turn that wants
         // any of it different cannot be answered by the process already up.
+        // The account's login is in it too: the user's own sign-in can change
+        // login without changing the environment, and a process stays signed
+        // in as whoever it started as.
         let fingerprint = format!(
-            "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{}\x01{:?}",
+            "{command_backend}\x01{command_model}\x01{command_effort}\x01{}\x01{}\x01{}\x01{}\x01{:?}\x01{}",
             turn.access,
             turn.workdir,
             turn.fast,
             turn.system_prompt.as_deref().unwrap_or_default(),
             turn.environment,
+            turn.account,
         );
         let mut command = if app_server {
             specification.build_app_server()
@@ -2502,9 +2504,14 @@ impl TurnRuntime {
         if was_cancelled || cut_short {
             let _ = self.inner.store.mark_turn_resumable(&chat_id);
         }
+        // The message the turn answered, read while the chat is still this
+        // turn's: once it is released the user can send and stop another.
         let limited = usage_limit
             .filter(|_| !was_cancelled && !background)
-            .map(|limit| (turn.backend.clone(), turn.account.clone(), limit));
+            .and_then(|limit| {
+                let message = self.inner.store.latest_user_message(&chat_id).ok()?;
+                Some((turn.backend.clone(), turn.account.clone(), message, limit))
+            });
         self.finish(
             turn,
             turn_id,
@@ -2516,8 +2523,8 @@ impl TurnRuntime {
             asked,
             context_usage,
         );
-        if let Some((provider, account, (resets_at_ms, limit))) = limited {
-            self.after_usage_limit(&chat_id, &provider, &account, resets_at_ms, limit);
+        if let Some((provider, account, message, (resets_at_ms, limit))) = limited {
+            self.after_usage_limit(&chat_id, &provider, &account, message, resets_at_ms, limit);
         }
         if keeps_process {
             self.pump_idle(&chat_id);
