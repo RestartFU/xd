@@ -32,11 +32,11 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * Renders the new session dialog with its workspace choices loaded.
+ * Renders the full-screen new session form with its workspace choices loaded,
+ * and drives it as a person would: switching to a new worktree, picking a
+ * branch on its own page, and starting the session.
  *
- * It checks that New worktree is listed before the project's checkouts, as
- * the desktop's Start from list orders them. With `-Pxd.shots=<dir>` it also
- * writes a PNG capture there.
+ * With `-Pxd.shots=<dir>` it writes PNG captures there.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -44,9 +44,35 @@ import org.robolectric.annotation.GraphicsMode
 class NewSessionDialogScreenshotTest {
     private val out = System.getProperty("xd.shots")?.let(::File)
 
-    @Test fun newWorktreeComesFirstDark() = shoot("new-session-dark", MinimalThemePreset.DARK)
+    @Test fun formDark() = shoot("new-session-form-dark", MinimalThemePreset.DARK)
 
-    @Test fun newWorktreeComesFirstLight() = shoot("new-session-light", MinimalThemePreset.LIGHT)
+    @Test fun formLight() = shoot("new-session-form-light", MinimalThemePreset.LIGHT)
+
+    /** A chat joining a session: no workspace to choose, and nothing to wait for once options load. */
+    @Test fun chatTabDark() {
+        val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
+        activity.setContent {
+            CompositionLocalProvider(LocalXdSignals provides xdSignals(MinimalThemePreset.DARK)) {
+                MaterialTheme(colorScheme = minimalColors(MinimalThemePreset.DARK), typography = XdTypography) {
+                    Surface(Modifier.fillMaxSize()) {
+                        NewSessionDialog(
+                            projectName = "Reconnect backoff",
+                            backends = listOf(com.restartfu.xd.protocol.BackendReply("claude", "Claude", efforts = listOf("low", "medium", "high"))),
+                            chatTab = true,
+                            onDismiss = {},
+                            onCreate = {},
+                        )
+                    }
+                }
+            }
+        }
+        repeat(3) { idle() }
+        val screen = activity.window.decorView
+        val dialog = dialogViews().last { it !== screen }
+        check(shows(dialog, "New chat") && shows(dialog, "Shares this session's workspace") && !shows(dialog, "Workspace")) { "A chat shows its session, not a workspace" }
+        check(isEnabled(dialog, "Start chat")) { "Start chat waits for nothing" }
+        capture(screen, dialog, "new-chat-dark")
+    }
 
     @Test fun creationDraftSurvivesClosingAndReopening() {
         fun open(): ComponentActivity {
@@ -54,30 +80,28 @@ class NewSessionDialogScreenshotTest {
             activity.setContent {
                 MaterialTheme {
                     NewSessionDialog(projectName = "Draft test", draftKey = "draft-reopen/new",
-                        onDismiss = {}, onCreate = { _, _, _, _, _, _, _ -> })
+                        onDismiss = {}, onCreate = {})
                 }
             }
-            repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
+            idle()
             return activity
         }
         val first = open()
         val dialog = dialogViews().last { it !== first.window.decorView }
-        val editor = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
-            .first { it.config.getOrNull(androidx.compose.ui.semantics.SemanticsActions.SetText) != null }
-        editor.config[androidx.compose.ui.semantics.SemanticsActions.SetText].action!!(androidx.compose.ui.text.AnnotatedString("Keep my draft"))
-        repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
+        val editor = nodes(dialog).first { it.config.getOrNull(SemanticsActions.SetText) != null }
+        editor.config[SemanticsActions.SetText].action!!(androidx.compose.ui.text.AnnotatedString("Keep my draft"))
+        idle()
         first.finish()
         val second = open()
         val reopened = dialogViews().last { it !== second.window.decorView }
-        assertTrue(composeViews(reopened).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
-            .any { it.config.getOrNull(SemanticsProperties.EditableText)?.text == "Keep my draft" })
+        assertTrue(nodes(reopened).any { it.config.getOrNull(SemanticsProperties.EditableText)?.text == "Keep my draft" })
         second.finish()
     }
 
     private fun shoot(name: String, theme: MinimalThemePreset) {
         // A plain activity: the compose test rule waits for an idleness this
         // dialog never reaches under Robolectric.
-        var createdRemote: Boolean? = null
+        var created: NewSessionRequest? = null
         val activity = Robolectric.buildActivity(ComponentActivity::class.java).setup().get()
         activity.setContent {
             CompositionLocalProvider(LocalXdSignals provides xdSignals(theme)) {
@@ -85,53 +109,97 @@ class NewSessionDialogScreenshotTest {
                     Surface(Modifier.fillMaxSize()) {
                         NewSessionDialog(
                             projectName = "xd",
-                            backends = listOf(com.restartfu.xd.protocol.BackendReply("codex", "Codex", efforts = listOf("low", "medium", "high"))),
+                            backends = listOf(com.restartfu.xd.protocol.BackendReply("codex", "Codex", efforts = listOf("low", "medium", "high", "xhigh"))),
                             places = { PLACES },
                             onDismiss = {},
-                            onCreate = { _, _, _, remote, _, _, _ -> createdRemote = remote },
+                            onCreate = { created = it },
                         )
                     }
                 }
             }
         }
-        repeat(30) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
+        repeat(3) { idle() }
         val screen = activity.window.decorView
         val dialog = dialogViews().last { it !== screen }
-        topOf(dialog, "Reasoning effort")
-        topOf(dialog, "Workspace access")
-        topOf(dialog, "Chat mode")
-        val newWorktree = topOf(dialog, "New worktree")
-        val checkout = topOf(dialog, "master")
-        val branch = topOf(dialog, "fix/reconnect-backoff")
-        assertTrue("New worktree is listed before the checkouts", newWorktree < checkout)
-        assertTrue("Checkouts are listed before branches", checkout < branch)
-        val branchNode = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
-            .first { it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == "fix/reconnect-backoff" } == true }
-        var clickable: SemanticsNode? = branchNode
-        while (clickable != null && clickable.config.getOrNull(SemanticsActions.OnClick) == null) clickable = clickable.parent
-        check(clickable?.config?.getOrNull(SemanticsActions.OnClick)?.action?.invoke() == true)
-        repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
-        out?.let { dir ->
-            dir.mkdirs()
-            val bitmap = Bitmap.createBitmap(screen.width, screen.height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bitmap)
-            screen.draw(canvas)
-            canvas.drawColor(Color.argb(82, 0, 0, 0))
-            canvas.translate((screen.width - dialog.width) / 2f, (screen.height - dialog.height) / 2f)
-            dialog.draw(canvas)
-            File(dir, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        }
-        val toggle = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
-            .single { it.config.getOrNull(SemanticsProperties.ToggleableState) != null }
+        // The project's own checkout is chosen at first, listed under Current worktree.
+        check(topOf(dialog, "Current worktree") < topOf(dialog, "master")) { "Current worktree comes before the checkouts" }
+        check(topOf(dialog, "Assistant") < topOf(dialog, "Workspace")) { "Assistant comes before Workspace" }
+        check(topOf(dialog, "Workspace") < topOf(dialog, "Options")) { "Workspace comes before Options" }
+        check(shows(dialog, "Reasoning effort") && shows(dialog, "Access") && shows(dialog, "Mode")) { "Options are all there" }
+        check(isEnabled(dialog, "Start session")) { "Start waits for nothing once the checkouts are read" }
+        capture(screen, dialog, name)
+
+        click(dialog, "New worktree")
+        check(shows(dialog, "Fresh branch") && shows(dialog, "From a branch or pull request") && !shows(dialog, "master")) { "New worktree offers its starts" }
+        capture(screen, dialog, "$name-worktree")
+
+        click(dialog, "From a branch or pull request")
+        check(shows(dialog, "Pull requests") && shows(dialog, "Branches")) { "The base page lists both" }
+        check(topOf(dialog, "#212 Give phone chats one header row") < topOf(dialog, "fix/reconnect-backoff")) { "Pull requests come first" }
+        capture(screen, dialog, "$name-base")
+
+        click(dialog, "fix/reconnect-backoff")
+        // Back on the form, with the branch chosen and its remote option offered.
+        check(shows(dialog, "fix/reconnect-backoff") && shows(dialog, "Start from remote")) { "The form shows the chosen branch" }
+        val toggle = nodes(dialog).single { it.config.getOrNull(SemanticsProperties.ToggleableState) != null }
         check(toggle.config[SemanticsProperties.ToggleableState] == androidx.compose.ui.state.ToggleableState.On)
         check(toggle.config[SemanticsActions.OnClick].action?.invoke() == true)
+        idle()
+        click(dialog, "Start session")
+        val request = checkNotNull(created) { "Start session sent nothing" }
+        check(request.worktree == com.restartfu.xd.protocol.Ops.NewSessionWorktree.Branch("refs/heads/fix/reconnect-backoff", "a1")) { request.toString() }
+        check(!request.startFromRemote && request.agent == com.restartfu.xd.model.DirectAgent.CODEX && !request.plan)
+    }
+
+    /**
+     * Lets time pass, then draws every window once: under Robolectric layout
+     * only catches up when something draws, and a lazy list composes its rows
+     * in layout.
+     */
+    private fun idle() {
         repeat(10) { ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS) }
-        val create = composeViews(dialog).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
-            .first { it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == "Create session" } == true }
-        var button: SemanticsNode? = create
-        while (button != null && button.config.getOrNull(SemanticsActions.OnClick) == null) button = button.parent
-        check(button?.config?.getOrNull(SemanticsActions.OnClick)?.action?.invoke() == true)
-        check(createdRemote == false)
+        dialogViews().filter { it.width > 0 && it.height > 0 }.forEach { view ->
+            view.draw(Canvas(Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)))
+        }
+        ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
+    }
+
+    private fun nodes(root: View): List<SemanticsNode> =
+        composeViews(root).flatMap { descendants(it.semanticsOwner.unmergedRootSemanticsNode) }
+
+    private fun node(root: View, text: String): SemanticsNode = nodes(root).firstOrNull { node ->
+        node.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true
+    } ?: error("Nothing shows \"$text\"")
+
+    private fun shows(root: View, text: String) = nodes(root).any { node ->
+        node.config.getOrNull(SemanticsProperties.Text)?.any { it.text == text } == true
+    }
+
+    /** The nearest node at or above [text] that can be clicked. */
+    private fun clickable(root: View, text: String): SemanticsNode {
+        var found: SemanticsNode? = node(root, text)
+        while (found != null && found.config.getOrNull(SemanticsActions.OnClick) == null) found = found.parent
+        return checkNotNull(found) { "\"$text\" cannot be clicked" }
+    }
+
+    private fun isEnabled(root: View, text: String) =
+        !clickable(root, text).config.contains(SemanticsProperties.Disabled)
+
+    private fun click(root: View, text: String) {
+        check(clickable(root, text).config[SemanticsActions.OnClick].action?.invoke() == true) { "Clicking \"$text\" did nothing" }
+        repeat(2) { idle() }
+    }
+
+    private fun capture(screen: View, dialog: View, name: String) {
+        val dir = out ?: return
+        dir.mkdirs()
+        val bitmap = Bitmap.createBitmap(screen.width, screen.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        screen.draw(canvas)
+        canvas.drawColor(Color.argb(82, 0, 0, 0))
+        canvas.translate((screen.width - dialog.width) / 2f, (screen.height - dialog.height) / 2f)
+        dialog.draw(canvas)
+        File(dir, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
     /** The unclipped top edge of the first node in [root]'s Compose tree showing [text]. */

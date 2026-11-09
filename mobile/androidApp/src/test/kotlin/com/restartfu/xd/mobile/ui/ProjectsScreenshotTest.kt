@@ -83,8 +83,8 @@ class ProjectsScreenshotTest {
 
     @Test fun newSessionAsksForAProject() = shoot("new-session-picker-dark", MinimalThemePreset.DARK) {
         click("New session")
-        check(shows("Choose a project") && shows("2 sessions") && shows("acme · 1 session") &&
-            shows("acme / Clients · No sessions") && !shows("Create session"))
+        check(shows("Which project?") && shows("2 sessions") && shows("acme · 1 session") &&
+            shows("acme / Clients · No sessions") && !shows("Start session"))
     }
 
     @Test fun pickingAProjectStartsItsSession() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
@@ -93,6 +93,7 @@ class ProjectsScreenshotTest {
         // Nothing waits on the next dialog: its title field never lets Compose go idle.
         // The checkouts it reads say which project it is for.
         click("acme / Clients · No sessions")
+        awaitPlaces(before)
         check(placesRead(before) == listOf("shop")) { placesRead(before).toString() }
     }
 
@@ -100,7 +101,21 @@ class ProjectsScreenshotTest {
         check(shows("New session in web") && shows("New session in xd"))
         val before = SENT.size
         click("New session in web")
+        awaitPlaces(before)
         check(placesRead(before) == listOf("web")) { placesRead(before).toString() }
+    }
+
+    /**
+     * Waits for the form to ask for a project's checkouts, which it does as it
+     * opens. Its effects run on the main looper, which Robolectric only runs
+     * when told to.
+     */
+    private fun Screen.awaitPlaces(from: Int) {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (placesRead(from).isEmpty() && System.currentTimeMillis() < deadline) {
+            ShadowLooper.idleMainLooper()
+            settle()
+        }
     }
 
     /** The projects whose checkouts the app asked for since request [from]. */
