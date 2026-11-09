@@ -2093,6 +2093,9 @@ impl Engine {
             Ok(working) => working.into_iter().for_each(&mut add),
             Err(error) => return error_reply(error),
         }
+        // Another project's chats are never waited on; the check is made again
+        // under each gate below.
+        chats.retain(|chat_id| in_scope(store, chat_id, folder));
         let mut paused = Vec::new();
         let mut pause = |chat_id: String, gate: std::sync::MutexGuard<'_, ()>| {
             // Asked under the gate too: a chat moved out of the folder stays.
