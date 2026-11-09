@@ -1617,6 +1617,76 @@ mod start_tests {
     use super::*;
 
     #[gpui::test]
+    fn opening_a_new_chat_closes_the_browser(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let open_browser = |desktop: &Entity<XdDesktop>, cx: &mut gpui::VisualTestContext| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.set_browser_open(true);
+                cx.notify();
+            });
+            cx.run_until_parked();
+            desktop.update(cx, |desktop, cx| {
+                let pane = desktop.browser_panes[&desktop.browser_scope_key()].clone();
+                assert!(pane.read(cx).is_visible());
+                pane
+            })
+        };
+        let assert_closed = |desktop: &Entity<XdDesktop>,
+                             pane: &Entity<BrowserPane>,
+                             cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let desktop = desktop.read(cx);
+                assert!(desktop.creating_chat_folder.is_some());
+                assert!(!desktop.browser_is_open());
+                assert!(!pane.read(cx).is_visible());
+                assert!(
+                    desktop
+                        .new_chat_input
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window),
+                    "the message box keeps the focus"
+                );
+            });
+        };
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = ChatEndpoint::Local;
+            desktop.settings.browser_sessions.clear();
+            desktop.model = crate::tests::grouped_workspace_fixture();
+            desktop.model.select_chat("review");
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "review".into(),
+                agent: AgentCli::Claude,
+            };
+            cx.notify();
+        });
+
+        // From a project's new chat button.
+        let pane = open_browser(&desktop, cx);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.begin_chat_create("atlas".into(), window, cx)
+            })
+        });
+        assert_closed(&desktop, &pane, cx);
+        // Leaving the new chat does not bring it back.
+        desktop.update(cx, |desktop, cx| desktop.cancel_chat_create(cx));
+        cx.run_until_parked();
+        desktop.read_with(cx, |desktop, _| assert!(!desktop.browser_is_open()));
+
+        // From a session's new chat button.
+        let pane = open_browser(&desktop, cx);
+        cx.update(|window, cx| {
+            desktop.update(cx, |desktop, cx| {
+                desktop.begin_session_chat_create(window, cx)
+            })
+        });
+        assert_closed(&desktop, &pane, cx);
+    }
+
+    #[gpui::test]
     fn a_new_chat_opens_under_the_empty_chat_heading(cx: &mut gpui::TestAppContext) {
         install_embedded_fonts(cx.text_system()).unwrap();
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
