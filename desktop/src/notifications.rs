@@ -88,8 +88,9 @@ enum Input<T> {
     Request(Request<T>),
     Bus(zbus::Result<Message>),
     BusClosed,
-    /// A shown notification whose time is up.
-    Close(u32),
+    /// A shown notification whose time is up, by its id and the `Notify`
+    /// call that showed it.
+    Close(u32, NonZeroU32),
 }
 
 async fn run<T>(
@@ -133,7 +134,7 @@ async fn serve<T>(
     let (due, closes) = async_channel::unbounded();
     let mut inputs = pin!(stream::select(
         stream::select(requests.map(Input::Request), messages),
-        closes.map(Input::Close),
+        closes.map(|(id, serial)| Input::Close(id, serial)),
     ));
     while let Some(input) = inputs.next().await {
         match input {
@@ -154,10 +155,10 @@ async fn serve<T>(
                 } = &event
                     && tracker.sent.contains_key(serial)
                 {
-                    let (due, id) = (due.clone(), *id);
+                    let (due, id, serial) = (due.clone(), *id, *serial);
                     thread::spawn(move || {
                         thread::sleep(close_after);
-                        let _ = due.try_send(id);
+                        let _ = due.try_send((id, serial));
                     });
                 }
                 if let Some(activation) = tracker.apply(event) {
@@ -166,8 +167,14 @@ async fn serve<T>(
             }
             Input::Bus(Err(error)) => return Err(error),
             Input::BusClosed => return Ok(()),
-            // Closing one that is already gone does nothing.
-            Input::Close(id) => connection.send(&close_message(id)?).await?,
+            // Only while the id is still that notification's: one clicked or
+            // closed is gone, and a notification server that restarted can
+            // give the same id to a newer one.
+            Input::Close(id, serial) => {
+                if tracker.shows(id, serial) {
+                    connection.send(&close_message(id)?).await?;
+                }
+            }
         }
     }
     Ok(())
@@ -248,6 +255,8 @@ fn decode(message: &Message) -> Option<BusEvent> {
 struct Shown<T> {
     target: T,
     token: Option<String>,
+    /// The `Notify` call that showed it.
+    serial: NonZeroU32,
 }
 
 /// What is known about each notification between sending it and it closing.
@@ -267,6 +276,13 @@ impl<T> Default for Tracker<T> {
 }
 
 impl<T> Tracker<T> {
+    /// Whether `id` is still the notification the `Notify` call `serial` showed.
+    fn shows(&self, id: u32, serial: NonZeroU32) -> bool {
+        self.shown
+            .get(&id)
+            .is_some_and(|shown| shown.serial == serial)
+    }
+
     fn apply(&mut self, event: BusEvent) -> Option<Activation<T>> {
         match event {
             BusEvent::Reply { serial, id } => {
@@ -276,6 +292,7 @@ impl<T> Tracker<T> {
                         Shown {
                             target,
                             token: None,
+                            serial,
                         },
                     );
                 }
@@ -608,9 +625,22 @@ mod tests {
         }
     }
 
-    /// A notification server that shows one notification and reports what
-    /// xd asks it to close.
-    async fn close_like_gnome(address: &str) -> zbus::Result<u32> {
+    const TEST_CLOSE_AFTER: Duration = Duration::from_millis(400);
+
+    /// Waits without holding up the other futures on the same executor.
+    async fn sleep(duration: Duration) {
+        let (done, finished) = async_channel::bounded(1);
+        thread::spawn(move || {
+            thread::sleep(duration);
+            let _ = done.try_send(());
+        });
+        let _ = finished.recv().await;
+    }
+
+    /// A notification server that shows a notification, restarts, and gives
+    /// the next one the same id, as a restarted server may. It reports each
+    /// close xd asks for, with how long after the second was shown it came.
+    async fn close_like_a_restarted_server(address: &str) -> zbus::Result<Vec<(u32, Duration)>> {
         let server = zbus::connection::Builder::address(address)?
             .name(SERVICE)?
             .build()
@@ -619,26 +649,38 @@ mod tests {
         let client = zbus::connection::Builder::address(address)?.build().await?;
         let (requests, received) = async_channel::unbounded();
         let (activations, _clicked) = async_channel::unbounded();
-        requests
-            .send(Request {
-                body: "body".to_owned(),
-                target: "chat",
-            })
-            .await
-            .unwrap();
-        let notifier = Box::pin(serve(
-            client,
-            received,
-            activations,
-            Duration::from_millis(50),
-        ));
+        let request = |target| Request {
+            body: "body".to_owned(),
+            target,
+        };
+        requests.send(request("first")).await.unwrap();
+        let notifier = Box::pin(serve(client, received, activations, TEST_CLOSE_AFTER));
         let shell = Box::pin(async {
+            let mut shown = 0;
+            let mut second_shown = None;
+            let mut closes = Vec::new();
             loop {
                 let message = calls.next().await.unwrap()?;
                 match message.header().member().map(|m| m.to_string()).as_deref() {
-                    Some("Notify") => server.reply(&message.header(), &42u32).await?,
+                    Some("Notify") => {
+                        server.reply(&message.header(), &7u32).await?;
+                        shown += 1;
+                        if shown == 1 {
+                            // Halfway to the first one's close, a restarted
+                            // server shows the next under the same id.
+                            sleep(TEST_CLOSE_AFTER / 2).await;
+                            requests.send(request("second")).await.unwrap();
+                        } else {
+                            second_shown = Some(std::time::Instant::now());
+                        }
+                    }
                     Some("CloseNotification") => {
-                        return message.body().deserialize::<u32>();
+                        let id = message.body().deserialize::<u32>()?;
+                        let since = second_shown.map(|at| at.elapsed()).unwrap_or_default();
+                        closes.push((id, since));
+                        // Long enough for a second close, if one were coming.
+                        sleep(TEST_CLOSE_AFTER).await;
+                        return Ok::<_, zbus::Error>(closes);
                     }
                     _ => {}
                 }
@@ -646,26 +688,36 @@ mod tests {
         });
         match futures_util::future::select(notifier, shell).await {
             futures_util::future::Either::Left((result, _)) => panic!("notifier ended: {result:?}"),
-            futures_util::future::Either::Right((closed, _)) => closed,
+            futures_util::future::Either::Right((closes, _)) => closes,
         }
     }
 
     #[test]
-    fn a_shown_notification_is_closed_when_its_time_is_up() {
+    fn a_notification_is_closed_when_its_own_time_is_up() {
         let Some(bus) = PrivateBus::start() else {
             eprintln!("skipped: dbus-daemon is not available");
             return;
         };
         let (done, result) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = done
-                .send(zbus::block_on(close_like_gnome(&bus.address)).map_err(|e| e.to_string()));
+            let _ = done.send(
+                zbus::block_on(close_like_a_restarted_server(&bus.address))
+                    .map_err(|e| e.to_string()),
+            );
         });
-        let closed = result
+        let closes = result
             .recv_timeout(std::time::Duration::from_secs(20))
             .expect("the notification was never closed")
             .unwrap();
-        assert_eq!(closed, 42);
+        // The first one's timer finds its id taken by the second and leaves
+        // it alone; the second is closed only once its own time is up.
+        assert_eq!(closes.len(), 1, "{closes:?}");
+        let (id, since) = closes[0];
+        assert_eq!(id, 7);
+        assert!(
+            since >= TEST_CLOSE_AFTER - Duration::from_millis(50),
+            "{since:?}"
+        );
     }
 
     #[test]
