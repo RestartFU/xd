@@ -280,7 +280,8 @@ private fun ProjectStep(
     Column(Modifier.fillMaxSize()) {
         TopBar("New session", Navigation.Close(onClose))
         LazyColumn(
-            modifier = Modifier.weight(1f),
+            // Ends above the keyboard and navigation bar, so the last rows can scroll into view.
+            modifier = Modifier.weight(1f).windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
         ) {
             item("question") {
@@ -1082,6 +1083,22 @@ private fun ActionBar(label: String, blocker: String?, busy: Boolean, onClick: (
 /** Branches and pull requests shown at once; the filter finds the rest. */
 private const val PLACE_LIMIT = 12
 
+/**
+ * The first [limit] of [matches], plus the chosen one from [all] even when
+ * the filter or the limit leaves it out, and how many matches are not shown.
+ * A chosen row shown outside the filter does not stand in for a hidden match.
+ */
+internal fun <T> limitPlaces(
+    matches: List<T>,
+    all: List<T>,
+    limit: Int = PLACE_LIMIT,
+    chosen: (T) -> Boolean,
+): Pair<List<T>, Int> {
+    val first = matches.take(limit)
+    val shown = first + all.filter { chosen(it) && it !in first }
+    return shown to matches.count { it !in shown }
+}
+
 /** Picks the branch or pull request a new worktree checks out. */
 @Composable
 private fun BasePicker(
@@ -1099,18 +1116,14 @@ private fun BasePicker(
     // The chosen one always shows, whatever the filter and limit hide.
     val chosenPull = (selected as? Ops.NewSessionWorktree.PullRequest)?.number
     val chosenBranch = (selected as? Ops.NewSessionWorktree.Branch)?.reference
-    val shownPulls = pulls.take(PLACE_LIMIT).let { shown ->
-        shown + places?.pullRequests.orEmpty().filter { it.number == chosenPull && it !in shown }
-    }
-    val shownBranches = branches.take(PLACE_LIMIT).let { shown ->
-        shown + places?.branches.orEmpty().filter { it.reference == chosenBranch && it !in shown }
-    }
+    val (shownPulls, hiddenPulls) = limitPlaces(pulls, places?.pullRequests.orEmpty()) { it.number == chosenPull }
+    val (shownBranches, hiddenBranches) = limitPlaces(branches, places?.branches.orEmpty()) { it.reference == chosenBranch }
     Column(Modifier.fillMaxSize()) {
         TopBar("Branch or pull request", Navigation.Back(onBack))
         LazyColumn(
-            modifier = Modifier.weight(1f),
+            // Ends above the keyboard and navigation bar, so the last rows can scroll into view.
+            modifier = Modifier.weight(1f).windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(0.dp),
         ) {
             item("filter") {
                 OutlinedTextField(
@@ -1126,7 +1139,7 @@ private fun BasePicker(
                 key = "pulls",
                 title = "Pull requests",
                 rows = shownPulls,
-                total = pulls.size,
+                hidden = hiddenPulls,
                 label = { "#${it.number} ${it.title}" },
                 detail = { "Pull request" },
                 chosen = { selected == Ops.NewSessionWorktree.PullRequest(it.number, it.oid) },
@@ -1137,7 +1150,7 @@ private fun BasePicker(
                 key = "branches",
                 title = "Branches",
                 rows = shownBranches,
-                total = branches.size,
+                hidden = hiddenBranches,
                 label = BranchSourceReply::name,
                 detail = { if (it.reference.startsWith("refs/remotes/")) "Remote branch" else "Branch" },
                 chosen = { selected == Ops.NewSessionWorktree.Branch(it.reference, it.oid) },
@@ -1189,7 +1202,8 @@ private fun <T> androidx.compose.foundation.lazy.LazyListScope.placeGroup(
     key: String,
     title: String,
     rows: List<T>,
-    total: Int,
+    /** Matches the limit leaves out; a chosen row shown outside the filter is not one. */
+    hidden: Int,
     label: (T) -> String,
     detail: (T) -> String,
     chosen: (T) -> Boolean,
@@ -1214,7 +1228,6 @@ private fun <T> androidx.compose.foundation.lazy.LazyListScope.placeGroup(
         }
     }
     item("$key-more") {
-        val hidden = total - rows.size
         if (hidden > 0) {
             Text(
                 "$hidden more. Search to find them.",
