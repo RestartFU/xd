@@ -1321,17 +1321,13 @@ impl Engine {
         // Codex sessions from before accounts were kept are filed under the
         // login Codex has as the host starts, so a later change of login is
         // caught for them too rather than resumed across.
-        if let Some(store) = self.store.clone() {
-            let auth = self.auth.clone();
-            let _ = thread::Builder::new()
-                .name("xd-claim-sessions".into())
-                .spawn(move || {
-                    if let Some(tag) = auth.read_own_codex_login()
-                        && let Err(error) = store.claim_unfiled_sessions("codex", &tag)
-                    {
-                        eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
-                    }
-                });
+        // Before any request is served, so no turn can prepare one of them
+        // while it is still unfiled. A local read, quick when Codex answers.
+        if let Some(store) = self.store.as_ref()
+            && let Some(tag) = self.auth.read_own_codex_login()
+            && let Err(error) = store.claim_unfiled_sessions("codex", &tag)
+        {
+            eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
         }
         let Some(runtime) = self.runtime.as_ref() else {
             return;

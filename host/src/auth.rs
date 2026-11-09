@@ -902,6 +902,11 @@ impl AuthManager {
             if let Some(mut snapshot) = settle(session)
                 && let Ok(mut states) = self.inner.states.lock()
             {
+                // Readings taken while the session ran may be of the login it
+                // replaced; they stop counting before the new state shows.
+                self.inner
+                    .accounts
+                    .forget_login_reading(provider, &session.account);
                 snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
                 snapshot.settled = Some(snapshot.state.clone());
                 states.insert(key(provider, &session.account), snapshot);
