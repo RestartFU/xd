@@ -221,6 +221,9 @@ pub struct TurnSpec {
     pub session_account: Option<String>,
     /// The account the turn runs on, chosen when it starts.
     pub account: String,
+    /// The turn starts a new session in a new process, even if the chat has a
+    /// process it could reuse: its session could not move to `account`.
+    pub fresh_session: bool,
     /// What the user sent, without the note `prompt` may open with.
     pub request: String,
     pub carries_cut_off_note: bool,
@@ -8638,6 +8641,7 @@ fn prepare_turn(
             .map(|_| session_account.unwrap_or_else(|| "default".into())),
         session_id,
         account: "default".into(),
+        fresh_session: false,
         label: format!(
             "{} · {}{}",
             model_label(&chat.1, &model),

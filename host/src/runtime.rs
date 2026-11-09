@@ -541,12 +541,14 @@ impl TurnRuntime {
         // A Codex session about to be resumed must be resumed as the login
         // that wrote it, so that login is read again first when it may be
         // stale. If it cannot be read, the session is not resumed.
+        // A new chat reads it too, so its session is filed under a known login.
         let mut unconfirmed = false;
-        if turn.backend == "codex" && turn.session_id.is_some() {
-            unconfirmed = !self
+        if turn.backend == "codex" {
+            let confirmed = self
                 .inner
                 .auth
                 .confirm_login(&turn.backend, &choice.account);
+            unconfirmed = !confirmed && turn.session_id.is_some();
             choice = self.inner.auth.choose(&turn.backend, chat_account);
         }
         // The account decides the home; a secret cannot point a turn at another
@@ -589,6 +591,7 @@ impl TurnRuntime {
             return;
         }
         turn.session_id = None;
+        turn.fresh_session = true;
         let conversation = self
             .inner
             .store
@@ -1668,12 +1671,14 @@ impl TurnRuntime {
                 .ok()
                 .and_then(|mut child| child.try_wait().ok().flatten())
                 .is_some();
+            // Exactly the same login: a process whose login was not known when
+            // it started cannot be taken to be the one known now. A turn that
+            // must start a new session never reuses the process either.
             if !dead
+                && !turn.fresh_session
                 && session.fingerprint == fingerprint
-                && crate::accounts::same_login(&session.account, &turn.account)
+                && session.account == turn.account
             {
-                // The login may only now be known; it is the same one.
-                session.account = turn.account.clone();
                 let router = session.router.clone();
                 let mut router = router
                     .lock()

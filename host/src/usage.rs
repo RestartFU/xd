@@ -2491,8 +2491,8 @@ pub(crate) fn check_account(accounts: &Accounts, provider: &str, id: &str) -> Op
     let environment = accounts.environment(provider, id);
     let account = probe_account(provider, &environment, now, Tz::UTC)?;
     let (identity, windows) = probe_reading(&account)?;
-    let checked = account["checked_at_ms"].as_i64().unwrap_or(now);
-    accounts.record_probe(provider, id, &identity, windows, checked);
+    // Filed by when the reading began, which orders it among other readings.
+    accounts.record_probe(provider, id, &identity, windows, now);
     Some(identity)
 }
 
@@ -2703,8 +2703,7 @@ impl UsageService {
                     account["account_rank"] = json!(rank);
                 }
                 if let Some((identity, windows)) = probe_reading(&account) {
-                    let checked = account["checked_at_ms"].as_i64().unwrap_or(now);
-                    known.record_probe(provider, &id, &identity, windows, checked);
+                    known.record_probe(provider, &id, &identity, windows, now);
                 }
                 // `account_key` is a hash, so no address crosses the wire.
                 if let Some(fields) = account.as_object_mut() {

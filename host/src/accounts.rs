@@ -115,6 +115,8 @@ struct Live {
     checked_at_ms: Option<i64>,
     /// When the login alone was last read, before a Codex session was resumed.
     login_read_at_ms: Option<i64>,
+    /// When the newest reading of the login began, by probe or on its own.
+    identity_at_ms: Option<i64>,
     /// Set when a turn was turned away for usage, until the stated reset.
     limited_until_ms: Option<i64>,
     limited_label: Option<String>,
@@ -387,6 +389,17 @@ impl Accounts {
         read_at_ms: i64,
     ) {
         let _ = self.update(provider, |state| {
+            if state.account(id).is_some_and(|account| {
+                account
+                    .live
+                    .identity_at_ms
+                    .is_some_and(|newer| newer > read_at_ms)
+            }) {
+                return Ok(());
+            }
+            if let Some(account) = state.account_mut(id) {
+                account.live.identity_at_ms = Some(read_at_ms);
+            }
             let position = |id: &str| state.accounts.iter().position(|account| account.id == id);
             let duplicate = identity.account_key.as_ref().is_some_and(|key| {
                 state.accounts.iter().any(|other| {
@@ -677,6 +690,19 @@ impl Accounts {
         checked_at_ms: i64,
     ) {
         let _ = self.update(provider, |state| {
+            // Readings land in the order they were taken: one that began
+            // before a newer reading of this login must not undo it.
+            if state.account(id).is_some_and(|account| {
+                account
+                    .live
+                    .identity_at_ms
+                    .is_some_and(|newer| newer > checked_at_ms)
+            }) {
+                return Ok(());
+            }
+            if let Some(account) = state.account_mut(id) {
+                account.live.identity_at_ms = Some(checked_at_ms);
+            }
             let duplicate = identity.account_key.as_ref().is_some_and(|key| {
                 state.accounts.iter().any(|other| {
                     other.id != id
@@ -1069,31 +1095,45 @@ fn link_home(provider: &str, source: &Path, home: &Path) -> io::Result<()> {
 /// Copies the user's own settings into an account's `.claude.json`, keeping
 /// everything there that belongs to the account's sign-in.
 fn sync_claude_settings(source: &Path, target: &Path) -> io::Result<()> {
+    // One sync at a time, so two turns starting together cannot undo each other.
+    static SYNC: Mutex<()> = Mutex::new(());
+    let _sync = SYNC
+        .lock()
+        .map_err(|_| io::Error::other("settings sync is unavailable"))?;
     let Ok(bytes) = fs::read(source) else {
         return Ok(());
     };
     let Ok(Value::Object(user)) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(());
     };
-    let current = fs::read(target)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    let mut merged = match &current {
-        Some(Value::Object(account)) => account.clone(),
-        _ => serde_json::Map::new(),
-    };
-    for key in CLAUDE_SHARED_SETTINGS {
-        match user.get(key) {
-            Some(value) => merged.insert(key.into(), value.clone()),
-            None => merged.remove(key),
+    // Claude writes this file too. If it changed while the merge was made, the
+    // merge is made again from what Claude wrote, rather than undo it.
+    for _ in 0..3 {
+        let before = fs::read(target).ok();
+        let current = before
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
+        let mut merged = match &current {
+            Some(Value::Object(account)) => account.clone(),
+            _ => serde_json::Map::new(),
         };
+        for key in CLAUDE_SHARED_SETTINGS {
+            match user.get(key) {
+                Some(value) => merged.insert(key.into(), value.clone()),
+                None => merged.remove(key),
+            };
+        }
+        let merged = Value::Object(merged);
+        if current.as_ref() == Some(&merged) {
+            return Ok(());
+        }
+        if fs::read(target).ok() != before {
+            continue;
+        }
+        let parent = target.parent().unwrap_or(Path::new("."));
+        return write_private(parent, target, &merged).map_err(io::Error::other);
     }
-    let merged = Value::Object(merged);
-    if current.as_ref() == Some(&merged) {
-        return Ok(());
-    }
-    let parent = target.parent().unwrap_or(Path::new("."));
-    write_private(parent, target, &merged).map_err(io::Error::other)
+    Ok(())
 }
 
 fn write_private(directory: &Path, path: &Path, value: &Value) -> Result<(), String> {
@@ -1212,6 +1252,36 @@ mod tests {
         );
         accounts.record_login("codex", &second, &identity("c@example.com"), 8);
         assert_eq!(accounts.describe("codex", 9)[1]["problem"], "mismatch");
+    }
+
+    #[test]
+    fn an_older_reading_never_undoes_a_newer_one() {
+        let data = temp("order-of-readings");
+        let accounts = Accounts::with_homes(&data, &[]);
+        accounts.record_login("codex", DEFAULT_ACCOUNT, &identity("b@example.com"), 10);
+        // A probe that began before that login read finishes after it.
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("a@example.com"),
+            vec![],
+            5,
+        );
+        assert_eq!(
+            accounts.session_tag("codex", DEFAULT_ACCOUNT),
+            "default#key-b@example.com"
+        );
+        accounts.record_probe(
+            "codex",
+            DEFAULT_ACCOUNT,
+            &identity("c@example.com"),
+            vec![],
+            11,
+        );
+        assert_eq!(
+            accounts.session_tag("codex", DEFAULT_ACCOUNT),
+            "default#key-c@example.com"
+        );
     }
 
     #[test]

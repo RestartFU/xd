@@ -273,9 +273,10 @@ impl AuthManager {
             return true;
         }
         let environment = accounts.environment(provider, account);
+        let started = now_ms();
         match crate::usage::read_codex_login(&environment) {
             Some(identity) => {
-                accounts.record_login(provider, account, &identity, now_ms());
+                accounts.record_login(provider, account, &identity, started);
                 true
             }
             None => false,
