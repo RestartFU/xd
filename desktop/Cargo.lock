@@ -8801,7 +8801,7 @@ dependencies = [
  "async-channel 2.5.0",
  "base64 0.22.1",
  "cef",
- "gio",
+ "futures-util",
  "gpui",
  "iana-time-zone",
  "image",
@@ -8817,6 +8817,7 @@ dependencies = [
  "x11rb",
  "xd-terminal",
  "xd-transport",
+ "zbus",
 ]
 
 [[package]]
