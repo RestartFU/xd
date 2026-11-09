@@ -24,7 +24,6 @@ xd-transport = { path = "../transport-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures-util = { version = "0.3", default-features = false }
-gio = "0.18"
 # The Dockerfile pins the matching CEF distribution; keep the two in step.
 cef = "=156.3.0"
 x11rb = "0.13"

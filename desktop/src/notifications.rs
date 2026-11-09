@@ -5,7 +5,7 @@
 //! also ties a notification naming its `desktop-entry` to the life of the
 //! sender, and would take it away as soon as such a helper exited.
 
-use std::{collections::HashMap, future::ready, num::NonZeroU32, pin::pin};
+use std::{collections::HashMap, future::ready, num::NonZeroU32, pin::pin, thread, time::Duration};
 
 use async_channel::{Receiver, Sender};
 use futures_util::{StreamExt as _, stream};
@@ -21,8 +21,11 @@ const SERVICE: &str = "org.freedesktop.Notifications";
 const OBJECT_PATH: &str = "/org/freedesktop/Notifications";
 const DEFAULT_ACTION: &str = "default";
 const APP_NAME: &str = "xd";
-/// Let the notification server decide how long a notification stays up.
-const SERVER_DEFAULT_TIMEOUT: i32 = -1;
+/// How long a completion notification stays up, in milliseconds.
+const EXPIRE_TIMEOUT: i32 = 10_000;
+/// When xd closes a notification itself: some servers keep one past its
+/// expiry, GNOME while the screen is locked for one.
+const CLOSE_AFTER: Duration = Duration::from_secs(10);
 
 /// A notification the user clicked.
 #[derive(Debug, PartialEq)]
@@ -85,19 +88,28 @@ enum Input<T> {
     Request(Request<T>),
     Bus(zbus::Result<Message>),
     BusClosed,
+    /// A shown notification whose time is up.
+    Close(u32),
 }
 
 async fn run<T>(
     requests: Receiver<Request<T>>,
     activations: Sender<Activation<T>>,
 ) -> zbus::Result<()> {
-    serve(Connection::session().await?, requests, activations).await
+    serve(
+        Connection::session().await?,
+        requests,
+        activations,
+        CLOSE_AFTER,
+    )
+    .await
 }
 
 async fn serve<T>(
     connection: Connection,
     requests: Receiver<Request<T>>,
     activations: Sender<Activation<T>>,
+    close_after: Duration,
 ) -> zbus::Result<()> {
     // One stream carries the replies to `Notify` as well as the signals, in bus
     // order, so a click can never be seen before the id it refers to.
@@ -118,7 +130,11 @@ async fn serve<T>(
     let messages = messages
         .map(Input::Bus)
         .chain(stream::once(ready(Input::BusClosed)));
-    let mut inputs = pin!(stream::select(requests.map(Input::Request), messages));
+    let (due, closes) = async_channel::unbounded();
+    let mut inputs = pin!(stream::select(
+        stream::select(requests.map(Input::Request), messages),
+        closes.map(Input::Close),
+    ));
     while let Some(input) = inputs.next().await {
         match input {
             Input::Request(Request { body, target }) => {
@@ -128,12 +144,30 @@ async fn serve<T>(
                 connection.send(&message).await?;
             }
             Input::Bus(Ok(message)) => {
-                if let Some(activation) = decode(&message).and_then(|event| tracker.apply(event)) {
+                let Some(event) = decode(&message) else {
+                    continue;
+                };
+                // A notification of ours was shown: close it when its time is up.
+                if let BusEvent::Reply {
+                    serial,
+                    id: Some(id),
+                } = &event
+                    && tracker.sent.contains_key(serial)
+                {
+                    let (due, id) = (due.clone(), *id);
+                    thread::spawn(move || {
+                        thread::sleep(close_after);
+                        let _ = due.try_send(id);
+                    });
+                }
+                if let Some(activation) = tracker.apply(event) {
                     let _ = activations.send(activation).await;
                 }
             }
             Input::Bus(Err(error)) => return Err(error),
             Input::BusClosed => return Ok(()),
+            // Closing one that is already gone does nothing.
+            Input::Close(id) => connection.send(&close_message(id)?).await?,
         }
     }
     Ok(())
@@ -143,7 +177,11 @@ fn notify_message(body: &str, desktop_entry: &str) -> zbus::Result<Message> {
     // A `default` action is what makes clicking the notification itself report
     // back. Without one GNOME would only try to open the app on its own.
     let actions = [DEFAULT_ACTION, "Open"];
-    let hints = HashMap::from([("desktop-entry", Value::from(desktop_entry))]);
+    // Transient: a completion alert stays out of the notification history.
+    let hints = HashMap::from([
+        ("desktop-entry", Value::from(desktop_entry)),
+        ("transient", Value::from(true)),
+    ]);
     Message::method_call(OBJECT_PATH, "Notify")?
         .destination(SERVICE)?
         .interface(SERVICE)?
@@ -155,8 +193,15 @@ fn notify_message(body: &str, desktop_entry: &str) -> zbus::Result<Message> {
             body,
             &actions[..],
             hints,
-            SERVER_DEFAULT_TIMEOUT,
+            EXPIRE_TIMEOUT,
         ))
+}
+
+fn close_message(id: u32) -> zbus::Result<Message> {
+    Message::method_call(OBJECT_PATH, "CloseNotification")?
+        .destination(SERVICE)?
+        .interface(SERVICE)?
+        .build(&(id,))
 }
 
 #[derive(Debug, PartialEq)]
@@ -465,7 +510,8 @@ mod tests {
             hints.get("desktop-entry"),
             Some(&Value::from("com.restartfu.Xd"))
         );
-        assert_eq!(timeout, -1);
+        assert_eq!(hints.get("transient"), Some(&Value::from(true)));
+        assert_eq!(timeout, 10_000);
     }
 
     /// A private bus, for as long as the machine has a `dbus-daemon` to run one.
@@ -519,7 +565,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let notifier = Box::pin(serve(client, received, activations));
+        let notifier = Box::pin(serve(client, received, activations, CLOSE_AFTER));
         let shell = Box::pin(async {
             let notify = loop {
                 let message = calls.next().await.unwrap()?;
@@ -562,6 +608,66 @@ mod tests {
         }
     }
 
+    /// A notification server that shows one notification and reports what
+    /// xd asks it to close.
+    async fn close_like_gnome(address: &str) -> zbus::Result<u32> {
+        let server = zbus::connection::Builder::address(address)?
+            .name(SERVICE)?
+            .build()
+            .await?;
+        let mut calls = MessageStream::from(&server);
+        let client = zbus::connection::Builder::address(address)?.build().await?;
+        let (requests, received) = async_channel::unbounded();
+        let (activations, _clicked) = async_channel::unbounded();
+        requests
+            .send(Request {
+                body: "body".to_owned(),
+                target: "chat",
+            })
+            .await
+            .unwrap();
+        let notifier = Box::pin(serve(
+            client,
+            received,
+            activations,
+            Duration::from_millis(50),
+        ));
+        let shell = Box::pin(async {
+            loop {
+                let message = calls.next().await.unwrap()?;
+                match message.header().member().map(|m| m.to_string()).as_deref() {
+                    Some("Notify") => server.reply(&message.header(), &42u32).await?,
+                    Some("CloseNotification") => {
+                        return message.body().deserialize::<u32>();
+                    }
+                    _ => {}
+                }
+            }
+        });
+        match futures_util::future::select(notifier, shell).await {
+            futures_util::future::Either::Left((result, _)) => panic!("notifier ended: {result:?}"),
+            futures_util::future::Either::Right((closed, _)) => closed,
+        }
+    }
+
+    #[test]
+    fn a_shown_notification_is_closed_when_its_time_is_up() {
+        let Some(bus) = PrivateBus::start() else {
+            eprintln!("skipped: dbus-daemon is not available");
+            return;
+        };
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done
+                .send(zbus::block_on(close_like_gnome(&bus.address)).map_err(|e| e.to_string()));
+        });
+        let closed = result
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the notification was never closed")
+            .unwrap();
+        assert_eq!(closed, 42);
+    }
+
     #[test]
     fn a_click_comes_back_over_a_real_bus() {
         let Some(bus) = PrivateBus::start() else {
@@ -601,7 +707,7 @@ mod tests {
                 let connection = zbus::connection::Builder::address(address.as_str())?
                     .build()
                     .await?;
-                serve(connection, received, activations).await
+                serve(connection, received, activations, CLOSE_AFTER).await
             });
             let _ = ended.send(());
         });

@@ -8802,7 +8802,6 @@ dependencies = [
  "base64 0.22.1",
  "cef",
  "futures-util",
- "gio",
  "gpui",
  "iana-time-zone",
  "image",
