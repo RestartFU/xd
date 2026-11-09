@@ -58,6 +58,8 @@ pub fn is_plain_activity(content: &str) -> bool {
 pub struct SubagentView {
     /// The host's id for the agent, which actions on it name.
     pub key: String,
+    /// Claude's own id for the agent, which its lead addresses it by.
+    pub task_id: String,
     pub provider: String,
     pub agent: String,
     /// The assistant whose shell runs this agent as a command, if one does.
@@ -125,6 +127,7 @@ impl SubagentView {
         };
         Some(Self {
             key: text("key"),
+            task_id: text("task_id"),
             provider: text("provider"),
             agent: text("agent"),
             launcher: text("launcher"),

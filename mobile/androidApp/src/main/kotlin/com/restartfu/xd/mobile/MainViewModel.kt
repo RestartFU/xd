@@ -1071,6 +1071,62 @@ class ChatViewModel(
     fun settleSubagentAction(key: String) {
         if (key in _subagentActions.value) _subagentActions.value = _subagentActions.value - key
     }
+
+    /**
+     * Agents opened as their own tabs inside this chat, by record key. Only
+     * kept while the chat is: an agent tab is a view, not a chat of its own.
+     */
+    private val _agentTabs = MutableStateFlow(emptyList<String>())
+    val agentTabs: StateFlow<List<String>> = _agentTabs.asStateFlow()
+
+    /** The agent tab shown in place of the conversation, if one is. */
+    private val _viewingAgent = MutableStateFlow<String?>(null)
+    val viewingAgent: StateFlow<String?> = _viewingAgent.asStateFlow()
+
+    /** What the reader is writing to each agent, by record key. */
+    private val _agentDrafts = MutableStateFlow(emptyMap<String, String>())
+    val agentDrafts: StateFlow<Map<String, String>> = _agentDrafts.asStateFlow()
+    private val _messagingAgent = MutableStateFlow(false)
+    val messagingAgent: StateFlow<Boolean> = _messagingAgent.asStateFlow()
+
+    fun openAgent(key: String) {
+        if (key !in _agentTabs.value) _agentTabs.value = _agentTabs.value + key
+        _viewingAgent.value = key
+    }
+
+    fun showChat() {
+        _viewingAgent.value = null
+    }
+
+    fun closeAgent(key: String) {
+        _agentTabs.value = _agentTabs.value - key
+        _agentDrafts.update { it - key }
+        if (_viewingAgent.value == key) _viewingAgent.value = null
+    }
+
+    fun updateAgentDraft(key: String, text: String) {
+        _agentDrafts.update { it + (key to text) }
+    }
+
+    /**
+     * Sends the reader's message to an agent. The host cannot write to an agent
+     * itself, so it goes to this chat for the lead to pass on, steered into the
+     * running turn when there is one rather than waiting behind it.
+     */
+    fun messageAgent(run: com.restartfu.xd.model.SubagentRun) {
+        val key = run.key ?: return
+        val address = run.messageAddress?.takeIf { run.canTakeMessages } ?: return
+        val text = _agentDrafts.value[key].orEmpty().trim()
+        if (text.isEmpty()) return
+        val description = run.detail.ifBlank { run.identity }
+        launchGuarded(_messagingAgent) {
+            session.send(
+                com.restartfu.xd.model.AgentRelay.format(description, address, text),
+                steer = state.value.working,
+            )
+            _agentDrafts.update { drafts -> if (drafts[key]?.trim() == text) drafts - key else drafts }
+        }
+    }
     fun answer(requestId: String, answers: Map<String, String>) {
         viewModelScope.launch { runCatching { session.answer(requestId, answers) } }
     }

@@ -101,6 +101,8 @@ public object Ops {
         chatId: String,
         text: String,
         images: List<PngAttachment> = emptyList(),
+        /** Steer a message that would be queued into the running turn instead. */
+        steer: Boolean = false,
     ): JsonObject {
         require(text.isNotEmpty() || images.isNotEmpty()) {
             "A message needs text or an image"
@@ -111,6 +113,7 @@ public object Ops {
             put("op", "send")
             put("chat", chatId)
             put("text", text)
+            if (steer) put("steer", true)
             if (images.isNotEmpty()) {
                 put(
                     "attachments",

@@ -23,6 +23,8 @@ public data class SubagentRun(
     val provider: String = "",
     /** The assistant whose shell runs this agent as a command, if one does. */
     val launcher: String = "",
+    /** Claude's own id for the agent, which its lead addresses messages to. */
+    val taskId: String = "",
     val model: String = "",
     val prompt: String = "",
     val background: Boolean = false,
@@ -56,6 +58,26 @@ public data class SubagentRun(
             elapsed?.let(::compactDuration),
         ).joinToString(" · ")
     }
+
+    /** A backgrounded shell command, which shares the agents' cards but is no agent. */
+    val isShell: Boolean
+        get() = identity == "Shell"
+
+    /**
+     * The id the lead addresses this agent's messages to: Claude's own id for
+     * it once reported, or for Codex the thread the record is keyed by.
+     */
+    val messageAddress: String?
+        get() = taskId.ifEmpty { null }
+            ?: key?.takeIf { it.isNotEmpty() && provider.equals("codex", ignoreCase = true) }
+
+    /** An agent run as a command has no conversation to take a message into. */
+    val runsAsCommand: Boolean
+        get() = isShell || launcher.isNotEmpty()
+
+    /** Whether the lead can pass this agent a message from the reader. */
+    val canTakeMessages: Boolean
+        get() = !runsAsCommand && messageAddress != null
 
     /** Steps the record no longer lists; only a run longer than the host keeps has any. */
     val droppedSteps: Long
@@ -112,6 +134,7 @@ public data class SubagentRun(
                 marker = text,
                 provider = field("provider"),
                 launcher = field("launcher"),
+                taskId = field("task_id"),
                 model = field("model"),
                 prompt = field("prompt"),
                 background = (record["background"] as? JsonPrimitive)?.booleanOrNull ?: false,
