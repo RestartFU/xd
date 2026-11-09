@@ -2653,21 +2653,29 @@ impl UsageService {
             let probes: Vec<_> = PROVIDERS
                 .iter()
                 .flat_map(|provider| {
-                    known.ids(provider).into_iter().map(move |id| (*provider, id))
+                    let ids = known.ids(provider);
+                    let several = ids.len() > 1;
+                    ids.into_iter()
+                        .enumerate()
+                        .map(move |(index, id)| (*provider, id, several.then_some(index + 1)))
                 })
-                .map(|(provider, id)| {
+                .map(|(provider, id, rank)| {
                     let environment = known.environment(provider, &id);
                     let probe = thread::spawn(move || {
                         probe_account(provider, &environment, now, zone)
                     });
-                    (provider, id, probe)
+                    (provider, id, rank, probe)
                 })
                 .collect();
             let mut accounts = Vec::new();
-            for (provider, id, probe) in probes {
+            for (provider, id, rank, probe) in probes {
                 let Some(mut account) = probe.join().ok().flatten() else {
                     continue;
                 };
+                // Its place in the host's account list, matching Settings.
+                if let Some(rank) = rank {
+                    account["account_rank"] = json!(rank);
+                }
                 if let Some((identity, windows)) = probe_reading(&account) {
                     let checked = account["checked_at_ms"].as_i64().unwrap_or(now);
                     known.record_probe(provider, &id, &identity, windows, checked);

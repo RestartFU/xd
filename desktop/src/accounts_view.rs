@@ -569,12 +569,19 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let several = ranked > 1;
         let (status, tone, dot) = account_status(account, now, colors);
-        let confirming =
+        let confirming_removal =
             self.account_remove_confirm
                 .as_ref()
                 .is_some_and(|(confirm_provider, confirm_id)| {
                     confirm_provider == provider && confirm_id == &account.id
                 });
+        // The warning before removal is not the account's status.
+        let (tone, dot) = if confirming_removal {
+            (colors.muted, false)
+        } else {
+            (tone, dot)
+        };
+        let confirming = confirming_removal;
         let mut facts = vec![];
         if let Some(plan) = &account.plan {
             facts.push(plan.clone());

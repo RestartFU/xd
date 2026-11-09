@@ -991,7 +991,12 @@ pub fn parse_limit_accounts(value: &Value, environment: usize, label: &str) -> V
                         identity: account["account_key"].as_str().map(str::to_owned),
                         provider,
                         plan: account["plan"].as_str().map(str::to_owned),
-                        environments: vec![label.to_owned()],
+                        // One of several accounts on the host: say which,
+                        // by its place in the host's list in Settings.
+                        environments: vec![match account["account_rank"].as_u64() {
+                            Some(rank) => format!("{label} · account {rank}"),
+                            None => label.to_owned(),
+                        }],
                         environment,
                         checked_at_ms: account["checked_at_ms"].as_i64().unwrap_or(0),
                         windows: account["windows"]
@@ -1842,6 +1847,19 @@ mod tests {
                 "Codex: No limits reported."
             ]
         );
+    }
+
+    #[test]
+    fn several_accounts_on_one_host_are_told_apart_by_their_place() {
+        let answer = json!({"accounts":[
+            {"provider":"codex", "account_key":"a", "account_rank":1, "windows":[]},
+            {"provider":"codex", "account_key":"b", "account_rank":2, "windows":[]},
+            {"provider":"claude", "account_key":"c", "windows":[]},
+        ]});
+        let accounts = parse_limit_accounts(&answer, 0, "Local");
+        assert_eq!(accounts[0].environments, ["Local · account 1"]);
+        assert_eq!(accounts[1].environments, ["Local · account 2"]);
+        assert_eq!(accounts[2].environments, ["Local"]);
     }
 
     #[test]
