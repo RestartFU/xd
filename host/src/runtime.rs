@@ -633,7 +633,8 @@ impl TurnRuntime {
         }
         if choice.unavailable {
             return Err(format!(
-                "No {} account can take this turn. Sign in again in Settings, Agents, Accounts.",
+                "No {} account can take this turn right now. It may be signing in or out; \
+                 otherwise sign in again in Settings, Agents, Accounts.",
                 provider_name(&turn.backend)
             ));
         }

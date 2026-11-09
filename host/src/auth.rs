@@ -278,12 +278,20 @@ impl AuthManager {
 
     /// The account the chat's next turn runs on; see [`Accounts::choose`].
     pub(crate) fn choose(&self, provider: &str, chat_account: Option<&str>) -> Choice {
-        self.inner.accounts.choose(
+        let mut choice = self.inner.accounts.choose(
             provider,
             chat_account,
             |account| self.signed_in(provider, account),
             now_ms(),
-        )
+        );
+        // Even a lone sign-in takes no turn while it is being signed in or out.
+        if matches!(
+            self.snapshot(provider, &choice.account).state.as_str(),
+            "signing-in" | "signing-out"
+        ) {
+            choice.unavailable = true;
+        }
+        choice
     }
 
     /// Reads the account's login again before a Codex session is resumed on it,
@@ -590,14 +598,34 @@ impl AuthManager {
                 .and_then(|releaser| releaser.as_ref().map(|release| release(provider, account)))
                 .unwrap_or(Ok(()));
             if let Err(error) = released {
+                // Settled before the slot is given up, so a sign-in that takes
+                // the slot next cannot have its state overwritten by this one.
                 if let Ok(mut sessions) = self.inner.sessions.lock()
                     && sessions
                         .get(provider)
                         .is_some_and(|session| session.serial == serial)
                 {
+                    if let Ok(mut states) = self.inner.states.lock() {
+                        let entry = key(provider, account);
+                        let settled = states
+                            .get(&entry)
+                            .and_then(|previous| previous.settled.clone());
+                        states.insert(
+                            entry,
+                            AuthSnapshot {
+                                state: "unknown".into(),
+                                generation: self
+                                    .inner
+                                    .next_generation
+                                    .fetch_add(1, Ordering::Relaxed),
+                                settled,
+                                ..Default::default()
+                            },
+                        );
+                    }
                     sessions.remove(provider);
                 }
-                self.set_snapshot(provider, account, AuthSnapshot::unknown());
+                self.publish(provider);
                 self.set_notice(provider, error);
                 self.refresh_account(provider, account);
                 return;
