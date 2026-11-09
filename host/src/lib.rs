@@ -1323,11 +1323,16 @@ impl Engine {
         // caught for them too rather than resumed across.
         // Before any request is served, so no turn can prepare one of them
         // while it is still unfiled. A local read, quick when Codex answers.
-        if let Some(store) = self.store.as_ref()
-            && let Some(tag) = self.auth.read_own_codex_login()
-            && let Err(error) = store.claim_unfiled_sessions("codex", &tag)
-        {
-            eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
+        // When the login cannot be read they are filed as an unknown login:
+        // then a later login never takes them for its own.
+        if let Some(store) = self.store.as_ref() {
+            let tag = self
+                .auth
+                .read_own_codex_login()
+                .unwrap_or_else(|| format!("{}#?", accounts::DEFAULT_ACCOUNT));
+            if let Err(error) = store.claim_unfiled_sessions("codex", &tag) {
+                eprintln!("xd-host: cannot file earlier Codex sessions: {error}");
+            }
         }
         let Some(runtime) = self.runtime.as_ref() else {
             return;
