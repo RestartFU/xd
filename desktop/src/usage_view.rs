@@ -899,6 +899,15 @@ fn share_bar(
     )
 }
 
+/// Names one row of the Limits flyout, for its element and its popover. Codex
+/// names windows by slot, so a slot can hold a session or a weekly window.
+fn limit_key(account: &LimitAccount, window: &xd_desktop::usage::LimitWindow) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        account.provider, window.kind, window.id, account.key
+    )
+}
+
 fn account_credits(account: &LimitAccount) -> u64 {
     account
         .reset_credits
@@ -4336,7 +4345,7 @@ impl XdDesktop {
         let time_left = window.pace_remaining_percent(now);
         let resets_in = window.resets_in(now);
         let credits = account_credits(account);
-        let key = format!("{}:{}:{}", account.provider, window.id, account.key);
+        let key = limit_key(account, window);
         let pace = window.pace(now);
         let label = window.label.clone();
         // The row may clip a long name, so the tooltip leads with all of it,
@@ -5004,6 +5013,26 @@ mod tests {
             );
             assert!(!desktop.usage.full_page);
         });
+    }
+
+    #[test]
+    fn each_window_of_an_account_has_its_own_row() {
+        let accounts = parse_limit_accounts(
+            &json!({"accounts":[{"provider":"codex", "account_key":"a", "windows":[
+                {"id":"primary", "kind":"session", "label":"Session", "used_percent":10},
+                {"id":"primary", "kind":"weekly", "label":"Weekly", "used_percent":80},
+            ]}]}),
+            0,
+            "Local",
+        );
+        let limits = collect_limits(&accounts, 0);
+        let account = &limits[0].accounts[0];
+        let keys: HashSet<String> = account
+            .windows
+            .iter()
+            .map(|window| limit_key(&account.account, window))
+            .collect();
+        assert_eq!(keys.len(), 2);
     }
 
     #[gpui::test]
