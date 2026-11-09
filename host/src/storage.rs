@@ -739,34 +739,44 @@ impl StateStore {
             .collect::<Result<HashMap<_, _>, rusqlite::Error>>()?;
         drop(statement);
 
+        // Gather what the chats still need from the database before running
+        // Git below. Git can be slow on a busy disk, and holding the snapshot
+        // through it would keep checkpoints from reusing the log.
+        let mut session_titles = HashMap::<String, String>::new();
+        let mut visible_chats = Vec::new();
+        for chat in stored_chats {
+            if !visible_ids.contains(chat.1.as_str()) {
+                continue;
+            }
+            let workdir = resolve_workdir(
+                &database,
+                &self.workspace_root,
+                &chat.1,
+                chat.5.as_deref(),
+                chat.6.as_deref(),
+            )
+            .ok();
+            if !session_titles.contains_key(&chat.8) {
+                let session_title: String = database.query_row(
+                    "SELECT COALESCE(title, 'New Session') FROM workspace_sessions WHERE id = ?",
+                    [&chat.8],
+                    |row| row.get(0),
+                )?;
+                session_titles.insert(chat.8.clone(), session_title);
+            }
+            visible_chats.push((chat, workdir));
+        }
+        drop(database);
+
         let mut branches = HashMap::<String, Option<String>>::new();
         let mut chats = Vec::new();
         let mut sessions = Vec::<Value>::new();
         for (
-            id,
-            folder,
-            title,
-            backend,
-            working,
+            (id, folder, title, backend, working, _, _, session_mode, session, last_reply),
             workdir,
-            original_workdir,
-            session_mode,
-            session,
-            last_reply,
-        ) in stored_chats
+        ) in visible_chats
         {
-            if !visible_ids.contains(folder.as_str()) {
-                continue;
-            }
-            let branch = resolve_workdir(
-                &database,
-                &self.workspace_root,
-                &folder,
-                workdir.as_deref(),
-                original_workdir.as_deref(),
-            )
-            .ok()
-            .and_then(|workdir| {
+            let branch = workdir.and_then(|workdir| {
                 let normalized = normalize_existing_path(Path::new(&workdir));
                 let cached = cached_worktree_branch(&branches, &normalized);
                 if cached.is_none() {
@@ -818,11 +828,7 @@ impl StateStore {
                     group["working"] = json!(true);
                 }
             } else {
-                let session_title: String = database.query_row(
-                    "SELECT COALESCE(title, 'New Session') FROM workspace_sessions WHERE id = ?",
-                    [&session],
-                    |row| row.get(0),
-                )?;
+                let session_title = session_titles.remove(&session).unwrap_or_default();
                 let mut group = json!({"id": session, "folder": folder, "title": session_title,
                     "chats": [id], "working": working, "terminal_chat": format!("session:{session}")});
                 if let Some(branch) = chat.get("branch") {
@@ -998,13 +1004,17 @@ impl StateStore {
         if let Some(first) = response["queue"].as_array().and_then(|queue| queue.first()) {
             response["queued"] = first.clone();
         }
-        if let Ok(workdir) = resolve_workdir(
+        let workdir = resolve_workdir(
             &database,
             &self.workspace_root,
             &row.0,
             row.3.as_deref(),
             row.15.as_deref(),
-        ) {
+        );
+        // Git below can be slow on a busy disk; holding the snapshot through
+        // it would keep checkpoints from reusing the log.
+        drop(database);
+        if let Ok(workdir) = workdir {
             response["workdir"] = Value::String(workdir.clone());
             if let Ok(worktrees) = list_git_worktrees(Path::new(&workdir)) {
                 let current_path = normalize_existing_path(Path::new(&workdir));
@@ -1269,6 +1279,8 @@ impl StateStore {
                         .unwrap_or_else(|| fallback.to_string_lossy().into_owned())
                 },
             );
+        // Release the snapshot before Git, which can be slow on a busy disk.
+        drop(database);
         let selected = normalize_existing_path(Path::new(&effective_workdir));
         let worktrees = list_git_worktrees(Path::new(&effective_workdir)).ok();
         let can_create_worktree = worktrees.is_some();
@@ -7389,7 +7401,21 @@ fn git_resolve_commit(root: &Path, reference: &str) -> Result<String, StorageErr
     Ok(oid)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs on this thread just before Git lists worktrees, so a test can see
+    /// what the read that asked for them still holds.
+    static BEFORE_GIT_WORKTREES: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn list_git_worktrees(root: &Path) -> Result<Vec<GitWorktree>, StorageError> {
+    #[cfg(test)]
+    BEFORE_GIT_WORKTREES.with_borrow_mut(|hook| {
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
     let result = run_git(root, &["worktree", "list", "--porcelain", "-z"])?;
     if !result.0.success() {
         let message = String::from_utf8_lossy(&result.2).trim().to_owned();
@@ -10016,6 +10042,43 @@ mod tests {
         let events = other.shared_events_after(0).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].2["text"], "token");
+    }
+
+    #[test]
+    fn reads_release_their_snapshot_before_running_git() {
+        let fixture = Fixture::new();
+        let (store, chat) = store_with_chat(&fixture, 1);
+        let store = std::sync::Arc::new(store);
+        let folder = store.chat(&chat).unwrap();
+        let folder = store.tree().unwrap()["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == chat)
+            .map(|entry| entry["folder"].as_str().unwrap().to_owned())
+            .unwrap_or_else(|| panic!("chat missing from tree: {folder}"));
+        let lent = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (hook_store, hook_lent) = (store.clone(), lent.clone());
+        BEFORE_GIT_WORKTREES.set(Some(Box::new(move || {
+            let readers = hook_store.readers.as_ref().expect("write-ahead log");
+            hook_lent.lock().unwrap().push(readers.lent());
+        })));
+        let tree = store.tree().unwrap();
+        let chat_state = store.chat(&chat).unwrap();
+        store.folder_settings(&json!({"folder": folder})).unwrap();
+        BEFORE_GIT_WORKTREES.set(None);
+        assert_eq!(tree["sessions"][0]["title"], "New Chat");
+        assert!(chat_state["workdir"].is_string());
+        let lent = lent.lock().unwrap();
+        assert_eq!(
+            lent.len(),
+            3,
+            "tree, chat and folder settings each list worktrees"
+        );
+        assert!(
+            lent.iter().all(|&count| count == 0),
+            "a snapshot was still held while Git ran: {lent:?}"
+        );
     }
 
     #[test]

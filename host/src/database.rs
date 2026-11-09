@@ -170,6 +170,13 @@ impl ReaderPool {
         self.returned.notify_one();
     }
 
+    /// Connections lent out right now.
+    #[cfg(test)]
+    pub(crate) fn lent(&self) -> usize {
+        let state = self.lock();
+        state.open - state.idle.len()
+    }
+
     fn forget(&self) {
         self.lock().open -= 1;
         self.returned.notify_one();
