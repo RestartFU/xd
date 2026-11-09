@@ -19,7 +19,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 chrono-tz = "0.10"
 libc = "0.2"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 serde_json = "1.0"
 sha2 = "0.10"
 similar = "2.7"

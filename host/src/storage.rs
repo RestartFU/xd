@@ -9830,6 +9830,18 @@ mod tests {
     }
 
     #[test]
+    fn the_bundled_sqlite_has_the_wal_reset_fix() {
+        // SQLite before 3.51.3 can corrupt a write-ahead-log database when one
+        // connection checkpoints while another commits, which the background
+        // checkpointer does by design. https://www.sqlite.org/wal.html#walresetbug
+        assert!(
+            rusqlite::version_number() >= 3_051_003,
+            "SQLite {} predates the WAL-reset fix",
+            rusqlite::version()
+        );
+    }
+
+    #[test]
     fn chat_reads_do_not_wait_for_a_commit_stuck_on_the_disk() {
         let fixture = Fixture::new();
         let (store, chat) = store_with_chat(&fixture, 20);
@@ -10108,7 +10120,7 @@ mod tests {
         let fixture = Fixture::new();
         let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
         let database = store.database.lock().unwrap();
-        let timeout: u64 = database
+        let timeout: i64 = database
             .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
             .unwrap();
 
