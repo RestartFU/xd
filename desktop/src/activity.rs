@@ -6,6 +6,8 @@ const SUBAGENT_PREFIX: &str = "subagent\n";
 const SUBAGENT_RUN_PREFIX: &str = "subagent_run\n";
 const WORKFLOW_PREFIX: &str = "workflow_run\n";
 const FILE_CHANGE_PREFIX: &str = "file_change\n";
+/// A chat moved to another account. A notice, never a tool card.
+const ACCOUNT_SWITCH_PREFIX: &str = "account_switch\n";
 const PATCH_MARKER: &str = "diff --git ";
 const MAX_AUTO_EXPANDED_PATCH_LINES: usize = 60;
 
@@ -48,6 +50,7 @@ pub fn is_plain_activity(content: &str) -> bool {
         && !content.starts_with(SUBAGENT_RUN_PREFIX)
         && !content.starts_with(WORKFLOW_PREFIX)
         && !content.starts_with(FILE_CHANGE_PREFIX)
+        && !content.starts_with(ACCOUNT_SWITCH_PREFIX)
 }
 
 /// A delegated agent, as the host's live record describes it.
