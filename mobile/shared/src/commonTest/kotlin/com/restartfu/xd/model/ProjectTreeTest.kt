@@ -67,6 +67,15 @@ class ProjectTreeTest {
     }
 
     @Test
+    fun aFolderHoldsTheProjectsNestedBeneathItAndNothingAfter() {
+        assertEquals(listOf("web", "site"), snapshot.projectsInside("acme"))
+        assertEquals(listOf("site"), snapshot.projectsInside("clients"))
+        // A project is not a folder of projects, and an unknown id holds nothing.
+        assertEquals(emptyList(), snapshot.projectsInside("notes"))
+        assertEquals(emptyList(), snapshot.projectsInside("missing"))
+    }
+
+    @Test
     fun somethingMovesOnlyIntoFoldersOutsideItself() {
         assertEquals(listOf("acme", "clients"), snapshot.moveDestinations("web").map { it.folder.id })
         assertEquals(listOf(0, 1), snapshot.moveDestinations("web").map { it.depth })

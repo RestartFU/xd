@@ -87,6 +87,22 @@ public fun TreeSnapshot.projectTree(collapsed: Set<String> = emptySet()): List<P
     return rows
 }
 
+/**
+ * The projects [folderId] holds at any depth, in the list's order: the run of
+ * deeper rows that follows it in the fully opened [projectTree]. A closed
+ * folder shows their sessions' signals, as the desktop sidebar does.
+ */
+public fun TreeSnapshot.projectsInside(folderId: String): List<String> {
+    val rows = projectTree()
+    val start = rows.indexOfFirst { it is ProjectTreeRow.FolderRow && it.id == folderId }
+    if (start < 0) return emptyList()
+    val depth = rows[start].depth
+    return rows.drop(start + 1)
+        .takeWhile { it.depth > depth }
+        .filterIsInstance<ProjectTreeRow.ProjectRow>()
+        .map { it.id }
+}
+
 /** A folder that something can be moved into, indented as the list shows it. */
 public data class FolderDestination(
     val folder: MinimalFolder,
