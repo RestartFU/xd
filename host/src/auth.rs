@@ -625,6 +625,7 @@ impl AuthManager {
             (SessionKind::Add, _) if session.cancelled => {
                 accounts.forget(provider, account);
                 self.forget_snapshot(provider, account);
+                self.publish(provider);
             }
             (SessionKind::Add, Err(error)) => {
                 accounts.forget(provider, account);
@@ -999,6 +1000,70 @@ fn strip_ansi(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Adding an account shows its sign-in code, and cancelling it takes the
+    /// account and its home away and tells clients so.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_new_account_is_discarded_and_reported() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            sync::{atomic::AtomicBool, mpsc},
+        };
+
+        let _environment = crate::AGENT_ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("xd-auth-add-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let codex = root.join("codex");
+        std::fs::write(
+            &codex,
+            "#!/bin/sh\nif [ \"$1\" = login ] && [ \"$2\" = --device-auth ]; then\n  echo 'Open https://auth.openai.com/codex/device and enter ABCD-12345'\n  exec sleep 30\nfi\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::set_var("XD_CODEX_EXECUTABLE", &codex) };
+        let events = Arc::new(EventBus::default());
+        let (sender, receiver) = mpsc::sync_channel(256);
+        events
+            .subscribe_with_auth(sender, None, Arc::new(AtomicBool::new(true)))
+            .unwrap();
+        let accounts = Accounts::with_homes(&root.join("data"), &[]);
+        let auth = AuthManager::new(events, accounts.clone());
+        let next = |wanted: &dyn Fn(&Value) -> bool| loop {
+            let event = receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("an agent-auth-changed event");
+            if event["event"] == "agent-auth-changed"
+                && event["provider"] == "codex"
+                && wanted(&event)
+            {
+                return event;
+            }
+        };
+
+        auth.add("codex").unwrap();
+        let pending =
+            next(&|event| {
+                event["accounts"].as_array().unwrap().iter().any(|account| {
+                    account["pending"] == true && account["device_code"] == "ABCD-12345"
+                })
+            });
+        assert_eq!(pending["adding"], true);
+        let id = accounts.pending("codex").unwrap();
+        let home = accounts.home("codex", &id).unwrap();
+        assert!(home.is_dir());
+        assert!(auth.add("codex").is_err(), "one sign-in at a time");
+
+        auth.cancel("codex").unwrap();
+        let settled = next(&|event| event["adding"] == false);
+        assert_eq!(settled["accounts"].as_array().unwrap().len(), 1);
+        assert!(!home.exists());
+        assert_eq!(accounts.ids("codex"), vec![DEFAULT_ACCOUNT.to_owned()]);
+        // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
+        unsafe { std::env::remove_var("XD_CODEX_EXECUTABLE") };
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn parses_codex_and_claude_authentication_status() {

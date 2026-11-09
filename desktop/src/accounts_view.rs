@@ -587,7 +587,14 @@ impl XdDesktop {
         let in_flight = matches!(account.state.as_str(), "signing-in" | "signing-out");
         let provider_owned = provider.to_owned();
         let account_id = account.id.clone();
-        let mut actions = div().flex_none().flex().items_center().gap(px(2.0));
+        // A steady width keeps the meters of every row in one column.
+        let mut actions = div()
+            .flex_none()
+            .min_w(px(if several { 150.0 } else { 90.0 }))
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(2.0));
         if several && !confirming {
             let up_provider = provider_owned.clone();
             let down_provider = provider_owned.clone();
@@ -725,35 +732,54 @@ impl XdDesktop {
                     .gap(px(3.0))
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .text_color(rgb(colors.text))
-                            .truncate()
-                            .child(account.label.clone()),
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(13.0))
+                                    .text_color(rgb(colors.text))
+                                    .truncate()
+                                    .child(account.label.clone()),
+                            )
+                            .when(!facts.is_empty(), |line| {
+                                line.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.0))
+                                        .text_color(rgb(colors.faint))
+                                        .child(facts.join(" · ")),
+                                )
+                            }),
                     )
                     .child(
                         div()
+                            .min_w_0()
                             .flex()
                             .items_center()
                             .gap(px(6.0))
                             .text_size(px(12.0))
                             .line_height(px(17.0))
                             .when(dot, |line| {
-                                line.child(div().size(px(6.0)).rounded_full().bg(rgb(tone)))
-                            })
-                            .child(div().text_color(rgb(tone)).child(if confirming {
-                                "Signs it out and deletes its saved sign-in from this host."
-                                    .to_owned()
-                            } else {
-                                status
-                            }))
-                            .when(!facts.is_empty() && !confirming, |line| {
                                 line.child(
-                                    div()
-                                        .text_color(rgb(colors.faint))
-                                        .truncate()
-                                        .child(format!("· {}", facts.join(" · "))),
+                                    div().flex_none().size(px(6.0)).rounded_full().bg(rgb(tone)),
                                 )
-                            }),
+                            })
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(rgb(tone))
+                                    .child(if confirming {
+                                        "Signs it out and deletes its saved sign-in from this host."
+                                            .to_owned()
+                                    } else {
+                                        status
+                                    }),
+                            ),
                     ),
             )
             .when_some(
