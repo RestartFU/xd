@@ -13,6 +13,16 @@ public class MobileSettings(context: Context) {
         PREFERENCES,
         Context.MODE_PRIVATE,
     )
+    var usageMetric: String
+        get() = preferences.getString("usage_metric", "Limits")?.takeIf { it in listOf("Cost", "Tokens", "Limits") } ?: "Limits"
+        set(value) { preferences.edit().putString("usage_metric", value).apply() }
+    var usageProvider: String
+        get() = preferences.getString("usage_provider", "All providers")?.takeIf { it in listOf("All providers", "Codex", "Claude") } ?: "All providers"
+        set(value) { preferences.edit().putString("usage_provider", value).apply() }
+    var usageDays: Int
+        get() = preferences.getInt("usage_days", 30).takeIf { it in listOf(1, 7, 30, 90) } ?: 30
+        set(value) { preferences.edit().putInt("usage_days", value).apply() }
+
     private val _accent = MutableStateFlow(
         AccentPreset.fromKey(preferences.getString(KEY_ACCENT, null)),
     )
