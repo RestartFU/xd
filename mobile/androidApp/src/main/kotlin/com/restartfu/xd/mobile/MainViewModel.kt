@@ -1084,12 +1084,18 @@ class ChatViewModel(
         launchGuarded(_sending) {
             session.send(text, images.map(Attachment::png))
             // Only clear what was actually sent: the composer may have moved
-            // on while the request was in flight.
-            if (_draft.value == text) {
-                _draft.value = ""
-                _attachments.value = _attachments.value.drop(images.size)
-                scheduleDraftSync(attachments = true)
+            // on while the request was in flight. Images go by content, one
+            // per image sent: one swapped in meanwhile was never sent, and a
+            // draft sync rebuilds the ones that were as new objects.
+            val left = _attachments.value.toMutableList()
+            for (sent in images) {
+                val at = left.indexOfFirst { it.png.bytes.contentEquals(sent.png.bytes) }
+                if (at >= 0) left.removeAt(at)
             }
+            val textSent = _draft.value == text
+            if (textSent) _draft.value = ""
+            if (left.size != _attachments.value.size) _attachments.value = left
+            if (textSent || images.isNotEmpty()) scheduleDraftSync(attachments = images.isNotEmpty())
         }
     }
 
@@ -1121,7 +1127,15 @@ class ChatViewModel(
         }
     }
 
+    /**
+     * Queues the draft behind the running turn.
+     *
+     * The queue op carries text alone, so a draft with images goes as a send
+     * instead: the host queues a message that arrives mid-turn with its images
+     * saved and referenced, which is how the desktop queues one too.
+     */
     fun enqueue() {
+        if (_attachments.value.isNotEmpty()) return send()
         val text = _draft.value
         launchGuarded(_sending) {
             session.enqueue(text)

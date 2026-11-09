@@ -662,7 +662,9 @@ impl StateStore {
             .collect::<Vec<_>>();
 
         let mut statement = database.prepare(
-            "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id FROM chats \
+            "SELECT id, folder_id, title, backend, host_working, workdir, original_workdir, session_mode, workspace_session_id, \
+             (SELECT CASE WHEN role = 'assistant' THEN content END FROM messages \
+              WHERE chat_id = chats.id AND role != 'duration' ORDER BY id DESC LIMIT 1) FROM chats \
              ORDER BY sort_order, last_user_message_at DESC, created_at DESC",
         )?;
         let stored_chats = statement
@@ -677,6 +679,7 @@ impl StateStore {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             })?
             .collect::<Result<Vec<_>, rusqlite::Error>>()?;
@@ -711,6 +714,7 @@ impl StateStore {
             original_workdir,
             session_mode,
             session,
+            last_reply,
         ) in stored_chats
         {
             if !visible_ids.contains(folder.as_str()) {
@@ -752,6 +756,7 @@ impl StateStore {
                 "title": title,
                 "backend": backend,
                 "working": working,
+                "question_waiting": !working && last_reply.as_deref().and_then(crate::ask::parse).is_some(),
                 "session_mode": session_mode,
                 "session": session,
             });
@@ -9332,6 +9337,38 @@ mod tests {
             fetch_worktree_base(&root, "refs/heads/main", &local).unwrap(),
             local
         );
+    }
+
+    #[test]
+    fn tree_restores_unanswered_questions_and_clears_them_after_a_reply() {
+        let fixture = Fixture::new();
+        let store = StateStore::open(&fixture.database, &fixture.workspaces).unwrap();
+        let folder = workspace(&store);
+        let chat = new_chat_on(&store, &folder, "codex");
+        let id = chat["id"].as_str().unwrap();
+        for (role, content, expected) in [
+            (
+                "assistant",
+                "<ask>\nChoose\n- First\n- Second\n</ask>",
+                true,
+            ),
+            ("duration", "2", true),
+            ("user", "First", false),
+        ] {
+            store
+                .database
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, ?, ?, 1)",
+                    params![id, role, content],
+                )
+                .unwrap();
+            assert_eq!(
+                store.tree().unwrap()["chats"][0]["question_waiting"],
+                expected
+            );
+        }
     }
 
     #[test]

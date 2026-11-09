@@ -643,6 +643,8 @@ pub struct AppModel {
     /// Pending approval or question request ids per chat, for every chat the
     /// daemon reports on, so the sidebar can flag sessions waiting on the user.
     pub waiting_chats: HashMap<String, HashSet<String>>,
+    /// Completed replies containing an unanswered <ask> block.
+    pub question_chats: HashSet<String>,
     pub messages: Vec<Message>,
     pub queue: Vec<String>,
     /// The chat's last turn was cut short and can be continued.
@@ -898,6 +900,19 @@ impl AppModel {
     pub fn apply_tree(&mut self, body: &Value) -> Result<(), serde_json::Error> {
         let mut snapshot: TreeSnapshot = serde_json::from_value(body.clone())?;
         normalize_sessions(&mut snapshot, body);
+        // New hosts persist final-reply questions in the tree, including chats
+        // whose transcript has never been opened on this desktop.
+        for chat in body["chats"].as_array().into_iter().flatten() {
+            if let (Some(id), Some(waiting)) =
+                (chat["id"].as_str(), chat["question_waiting"].as_bool())
+            {
+                if waiting {
+                    self.question_chats.insert(id.to_owned());
+                } else {
+                    self.question_chats.remove(id);
+                }
+            }
+        }
         let terminal_activity_revision = self.prepare_terminal_activity_version(
             snapshot.terminal_activity_epoch.as_deref(),
             snapshot.terminal_activity_revision,
@@ -1051,9 +1066,11 @@ impl AppModel {
 
     /// Whether a chat has an approval or question waiting on the user.
     pub fn is_waiting(&self, chat_id: &str) -> bool {
-        self.waiting_chats
-            .get(chat_id)
-            .is_some_and(|pending| !pending.is_empty())
+        self.question_chats.contains(chat_id)
+            || self
+                .waiting_chats
+                .get(chat_id)
+                .is_some_and(|pending| !pending.is_empty())
     }
 
     fn track_waiting(&mut self, name: &str, chat: &str, body: &Value) {
@@ -1609,6 +1626,13 @@ impl AppModel {
         {
             chat.working = working;
         }
+        if let Some(chat_id) = body.get("chat").and_then(Value::as_str) {
+            if name == "turn-finished" && body["waiting"] == true {
+                self.question_chats.insert(chat_id.to_owned());
+            } else if matches!(name, "turn-started" | "turn-finished") {
+                self.question_chats.remove(chat_id);
+            }
+        }
         self.refresh_session_activity();
         if name == "turn-finished"
             && let Some(chat_id) = body.get("chat").and_then(Value::as_str)
@@ -1874,6 +1898,7 @@ impl AppModel {
             chat_visits: 0,
             unread_chats: HashSet::new(),
             waiting_chats: HashMap::new(),
+            question_chats: HashSet::new(),
             messages: vec![
                 Message::new(
                     Some(1),
@@ -2285,6 +2310,25 @@ mod tests {
             model.apply_record(&json!({"chat":"other","message_id":3,"text":"x"})),
             None
         );
+    }
+
+    #[test]
+    fn completed_questions_flag_background_chats_until_the_next_turn() {
+        let mut model = AppModel::default();
+        model.apply_event(
+            "turn-finished",
+            &json!({"chat":"background","waiting":true}),
+        );
+        assert!(model.is_waiting("background"));
+        model.apply_event("interactions-cleared", &json!({"chat":"background"}));
+        assert!(model.is_waiting("background"));
+        model.apply_event("turn-started", &json!({"chat":"background"}));
+        assert!(!model.is_waiting("background"));
+        model.apply_event(
+            "turn-finished",
+            &json!({"chat":"background","waiting":false}),
+        );
+        assert!(!model.is_waiting("background"));
     }
 
     #[test]

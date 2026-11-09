@@ -14,6 +14,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -59,8 +60,9 @@ import org.robolectric.shadows.ShadowLooper
  * Renders the Projects page against a scripted host that keeps folders.
  *
  * With `-Pxd.shots=<dir>` it writes PNG captures there for design review.
- * Nothing in the script is working: a running turn's pulse never lets the
- * paused Robolectric clock settle once the list recomposes.
+ * Only a project the list keeps closed has a working session: a running
+ * turn's pulse in an open project never lets the paused Robolectric clock
+ * settle once the list recomposes, while a closed row's dot holds still.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -84,7 +86,7 @@ class ProjectsScreenshotTest {
     @Test fun newSessionAsksForAProject() = shoot("new-session-picker-dark", MinimalThemePreset.DARK) {
         click("New session")
         check(shows("Which project?") && shows("2 sessions") && shows("acme · 1 session") &&
-            shows("acme / Clients · No sessions") && !shows("Start session"))
+            shows("acme / Clients · 1 session") && !shows("Start session"))
     }
 
     @Test fun pickingAProjectStartsItsSession() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
@@ -92,7 +94,7 @@ class ProjectsScreenshotTest {
         val before = SENT.size
         // Nothing waits on the next dialog: its title field never lets Compose go idle.
         // The checkouts it reads say which project it is for.
-        click("acme / Clients · No sessions")
+        click("acme / Clients · 1 session")
         awaitPlaces(before)
         check(placesRead(before) == listOf("shop")) { placesRead(before).toString() }
     }
@@ -161,6 +163,16 @@ class ProjectsScreenshotTest {
         check(!shows("web") && !shows("shop") && !shows("Clients"))
         click("acme")
         check(shows("web") && shows("shop"))
+    }
+
+    @Test fun aClosedFolderShowsWhatItsProjectsNeed() = shoot("folder-closed-signals-dark", MinimalThemePreset.DARK) {
+        val working = xdSignals(MinimalThemePreset.DARK).working.toArgb()
+        // Open, the folder leaves its projects' dots to their own rows.
+        check(paintedOnRowOf("acme", working) == 0) { "an open folder shows dots" }
+        click("acme")
+        check(!shows("web") && !shows("shop"))
+        // web's working session and shop's background task, held in the closed folder.
+        check(paintedOnRowOf("acme", working) > 0) { "the closed folder shows no dots" }
     }
 
     @Test fun movingSendsTheChosenFolder() = shoot("moved-dark", MinimalThemePreset.DARK) {
@@ -247,6 +259,15 @@ class ProjectsScreenshotTest {
         }
 
         fun shows(label: String): Boolean = matching(label).fetchSemanticsNodes().isNotEmpty()
+
+        /** How many pixels of exactly [color] the row holding [label] paints, across the screen's width. */
+        fun paintedOnRowOf(label: String, color: Int): Int {
+            val bounds = matching(label).fetchSemanticsNodes().last().boundsInWindow
+            val bitmap = capture()
+            val top = bounds.top.toInt().coerceIn(0, bitmap.height)
+            val bottom = bounds.bottom.toInt().coerceIn(top, bitmap.height)
+            return (top until bottom).sumOf { y -> (0 until bitmap.width).count { x -> bitmap.getPixel(x, y) == color } }
+        }
 
         fun click(label: String) {
             matching(label).onLast().performClick()
@@ -360,10 +381,12 @@ class ProjectsScreenshotTest {
             """{"id":"notes","name":"notes"}],""" +
             """"sessions":[{"id":"s1","folder":"xd","title":"Reconnect backoff","chats":["c1"],"terminal_chat":"session:s1"},""" +
             """{"id":"s2","folder":"xd","title":"Usage page","chats":["c2"],"terminal_chat":"session:s2"},""" +
-            """{"id":"s3","folder":"web","title":"Landing copy","chats":["c3"],"terminal_chat":"session:s3"}],""" +
+            """{"id":"s3","folder":"web","title":"Landing copy","chats":["c3"],"terminal_chat":"session:s3"},""" +
+            """{"id":"s4","folder":"shop","title":"Checkout fix","chats":["c4"],"terminal_chat":"session:s4"}],""" +
             """"chats":[{"id":"c1","folder":"xd","title":"Reconnect backoff","backend":"claude","working":false,"session":"s1"},""" +
             """{"id":"c2","folder":"xd","title":"Usage page","backend":"codex","working":false,"session":"s2"},""" +
-            """{"id":"c3","folder":"web","title":"Landing copy","backend":"codex","working":false,"session":"s3"}]}"""
+            """{"id":"c3","folder":"web","title":"Landing copy","backend":"codex","working":true,"session":"s3"},""" +
+            """{"id":"c4","folder":"shop","title":"Checkout fix","backend":"claude","working":false,"background_tasks":1,"session":"s4"}]}"""
 
         /** A plain stand-in avatar: the account's initial on a colour of its own. */
         fun avatar(owner: String): String {

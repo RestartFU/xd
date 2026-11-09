@@ -115,7 +115,7 @@ use input::{
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
     next_active_session, project_cards, project_sessions, reconcile_route, resumable_session,
-    settled_cards,
+    settled_cards, tree_descendants,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -408,6 +408,15 @@ fn background_ring(size: f32, color: u32) -> gpui::Div {
 /// The small status mark at the end of a session row: a dot for work and
 /// unread turns, and nothing for a quiet session so a list of them reads quiet.
 /// Waiting on the user is the one state that also says so in words.
+fn waiting_ring(colors: ThemeColors) -> gpui::Div {
+    div()
+        .size(px(9.0))
+        .flex_none()
+        .rounded_full()
+        .border(px(1.5))
+        .border_color(rgb(colors.waiting))
+}
+
 fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyElement> {
     let color = signal.color(colors);
     let dot = |size: f32| {
@@ -420,7 +429,18 @@ fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyEle
     match signal {
         SessionSignal::Idle => None,
         SessionSignal::Working => Some(dot(7.0).opacity(pulse_opacity()).into_any_element()),
-        SessionSignal::Waiting => Some(pill("Waiting", color)),
+        SessionSignal::Waiting => Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(11.0))
+                .text_color(rgb(color))
+                .child(waiting_ring(colors))
+                .child("Waiting on you")
+                .into_any_element(),
+        ),
         SessionSignal::Background(count) => Some(
             div()
                 .flex_none()
@@ -441,7 +461,7 @@ fn signal_tab(signal: SessionSignal, colors: ThemeColors) -> Option<gpui::AnyEle
 /// an approval or question is not doing anything, so it stops reading as work.
 fn turn_status(waiting: bool, colors: ThemeColors) -> (&'static str, u32) {
     if waiting {
-        ("Waiting", colors.muted)
+        ("Waiting on you", colors.waiting)
     } else {
         ("Working", colors.working)
     }
@@ -5456,6 +5476,10 @@ impl XdDesktop {
                 }
                 if self.model.working || !self.model.queue.is_empty() {
                     self.clear_question(cx);
+                } else if !self.transcript_loading && !self.transcript_has_newer {
+                    // Metadata can arrive after history; restore once both agree
+                    // that this turn has finished.
+                    self.sync_question_from_history(&chat_id, cx);
                 }
                 if self
                     .terminal_panel
@@ -7164,7 +7188,7 @@ impl XdDesktop {
                     ))
                     .child(truncating_label(title))
                     .when(self.model.is_waiting(&chat.id), |tab| {
-                        tab.child(icon(STOP_ICON, 9.0, colors.waiting))
+                        tab.child(waiting_ring(colors))
                     })
                     .when(can_close, |tab| {
                         tab.child(
@@ -7258,6 +7282,13 @@ impl XdDesktop {
         self.new_chat_default_branch = None;
         self.new_chat_query.clear();
         self.new_chat_menu = None;
+        // A new chat starts without the browser the last view had open. Focus
+        // goes to the message box below, not where closing a browser, now or
+        // just before, sends it.
+        if self.browser_is_open() {
+            self.close_browser(cx);
+        }
+        self.browser_restore_focus = false;
         self.restore_new_chat_choices(&folder_id);
         self.new_chat_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
@@ -10341,10 +10372,19 @@ impl XdDesktop {
             return;
         };
         // A file still being read would be left behind for the next message.
-        if text.is_empty()
-            || !self.model.draft_attachments.is_empty()
-            || self.attachments_reading > 0
-        {
+        if self.attachments_reading > 0 {
+            return;
+        }
+        // The queue op carries text alone. A send that arrives mid-turn is
+        // queued by the host with its files saved and referenced, so that is
+        // how a draft with files is queued.
+        if !self.model.draft_attachments.is_empty() {
+            if self.model.working {
+                self.submit_composer(false, cx);
+            }
+            return;
+        }
+        if text.is_empty() {
             return;
         }
         let Some(host) = self.active_host().cloned() else {
@@ -10453,6 +10493,11 @@ impl XdDesktop {
                 options: ask.options,
                 accepts_input: ask.accepts_input,
             });
+        if pending.is_some() {
+            self.model.question_chats.insert(chat_id.to_owned());
+        } else {
+            self.model.question_chats.remove(chat_id);
+        }
         if pending != self.open_question {
             self.open_question = pending;
             self.question_answer.clear();
@@ -10463,6 +10508,7 @@ impl XdDesktop {
 
     fn answer_question(&mut self, answer: String, cx: &mut Context<Self>) {
         if self.send_shortcut(answer) {
+            // Keep the navigation mark until the host confirms a new turn.
             self.clear_question(cx);
             cx.notify();
         }
@@ -12965,6 +13011,7 @@ impl XdDesktop {
         indent: Pixels,
         open: bool,
         held: usize,
+        signals: &[SessionSignal],
         folders: Rc<[Folder]>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -13054,6 +13101,7 @@ impl XdDesktop {
                     .child(held.to_string()),
             )
             .child(div().flex_1())
+            .when(!open, |header| header.child(drawer_tabs(signals, colors)))
             .child(
                 div()
                     .id(("catalog-folder-add", index))
@@ -13298,7 +13346,7 @@ impl XdDesktop {
         }
         let mut matches = 0usize;
         let mut hidden_below = None;
-        for row in &tree {
+        for (position, row) in tree.iter().enumerate() {
             let project_index = row.index;
             let project = &projects[project_index];
             let indent = px(row.depth as f32 * CATALOG_INDENT);
@@ -13319,6 +13367,17 @@ impl XdDesktop {
                     .iter()
                     .filter(|parent| **parent == Some(project_index))
                     .count();
+                // A closed folder hides its projects, so it carries their
+                // signals the way a closed project carries its sessions'.
+                let signals = if open {
+                    Vec::new()
+                } else {
+                    tree_descendants(&tree, position)
+                        .filter(|row| !folders[row.index].group)
+                        .flat_map(|row| project_sessions(&folders[row.index].id, &active_chats))
+                        .map(|session| self.session_signal(&session))
+                        .collect()
+                };
                 drawers.push(self.render_folder_group(
                     colors,
                     project,
@@ -13326,6 +13385,7 @@ impl XdDesktop {
                     indent,
                     open,
                     held,
+                    &signals,
                     folders.clone(),
                     cx,
                 ));
@@ -16008,10 +16068,15 @@ impl XdDesktop {
             && !self.sending
             && self.attachments_reading == 0
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
+        // A draft with files is queued by sending it, which queues only while
+        // a turn runs, and waits on a send in flight like the send button does.
         let can_queue = self.model.connected
-            && !self.composer.trim().is_empty()
-            && self.model.draft_attachments.is_empty()
-            && self.attachments_reading == 0;
+            && self.attachments_reading == 0
+            && if self.model.draft_attachments.is_empty() {
+                !self.composer.trim().is_empty()
+            } else {
+                self.model.working && !self.sending
+            };
         let working = self.model.working;
         // Between turns, the background agents and shells still running.
         let waiting_on = if working {
@@ -16368,15 +16433,19 @@ impl XdDesktop {
                         .gap(px(8.0))
                         .text_size(px(12.5))
                         .text_color(rgb(colors.muted))
-                        .child(
+                        .child(if self.model.interactions.is_empty() {
                             div()
                                 .size(px(7.0))
                                 .rounded_full()
                                 .bg(rgb(dot))
-                                .opacity(pulse_opacity()),
-                        )
+                                .opacity(pulse_opacity())
+                        } else {
+                            waiting_ring(colors)
+                        })
                         .child(status)
-                        .child(working_dots(0, colors.muted)),
+                        .when(self.model.interactions.is_empty(), |row| {
+                            row.child(working_dots(0, colors.muted))
+                        }),
                 )
             })
             .when(!queued.is_empty(), |chat| {
@@ -21164,6 +21233,35 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
+    fn history_restores_question_and_navigation_until_a_user_answers(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        cx.update_window_entity(&desktop, |desktop, _, cx| {
+            desktop.model.select_chat("chat");
+            desktop.model.messages = vec![
+                Message::new(
+                    Some(1),
+                    "assistant",
+                    "<ask>\nPick one\n- First\n- Second\n<input>\n</ask>",
+                    None,
+                ),
+                Message::new(Some(2), "duration", "2", None),
+            ];
+            desktop.sync_question_from_history("chat", cx);
+            assert_eq!(desktop.open_question.as_ref().unwrap().options.len(), 2);
+            assert!(desktop.model.is_waiting("chat"));
+            desktop
+                .model
+                .messages
+                .push(Message::new(Some(3), "user", "First", None));
+            desktop.sync_question_from_history("chat", cx);
+            assert!(desktop.open_question.is_none());
+            assert!(!desktop.model.is_waiting("chat"));
+        });
+    }
+
+    #[gpui::test]
     fn the_send_button_resumes_a_cut_short_chat_while_nothing_is_typed(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -22093,6 +22191,12 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of native composer actions")
             .0;
         assert!(actions.contains("host.queue_message(&chat_id, &text)"));
+        let queue = actions
+            .split_once("fn drop_queued(")
+            .expect("end of native queue action")
+            .0;
+        // The queue op carries text alone, so files go as a mid-turn send.
+        assert!(queue.contains("self.submit_composer(false, cx)"));
         assert!(actions.contains("host.drop_queue(&chat_id, index)"));
         assert!(actions.contains("host.steer_queue(&chat_id, index, &text)"));
         assert!(actions.contains("host.cancel(&chat_id)"));
@@ -22753,11 +22857,14 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[test]
-    fn a_turn_held_up_on_the_user_reads_as_waiting_in_grey() {
+    fn a_turn_held_up_on_the_user_reads_as_waiting_in_amber() {
         for preset in [ThemePreset::Dark, ThemePreset::Light] {
             let colors = preset.colors();
             assert_eq!(turn_status(false, colors), ("Working", colors.working));
-            assert_eq!(turn_status(true, colors), ("Waiting", colors.muted));
+            assert_eq!(
+                turn_status(true, colors),
+                ("Waiting on you", colors.waiting)
+            );
         }
     }
 

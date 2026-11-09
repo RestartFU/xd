@@ -1,6 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -54,6 +58,7 @@ import com.restartfu.xd.protocol.UsageBucketReply
 import com.restartfu.xd.protocol.UsagePriceReply
 import com.restartfu.xd.protocol.UsageSummaryReply
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -61,9 +66,15 @@ import kotlinx.coroutines.launch
  * Cost and tokens by provider, model, and day, and each account's
  * subscription limits: the desktop's Usage page on the phone.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun UsageContent(model: UsageViewModel) {
     val state by model.state.collectAsStateWithLifecycle()
+    val metric = state.metric
+    val provider = state.provider
+    var selectedModel by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedProvider by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(selectedModel != null) { selectedModel = null; selectedProvider = null }
     var pricesOpen by rememberSaveable { mutableStateOf(false) }
     var confirmingReset by remember { mutableStateOf<UsageAccountReply?>(null) }
     Column(
@@ -74,50 +85,66 @@ internal fun UsageContent(model: UsageViewModel) {
             .navigationBarsPadding(),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Ops.USAGE_DAYS.forEach { days ->
-                FilterChip(
-                    selected = state.days == days,
-                    onClick = { model.showDays(days) },
-                    label = { Text(if (days == 1) "Past 24h" else "$days days") },
-                )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Cost", "Tokens", "Limits").forEach { option ->
+                FilterChip(selected = metric == option, onClick = { model.showMetric(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
             }
         }
-        val summary = state.summary
-        when {
-            summary == null && state.summaryError != null -> ErrorLine(state.summaryError.orEmpty(), model::refresh)
-            summary == null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                CircularProgressIndicator(Modifier.height(18.dp))
-                Text("Reading usage…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            else -> SummarySection(summary, state.summaryLoading, model)
-        }
-        state.summaryError?.takeIf { summary != null }?.let { ErrorLine(it, model::refresh) }
-        HorizontalDivider()
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Limits", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
-            TextButton(onClick = model::readLimits, enabled = !state.limitsLoading) {
-                Text(if (state.limitsLoading) "Refreshing…" else "Refresh limits")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("All providers", "Codex", "Claude").forEach { option ->
+                FilterChip(selected = provider == option, onClick = { model.showProvider(option); selectedModel = null; selectedProvider = null }, label = { Text(option) })
             }
         }
-        val accounts = state.accounts
-        when {
-            accounts == null && state.limitsError != null -> ErrorLine(state.limitsError.orEmpty(), model::readLimits)
-            accounts == null -> Text("Reading limits…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            accounts.isEmpty() -> Text("No providers", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            else -> accounts.forEach { account ->
-                val unsettled = account.accountKey in state.unsettledResets
-                LimitsCard(
-                    account,
-                    resetting = state.resetting,
-                    unsettled = unsettled,
-                    // Checking an earlier attempt again spends nothing new, so it needs no question.
-                    onReset = { if (unsettled) account.accountKey?.let(model::useResetCredit) else confirmingReset = account },
-                )
+        if (metric != "Limits") {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Ops.USAGE_DAYS.forEach { days ->
+                    FilterChip(
+                        selected = state.days == days,
+                        onClick = { model.showDays(days) },
+                        label = { Text(if (days == 1) "Past 24h" else "$days days") },
+                    )
+                }
             }
+            selectedModel?.let { name ->
+                TextButton(onClick = { selectedModel = null; selectedProvider = null }) { Text("Back to overview") }
+                Text(name, style = MaterialTheme.typography.titleMedium)
+            }
+            val summary = state.summary?.filtered(provider, selectedProvider, selectedModel)
+            when {
+                summary == null && state.summaryError != null -> ErrorLine(state.summaryError.orEmpty(), model::refresh)
+                summary == null -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(Modifier.height(18.dp))
+                    Text("Reading usage…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                else -> SummarySection(summary, state.summaryLoading, model, metric, selectedModel != null) { backend, name -> selectedProvider = backend; selectedModel = name }
+            }
+            state.summaryError?.takeIf { summary != null }?.let { ErrorLine(it, model::refresh) }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Limits", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = model::readLimits, enabled = !state.limitsLoading) {
+                    Text(if (state.limitsLoading) "Refreshing…" else "Refresh limits")
+                }
+            }
+            val accounts = state.accounts?.filter { provider == "All providers" || it.provider.equals(provider, ignoreCase = true) }
+            when {
+                accounts == null && state.limitsError != null -> ErrorLine(state.limitsError.orEmpty(), model::readLimits)
+                accounts == null -> Text("Reading limits…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                accounts.isEmpty() -> Text("No providers", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else -> accounts.forEach { account ->
+                    val unsettled = account.accountKey in state.unsettledResets
+                    LimitsCard(
+                        account,
+                        resetting = state.resetting,
+                        unsettled = unsettled,
+                        // Checking an earlier attempt again spends nothing new, so it needs no question.
+                        onReset = { if (unsettled) account.accountKey?.let(model::useResetCredit) else confirmingReset = account },
+                    )
+                }
+            }
+            state.limitsError?.takeIf { accounts != null }?.let { ErrorLine(it, model::readLimits) }
+            state.resetMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
-        state.limitsError?.takeIf { accounts != null }?.let { ErrorLine(it, model::readLimits) }
-        state.resetMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         HorizontalDivider()
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -161,8 +188,10 @@ private fun ErrorLine(message: String, retry: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: UsageViewModel) {
+private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: UsageViewModel, metric: String, detail: Boolean, onModel: (String, String) -> Unit) {
+    var byTime by rememberSaveable { mutableStateOf(false) }
     val signals = LocalXdSignals.current
     val cost = summary.buckets.sumOf(UsageBucketReply::costUsd)
     val tokens = summary.buckets.sumOf { it.totals.all }
@@ -174,10 +203,10 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
                 Text(if (loading) "Refreshing…" else "Refresh usage")
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-            Stat("Cost", usd(cost))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Stat("API estimate", usd(cost))
             Stat("Processed tokens", compact(tokens))
-            Stat("Sessions", summary.sessions.values.sum().toString())
+            if (!detail) Stat("Sessions", summary.sessions.values.sum().toString())
         }
         // Before the empty case too: a partial read is not "no activity".
         summary.sources.filter { it.status == "partial" }.forEach { source ->
@@ -192,7 +221,7 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
             Text("No activity in this window.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             return@Column
         }
-        CostChart(summary)
+        UsageChart(summary, metric)
         if (unpriced > 0) {
             Text(
                 "API estimate excludes $unpriced unpriced records.",
@@ -200,19 +229,41 @@ private fun SummarySection(summary: UsageSummaryReply, loading: Boolean, model: 
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        Text("Models", style = MaterialTheme.typography.titleSmall)
-        summary.buckets
-            .groupBy { it.provider to it.model }
-            .map { (key, buckets) -> Triple(key, buckets.sumOf(UsageBucketReply::costUsd), buckets.sumOf { it.totals.all }) }
-            .sortedByDescending { it.second }
-            .forEach { (key, modelCost, modelTokens) ->
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    BackendIcon(key.first, size = 16.dp)
-                    Text(key.second, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = XdMonoFamily, style = MaterialTheme.typography.bodySmall)
-                    Text(compact(modelTokens), color = signals.faint, style = MaterialTheme.typography.labelMedium)
-                    Text(usd(modelCost), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge)
+        if (metric == "Tokens") {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Stat("Input", compact(summary.buckets.sumOf { it.totals.uncachedInput }))
+                Stat("Output", compact(summary.buckets.sumOf { it.totals.output }))
+                Stat("Cache read", compact(summary.buckets.sumOf { it.totals.cachedInput }))
+                Stat("Cache write", compact(summary.buckets.sumOf { it.totals.cacheCreation }))
+            }
+        }
+        Text("Breakdown", style = MaterialTheme.typography.titleSmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = !byTime, onClick = { byTime = false }, label = { Text("Model") })
+            FilterChip(selected = byTime, onClick = { byTime = true }, label = { Text(if (summary.resolution == "hour") "Hour" else "Day") })
+        }
+        if (byTime) {
+            summary.periods.forEach { period ->
+                val buckets = summary.buckets.filter { it.period == period.key }
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(period.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                    Text(if (metric == "Cost") usd(buckets.sumOf { it.costUsd }) else compact(buckets.sumOf { it.totals.all }))
                 }
             }
+        } else {
+            summary.buckets
+                .groupBy { it.provider to it.model }
+                .map { (key, buckets) -> Triple(key, buckets.sumOf(UsageBucketReply::costUsd), buckets.sumOf { it.totals.all }) }
+                .sortedByDescending { if (metric == "Cost") it.second else it.third.toDouble() }
+                .forEach { (key, modelCost, modelTokens) ->
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable { onModel(key.first, key.second) }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        BackendIcon(key.first, size = 16.dp)
+                        Text(key.second, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = XdMonoFamily, style = MaterialTheme.typography.bodySmall)
+                        Text(if (metric == "Cost") compact(modelTokens) else usd(modelCost), color = signals.faint, style = MaterialTheme.typography.labelMedium)
+                        Text(if (metric == "Cost") usd(modelCost) else compact(modelTokens), fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+        }
     }
 }
 
@@ -224,15 +275,17 @@ private fun Stat(label: String, value: String) {
     }
 }
 
-/** Cost per day, or per hour over the past day, one bar per period. */
+/** The selected metric per day, or per hour over the past day. */
 @Composable
-private fun CostChart(summary: UsageSummaryReply) {
-    val byPeriod = summary.buckets.groupBy(UsageBucketReply::period).mapValues { (_, it) -> it.sumOf(UsageBucketReply::costUsd) }
+private fun UsageChart(summary: UsageSummaryReply, metric: String) {
+    val byPeriod = summary.buckets.groupBy(UsageBucketReply::period).mapValues { (_, it) -> it.sumOf { bucket -> if (metric == "Cost") bucket.costUsd else bucket.totals.all.toDouble() } }
     val values = summary.periods.map { byPeriod[it.key] ?: 0.0 }
     val peak = values.maxOrNull()?.takeIf { it > 0 } ?: 1.0
     val bar = MaterialTheme.colorScheme.primary
     val track = MaterialTheme.colorScheme.surfaceContainerHigh
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(if (metric == "Cost") "Cost over time (USD)" else "Tokens over time", style = MaterialTheme.typography.labelMedium)
+        Text(if (metric == "Cost") usd(peak) else compact(peak.toLong()), style = MaterialTheme.typography.labelSmall)
         Canvas(Modifier.fillMaxWidth().height(96.dp)) {
             if (values.isEmpty()) return@Canvas
             val slot = size.width / values.size
@@ -281,13 +334,14 @@ private fun LimitsCard(account: UsageAccountReply, resetting: Boolean, unsettled
             )
         }
         account.windows.forEach { window ->
+            val remaining = (100.0 - window.usedPercent.coerceIn(0.0, 100.0)).roundToInt()
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row {
                     Text(window.label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                    Text("${window.usedPercent.coerceIn(0.0, 100.0).toInt()}%", style = MaterialTheme.typography.labelMedium)
+                    Text("$remaining% left", style = MaterialTheme.typography.labelMedium)
                 }
                 LinearProgressIndicator(
-                    progress = { (window.usedPercent / 100.0).coerceIn(0.0, 1.0).toFloat() },
+                    progress = { remaining / 100f },
                     modifier = Modifier.fillMaxWidth(),
                     color = if (window.usedPercent >= 90) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 )
@@ -498,4 +552,14 @@ private fun compact(value: Long): String = when {
     value >= 1_000_000 -> String.format(Locale.US, "%.1fM", value / 1e6)
     value >= 1_000 -> String.format(Locale.US, "%.1fK", value / 1e3)
     else -> value.toString()
+}
+
+/** Apply the same selection to every summary surface, including warnings and sessions. */
+internal fun UsageSummaryReply.filtered(provider: String, modelProvider: String?, model: String?): UsageSummaryReply {
+    fun includes(key: String) = provider == "All providers" || key.equals(provider, ignoreCase = true)
+    return copy(
+        buckets = buckets.filter { includes(it.provider) && (model == null || (it.model == model && it.provider == modelProvider)) },
+        sessions = sessions.filterKeys(::includes),
+        sources = sources.filter { includes(it.provider) && (modelProvider == null || it.provider == modelProvider) },
+    )
 }
