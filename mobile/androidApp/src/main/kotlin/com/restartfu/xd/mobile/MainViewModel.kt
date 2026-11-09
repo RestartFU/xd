@@ -1084,12 +1084,13 @@ class ChatViewModel(
         launchGuarded(_sending) {
             session.send(text, images.map(Attachment::png))
             // Only clear what was actually sent: the composer may have moved
-            // on while the request was in flight.
-            if (_draft.value == text) {
-                _draft.value = ""
-                _attachments.value = _attachments.value.drop(images.size)
-                scheduleDraftSync(attachments = true)
-            }
+            // on while the request was in flight. Images go by identity, since
+            // one removed and another attached meanwhile was never sent.
+            val left = _attachments.value.filterNot { current -> images.any { it === current } }
+            val textSent = _draft.value == text
+            if (textSent) _draft.value = ""
+            if (left.size != _attachments.value.size) _attachments.value = left
+            if (textSent || images.isNotEmpty()) scheduleDraftSync(attachments = images.isNotEmpty())
         }
     }
 
