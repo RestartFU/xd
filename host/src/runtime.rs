@@ -529,12 +529,19 @@ impl TurnRuntime {
     /// session cannot: its reasoning is sealed to the account that wrote it,
     /// so the new account starts a session with the conversation's text.
     fn place_on_account(&self, turn: &mut TurnSpec) {
-        let choice = self.inner.auth.choose(
-            &turn.backend,
-            turn.session_account
-                .as_deref()
-                .map(crate::accounts::tag_account),
-        );
+        let chat_account = turn
+            .session_account
+            .as_deref()
+            .map(crate::accounts::tag_account);
+        let mut choice = self.inner.auth.choose(&turn.backend, chat_account);
+        // A Codex session about to be resumed must be resumed as the login
+        // that wrote it, so that login is read again first when it may be stale.
+        if turn.backend == "codex" && turn.session_id.is_some() {
+            self.inner
+                .auth
+                .confirm_login(&turn.backend, &choice.account);
+            choice = self.inner.auth.choose(&turn.backend, chat_account);
+        }
         turn.environment.extend(choice.environment.iter().cloned());
         // Filed with the login, so a session never follows the user's own
         // sign-in to another login under the same account.

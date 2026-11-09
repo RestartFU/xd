@@ -363,6 +363,16 @@ impl Accounts {
         .map_or_else(|| id.to_owned(), |key| format!("{id}#{key}"))
     }
 
+    /// When the account's limits and login were last read.
+    pub(crate) fn checked_at(&self, provider: &str, id: &str) -> Option<i64> {
+        self.with(provider, |state| {
+            state
+                .account(id)
+                .and_then(|account| account.live.checked_at_ms)
+        })
+        .flatten()
+    }
+
     /// Whether the account's login has been read.
     pub(crate) fn knows_login(&self, provider: &str, id: &str) -> bool {
         self.with(provider, |state| {

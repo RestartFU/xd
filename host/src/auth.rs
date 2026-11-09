@@ -39,27 +39,35 @@ struct AuthInner {
     /// The outcome of the last attempt to add an account, by provider.
     notices: Mutex<HashMap<String, String>>,
     next_session: AtomicU64,
+    next_generation: AtomicU64,
     events: Arc<EventBus>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct AuthSnapshot {
     state: String,
     detail: Option<String>,
     login_url: Option<String>,
     device_code: Option<String>,
     needs_input: bool,
+    /// Changes whenever the state is replaced, so a status check that started
+    /// before a newer change cannot overwrite it.
+    generation: u64,
+    /// The last state a check or sign-in established, kept while a refresh is
+    /// still checking so a known signed-out account is not used meanwhile.
+    settled: Option<String>,
 }
 
 impl AuthSnapshot {
     fn unknown() -> Self {
         Self {
             state: "unknown".into(),
-            detail: None,
-            login_url: None,
-            device_code: None,
-            needs_input: false,
+            ..Default::default()
         }
+    }
+
+    fn established(state: &str) -> bool {
+        matches!(state, "signed-in" | "signed-out" | "failed")
     }
 }
 
@@ -111,6 +119,7 @@ impl AuthManager {
                 sessions: Mutex::new(HashMap::new()),
                 notices: Mutex::new(HashMap::new()),
                 next_session: AtomicU64::new(1),
+                next_generation: AtomicU64::new(1),
                 events,
             }),
         }
@@ -154,6 +163,10 @@ impl AuthManager {
             if snapshot.state == "checking" {
                 return true;
             }
+            if AuthSnapshot::established(&snapshot.state) {
+                snapshot.settled = Some(snapshot.state.clone());
+            }
+            snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
             snapshot.state = "checking".into();
             snapshot.detail = None;
             snapshot.login_url = None;
@@ -161,6 +174,7 @@ impl AuthManager {
             snapshot.needs_input = false;
         }
         self.publish(provider);
+        let generation = self.snapshot(provider, account).generation;
         let manager = self.clone();
         let checked_provider = provider.to_owned();
         let checked_account = account.to_owned();
@@ -172,16 +186,7 @@ impl AuthManager {
                     .accounts
                     .environment(&checked_provider, &checked_account);
                 let snapshot = check_status(&checked_provider, &environment);
-                // A sign-in or sign-out that began meanwhile owns the state now;
-                // this answer is from before it.
-                let superseded = manager.inner.sessions.lock().map_or(true, |sessions| {
-                    sessions
-                        .get(&checked_provider)
-                        .is_some_and(|session| session.account == checked_account)
-                });
-                if !superseded && let Ok(mut states) = manager.inner.states.lock() {
-                    states.insert(key(&checked_provider, &checked_account), snapshot);
-                }
+                manager.apply_check(&checked_provider, &checked_account, generation, snapshot);
                 manager.publish(&checked_provider);
             });
         if let Err(error) = spawned {
@@ -192,6 +197,31 @@ impl AuthManager {
             );
             return false;
         }
+        true
+    }
+
+    /// Installs a status check's answer unless anything replaced the state
+    /// since the check began: a sign-in, a sign-out, or another check.
+    fn apply_check(
+        &self,
+        provider: &str,
+        account: &str,
+        generation: u64,
+        mut snapshot: AuthSnapshot,
+    ) -> bool {
+        let Ok(mut states) = self.inner.states.lock() else {
+            return false;
+        };
+        let entry = key(provider, account);
+        if states
+            .get(&entry)
+            .is_none_or(|current| current.generation != generation)
+        {
+            return false;
+        }
+        snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+        snapshot.settled = Some(snapshot.state.clone());
+        states.insert(entry, snapshot);
         true
     }
 
@@ -207,10 +237,14 @@ impl AuthManager {
     /// Whether a turn may run on the account. One whose check has not come
     /// back yet gets the benefit of the doubt; the CLI says so if it is wrong.
     pub(crate) fn signed_in(&self, provider: &str, account: &str) -> bool {
-        !matches!(
-            self.snapshot(provider, account).state.as_str(),
-            "signed-out" | "failed" | "signing-out"
-        )
+        let snapshot = self.snapshot(provider, account);
+        let state = match snapshot.state.as_str() {
+            "checking" | "unknown" | "signing-in" => {
+                snapshot.settled.as_deref().unwrap_or("unknown")
+            }
+            state => state,
+        };
+        !matches!(state, "signed-out" | "failed" | "signing-out")
     }
 
     /// The account the chat's next turn runs on; see [`Accounts::choose`].
@@ -221,6 +255,23 @@ impl AuthManager {
             |account| self.signed_in(provider, account),
             now_ms(),
         )
+    }
+
+    /// Reads the account's login again before a Codex session is resumed on it,
+    /// unless it was read moments ago. The CLI can be signed in to another
+    /// login outside xd, and a Codex session cannot open under another login.
+    pub(crate) fn confirm_login(&self, provider: &str, account: &str) {
+        const FRESH_MS: i64 = 2 * 60 * 1000;
+        let fresh = self
+            .inner
+            .accounts
+            .checked_at(provider, account)
+            .is_some_and(|checked| now_ms() - checked < FRESH_MS);
+        // Unit tests never start a real CLI for this.
+        if fresh || cfg!(test) {
+            return;
+        }
+        crate::usage::check_account(&self.inner.accounts, provider, account);
     }
 
     /// Sign-in state as a chat shows it: that of the account a new turn would use.
@@ -446,6 +497,7 @@ impl AuthManager {
                 login_url: None,
                 device_code: None,
                 needs_input: false,
+                ..Default::default()
             },
         );
         let manager = self.clone();
@@ -665,6 +717,7 @@ impl AuthManager {
                 login_url: None,
                 device_code: None,
                 needs_input: false,
+                ..Default::default()
             },
         );
         let accounts = &self.inner.accounts;
@@ -747,9 +800,18 @@ impl AuthManager {
         }
     }
 
-    fn set_snapshot(&self, provider: &str, account: &str, snapshot: AuthSnapshot) {
+    fn set_snapshot(&self, provider: &str, account: &str, mut snapshot: AuthSnapshot) {
+        snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut states) = self.inner.states.lock() {
-            states.insert(key(provider, account), snapshot);
+            let entry = key(provider, account);
+            snapshot.settled = if AuthSnapshot::established(&snapshot.state) {
+                Some(snapshot.state.clone())
+            } else {
+                states
+                    .get(&entry)
+                    .and_then(|previous| previous.settled.clone())
+            };
+            states.insert(entry, snapshot);
         }
         self.publish(provider);
     }
@@ -899,6 +961,7 @@ fn parse_claude_status(stdout: &[u8], stderr: &[u8], success: bool) -> AuthSnaps
             login_url: None,
             device_code: None,
             needs_input: false,
+            ..Default::default()
         },
         Some(false) => signed_out(),
         None => failed(command_detail(stdout, stderr, success)),
@@ -916,6 +979,7 @@ fn parse_codex_status(stdout: &[u8], stderr: &[u8], success: bool) -> AuthSnapsh
             login_url: None,
             device_code: None,
             needs_input: false,
+            ..Default::default()
         }
     } else {
         failed(detail)
@@ -963,6 +1027,7 @@ fn signed_out() -> AuthSnapshot {
         login_url: None,
         device_code: None,
         needs_input: false,
+        ..Default::default()
     }
 }
 
@@ -973,6 +1038,7 @@ fn failed(detail: String) -> AuthSnapshot {
         login_url: None,
         device_code: None,
         needs_input: false,
+        ..Default::default()
     }
 }
 
@@ -1089,6 +1155,31 @@ mod tests {
         // SAFETY: agent executable overrides are serialized by AGENT_ENV_LOCK.
         unsafe { std::env::remove_var("XD_CODEX_EXECUTABLE") };
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_status_check_never_outlives_a_newer_change() {
+        let auth = AuthManager::new(Arc::new(EventBus::default()), Accounts::new(None));
+        auth.set_snapshot("codex", DEFAULT_ACCOUNT, signed_out());
+        // A refresh is under way: the account stays unusable meanwhile.
+        if let Ok(mut states) = auth.inner.states.lock() {
+            let snapshot = states.get_mut(&key("codex", DEFAULT_ACCOUNT)).unwrap();
+            snapshot.settled = Some("signed-out".into());
+            snapshot.state = "checking".into();
+        }
+        assert!(!auth.signed_in("codex", DEFAULT_ACCOUNT));
+        let started = auth.snapshot("codex", DEFAULT_ACCOUNT).generation;
+        // A sign-out (or anything else) lands before the check answers.
+        auth.set_snapshot("codex", DEFAULT_ACCOUNT, signed_out());
+        let stale = AuthSnapshot {
+            state: "signed-in".into(),
+            ..Default::default()
+        };
+        assert!(!auth.apply_check("codex", DEFAULT_ACCOUNT, started, stale.clone()));
+        assert!(!auth.signed_in("codex", DEFAULT_ACCOUNT));
+        let current = auth.snapshot("codex", DEFAULT_ACCOUNT).generation;
+        assert!(auth.apply_check("codex", DEFAULT_ACCOUNT, current, stale));
+        assert!(auth.signed_in("codex", DEFAULT_ACCOUNT));
     }
 
     #[test]
