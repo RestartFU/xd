@@ -1,6 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
 import android.app.Activity
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalUriHandler
@@ -72,7 +76,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -224,10 +227,18 @@ internal fun ChatScreen(
     val waitingOn = if (state.working) 0 else backgroundTasks
     val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
-    val atBottom by remember(rows.size, leadingItemCount, trailingItemCount) {
-        derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            last >= lastTranscriptIndex - 1
+    // Whether new output keeps the end in view. Only the reader's own drags
+    // and flings change it (scrolling from code is not nested scrolling), so
+    // a follow still animating when the next words arrive keeps following,
+    // and a reader who scrolled back inside a long reply is left there.
+    // Saved, so a rotation does not pull a reader who scrolled away back down.
+    val following = rememberSaveable(state.chatId) { mutableStateOf(true) }
+    val followReader = remember(listState, following) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                following.value = !listState.canScrollForward
+                return Offset.Zero
+            }
         }
     }
 
@@ -251,12 +262,13 @@ internal fun ChatScreen(
             // Jumped, not animated: scrolling through a loaded history on open
             // is motion the reader did not ask for.
             listState.scrollToEnd(lastTranscriptIndex)
+            following.value = true
             model.landed = true
         }
     }
 
     LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount, trailingItemCount) {
-        if (model.landed && items.isNotEmpty() && atBottom) {
+        if (model.landed && items.isNotEmpty() && following.value) {
             listState.scrollToEnd(lastTranscriptIndex, animated = true)
         }
     }
@@ -444,7 +456,8 @@ internal fun ChatScreen(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                .nestedScroll(followReader),
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -1227,9 +1240,17 @@ private fun AnalysisDisclosure(
  * show its start with the rest of it still below.
  */
 private suspend fun LazyListState.scrollToEnd(index: Int, animated: Boolean = false) {
-    if (animated) animateScrollToItem(index) else scrollToItem(index)
+    // An item already in view is scrolled on from where it is: going to its
+    // top first would run back through a tall reply before coming down again.
+    if (layoutInfo.visibleItemsInfo.none { it.index == index }) {
+        if (animated) animateScrollToItem(index) else scrollToItem(index)
+    }
     while (canScrollForward) {
-        val step = layoutInfo.viewportSize.height.coerceAtLeast(1).toFloat()
+        val info = layoutInfo
+        val last = info.visibleItemsInfo.lastOrNull() ?: break
+        // What is left of the last item in view below the list's end.
+        val left = last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding)
+        val step = (if (left > 0) left else info.viewportSize.height).coerceAtLeast(1).toFloat()
         val moved = if (animated) animateScrollBy(step) else scrollBy(step)
         if (moved <= 0f) break
     }

@@ -16,6 +16,10 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.swipe
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.performTouchInput
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.restartfu.xd.XdClient
 import com.restartfu.xd.credentials.CredentialStore
@@ -63,10 +67,68 @@ class ChatLandingTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun goingIntoAChatLandsOnItsNewestMessage() {
+    fun goingIntoAChatLandsOnItsNewestMessage() = withApp {
+        click(TITLE)
+        waitFor { shows(FIRST_LINE_OF_LATEST) || shows(LAST_LINE_OF_LATEST) }
+        settle()
+        shoot("chat-opened")
+        check(endOnScreen(LAST_LINE_OF_LATEST)) { "Opening the chat did not show the end of its newest reply" }
+
+        // Back through the history, out to the projects, and in again.
+        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
+        settle()
+        check(!shows(FIRST_LINE_OF_LATEST)) { "Scrolling back left the newest reply on screen" }
+        click("Back")
+        waitFor { !shows(FIRST_LINE_OF_LATEST) && !shows("Back") }
+        click(TITLE)
+        waitFor { shows("Back") }
+        settle()
+        shoot("chat-reopened")
+        check(endOnScreen(LAST_LINE_OF_LATEST)) { "Going back into the chat kept the old scroll position" }
+    }
+
+    @Test
+    fun aReplyArrivingAtTheEndIsFollowedToItsEnd() = withApp {
+        click(TITLE)
+        waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
+        arrive()
+        waitFor { endOnScreen(LAST_LINE_OF_NEXT) }
+        check(endOnScreen(LAST_LINE_OF_NEXT)) { "A reply that arrived at the end was not followed to its end" }
+    }
+
+    @Test
+    fun aReaderWhoScrolledBackIsLeftThereWhenAReplyArrives() = withApp {
+        click(TITLE)
+        waitFor { endOnScreen(LAST_LINE_OF_LATEST) }
+        // A short, slow swipe, as a reader scrolls back inside the long reply:
+        // its rows stay in view, and only the reader's own scrolling stops the follow.
+        compose.onNode(hasScrollToIndexAction()).performTouchInput {
+            swipe(center, center + Offset(0f, 400f), durationMillis = 1000)
+        }
+        settle()
+        check(!endOnScreen(LAST_LINE_OF_LATEST) && shows(LAST_LINE_OF_LATEST)) { "The swipe did not scroll back inside the reply" }
+        val before = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode()
+            .config[SemanticsProperties.VerticalScrollAxisRange].value()
+        val reads = messageReads
+        arrive()
+        waitFor { messageReads > reads }
+        settle()
+        val after = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode()
+            .config[SemanticsProperties.VerticalScrollAxisRange].value()
+        check(!shows(FIRST_LINE_OF_NEXT) && kotlin.math.abs(after - before) < 1f) {
+            "A reply that arrived pulled the reader away from where they scrolled to ($before -> $after)"
+        }
+    }
+
+    private lateinit var model: MainViewModel
+
+    /** Starts the whole app against the scripted host, then runs [steps]. */
+    private fun withApp(steps: () -> Unit) {
+        MESSAGES.clear()
+        MESSAGES += HISTORY
         val activity = compose.activity
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val model = MainViewModel(activity.application, XdClient({ ScriptedSocket() }, NoCredentials, scope))
+        model = MainViewModel(activity.application, XdClient({ ScriptedSocket().also { socket = it } }, NoCredentials, scope))
         val connected = runBlocking { model.client.connect(connection) }
         check(connected is ConnectResult.Success) { "Could not reach the scripted host: $connected" }
         val settings = MobileSettings(activity)
@@ -80,36 +142,28 @@ class ChatLandingTest {
             }
         }
         waitFor { model.client.tree.value.chats.isNotEmpty() }
+        try {
+            steps()
+        } finally {
+            scope.cancel()
+        }
+    }
 
-        click(TITLE)
-        waitFor { shows(FIRST_LINE_OF_LATEST) || shows(LAST_LINE_OF_LATEST) }
+    /** The host stores another long reply and says the chat changed. */
+    private fun arrive() {
+        MESSAGES += NEXT_REPLY
+        socket?.push("""{"event":"changed","chat":"c1"}""")
         settle()
-        shoot("chat-opened")
-        check(endOfLatestOnScreen()) { "Opening the chat did not show the end of its newest reply" }
-
-        // Back through the history, out to the projects, and in again.
-        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(0)
-        settle()
-        check(!shows(FIRST_LINE_OF_LATEST)) { "Scrolling back left the newest reply on screen" }
-        click("Back")
-        waitFor { !shows(FIRST_LINE_OF_LATEST) && !shows("Back") }
-        click(TITLE)
-        waitFor { shows("Back") }
-        settle()
-        shoot("chat-reopened")
-        check(endOfLatestOnScreen()) { "Going back into the chat kept the old scroll position" }
-
-        scope.cancel()
     }
 
     /**
-     * Whether the newest reply's last line is inside the list's viewport. Its
-     * text exists as soon as any of the reply is on screen, so its bounds are
-     * what tell.
+     * Whether the end of the text holding [line] is inside the list's
+     * viewport. The text exists as soon as any of its reply is on screen, so
+     * its bounds are what tell.
      */
-    private fun endOfLatestOnScreen(): Boolean {
+    private fun endOnScreen(line: String): Boolean {
         val list = compose.onNode(hasScrollToIndexAction()).fetchSemanticsNode().boundsInRoot
-        val ends = matching(LAST_LINE_OF_LATEST).fetchSemanticsNodes().map { it.boundsInRoot.bottom }
+        val ends = matching(line).fetchSemanticsNodes().map { it.boundsInRoot.bottom }
         return ends.any { it > list.top && it <= list.bottom + 1f }
     }
 
@@ -180,6 +234,11 @@ class ChatLandingTest {
 
         override fun close() = Unit
 
+        /** Sends what the host would send on its own, unasked. */
+        fun push(line: String) {
+            Thread { Thread.sleep(5); listener?.onBytes((line + "\n").encodeToByteArray()) }.start()
+        }
+
         private fun reply(op: String?): String = when (op) {
             "tree" -> """{"ok":true,"folders":[{"id":"xd","name":"xd"}],""" +
                 """"sessions":[{"id":"s1","folder":"xd","title":"$TITLE","chats":["c1"],"terminal_chat":"session:s1"}],""" +
@@ -187,10 +246,10 @@ class ChatLandingTest {
             "chat" -> """{"ok":true,"title":"$TITLE","backend":"claude","commands":[],"plan":false,""" +
                 """"queue":[],"working":false,"label":"Claude","items":[],"new_worktree":false,""" +
                 """"has_messages":true,"model":"claude-opus-5-5","effort":"high"}"""
-            "messages" -> """{"ok":true,"total_messages":${MESSAGES.size},"last_message_id":${MESSAGES.size},"messages":[""" +
-                MESSAGES.mapIndexed { i, (role, text) ->
+            "messages" -> MESSAGES.toList().also { messageReads++ }.let { messages -> """{"ok":true,"total_messages":${messages.size},"last_message_id":${messages.size},"messages":[""" +
+                messages.mapIndexed { i, (role, text) ->
                     """{"id":${i + 1},"role":"$role","content":${JsonPrimitive(text)},"at":${1762500000 + i}}"""
-                }.joinToString(",") + "]}"
+                }.joinToString(",") + "]}" }
             else -> """{"ok":true}"""
         }
     }
@@ -199,17 +258,32 @@ class ChatLandingTest {
         const val TITLE = "Reconnect backoff"
         const val FIRST_LINE_OF_LATEST = "Here is where the reconnect work stands."
         const val LAST_LINE_OF_LATEST = "That is everything; the branch is ready for review."
+        const val FIRST_LINE_OF_NEXT = "One more pass over the reconnect work."
+        const val LAST_LINE_OF_NEXT = "That pass is done too; nothing else is left."
+
+        /** How many times the app has read the messages. */
+        @Volatile var messageReads = 0
+
+        /** The socket the app opened last, to send events on. */
+        @Volatile var socket: ScriptedSocket? = null
+
+        /** What the host has stored, which a test can add to. */
+        val MESSAGES: MutableList<Pair<String, String>> = java.util.Collections.synchronizedList(mutableListOf())
+
+        fun longReply(first: String, last: String) = "assistant" to (
+            listOf(first) +
+                (1..14).map { "Step $it of the change touched another part of the actor and its tests, and each of them still passes." } +
+                last
+            ).joinToString("\n\n")
 
         /** A long history whose newest reply is taller than the screen. */
-        val MESSAGES = (1..12).flatMap { turn ->
+        val HISTORY = (1..12).flatMap { turn ->
             listOf(
                 "user" to "Question $turn about the reconnect loop.",
                 "assistant" to "Answer $turn. The connection actor retries on a timer, and this turn looked at part $turn of it.",
             )
-        } + ("assistant" to (
-            listOf(FIRST_LINE_OF_LATEST) +
-                (1..14).map { "Step $it of the change touched another part of the actor and its tests, and each of them still passes." } +
-                LAST_LINE_OF_LATEST
-            ).joinToString("\n\n"))
+        } + longReply(FIRST_LINE_OF_LATEST, LAST_LINE_OF_LATEST)
+
+        val NEXT_REPLY = longReply(FIRST_LINE_OF_NEXT, LAST_LINE_OF_NEXT)
     }
 }
