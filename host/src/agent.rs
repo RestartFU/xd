@@ -1840,7 +1840,14 @@ fn unwrap_shell(command: &str) -> Option<String> {
     // Only a space or tab separates arguments; a newline would end the command.
     let blank = [' ', '\t'];
     let (program, rest) = command.trim_matches(blank).split_once(blank)?;
-    let name = program.rsplit(['/', '\\']).next()?;
+    // A plain path, so nothing before the shell runs as well.
+    if !program
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+    {
+        return None;
+    }
+    let name = program.rsplit('/').next()?;
     if !matches!(name, "bash" | "zsh" | "sh" | "dash") {
         return None;
     }
@@ -2987,6 +2994,9 @@ mod tests {
             "/bin/bash -lc\n'echo hello'",
             "/bin/bash\n-lc 'echo hello'",
             "/bin/bash -lc\u{a0}'echo hello'",
+            "/bin/echo;/bin/bash -lc 'pwd'",
+            "$SHELL_DIR/bash -lc 'pwd'",
+            "~/bin/bash -lc 'pwd'",
         ] {
             assert_eq!(shell_script(command), command);
         }
