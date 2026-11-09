@@ -19,6 +19,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.AndroidComposeTestRule
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -93,9 +94,20 @@ class ProjectsScreenshotTest {
         check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New session"), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
     }
 
-    /** The narrowest common phone still fits the bar and the round button side by side. */
+    /** A common narrow phone fits the bar and the round button side by side. */
     @Test @Config(qualifiers = "w360dp-h780dp-420dpi")
     fun narrowPhone() = longList("narrow-dark", MinimalThemePreset.DARK)
+
+    /** The narrowest phone window moves the bar aside rather than covering the button. */
+    @Test @Config(qualifiers = "w320dp-h640dp-320dpi")
+    fun narrowestPhone() = longList("narrowest-dark", MinimalThemePreset.DARK)
+
+    @Test fun barStaysCentredWithoutTheButton() = shoot("terminal-centred-dark", MinimalThemePreset.DARK) {
+        click("Terminal")
+        val root = bounds { isRoot() }
+        val bar = bounds { hasContentDescription("Projects") }.left to bounds { hasContentDescription("Usage") }.right
+        check(kotlin.math.abs((bar.first - root.left) - (root.right - bar.second)) < 2f) { "bar $bar in $root" }
+    }
 
     @Test fun longListDark() = longList("long-list-dark", MinimalThemePreset.DARK)
 
@@ -109,7 +121,15 @@ class ProjectsScreenshotTest {
     private fun longList(name: String, theme: MinimalThemePreset) {
         longTree = true
         try {
-            shoot(name, theme) { check(shows("Quota bars") && shows("New session")) }
+            shoot(name, theme) {
+                check(shows("Quota bars") && shows("New session"))
+                // The bar's last tab ends before the round button starts, so neither covers the other.
+                val usage = bounds { hasContentDescription("Usage") }
+                val button = bounds { hasContentDescription("New session") }
+                check(usage.right < button.left && bounds { isRoot() }.left <= bounds { hasContentDescription("Projects") }.left) {
+                    "Usage tab $usage, New session $button"
+                }
+            }
         } finally {
             longTree = false
         }
@@ -234,6 +254,9 @@ class ProjectsScreenshotTest {
             node.config.getOrNull(SemanticsProperties.Text)?.joinToString { it.text }
                 ?: node.config.getOrNull(SemanticsProperties.ContentDescription)?.joinToString()
         }
+
+        /** Where the one node [matcher] picks sits on screen, merged with its children. */
+        fun bounds(matcher: () -> SemanticsMatcher) = compose.onNode(matcher()).fetchSemanticsNode().boundsInRoot
 
         fun shows(label: String): Boolean = matching(label).fetchSemanticsNodes().isNotEmpty()
 

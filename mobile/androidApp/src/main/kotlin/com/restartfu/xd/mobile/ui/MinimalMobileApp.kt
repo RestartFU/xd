@@ -62,6 +62,8 @@ import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.ExtendedFloatingActionButton
@@ -407,10 +409,15 @@ internal fun MinimalMobileApp(
                     )
                 }
                 if (showBottomNavigation) {
-                    XdNavigationBar(
-                        mobileDestination, showProjects, showTerminal, showUsage,
-                        Modifier.align(Alignment.BottomCenter),
-                    )
+                    BoxWithConstraints(Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+                        // Centred, unless that would run into Projects' New session button on a narrow window.
+                        val reserved = if (mobileDestination == MobileDestination.PROJECTS) FloatingBarClearance else 0.dp
+                        val overlap = (maxWidth + FloatingBarWidth) / 2 - (maxWidth - reserved)
+                        XdNavigationBar(
+                            mobileDestination, showProjects, showTerminal, showUsage,
+                            Modifier.align(Alignment.BottomCenter).offset(x = -overlap.coerceAtLeast(0.dp)),
+                        )
+                    }
                 }
             }
         }
@@ -1113,6 +1120,13 @@ private val FloatingBarHeight = 60.dp
 /** What the floating bar covers at the foot of a page: its margin, its height, and a gap above it. */
 private val FloatingBarClearance = 16.dp + FloatingBarHeight + 12.dp
 
+private val FloatingTabWidth = 56.dp
+private val FloatingTabGap = 4.dp
+private val FloatingBarPadding = 6.dp
+
+/** The bar's width with its three tabs. */
+private val FloatingBarWidth = FloatingBarPadding * 2 + FloatingTabWidth * 3 + FloatingTabGap * 2
+
 /**
  * Icon tabs between the top-level places, floating over the page on phones.
  * Sessions open from Projects. A long press names each tab.
@@ -1134,8 +1148,8 @@ private fun XdNavigationBar(
         shadowElevation = 6.dp,
     ) {
         Row(
-            Modifier.selectableGroup().padding(6.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            Modifier.selectableGroup().padding(FloatingBarPadding),
+            horizontalArrangement = Arrangement.spacedBy(FloatingTabGap),
         ) {
             listOf(
                 Triple(MobileDestination.PROJECTS, "Projects", R.drawable.ic_projects) to onProjects,
@@ -1147,7 +1161,7 @@ private fun XdNavigationBar(
                 IconTooltip(label) {
                     Box(
                         Modifier
-                            .size(width = 56.dp, height = 48.dp)
+                            .size(width = FloatingTabWidth, height = 48.dp)
                             .clip(CircleShape)
                             .background(if (selected) colors.surfaceContainerHighest else Color.Transparent)
                             .selectable(selected = selected, role = Role.Tab, onClick = onClick)
