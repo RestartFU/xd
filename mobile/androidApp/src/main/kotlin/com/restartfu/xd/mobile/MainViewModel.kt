@@ -941,6 +941,13 @@ class ChatViewModel(
     private val _openQueued = MutableStateFlow<OpenedMessage?>(null)
 
     /**
+     * Whether the chat on screen has landed on its newest message. Cleared
+     * when the reader leaves the chat, so going back into it lands again, and
+     * kept through a rotation, which restores where they had scrolled to.
+     */
+    var landed = false
+
+    /**
      * The queued message being edited, with the queue it was opened on. Kept
      * here, not in saved state: it survives rotation, and a long queue never
      * has to fit in the activity's saved state.

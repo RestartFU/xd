@@ -11305,7 +11305,7 @@ impl XdDesktop {
         {
             self.pending_minimal_session = None;
         }
-        self.select_minimal_session(project_id, chat_id, agent, cx);
+        self.route_minimal_session(project_id, chat_id, agent, true, cx);
         let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
         cx.notify();
@@ -11363,6 +11363,20 @@ impl XdDesktop {
         agent: AgentCli,
         cx: &mut Context<Self>,
     ) {
+        self.route_minimal_session(project_id, chat_id, agent, false, cx);
+    }
+
+    /// Shows a chat. Another chat always opens on its newest message; with
+    /// `land_on_newest`, so does the chat already selected, which keeps its
+    /// place otherwise (a tree update that re-routes to it, say).
+    fn route_minimal_session(
+        &mut self,
+        project_id: String,
+        chat_id: String,
+        agent: AgentCli,
+        land_on_newest: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.model.selected_chat.as_deref() != Some(chat_id.as_str())
             && !self.flush_draft_before_navigation()
         {
@@ -11393,7 +11407,9 @@ impl XdDesktop {
         let same_workspace = self.model.selected_chat.as_deref().is_some_and(|current| {
             self.model.session_key_for_chat(current) == self.model.session_key_for_chat(&chat_id)
         });
-        if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
+        let reopened = self.model.selected_chat.as_deref() == Some(chat_id.as_str());
+        let land_on_newest = land_on_newest && reopened;
+        if !reopened {
             if !same_workspace {
                 self.native_pane = NativePane::Chat;
                 self.bottom_terminal_open = false;
@@ -11426,7 +11442,18 @@ impl XdDesktop {
         self.sync_terminal_input_mode(cx);
         self.transcript_loading = !self.transcript_loaded;
         self.request_chat(&chat_id);
-        self.request_messages(&chat_id);
+        if land_on_newest && self.transcript_has_newer {
+            // The reader paged back far enough to drop the newest rows; going
+            // into the chat shows them again, and the tail page lands pinned.
+            self.request_message_page(&chat_id, MessageCursor::Tail);
+        } else {
+            self.request_messages(&chat_id);
+        }
+        if land_on_newest {
+            // Going into a chat lands on its newest message, even the one
+            // already selected and scrolled back through.
+            self.pin_transcript();
+        }
         self.list_tree_directory(String::new(), cx);
         let _ = self.request_git_state(&chat_id);
         cx.notify();
@@ -21282,6 +21309,71 @@ Binary files /dev/null and b/image.png differ\n";
                 .bounds_for_item(0)
                 .expect("first message is reachable");
             assert!(first.top() >= desktop.transcript.viewport_bounds().top() - px(1.0));
+        });
+    }
+
+    #[gpui::test]
+    fn going_into_the_open_chat_lands_on_its_newest_message(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages = Arc::new(
+                (0..12)
+                    .map(|index| {
+                        Message::new(
+                            Some(index),
+                            "assistant",
+                            format!("Message {index}. {}", "A long paragraph. ".repeat(40)),
+                            None,
+                        )
+                    })
+                    .collect(),
+            );
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        cx.run_until_parked();
+        let scroll_back = |desktop: &mut XdDesktop| {
+            desktop.transcript.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            assert!(!desktop.transcript_pinned());
+        };
+
+        // A tree update that routes to the open chat leaves the reader's place.
+        desktop.update(cx, |desktop, cx| {
+            scroll_back(desktop);
+            desktop.select_minimal_session(
+                "atlas".into(),
+                "implementation".into(),
+                AgentCli::Codex,
+                cx,
+            );
+            assert!(!desktop.transcript_pinned());
+        });
+
+        // Going into it, from the sidebar say, shows the newest message.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_minimal_session(
+                "atlas".into(),
+                "implementation".into(),
+                AgentCli::Codex,
+                window,
+                cx,
+            );
+            assert!(desktop.transcript_pinned());
         });
     }
 
