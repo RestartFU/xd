@@ -15980,8 +15980,29 @@ impl XdDesktop {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let column = px(self.chat_column_width);
-        let Some(view) = self.find_agent(key) else {
+        let view = self.find_agent(key);
+        let address = view
+            .as_ref()
+            .map(|view| agent_relay::address(view).map(str::to_owned));
+        let can_message = matches!(address, Some(Ok(_)));
+        // Focus belongs to what the tab draws: its box when the agent takes
+        // messages, the tab itself when not. Coming back to the chat behind
+        // it leaves focus on that chat's composer, which is not drawn now.
+        let input_focus = self.agent_input.read(cx).focus_handle(cx);
+        let composer_focused = self
+            .composer_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        if can_message && (composer_focused || self.agent_view_focus.is_focused(window)) {
+            window.focus(&input_focus);
+        } else if !can_message && (composer_focused || input_focus.is_focused(window)) {
+            window.focus(&self.agent_view_focus);
+        }
+        let (Some(view), Some(address)) = (view, address) else {
             return div()
+                .id("agent-view")
+                .track_focus(&self.agent_view_focus)
                 .size_full()
                 .flex()
                 .items_center()
@@ -15994,21 +16015,6 @@ impl XdDesktop {
         };
         let running = view.status == SubagentState::Running;
         let pending = self.subagent_actions.get(view.key.as_str()).copied();
-        let address = agent_relay::address(&view).map(str::to_owned);
-        // Focus belongs to what the tab draws: its box when the agent takes
-        // messages, the tab itself when not. Coming back to the chat behind
-        // it leaves focus on that chat's composer, which is not drawn now.
-        let input_focus = self.agent_input.read(cx).focus_handle(cx);
-        let composer_focused = self
-            .composer_input
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window);
-        if address.is_ok() && (composer_focused || self.agent_view_focus.is_focused(window)) {
-            window.focus(&input_focus);
-        } else if address.is_err() && (composer_focused || input_focus.is_focused(window)) {
-            window.focus(&self.agent_view_focus);
-        }
         let messages = address
             .as_ref()
             .map(|address| self.agent_messages(address))
@@ -22298,6 +22304,19 @@ Binary files /dev/null and b/image.png differ\n";
         });
         cx.run_until_parked();
         assert!(cx.debug_bounds("agent-composer").is_some());
+        // An agent whose record is not loaded draws a note, and holds focus
+        // there even after the chat's composer had it.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_agent_tab("toolu_gone".into(), window, cx);
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(desktop.agent_view_focus.is_focused(window));
+            desktop.close_agent_tab("toolu_gone", cx);
+            desktop.open_agent_tab("toolu_1".into(), window, cx);
+        });
+        cx.run_until_parked();
         // Back from another chat, focus is on this chat's composer, which the
         // agent tab hides; drawing the tab hands it to the agent's box.
         cx.update_window_entity(&desktop, |desktop, window, cx| {
