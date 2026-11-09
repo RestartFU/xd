@@ -426,9 +426,10 @@ internal fun MinimalMobileApp(
         Modifier
             .align(Alignment.BottomCenter)
             .navigationBarsPadding()
+            .padding(horizontal = 16.dp)
+            // Bottom only: a short split-screen window still leaves the snackbar its height.
             .padding(
-                horizontal = 16.dp,
-                vertical = when {
+                bottom = when {
                     // Above Projects' New session button, as Material places snackbars over a FAB.
                     showBottomNavigation && projectsShown -> NewSessionBottom + FloatingBarHeight + 8.dp
                     showBottomNavigation -> FloatingBarClearance
@@ -635,14 +636,6 @@ private fun MinimalProjectsHome(
             .navigationBarsPadding(),
     ) {
         ProductHeader(link = link, title = "Projects", onSettings = { settingsOpen = true })
-        ContextBar(title = countLabel(projects.size, folders.size)) {
-            NewMenu(
-                canCreateFolders = tree.canCreateFolders,
-                onProject = { newProjectIn(null) },
-                onFolder = { newFolderIn(null) },
-            )
-        }
-
         when {
             loading && projects.isEmpty() -> Box(
                 Modifier.fillMaxSize(),
@@ -745,33 +738,43 @@ private fun MinimalProjectsHome(
                     }
                 }
             }
-            if (selected != null && newSessionAboveBar) {
-                // Just above the floating bar's right end, clear of it at any width.
-                // The tooltip's own layout drops alignment, so a plain box places it.
-                Box(Modifier.align(Alignment.BottomEnd).padding(end = 16.dp, bottom = NewSessionBottom)) {
-                    IconTooltip("New session") {
-                        FloatingActionButton(
-                            onClick = { createSessionIn = selected.id },
-                            modifier = Modifier.size(FloatingBarHeight),
-                            shape = CircleShape,
+            // The page's one New button: a session in the chosen project, a project, or a folder.
+            // On phones it sits just above the floating bar's right end, clear of it at any width.
+            // The tooltip's own layout drops alignment, so a plain box places it.
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = if (newSessionAboveBar) NewSessionBottom else 16.dp),
+            ) {
+                NewMenu(
+                    sessionProject = selected?.name,
+                    canCreateFolders = tree.canCreateFolders,
+                    onSession = { selected?.let { createSessionIn = it.id } },
+                    onProject = { newProjectIn(null) },
+                    onFolder = { newFolderIn(null) },
+                ) { open ->
+                    if (newSessionAboveBar) {
+                        IconTooltip("New") {
+                            FloatingActionButton(
+                                onClick = open,
+                                modifier = Modifier.size(FloatingBarHeight),
+                                shape = CircleShape,
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary,
+                            ) {
+                                Icon(painterResource(R.drawable.ic_add), contentDescription = "New")
+                            }
+                        }
+                    } else {
+                        ExtendedFloatingActionButton(
+                            onClick = open,
+                            icon = { Icon(painterResource(R.drawable.ic_add), contentDescription = null) },
+                            text = { Text("New") },
                             containerColor = MaterialTheme.colorScheme.primary,
                             contentColor = MaterialTheme.colorScheme.onPrimary,
-                        ) {
-                            Icon(painterResource(R.drawable.ic_add), contentDescription = "New session")
-                        }
+                        )
                     }
                 }
-            } else if (selected != null) {
-                ExtendedFloatingActionButton(
-                    onClick = { createSessionIn = selected.id },
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(16.dp),
-                    icon = { Icon(painterResource(R.drawable.ic_add), contentDescription = null) },
-                    text = { Text("New session") },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
-                )
             }
             }
         }
@@ -1225,22 +1228,6 @@ private fun XdNavigationRail(
     }
 }
 
-@Composable
-private fun ContextBar(title: String, action: (@Composable () -> Unit)? = null) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(52.dp)
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(start = 16.dp, end = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
-        action?.invoke()
-    }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-}
-
 /** What a session's signal tab says about its agent, as on the desktop. */
 private enum class SessionSignal(val label: String) {
     IDLE("Idle"),
@@ -1423,11 +1410,6 @@ private const val FOLDER_INDENT = 16
 /** Told when New folder is offered by a host that would make a project instead. */
 private const val NEEDS_NEWER_HOST = "Needs a newer xd host"
 
-private fun countLabel(projects: Int, folders: Int): String {
-    val projectCount = "$projects project${if (projects == 1) "" else "s"}"
-    return if (folders == 0) projectCount else "$projectCount · $folders folder${if (folders == 1) "" else "s"}"
-}
-
 /** An account's avatar, or [fallback] until the host has one to show. */
 @Composable
 private fun OwnerAvatar(icon: ByteArray?, fallback: Int, tint: Color, size: Dp = 16.dp) {
@@ -1457,26 +1439,42 @@ private fun MenuLabel(label: String, detail: String? = null) {
     }
 }
 
-/** The page's New button: a project or a folder, as the desktop's + offers. */
+/**
+ * The page's New button and the menu it opens above itself: a session in [sessionProject]
+ * when there is one, a project, or a folder, as the desktop's + offers. New session sits
+ * last, nearest the button.
+ */
 @Composable
-private fun NewMenu(canCreateFolders: Boolean, onProject: () -> Unit, onFolder: () -> Unit) {
+private fun NewMenu(
+    sessionProject: String?,
+    canCreateFolders: Boolean,
+    onSession: () -> Unit,
+    onProject: () -> Unit,
+    onFolder: () -> Unit,
+    button: @Composable (open: () -> Unit) -> Unit,
+) {
     var open by remember { mutableStateOf(false) }
     Box {
-        TextButton(onClick = { open = true }) {
-            Icon(painterResource(R.drawable.ic_add), contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("New")
-        }
+        button { open = true }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(
-                text = { Text("New project") },
-                onClick = { open = false; onProject() },
-            )
-            DropdownMenuItem(
                 text = { MenuLabel("New folder", NEEDS_NEWER_HOST.takeUnless { canCreateFolders }) },
+                leadingIcon = { Icon(painterResource(R.drawable.ic_folder), contentDescription = null) },
                 enabled = canCreateFolders,
                 onClick = { open = false; onFolder() },
             )
+            DropdownMenuItem(
+                text = { Text("New project") },
+                leadingIcon = { Icon(painterResource(R.drawable.ic_projects), contentDescription = null) },
+                onClick = { open = false; onProject() },
+            )
+            sessionProject?.let { project ->
+                DropdownMenuItem(
+                    text = { MenuLabel("New session", "in $project") },
+                    leadingIcon = { Icon(painterResource(R.drawable.ic_sessions), contentDescription = null) },
+                    onClick = { open = false; onSession() },
+                )
+            }
         }
     }
 }

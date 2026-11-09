@@ -84,14 +84,16 @@ class ProjectsScreenshotTest {
     }
 
     @Test @Config(qualifiers = "w840dp-h1200dp-320dpi")
-    fun tabletKeepsTheLabelledNewSessionButton() = shoot("rail-new-session-dark", MinimalThemePreset.DARK) {
-        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New session"), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
+    fun tabletKeepsALabelledNewButton() = shoot("rail-new-menu-dark", MinimalThemePreset.DARK) {
+        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New"), useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty())
+        click("New")
+        check(shows("New session") && shows("in xd") && shows("New project") && shows("New folder"))
     }
 
-    @Test fun phoneNewSessionIsTheRoundButton() = shoot("phone-new-session-dark", MinimalThemePreset.DARK) {
-        // Named for screen readers, with no visible label beside the floating bar.
-        check(shows("New session"))
-        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New session"), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
+    @Test fun phoneNewIsTheRoundButton() = shoot("phone-new-dark", MinimalThemePreset.DARK) {
+        // Named for screen readers, with no visible label and no row of its own above the list.
+        check(shows("New") && !shows("4 projects · 2 folders"))
+        check(this@ProjectsScreenshotTest.compose.onAllNodes(hasText("New"), useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
     }
 
     @Test @Config(qualifiers = "w360dp-h780dp-420dpi")
@@ -118,11 +120,11 @@ class ProjectsScreenshotTest {
         longTree = true
         try {
             shoot(name, theme) {
-                check(shows("Quota bars") && shows("New session"))
+                check(shows("Quota bars") && shows("New"))
                 // The round button sits above the bar at any width, so neither covers the other.
                 val usage = bounds { hasContentDescription("Usage") }
-                val button = bounds { hasContentDescription("New session") }
-                check(button.bottom < usage.top) { "Usage tab $usage, New session $button" }
+                val button = bounds { hasContentDescription("New") }
+                check(button.bottom < usage.top) { "Usage tab $usage, New button $button" }
                 checkBarCentred()
             }
         } finally {
@@ -131,8 +133,14 @@ class ProjectsScreenshotTest {
     }
 
     @Test fun newMenu() = shoot("new-menu-dark", MinimalThemePreset.DARK) {
-        click("New")
-        check(shows("New project") && shows("New folder"))
+        showNewMenu()
+        // A session goes in the project the page has chosen, the first one here.
+        check(shows("New session") && shows("in xd") && shows("New project") && shows("New folder"))
+    }
+
+    @Test fun newMenuLight() = shoot("new-menu-light", MinimalThemePreset.LIGHT) {
+        showNewMenu()
+        check(shows("New session"))
     }
 
     @Test fun newFolderDialog() = shoot("new-folder-dark", MinimalThemePreset.DARK) {
@@ -252,6 +260,16 @@ class ProjectsScreenshotTest {
 
         /** Where the one node [matcher] picks sits on screen, merged with its children. */
         fun bounds(matcher: () -> SemanticsMatcher) = compose.onNode(matcher()).fetchSemanticsNode().boundsInRoot
+
+        /**
+         * Opens the New menu so a capture shows it. Under Robolectric the first
+         * menu a test opens is never painted into its window, so it opens twice.
+         */
+        fun showNewMenu() {
+            click("New")
+            pressBack()
+            click("New")
+        }
 
         /** The floating bar sits in the middle of the window. */
         fun checkBarCentred() {
