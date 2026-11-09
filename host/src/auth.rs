@@ -740,12 +740,32 @@ impl AuthManager {
         });
         if let Some(account) = adding.filter(|_| result.is_ok()) {
             self.inner.accounts.forget_login_reading(provider, &account);
-            let added = self.adopt(provider, &account);
+            let added = self.adopt(provider, serial, &account);
             self.release_slot(provider, serial);
             self.publish(provider);
             if added {
                 self.refresh_account(provider, &account);
             }
+            return;
+        }
+        // A removal likewise keeps the slot until the home is gone, so no
+        // sign-in can start in a home about to be deleted.
+        let removing = self.inner.sessions.lock().ok().and_then(|sessions| {
+            sessions
+                .get(provider)
+                .filter(|session| session.serial == serial && session.kind == SessionKind::Remove)
+                .map(|session| session.account.clone())
+        });
+        if let Some(account) = removing {
+            // The home goes even if the CLI could not sign out, so no
+            // credential is left behind.
+            if let Err(error) = &result {
+                eprintln!("xd: {provider} sign-out before removal failed: {error}");
+            }
+            self.inner.accounts.forget(provider, &account);
+            self.forget_snapshot(provider, &account);
+            self.release_slot(provider, serial);
+            self.publish(provider);
             return;
         }
         let Some(session) = self.release_slot(provider, serial) else {
@@ -768,16 +788,8 @@ impl AuthManager {
             }
             // Adopted above, before the slot was released.
             (SessionKind::Add, Ok(())) => {}
-            (SessionKind::Remove, outcome) => {
-                // The home goes even if the CLI could not sign out, so no
-                // credential is left behind.
-                if let Err(error) = outcome {
-                    eprintln!("xd: {provider} sign-out before removal failed: {error}");
-                }
-                accounts.forget(provider, account);
-                self.forget_snapshot(provider, account);
-                self.publish(provider);
-            }
+            // Removed above, before the slot was released.
+            (SessionKind::Remove, _) => {}
             (_, Ok(())) | (_, Err(_)) if session.cancelled => {
                 self.set_snapshot_if_idle(provider, account, failed("Sign-in canceled.".into()));
                 self.refresh_account(provider, account);
@@ -792,7 +804,7 @@ impl AuthManager {
 
     /// Checks who a new sign-in belongs to before it joins the list.
     /// Returns whether the account joined the list.
-    fn adopt(&self, provider: &str, account: &str) -> bool {
+    fn adopt(&self, provider: &str, serial: u64, account: &str) -> bool {
         self.set_snapshot(
             provider,
             account,
@@ -845,7 +857,27 @@ impl AuthManager {
         // Shared while the account is still pending: nothing can run as it yet,
         // so this cannot race Claude's own writes to the file.
         accounts.share_settings(provider, account);
-        match accounts.finish_adding(provider, account, &identity) {
+        // Joins the list only if the sign-in was not cancelled meanwhile, decided
+        // under the lock cancelling takes, so the two cannot both win.
+        let joined = match self.inner.sessions.lock() {
+            Ok(sessions) => {
+                if sessions
+                    .get(provider)
+                    .is_some_and(|session| session.serial == serial && !session.cancelled)
+                {
+                    Some(accounts.finish_adding(provider, account, &identity))
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
+        let Some(joined) = joined else {
+            accounts.forget(provider, account);
+            self.forget_snapshot(provider, account);
+            return false;
+        };
+        match joined {
             Ok(Ok(())) => {
                 self.set_notice(
                     provider,
