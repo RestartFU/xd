@@ -7282,6 +7282,13 @@ impl XdDesktop {
         self.new_chat_default_branch = None;
         self.new_chat_query.clear();
         self.new_chat_menu = None;
+        // A new chat starts without the browser the last view had open. Focus
+        // goes to the message box below, not where closing a browser, now or
+        // just before, sends it.
+        if self.browser_is_open() {
+            self.close_browser(cx);
+        }
+        self.browser_restore_focus = false;
         self.restore_new_chat_choices(&folder_id);
         self.new_chat_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
