@@ -89,7 +89,7 @@ class ProjectsScreenshotTest {
             shows("acme / Clients · 1 session") && !shows("Start session"))
     }
 
-    @Test fun pickingAProjectStartsItsSession() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
+    @Test fun pickingAProjectOpensItsForm() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
         click("New session")
         val before = SENT.size
         // Nothing waits on the next dialog: its title field never lets Compose go idle.
@@ -99,7 +99,7 @@ class ProjectsScreenshotTest {
         check(placesRead(before) == listOf("shop")) { placesRead(before).toString() }
     }
 
-    @Test fun anOpenProjectStartsASessionInItself() = shoot("new-session-here-dark", MinimalThemePreset.DARK) {
+    @Test fun anOpenProjectsPlusOpensItsForm() = shoot("new-session-here-dark", MinimalThemePreset.DARK) {
         check(shows("New session in web") && shows("New session in xd"))
         val before = SENT.size
         click("New session in web")

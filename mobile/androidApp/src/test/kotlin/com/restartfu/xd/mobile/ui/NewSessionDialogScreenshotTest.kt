@@ -129,6 +129,14 @@ class NewSessionDialogScreenshotTest {
         check(isEnabled(dialog, "Start session")) { "Start waits for nothing once the checkouts are read" }
         capture(screen, dialog, name)
 
+        // Tapping the segment already chosen keeps the checkout picked under it.
+        click(dialog, "feat/usage-page")
+        click(dialog, "Current worktree")
+        check(nodes(dialog).any { node ->
+            node.config.getOrNull(SemanticsProperties.Selected) == true &&
+                descendants(node).any { it.config.getOrNull(SemanticsProperties.Text)?.any { text -> text.text == "feat/usage-page" } == true }
+        }) { "The chosen checkout stays chosen" }
+
         click(dialog, "New worktree")
         check(shows(dialog, "Fresh branch") && shows(dialog, "From a branch or pull request") && !shows(dialog, "master")) { "New worktree offers its starts" }
         capture(screen, dialog, "$name-worktree")

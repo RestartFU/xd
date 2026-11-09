@@ -745,7 +745,8 @@ private fun WorkspaceSection(
                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     SegmentedButton(
                         selected = !newWorktree,
-                        onClick = { places.default?.let(onSelect) },
+                        // Only a switch picks the default; the checkout already chosen stays.
+                        onClick = { if (newWorktree) places.default?.let(onSelect) },
                         shape = SegmentedButtonDefaults.itemShape(0, 2),
                         colors = segmentedColors(),
                     ) { Text("Current worktree", maxLines = 1) }
