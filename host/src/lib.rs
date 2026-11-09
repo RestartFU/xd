@@ -2044,6 +2044,24 @@ impl Engine {
         let Some(store) = self.store.as_ref() else {
             return error_reply("Rust host state storage is not configured.");
         };
+        // The whole steer runs under the chat's gate, as a send does, so a
+        // pause-all either comes first and is undone by this explicit steer, or
+        // comes after and stops whatever it started.
+        let gate = if gated {
+            None
+        } else {
+            match self.chat_execution_gate(request["chat"].as_str().unwrap_or_default()) {
+                Ok(gate) => Some(gate),
+                Err(error) => return error_reply(error),
+            }
+        };
+        let _execution = match &gate {
+            Some(gate) => match gate.lock() {
+                Ok(execution) => Some(execution),
+                Err(_) => return error_reply("This session's agent state is unavailable."),
+            },
+            None => None,
+        };
         match store.take_queued(request) {
             Ok((mut reply, event)) => {
                 self.events.publish(event);
@@ -2067,7 +2085,7 @@ impl Engine {
                     if let Some(runtime) = &self.runtime {
                         runtime.cancel(chat_id);
                     }
-                    if let Err(error) = self.start_queued_if_idle(chat_id, text, gated, unpaused) {
+                    if let Err(error) = self.start_queued_if_idle(chat_id, text, true, unpaused) {
                         return error_reply(error);
                     }
                 }
