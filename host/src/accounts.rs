@@ -150,7 +150,7 @@ impl Live {
 
 impl Account {
     fn login_confirmed(&self) -> bool {
-        self.live.login_read_at_ms.is_some() || self.live.checked_at_ms.is_some()
+        self.live.login_read_at_ms.is_some()
     }
 
     fn new(id: &str, now: i64) -> Self {
@@ -454,12 +454,9 @@ impl Accounts {
     /// When the account's login was last read, by a usage probe or on its own.
     pub(crate) fn login_read_at(&self, provider: &str, id: &str) -> Option<i64> {
         self.with(provider, |state| {
-            state.account(id).and_then(|account| {
-                account
-                    .live
-                    .login_read_at_ms
-                    .max(account.live.checked_at_ms)
-            })
+            state
+                .account(id)
+                .and_then(|account| account.live.login_read_at_ms)
         })
         .flatten()
     }
@@ -840,7 +837,10 @@ impl Accounts {
             }) {
                 return Ok(());
             }
-            if let Some(account) = state.account_mut(id) {
+            // Only a reading that names the login says anything about it.
+            // Limits read without it update the limits and nothing else.
+            let named = identity.account_key.is_some();
+            if named && let Some(account) = state.account_mut(id) {
                 account.live.identity_at_ms = Some(checked_at_ms);
             }
             let duplicate = identity.account_key.as_ref().is_some_and(|key| {
@@ -862,21 +862,25 @@ impl Accounts {
                 (Some(known), Some(found)) => known != found,
                 _ => false,
             };
-            account.live.problem = if changed && id != DEFAULT_ACCOUNT {
-                Some("mismatch")
-            } else if duplicate {
-                Some("duplicate")
-            } else {
-                None
-            };
-            // The default account is whatever the user's CLI is signed in to.
-            if id == DEFAULT_ACCOUNT && changed {
-                account.live.forget_usage();
+            if named {
+                account.live.problem = if changed && id != DEFAULT_ACCOUNT {
+                    Some("mismatch")
+                } else if duplicate {
+                    Some("duplicate")
+                } else {
+                    None
+                };
+                // The default account is whatever the user's CLI is signed in to.
+                if id == DEFAULT_ACCOUNT && changed {
+                    account.live.forget_usage();
+                }
+                if id == DEFAULT_ACCOUNT || account.account_key.is_none() {
+                    account.account_key = identity.account_key.clone();
+                }
+                account.live.login_read_at_ms = Some(checked_at_ms);
             }
-            if id == DEFAULT_ACCOUNT || account.account_key.is_none() {
-                account.account_key = identity.account_key.clone().or(account.account_key.take());
-            }
-            if !changed || id == DEFAULT_ACCOUNT {
+            // Limits of a login known to be the wrong one are not this account's.
+            if (named || account.live.problem.is_none()) && (!changed || id == DEFAULT_ACCOUNT) {
                 if identity.email.is_some() {
                     account.email = identity.email.clone();
                 }
@@ -1678,6 +1682,26 @@ mod tests {
         let reloaded = Accounts::with_homes(&data, &[]);
         assert_eq!(
             reloaded.choose("claude", None, |_| true, 0).account,
+            DEFAULT_ACCOUNT
+        );
+    }
+
+    #[test]
+    fn limits_read_without_a_login_confirm_nothing() {
+        let data = temp("unnamed");
+        let accounts = Accounts::with_homes(&data, &[]);
+        let second = added(&accounts, "codex", "b@example.com");
+        accounts.record_probe("codex", &second, &identity("c@example.com"), vec![], 10);
+        assert_eq!(accounts.describe("codex", 11)[1]["problem"], "mismatch");
+        accounts.forget_login_reading("codex", &second);
+        let unnamed = Identity::default();
+        accounts.record_probe("codex", &second, &unnamed, vec![], now_ms() + 1);
+        assert_eq!(accounts.describe("codex", 12)[1]["problem"], "mismatch");
+        assert_eq!(accounts.login_read_at("codex", &second), None);
+        assert_eq!(
+            accounts
+                .choose("codex", Some(&second), |_| true, 13)
+                .account,
             DEFAULT_ACCOUNT
         );
     }
