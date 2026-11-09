@@ -5,7 +5,14 @@
 //! also ties a notification naming its `desktop-entry` to the life of the
 //! sender, and would take it away as soon as such a helper exited.
 
-use std::{collections::HashMap, future::ready, num::NonZeroU32, pin::pin, thread, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    future::ready,
+    num::NonZeroU32,
+    pin::pin,
+    thread,
+    time::Duration,
+};
 
 use async_channel::{Receiver, Sender};
 use futures_util::{StreamExt as _, stream};
@@ -29,6 +36,9 @@ const CLOSE_AFTER: Duration = Duration::from_secs(10);
 /// How long a `Notify` call may go unanswered, as D-Bus's own default
 /// method-call timeout: after that the notification is not shown late.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(25);
+/// How many calls given up on are remembered, to close what they show if
+/// they are answered after all.
+const MAX_EXPIRED: usize = 32;
 
 /// How long the worker waits before acting on its own; shorter in tests.
 #[derive(Clone, Copy)]
@@ -187,6 +197,20 @@ async fn serve<T>(
                 // that restarts, or takes over the service, hands them out
                 // again, possibly to other applications.
                 let sender = message.header().sender().map(|sender| sender.to_string());
+                // Answered after it was given up on: whatever the server shows
+                // has been up for longer than its time already.
+                if let BusEvent::Reply {
+                    serial,
+                    id: Some(id),
+                } = &event
+                    && let Some(at) = tracker.expired.iter().position(|e| e == serial)
+                {
+                    tracker.expired.remove(at);
+                    connection
+                        .send(&close_message(*id, sender.as_deref())?)
+                        .await?;
+                    continue;
+                }
                 // A notification of ours was shown: close it when its time is up.
                 if let BusEvent::Reply {
                     serial,
@@ -206,8 +230,15 @@ async fn serve<T>(
             // Only while the id is still that notification's: one clicked or
             // closed is gone. Sent to the server connection that showed it, so
             // a server that has taken over the service never closes its own.
+            // Not shown late as a click target, but remembered, so an answer
+            // that does come still gets its notification closed.
             Input::Due(Due::Unanswered(serial)) => {
-                tracker.sent.remove(&serial);
+                if tracker.sent.remove(&serial).is_some() {
+                    if tracker.expired.len() == MAX_EXPIRED {
+                        tracker.expired.pop_front();
+                    }
+                    tracker.expired.push_back(serial);
+                }
             }
             Input::Due(Due::Close(key, serial)) => {
                 if tracker.shows(&key, serial) {
@@ -310,6 +341,8 @@ type Key = (Option<String>, u32);
 struct Tracker<T> {
     /// `Notify` calls awaiting the id the server gives them, by call serial.
     sent: HashMap<NonZeroU32, T>,
+    /// `Notify` calls given up on unanswered, newest last.
+    expired: VecDeque<NonZeroU32>,
     shown: HashMap<Key, Shown<T>>,
 }
 
@@ -317,6 +350,7 @@ impl<T> Default for Tracker<T> {
     fn default() -> Self {
         Self {
             sent: HashMap::new(),
+            expired: VecDeque::new(),
             shown: HashMap::new(),
         }
     }
@@ -943,14 +977,20 @@ mod tests {
                             &(7u32, DEFAULT_ACTION),
                         )
                         .await?;
+                    let close = next_call(&mut calls, "CloseNotification").await?;
                     sleep(Duration::from_millis(200)).await;
-                    Ok(clicked.try_recv().ok().map(|click| click.target))
+                    Ok((
+                        clicked.try_recv().ok().map(|click| click.target),
+                        close.body().deserialize::<u32>()?,
+                    ))
                 })
                 .await
             })
         });
-        if let Some(click) = click {
+        // Not opened by a click, and closed at once: it has been up too long.
+        if let Some((click, closed)) = click {
             assert_eq!(click, None);
+            assert_eq!(closed, 7);
         }
     }
 
