@@ -165,6 +165,7 @@ const ARROW_RIGHT_ICON: &str = "icons/arrow-right.svg";
 const ROTATE_CW_ICON: &str = "icons/rotate-cw.svg";
 const EXTERNAL_LINK_ICON: &str = "icons/external-link.svg";
 const CHECK_ICON: &str = "icons/check.svg";
+const REPLY_ICON: &str = "icons/reply.svg";
 const UNDO_ICON: &str = "icons/undo.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
 const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
@@ -574,6 +575,11 @@ fn first_line(text: &str) -> String {
 }
 
 /// A small status label on a soft tint of its own color.
+/// The caption on a message sent in reply to a question.
+fn answered_question_label(question: &str) -> String {
+    format!("Answering “{}”", question.trim())
+}
+
 fn stamp(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
     pill(label, color)
 }
@@ -1623,6 +1629,9 @@ struct TranscriptSnapshot {
     /// Each row's place in its work log, kept with the rows so measuring a long
     /// log need not compare its text again for every row.
     work_runs: Arc<Vec<Option<WorkRun>>>,
+    /// For each row the user sent in reply to a tagged question, that
+    /// question, so the bubble can say what it answers.
+    answered_questions: Arc<Vec<Option<String>>>,
 }
 
 impl TranscriptSnapshot {
@@ -1657,6 +1666,42 @@ impl TranscriptSnapshot {
     fn sync_derived_rows(&mut self) {
         self.sync_running_agents();
         self.sync_work_runs();
+        self.sync_answered_questions();
+    }
+
+    /// A user row answers the question a reply asked when that reply is the
+    /// row before it, as `sync_question_from_history` reads a waiting one.
+    ///
+    /// Only a reply with a message right after it is parsed, so a live update
+    /// does not read every reply in a long chat again.
+    fn sync_answered_questions(&mut self) {
+        let mut reply: Option<&Message> = None;
+        self.answered_questions = Arc::new(
+            self.messages
+                .iter()
+                .chain(self.live_items.iter())
+                .map(|message| match message.role.as_str() {
+                    // The turn's duration sits between a reply and the answer.
+                    "duration" => None,
+                    "user" => reply
+                        .take()
+                        .and_then(|reply| markdown::ask(&reply.content))
+                        .map(|ask| ask.question),
+                    "assistant" => {
+                        reply = Some(message);
+                        None
+                    }
+                    _ => {
+                        reply = None;
+                        None
+                    }
+                })
+                .collect(),
+        );
+    }
+
+    fn answered_question(&self, index: usize) -> Option<&str> {
+        self.answered_questions.get(index)?.as_deref()
     }
 
     fn sync_running_agents(&mut self) {
@@ -15183,6 +15228,7 @@ impl XdDesktop {
         expanded: bool,
         images: &MessageImages,
         column: f32,
+        answering: Option<&str>,
     ) -> gpui::AnyElement {
         let role = message.role.as_str();
         if role == "duration" {
@@ -15381,6 +15427,27 @@ impl XdDesktop {
                 })
                 .child("Copy")
         });
+        // What the message answers, attached above it like a reply's quote.
+        let answered = answering.filter(|_| user).map(|question| {
+            div()
+                .debug_selector(|| "native-answered-question".into())
+                .max_w(px(column.min(600.0)))
+                .min_w_0()
+                .mb(px(4.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(px(11.5))
+                .text_color(rgb(colors.faint))
+                .child(icon(REPLY_ICON, 12.0, colors.faint))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink()
+                        .child(truncating_label(answered_question_label(question))),
+                )
+        });
         div()
             .id(("native-message", index))
             .group("native-message")
@@ -15388,6 +15455,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .when(user, |row| row.items_end())
+            .children(answered)
             .child(card)
             .children(copy)
             .child(div().h(px(if user { 10.0 } else { 6.0 })))
@@ -15907,6 +15975,7 @@ impl XdDesktop {
                         expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
                         &message_images,
                         column,
+                        messages.answered_question(index),
                     )))
                     .into_any_element()
             })
@@ -19612,6 +19681,9 @@ impl AssetSource for EmbeddedIcons {
             CHECK_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/check.svg").as_slice(),
             )),
+            REPLY_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/reply.svg").as_slice(),
+            )),
             SIDE_LAYOUT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/panel-right.svg").as_slice(),
             )),
@@ -21045,6 +21117,42 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
+    fn an_answer_in_the_transcript_carries_its_question(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "claude".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Claude,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(
+                    Some(1),
+                    "assistant",
+                    "<ask>\nWhich region?\n- us-east-1\n- eu-west-1\n</ask>",
+                    None,
+                ),
+                Message::new(Some(2), "duration", "3", None),
+                Message::new(Some(3), "user", "eu-west-1", None),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(1100.0), px(800.0)));
+        cx.run_until_parked();
+        let caption = cx.debug_bounds("native-answered-question").unwrap();
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        assert!(caption.bottom() < composer.top());
+    }
+
+    #[gpui::test]
     fn dragging_across_a_code_block_selects_its_text(cx: &mut gpui::TestAppContext) {
         let code = "first line of code\nsecond line of code";
         let cx = table_transcript(cx, 1100.0, &format!("Run this:\n\n```sh\n{code}\n```"));
@@ -21406,6 +21514,47 @@ Binary files /dev/null and b/image.png differ\n";
         let mut snapshot = TranscriptSnapshot::default();
         snapshot.sync_messages(&model);
         snapshot
+    }
+
+    #[test]
+    fn a_message_sent_right_after_a_question_says_what_it_answers() {
+        let mut model = AppModel::default();
+        let ask = "Ready.\n\n<ask>\nWhich region?\n- us-east-1\n- eu-west-1\n</ask>";
+        model.messages = vec![
+            Message::new(Some(1), "user", "Deploy staging.", None),
+            Message::new(Some(2), "assistant", ask, None),
+            Message::new(Some(3), "duration", "4", None),
+            Message::new(Some(4), "user", "eu-west-1", None),
+            Message::new(Some(5), "assistant", "Done.", None),
+            Message::new(Some(6), "user", "Thanks", None),
+            // A question the agent moved past before anyone answered.
+            Message::new(Some(7), "assistant", ask, None),
+            Message::new(Some(8), "tool", "Read a", None),
+            Message::new(Some(9), "user", "Unrelated", None),
+        ];
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+        let answered = (0..snapshot.len())
+            .map(|index| snapshot.answered_question(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            answered,
+            [
+                None,
+                None,
+                None,
+                Some("Which region?"),
+                None,
+                None,
+                None,
+                None,
+                None
+            ]
+        );
+        assert_eq!(
+            answered_question_label("Which region?"),
+            "Answering \u{201c}Which region?\u{201d}"
+        );
     }
 
     /// The rows a work log draws an entry for, and the count each one shows.
@@ -21885,7 +22034,7 @@ Binary files /dev/null and b/image.png differ\n";
                         .flex()
                         .justify_center()
                         .child(div().w(px(COLUMN)).child(XdDesktop::render_native_message(
-                            colors, message, None, None, index, false, &images, COLUMN,
+                            colors, message, None, None, index, false, &images, COLUMN, None,
                         )))
                         .into_any_element()
                 })
@@ -21982,6 +22131,7 @@ Binary files /dev/null and b/image.png differ\n";
                         false,
                         &MessageImages::default(),
                         720.0,
+                        None,
                     )
                 })
                 .size_full()
@@ -23355,6 +23505,7 @@ Binary files /dev/null and b/image.png differ\n";
                     false,
                     &self.images,
                     720.0,
+                    None,
                 ))
             }
         }
