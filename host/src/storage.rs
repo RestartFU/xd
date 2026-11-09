@@ -48,7 +48,9 @@ const AGENT_UI_INSTRUCTIONS: &str = r#"To show the user an image file from this 
 [image: /absolute/path/to/image.png]
 The image appears at that point in the reply. PNG, JPEG, GIF and WebP files up to 10 MiB can be shown, and you do not need to keep the file afterwards. Markdown image syntax does not display local files.
 
-A line of the form [file: /absolute/path] in the user's message is a file they attached; read it from that path when you need it."#;
+A line of the form [file: /absolute/path] in the user's message is a file they attached; read it from that path when you need it.
+
+Whenever you mention a pull request to the user, write it as a Markdown link to its full URL, such as [PR #200](https://github.com/owner/repo/pull/200), so it can be clicked. A bare PR #200 or #200 is not enough, including in progress updates and final reports. If you do not know the URL, look it up, for example with gh pr view 200 --json url."#;
 /// Long enough for any typed request; a pasted log does not need to repeat whole.
 const MAX_CUT_OFF_REQUEST_CHARS: usize = 4_000;
 /// Twice the above, so the newest request always survives older ones in full.
@@ -13268,6 +13270,7 @@ mod tests {
             let prompt = turn.system_prompt.unwrap();
             assert_eq!(prompt.contains("<ask>"), asks, "{backend}");
             assert!(prompt.contains("[image: /absolute/path/to/image.png]"));
+            assert!(prompt.contains("[PR #200](https://github.com/owner/repo/pull/200)"));
         }
     }
 
