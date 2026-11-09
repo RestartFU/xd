@@ -9,7 +9,7 @@ when clients disconnect, and the host applies its own rules (such as
 Install and sign in to your assistant CLI on the machine running the xd host.
 xd discovers tools through your login shell and reuses their existing
 configuration and login state. For remote sessions, the CLI and login belong on
-the remote machine. **Settings → Assistant accounts** refreshes the CLI's current
+the remote machine. **Settings → Agents → Accounts** refreshes the CLI's current
 status. Agent binaries and separate copies of their credentials are not included
 in xd.
 
@@ -26,8 +26,9 @@ every 30 minutes; only the package names are sent.
 
 When something is out of date, an **Update** button appears beside the terminal
 and Settings buttons. It lists what will change, and nothing is installed until
-you confirm. **Settings → Updates** checks manually. Updates always target the
-local machine, including while you are viewing a remote workspace.
+you confirm. **Check for updates** under **Settings → General → Updates** checks
+manually. Updates always target the local machine, including while you are
+viewing a remote workspace.
 
 Restart is blocked while chats are running, a chat's background agents or shells
 are still at work, or terminal tabs are open; close the terminal tabs first.
@@ -51,6 +52,12 @@ resumed turn that is cut off again waits for you.
 With the setting off, connecting drops those waiting chats instead, so a later
 change of mind does not restart old work; the play button still works.
 
+The setting belongs to each device, but the host offers the waiting chats only
+once. The first desktop to connect decides for all of them: with its setting on
+it resumes them, and with it off it drops them, so a desktop that connects later
+finds nothing to resume. An Android device with the setting off leaves them for
+the next device instead.
+
 ## Memory limits
 
 On Linux, a container's memory limit can be set to stop every process in it at
@@ -60,9 +67,11 @@ would take down the daemon, every chat and every terminal.
 When the host runs in such a container, it watches the memory the kernel cannot
 reclaim (page cache does not count) and, once that reaches 92% of the limit,
 stops the largest process tree of the same user in the container, such as a
-compiler or build tool, whether or not xd started it, and never an agent, a
-terminal shell or xd itself. The host log, and the chat the work ran under when
-there is one, say what was stopped.
+compiler or build tool, whether xd started it or not. It never stops an agent, xd
+itself, or the shell that leads each xd terminal, but a shell started inside a
+terminal, and anything running in it, can be stopped. The tree is frozen and then
+killed with `SIGKILL`, so it gets no chance to save its state. The host log, and
+the chat the work ran under when there is one, say what was stopped.
 
 Set `XD_MEMORY_GUARD_PERCENT` to a value from 50 to 99 to change the threshold,
 or to `off` to turn this off.

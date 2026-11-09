@@ -56,9 +56,14 @@ a session may sit idle. It is off until you do, because deleting can't be undone
 
 - The session goes with its chats and terminals, and so does the worktree xd made
   for it, but its branch and every commit on it stay in the repository.
-- A worktree with uncommitted changes or untracked files keeps its whole session
-  until you commit or clean it up, and so do commits on a detached HEAD that no
-  branch holds.
+- A worktree xd made for the session, and that no other session uses, keeps the
+  whole session while it has uncommitted changes or untracked files, or commits
+  on a detached HEAD that no branch holds, until you commit or clean it up.
+- Ignored files, such as `.env` or build output, don't count: they are deleted
+  with the worktree. Copy anything you need out of it first.
+- Any other worktree, such as an existing checkout or one another session also
+  uses, doesn't keep the session. The session and its chats are deleted, and the
+  worktree stays on disk untouched.
 - Using a session's terminal counts as activity.
 - Sessions you've kept out of auto-settle are not deleted, and neither is one you
   brought back from the **Settled** shelf, until it sees new activity.

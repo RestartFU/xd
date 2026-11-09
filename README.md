@@ -43,8 +43,10 @@ computer or your Android phone.
 
 ### Work side by side
 
-- **Project → session → chat tabs.** Each session gets its own branch or Git
-  worktree, and its chat tabs share that workspace.
+- **Project → session → chat tabs.** A session works in the project's checkout
+  or a checkout you pick, or in a new Git worktree on its own branch. Choose a new
+  worktree to keep agents from editing the same files. A session's chat tabs share
+  its workspace.
 - **Side pane and terminal** next to every chat: an integrated browser, files, and
   changes on the side, a shell below, all resizable and remembered per chat.
 - **Pull requests in place.** Projects, worktrees, branches, and pull requests live
@@ -115,8 +117,10 @@ distro.
 2. **Add a project.** Press `+` beside **Projects** in the sidebar and choose a folder or repository.
 3. **Start a session** in it and send a message. Open more chat tabs, the side
    pane, or the terminal as you go.
-4. **Pair another device** (optional): **Settings → Pair a device** on the host,
-   then paste the code into the remote desktop or Android app.
+4. **Pair another device** (optional): open **Settings → Devices → Pair a device**
+   on the host and copy the code. On the remote desktop or Android app, enter an
+   address that reaches the host (LAN, Tailscale, or server; port 4001 by default)
+   and paste the code. See [remote connections](docs/remote.md).
 
 Installed Linux and macOS builds update themselves: an **Update** button appears
 when a new xd, Codex, or Claude Code release is out, and nothing installs until you
