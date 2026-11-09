@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet, VecDeque},
     env,
     path::PathBuf,
@@ -1657,6 +1658,15 @@ fn claude_tool_summary(name: &str, arguments: Option<&Value>) -> String {
         }
         return subagent_marker(None, &identity.join(" · "), &task.join(" · "));
     }
+    // A shell command reads as itself, the way Codex commands do, rather than
+    // behind the tool's name.
+    if name == "Bash"
+        && let Some(command) = arguments
+            .and_then(|arguments| arguments.get("command"))
+            .and_then(Value::as_str)
+    {
+        return format!("$ {}", compact(command, 110));
+    }
     for key in [
         "file_path",
         "path",
@@ -1714,7 +1724,7 @@ fn tool_summary(item: &Value) -> String {
     if kind == "command_execution"
         && let Some(command) = item.get("command").and_then(Value::as_str)
     {
-        return format!("$ {}", compact(command, 110));
+        return format!("$ {}", compact(&shell_script(command), 110));
     }
     for key in [
         "file_path",
@@ -1816,6 +1826,81 @@ fn compact(value: &str, limit: usize) -> String {
         .collect::<String>();
     shortened.push('…');
     shortened
+}
+
+/// The script inside a `/bin/bash -lc "…"` wrapper, else the command as is.
+///
+/// Codex reports every command wrapped in the shell that ran it, which
+/// buries the part worth reading behind the same prefix on every row.
+pub(crate) fn shell_script(command: &str) -> Cow<'_, str> {
+    unwrap_shell(command).map_or(Cow::Borrowed(command), Cow::Owned)
+}
+
+fn unwrap_shell(command: &str) -> Option<String> {
+    // Only a space or tab separates arguments; a newline would end the command.
+    let blank = [' ', '\t'];
+    let (program, rest) = command.trim_matches(blank).split_once(blank)?;
+    // A plain path, so nothing before the shell runs as well.
+    if !program
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+    {
+        return None;
+    }
+    let name = program.rsplit('/').next()?;
+    if !matches!(name, "bash" | "zsh" | "sh" | "dash") {
+        return None;
+    }
+    let (flag, script) = rest.trim_start_matches(blank).split_once(blank)?;
+    if !matches!(flag, "-c" | "-lc") {
+        return None;
+    }
+    shell_word(script.trim_start_matches(blank)).filter(|script| !script.trim().is_empty())
+}
+
+/// Unquotes text that is exactly one POSIX shell word. Anything else, such as
+/// a second argument, an unterminated quote or a shell operator, is left for
+/// the caller to show unchanged.
+fn shell_word(text: &str) -> Option<String> {
+    let mut word = String::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => loop {
+                match chars.next()? {
+                    '\'' => break,
+                    c => word.push(c),
+                }
+            },
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    '\\' => match chars.next()? {
+                        '\n' => {}
+                        c @ ('$' | '`' | '"' | '\\') => word.push(c),
+                        c => {
+                            word.push('\\');
+                            word.push(c);
+                        }
+                    },
+                    // The outer shell would expand these before the inner
+                    // one ran, so the script is not what this text shows.
+                    '$' | '`' => return None,
+                    c => word.push(c),
+                }
+            },
+            '\\' => match chars.next()? {
+                '\n' => {}
+                c => word.push(c),
+            },
+            // Unquoted, only characters the shell gives no meaning. An
+            // operator, expansion, glob or `$'…'` quote means the text is not
+            // one plain script.
+            c if c.is_alphanumeric() || "-_./,:=+@%".contains(c) => word.push(c),
+            _ => return None,
+        }
+    }
+    Some(word)
 }
 
 fn error_message(root: &Value) -> String {
@@ -2851,6 +2936,70 @@ mod tests {
             parser.feed(r#"{"type":"system","subtype":"init","session_id":"s9"}"#),
             vec![AgentEvent::Session("s9".into())]
         );
+    }
+
+    #[test]
+    fn claude_shell_commands_read_as_commands_not_as_the_tool_name() {
+        let command = json!({"command": "git status --short", "description": "Show status"});
+        assert_eq!(
+            claude_tool_summary("Bash", Some(&command)),
+            "$ git status --short"
+        );
+        let read = json!({"file_path": "src/main.rs"});
+        assert_eq!(
+            claude_tool_summary("Read", Some(&read)),
+            "Read  src/main.rs"
+        );
+        assert_eq!(claude_tool_summary("Bash", None), "Bash");
+    }
+
+    #[test]
+    fn shell_wrappers_are_unwrapped_only_around_one_quoted_script() {
+        for (command, script) in [
+            (
+                r#"/bin/bash -lc "rg --files -g '*.rs'""#,
+                "rg --files -g '*.rs'",
+            ),
+            (
+                r#"/bin/bash -lc 'gh run view 42 --log'"#,
+                "gh run view 42 --log",
+            ),
+            (r#"bash -c "echo \"\$HOME\" \\n""#, r#"echo "$HOME" \n"#),
+            (r#"/bin/zsh -lc 'it'\''s'"#, "it's"),
+            (
+                "/bin/bash -lc \"python3 - <<'EOF'\nprint(1)\nEOF\"",
+                "python3 - <<'EOF'\nprint(1)\nEOF",
+            ),
+            ("sh -c ls", "ls"),
+        ] {
+            assert_eq!(shell_script(command), script, "{command}");
+        }
+        for command in [
+            "git status",
+            "/bin/bash script.sh",
+            "/bin/bash -lc 'echo' extra",
+            r#"/bin/bash -lc "unterminated"#,
+            "/bin/bash -lc ''",
+            "python -c 'print(1)'",
+            "/bin/bash -lc 'cd /tmp';pwd",
+            "/bin/bash -lc 'make' > build.log",
+            "/bin/bash -lc 'a' | tee out",
+            "/bin/bash -lc 'sleep 9' &",
+            r"/bin/bash -lc $'echo hello\npwd'",
+            "/bin/bash -lc $SCRIPT",
+            "/bin/bash -lc 'ls' # note",
+            "/bin/bash -lc *.sh",
+            r#"/bin/bash -lc "printf '%s\n' '$HOME'""#,
+            r#"/bin/bash -lc "echo `date`""#,
+            "/bin/bash -lc\n'echo hello'",
+            "/bin/bash\n-lc 'echo hello'",
+            "/bin/bash -lc\u{a0}'echo hello'",
+            "/bin/echo;/bin/bash -lc 'pwd'",
+            "$SHELL_DIR/bash -lc 'pwd'",
+            "~/bin/bash -lc 'pwd'",
+        ] {
+            assert_eq!(shell_script(command), command);
+        }
     }
 
     #[test]
