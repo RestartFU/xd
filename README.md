@@ -65,13 +65,13 @@ computer or your Android phone.
 - **Uses your own tools.** xd discovers your installed CLIs and reuses their
   authentication and configuration. Dark and light themes included.
 
-<table>
+<table align="center">
   <tr>
-    <td width="78%"><img src="docs/assets/readme/usage.png" alt="The Usage page with daily cost by provider and a breakdown by model"></td>
-    <td width="22%"><img src="docs/assets/readme/android-chat.png" alt="A chat in the Android app"></td>
+    <td align="center"><img src="docs/assets/readme/usage-limits.png" width="300" alt="The Usage popup listing Codex and Claude Code session and weekly limits, grouped by account"></td>
+    <td align="center"><img src="docs/assets/readme/android-chat.png" width="300" alt="A chat in the Android app"></td>
   </tr>
   <tr>
-    <td align="center"><sub>Cost and tokens on the Usage page</sub></td>
+    <td align="center"><sub>Subscription limits by account (<kbd>Ctrl</kbd>+<kbd>U</kbd>)</sub></td>
     <td align="center"><sub>A chat on Android</sub></td>
   </tr>
 </table>
