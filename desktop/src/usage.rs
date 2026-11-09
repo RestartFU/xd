@@ -1,5 +1,5 @@
 //! The Usage page's data: host answers merged across connected hosts, the
-//! formats they display in, and the chart and limit-pool math. Ported from
+//! formats they display in, and the chart and limit math. Ported from
 //! T3 Code (MIT, see `data/licenses/t3code-LICENSE`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -965,6 +965,9 @@ pub struct LimitAccount {
     pub provider: String,
     pub plan: Option<String>,
     pub environments: Vec<String>,
+    /// Its place in the host's list of this provider's accounts, when there
+    /// are several.
+    pub rank: Option<u64>,
     /// Index of the host that can redeem this account's reset credit.
     pub environment: usize,
     pub checked_at_ms: i64,
@@ -993,6 +996,7 @@ pub fn parse_limit_accounts(value: &Value, environment: usize, label: &str) -> V
                         plan: account["plan"].as_str().map(str::to_owned),
                         // One of several accounts on the host: say which,
                         // by its place in the host's list in Settings.
+                        rank: account["account_rank"].as_u64(),
                         environments: vec![match account["account_rank"].as_u64() {
                             Some(rank) => format!("{label} · account {rank}"),
                             None => label.to_owned(),
@@ -1102,36 +1106,18 @@ pub fn collect_notices(accounts: &[LimitAccount], many_environments: bool) -> Ve
         .collect()
 }
 
+/// One account's limits, session first.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PoolMember {
-    pub account: String,
-    pub window: LimitWindow,
-    pub refill_percent: f64,
+pub struct AccountLimits {
+    pub account: LimitAccount,
+    pub windows: Vec<LimitWindow>,
 }
 
+/// A provider's accounts, each with its own limits.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PoolReset {
-    pub account: String,
-    pub at_ms: i64,
-    pub restores_percent: i64,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PoolWindow {
-    pub id: String,
-    pub kind: String,
-    pub label: String,
-    pub members: Vec<PoolMember>,
-    pub remaining_percent: i64,
-    pub pace: Option<Pace>,
-    pub resets: Vec<PoolReset>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct LimitPool {
+pub struct ProviderLimits {
     pub provider: String,
-    pub accounts: Vec<LimitAccount>,
-    pub windows: Vec<PoolWindow>,
+    pub accounts: Vec<AccountLimits>,
 }
 
 fn kind_order(kind: &str) -> u8 {
@@ -1143,19 +1129,9 @@ fn kind_order(kind: &str) -> u8 {
     }
 }
 
-/// Codex's `primary` and `secondary` name slots, so they pool by kind. Other ids,
-/// such as its credit limit and Claude's allowances, are distinct allowances.
-fn pool_key(provider: &str, window: &LimitWindow) -> String {
-    if provider == "codex" && matches!(window.id.as_str(), "primary" | "secondary") {
-        window.kind.clone()
-    } else {
-        format!("{}:{}", window.kind, window.id)
-    }
-}
-
 /// A spent weekly limit blocks the session window too, so the session bar
-/// reports empty and refills on the weekly clock rather than its own.
-fn pool_member(account: &LimitAccount, reported: &LimitWindow, now: i64) -> PoolMember {
+/// reports empty and resets on the weekly clock rather than its own.
+fn shown_window(account: &LimitAccount, reported: &LimitWindow, now: i64) -> LimitWindow {
     let spent_weekly = (reported.kind == "session")
         .then(|| {
             account.windows.iter().find(|window| {
@@ -1169,164 +1145,71 @@ fn pool_member(account: &LimitAccount, reported: &LimitWindow, now: i64) -> Pool
         })
         .flatten();
     let Some(weekly) = spent_weekly else {
-        return PoolMember {
-            account: account.key.clone(),
-            window: reported.clone(),
-            refill_percent: reported.used_percent,
-        };
+        return reported.clone();
     };
     let cutoff = now.max(account.checked_at_ms);
     let mut resets = (None, None);
-    let mut refill_percent = 0.0;
     // A stale or missing clock cannot say when blocked quota becomes usable.
     if let (Some(weekly_reset), Some(session_reset)) = (weekly.resets_at_ms, reported.resets_at_ms)
         && weekly_reset > cutoff
         && session_reset > cutoff
     {
-        if session_reset <= weekly_reset {
-            resets = (weekly.resets_at_ms, weekly.resets_at_label.clone());
-            refill_percent = 100.0;
-        } else if reported.used_percent >= 100.0 {
-            resets = (reported.resets_at_ms, reported.resets_at_label.clone());
-            refill_percent = 100.0;
+        // A spent session that resets after the weekly window stays blocked
+        // until its own reset.
+        resets = if session_reset > weekly_reset && reported.used_percent >= 100.0 {
+            (reported.resets_at_ms, reported.resets_at_label.clone())
         } else {
-            resets = (weekly.resets_at_ms, weekly.resets_at_label.clone());
-            refill_percent = 100.0 - reported.used_percent.clamp(0.0, 100.0);
-        }
+            (weekly.resets_at_ms, weekly.resets_at_label.clone())
+        };
     }
-    PoolMember {
-        account: account.key.clone(),
-        window: LimitWindow {
-            used_percent: 100.0,
-            resets_at_ms: resets.0,
-            resets_at_label: resets.1,
-            // Suppression is not session spending, so it has no session pace clock.
-            window_duration_mins: None,
-            ..reported.clone()
-        },
-        refill_percent,
+    LimitWindow {
+        used_percent: 100.0,
+        resets_at_ms: resets.0,
+        resets_at_label: resets.1,
+        // Suppression is not session spending, so it has no session pace clock.
+        window_duration_mins: None,
+        ..reported.clone()
     }
 }
 
-fn pool_windows(accounts: &[LimitAccount], now: i64) -> Vec<PoolWindow> {
-    let mut keyed: Vec<(String, Vec<PoolMember>)> = Vec::new();
-    for account in accounts {
-        for reported in &account.windows {
-            let member = pool_member(account, reported, now);
-            let pooled = pool_key(&account.provider, &member.window);
-            let taken = keyed.iter().any(|(key, members)| {
-                *key == pooled && members.iter().any(|held| held.account == account.key)
-            });
-            let key = if taken {
-                format!("{}:{}", member.window.kind, member.window.id)
-            } else {
-                pooled
-            };
-            match keyed.iter_mut().find(|(held, _)| *held == key) {
-                Some((_, members)) => members.push(member),
-                None => keyed.push((key, vec![member])),
-            }
+/// Groups accounts by provider, each account with its own windows. Accounts
+/// keep their host's order, the one Settings lists them in.
+pub fn collect_limits(accounts: &[LimitAccount], now: i64) -> Vec<ProviderLimits> {
+    let mut providers: Vec<ProviderLimits> = Vec::new();
+    for account in accounts
+        .iter()
+        .filter(|account| !account.windows.is_empty())
+    {
+        let mut windows: Vec<LimitWindow> = account
+            .windows
+            .iter()
+            .map(|window| shown_window(account, window, now))
+            .collect();
+        windows.sort_by_key(|window| kind_order(&window.kind));
+        let limits = AccountLimits {
+            account: account.clone(),
+            windows,
+        };
+        match providers
+            .iter_mut()
+            .find(|held| held.provider == account.provider)
+        {
+            Some(held) => held.accounts.push(limits),
+            None => providers.push(ProviderLimits {
+                provider: account.provider.clone(),
+                accounts: vec![limits],
+            }),
         }
     }
-    let mut pools: Vec<PoolWindow> = keyed
-        .into_iter()
-        .map(|(key, members)| {
-            let first = members[0].window.clone();
-            let count = members.len() as f64;
-            let used = members
-                .iter()
-                .map(|member| member.window.used_percent)
-                .sum::<f64>()
-                / count;
-            // Judge pace only for windows with reset clocks.
-            let timed: Vec<(f64, f64)> = members
-                .iter()
-                .filter_map(|member| {
-                    member
-                        .window
-                        .elapsed_share(now)
-                        .map(|share| (member.window.used_percent, share))
-                })
-                .collect();
-            let pace = (!timed.is_empty()).then(|| {
-                let spread = timed.len() as f64;
-                pace_of_shares(
-                    timed.iter().map(|(used, _)| used).sum::<f64>() / spread,
-                    timed.iter().map(|(_, elapsed)| elapsed).sum::<f64>() / spread,
-                )
-            });
-            let mut resets: Vec<PoolReset> = members
-                .iter()
-                .filter_map(|member| {
-                    Some(PoolReset {
-                        account: member.account.clone(),
-                        at_ms: member.window.resets_at_ms?,
-                        restores_percent: (member.refill_percent / count).round() as i64,
-                    })
-                })
-                .collect();
-            resets.sort_by_key(|reset| reset.at_ms);
-            PoolWindow {
-                id: key,
-                kind: first.kind,
-                label: first.label,
-                members,
-                remaining_percent: (100.0 - used).round() as i64,
-                pace,
-                resets,
-            }
-        })
-        .collect();
-    pools.sort_by_key(|pool| kind_order(&pool.kind));
-    pools
-}
-
-/// Groups accounts by provider; each window shows one segment per account.
-pub fn collect_pools(accounts: &[LimitAccount], now: i64) -> Vec<LimitPool> {
-    let mut providers: Vec<&str> = Vec::new();
-    for account in accounts {
-        if !account.windows.is_empty() && !providers.contains(&account.provider.as_str()) {
-            providers.push(&account.provider);
-        }
+    for provider in &mut providers {
+        provider.accounts.sort_by(|left, right| {
+            let place = |limits: &AccountLimits| (limits.account.environment, limits.account.rank);
+            place(left)
+                .cmp(&place(right))
+                .then_with(|| left.account.key.cmp(&right.account.key))
+        });
     }
     providers
-        .into_iter()
-        .map(|provider| {
-            let mut members: Vec<LimitAccount> = accounts
-                .iter()
-                .filter(|account| account.provider == provider && !account.windows.is_empty())
-                .cloned()
-                .collect();
-            let first_kind = members
-                .iter()
-                .flat_map(|account| account.windows.iter())
-                .min_by_key(|window| kind_order(&window.kind))
-                .cloned();
-            let order = |account: &LimitAccount| {
-                first_kind
-                    .as_ref()
-                    .and_then(|first| {
-                        account
-                            .windows
-                            .iter()
-                            .find(|window| pool_key(provider, window) == pool_key(provider, first))
-                    })
-                    .and_then(|window| pool_member(account, window, now).window.resets_at_ms)
-                    .unwrap_or(i64::MAX)
-            };
-            members.sort_by(|left, right| {
-                order(left)
-                    .cmp(&order(right))
-                    .then_with(|| left.key.cmp(&right.key))
-            });
-            let windows = pool_windows(&members, now);
-            LimitPool {
-                provider: provider.to_owned(),
-                accounts: members,
-                windows,
-            }
-        })
-        .collect()
 }
 
 /// A price cell: blank is `Some(None)`, a valid rate `Some(Some(_))`, anything else `None`.
@@ -1672,6 +1555,7 @@ mod tests {
             provider: provider.into(),
             plan: None,
             environments: vec!["Local".into()],
+            rank: None,
             environment: 0,
             checked_at_ms: 0,
             windows,
@@ -1700,14 +1584,8 @@ mod tests {
         assert_eq!(half.remaining_percent(), 50);
         assert_eq!(half.pace_remaining_percent(now), Some(50));
         assert_eq!(half.resets_in(now).as_deref(), Some("resets in 2h 30m"));
-        let pools = collect_pools(&[account("codex", "k", vec![half])], now);
-        assert_eq!(pools[0].windows[0].pace, Some(Pace::On));
-        let fast = window("a", "session", 90.0, Some(150 * 60_000), Some(300));
-        let pools = collect_pools(&[account("codex", "k", vec![fast])], now);
-        assert_eq!(pools[0].windows[0].pace, Some(Pace::Ahead));
-        let slow = window("a", "session", 10.0, Some(150 * 60_000), Some(300));
-        let pools = collect_pools(&[account("codex", "k", vec![slow])], now);
-        assert_eq!(pools[0].windows[0].pace, Some(Pace::Under));
+        let limits = collect_limits(&[account("codex", "k", vec![half])], now);
+        assert_eq!(limits[0].accounts[0].windows[0].pace(now), Some(Pace::On));
         let untimed = window("a", "monthly", 10.0, None, None);
         assert_eq!(untimed.pace_remaining_percent(now), None);
         assert_eq!(untimed.resets_in(now), None);
@@ -1736,14 +1614,13 @@ mod tests {
                 window("seven_day", "weekly", 100.0, Some(48 * HOUR), Some(10080)),
             ],
         )];
-        let pools = collect_pools(&accounts, now);
-        let session = &pools[0].windows[0];
+        let limits = collect_limits(&accounts, now);
+        let session = &limits[0].accounts[0].windows[0];
         assert_eq!(session.kind, "session");
-        assert_eq!(session.remaining_percent, 0);
-        assert_eq!(session.pace, None, "suppression has no session clock");
-        // The session clock lands first, so only the weekly reset frees it, entirely.
-        assert_eq!(session.resets[0].at_ms, 48 * HOUR);
-        assert_eq!(session.resets[0].restores_percent, 100);
+        assert_eq!(session.remaining_percent(), 0);
+        assert_eq!(session.pace(now), None, "suppression has no session clock");
+        // The session clock lands first, so only the weekly reset frees it.
+        assert_eq!(session.resets_at_ms, Some(48 * HOUR));
         let later_session = [account(
             "claude",
             "k",
@@ -1752,75 +1629,63 @@ mod tests {
                 window("seven_day", "weekly", 100.0, Some(HOUR), Some(10080)),
             ],
         )];
-        let session = &collect_pools(&later_session, now)[0].windows[0];
-        // The weekly reset comes first and leaves the session's own spend in place.
-        assert_eq!(session.resets[0].at_ms, HOUR);
-        assert_eq!(session.resets[0].restores_percent, 80);
-    }
-
-    #[test]
-    fn pools_order_kinds_and_split_accounts_into_segments() {
-        let accounts = [
-            account(
-                "codex",
-                "b",
-                vec![window("secondary", "weekly", 40.0, Some(9), Some(10080))],
-            ),
-            account(
-                "codex",
-                "a",
-                vec![
-                    window("primary", "weekly", 80.0, Some(5), Some(10080)),
-                    window("primary", "session", 10.0, Some(5), Some(300)),
-                ],
-            ),
-            account("claude", "c", vec![]),
-        ];
-        let pools = collect_pools(&accounts, 0);
-        assert_eq!(pools.len(), 1, "an account with no windows draws no pool");
-        assert_eq!(pools[0].windows[0].kind, "session");
-        let weekly = &pools[0].windows[1];
-        // Codex slots pool by kind, whichever position reported them.
-        assert_eq!(weekly.members.len(), 2);
-        assert_eq!(weekly.remaining_percent, 40);
+        let limits = collect_limits(&later_session, now);
+        // The weekly reset comes first and frees what is left of the session.
+        assert_eq!(limits[0].accounts[0].windows[0].resets_at_ms, Some(HOUR));
+        let spent_session = [account(
+            "claude",
+            "k",
+            vec![
+                window("five_hour", "session", 100.0, Some(5 * HOUR), Some(300)),
+                window("seven_day", "weekly", 100.0, Some(HOUR), Some(10080)),
+            ],
+        )];
+        let limits = collect_limits(&spent_session, now);
+        // A spent session stays blocked past the weekly reset, until its own.
         assert_eq!(
-            pools[0].accounts[0].key, "a",
-            "the soonest reset comes first"
+            limits[0].accounts[0].windows[0].resets_at_ms,
+            Some(5 * HOUR)
         );
     }
 
     #[test]
-    fn a_codex_credit_limit_never_pools_with_a_monthly_allowance() {
-        let accounts = [
-            account(
-                "codex",
-                "a",
-                vec![
-                    window("primary", "monthly", 80.0, None, None),
-                    window("individual", "monthly", 10.0, None, None),
-                ],
-            ),
-            account(
-                "codex",
-                "b",
-                vec![window("individual", "monthly", 30.0, None, None)],
-            ),
-        ];
-        let pools = collect_pools(&accounts, 0);
-        let windows = &pools[0].windows;
-        assert_eq!(windows.len(), 2);
-        let primary = windows
+    fn limits_group_by_account_in_the_hosts_order() {
+        let mut second = account(
+            "codex",
+            "a",
+            vec![window("secondary", "weekly", 40.0, Some(9), Some(10080))],
+        );
+        second.rank = Some(2);
+        let mut first = account(
+            "codex",
+            "b",
+            vec![
+                window("secondary", "weekly", 80.0, Some(5), Some(10080)),
+                window("primary", "session", 10.0, Some(5), Some(300)),
+            ],
+        );
+        first.rank = Some(1);
+        let mut elsewhere = account(
+            "codex",
+            "0",
+            vec![window("secondary", "weekly", 0.0, Some(5), Some(10080))],
+        );
+        elsewhere.environment = 1;
+        let accounts = [elsewhere, second, first, account("claude", "c", vec![])];
+        let limits = collect_limits(&accounts, 0);
+        assert_eq!(limits.len(), 1, "an account with no windows shows nothing");
+        let keys: Vec<&str> = limits[0]
+            .accounts
             .iter()
-            .find(|pool| pool.members[0].window.id == "primary")
-            .unwrap();
-        assert_eq!(primary.members.len(), 1);
-        assert_eq!(primary.remaining_percent, 20);
-        let credit = windows
+            .map(|limits| limits.account.key.as_str())
+            .collect();
+        assert_eq!(keys, ["b", "a", "0"], "by host, then by place in its list");
+        let kinds: Vec<&str> = limits[0].accounts[0]
+            .windows
             .iter()
-            .find(|pool| pool.members[0].window.id == "individual")
-            .unwrap();
-        assert_eq!(credit.members.len(), 2);
-        assert_eq!(credit.remaining_percent, 80);
+            .map(|window| window.kind.as_str())
+            .collect();
+        assert_eq!(kinds, ["session", "weekly"]);
     }
 
     #[test]
@@ -1833,7 +1698,7 @@ mod tests {
                 window("seven_day_fable", "weekly", 20.0, None, None),
             ],
         )];
-        assert_eq!(collect_pools(&accounts, 0)[0].windows.len(), 2);
+        assert_eq!(collect_limits(&accounts, 0)[0].accounts[0].windows.len(), 2);
         let mut unsupported = account("claude", "k", vec![]);
         unsupported.unavailable_reason = Some("unsupported".into());
         let mut failed = account("codex", "j", vec![]);

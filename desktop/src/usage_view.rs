@@ -10,11 +10,11 @@ use gpui::{
 };
 use serde_json::{Map, json};
 use xd_desktop::usage::{
-    Bucket, Chart, ChartMetric, ChartPoint, LimitAccount, LimitPool, Merged, ModelTotals,
-    PROVIDER_ORDER, Pace, Period, PeriodTotals, PoolWindow, ResetCredits, Summary, VIEW_HEIGHT,
-    VIEW_WIDTH, build_chart, collect_accounts, collect_notices, collect_pools, format_count,
-    format_percent, format_tokens, format_usd, merge, parse_limit_accounts, parse_price_cell,
-    provider_label, rank_providers, sort_models_by_tokens, source_messages,
+    Bucket, Chart, ChartMetric, ChartPoint, LimitAccount, Merged, ModelTotals, PROVIDER_ORDER,
+    Pace, Period, PeriodTotals, ProviderLimits, ResetCredits, Summary, VIEW_HEIGHT, VIEW_WIDTH,
+    build_chart, collect_accounts, collect_limits, collect_notices, format_count, format_percent,
+    format_tokens, format_usd, merge, parse_limit_accounts, parse_price_cell, provider_label,
+    rank_providers, sort_models_by_tokens, source_messages,
 };
 
 use super::*;
@@ -430,8 +430,6 @@ fn metric_cell(
 /// One limit in the flyout: its name, then what is left against the time left.
 struct LimitRow {
     label: SharedString,
-    /// An account under its pooled total.
-    nested: bool,
     remaining: i64,
     time_left: Option<i64>,
     pace: Option<Pace>,
@@ -530,10 +528,8 @@ fn limit_row(row: LimitRow, colors: ThemeColors) -> gpui::Div {
                     div()
                         .min_w_0()
                         .truncate()
-                        .when(row.nested, |label| label.pl_3())
-                        .when(!row.nested, |label| {
-                            label.text_size(px(13.0)).text_color(rgb(colors.text))
-                        })
+                        .text_size(px(13.0))
+                        .text_color(rgb(colors.text))
                         .child(row.label),
                 )
                 .child(
@@ -697,6 +693,27 @@ fn flyout_heading(
         .text_color(rgb(colors.muted))
         .children(icon_path.map(|path| assistant_icon(path, 14.0, colors.muted, colors)))
         .child(label.into())
+}
+
+/// Names one of a provider's accounts above its limits.
+fn account_heading(name: String, plan: Option<String>, colors: ThemeColors) -> gpui::Div {
+    div()
+        .h(px(22.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .text_size(px(11.5))
+        .text_color(rgb(colors.muted))
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_weight(FontWeight::MEDIUM)
+                .child(name),
+        )
+        .children(plan.map(|plan| div().flex_none().child(plan)))
 }
 
 struct ShareSegment {
@@ -879,6 +896,15 @@ fn share_bar(
                     .children(legend),
             )
             .into_any_element(),
+    )
+}
+
+/// Names one row of the Limits flyout, for its element and its popover. Codex
+/// names windows by slot, so a slot can hold a session or a weekly window.
+fn limit_key(account: &LimitAccount, window: &xd_desktop::usage::LimitWindow) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        account.provider, window.kind, window.id, account.key
     )
 }
 
@@ -4183,7 +4209,7 @@ impl XdDesktop {
         let loading = selected
             .iter()
             .any(|index| self.usage.environments[*index].limits_loading);
-        let pools = collect_pools(&accounts, now);
+        let providers = collect_limits(&accounts, now);
         let mut notices = collect_notices(&accounts, many);
         notices.extend(selected.iter().filter_map(|index| {
             self.usage.environments[*index]
@@ -4191,15 +4217,15 @@ impl XdDesktop {
                 .as_ref()
                 .map(|error| format!("{}: {error}", environment_label(*index)))
         }));
-        let empty = pools.is_empty() && notices.is_empty();
+        let empty = providers.is_empty() && notices.is_empty();
         let status = self
             .usage
             .reset_busy
             .map(|_| "Using reset credit…".to_owned())
             .or_else(|| self.usage.reset_status.clone());
-        let sections: Vec<AnyElement> = pools
+        let sections: Vec<AnyElement> = providers
             .iter()
-            .map(|pool| self.render_usage_pool(pool, now, colors, cx))
+            .map(|provider| self.render_usage_provider_limits(provider, now, colors, cx))
             .collect();
         div()
             .flex()
@@ -4246,125 +4272,71 @@ impl XdDesktop {
             .into_any_element()
     }
 
-    fn render_usage_pool(
+    /// A provider's limits, under one heading per account when it has several.
+    fn render_usage_provider_limits(
         &self,
-        pool: &LimitPool,
+        provider: &ProviderLimits,
         now: i64,
         colors: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rows: Vec<AnyElement> = pool
-            .windows
+        let many_accounts = provider.accounts.len() > 1;
+        let groups: Vec<AnyElement> = provider
+            .accounts
             .iter()
-            .flat_map(|window| self.render_usage_pool_rows(pool, window, now, colors, cx))
+            .enumerate()
+            .map(|(index, limits)| {
+                let account = &limits.account;
+                let name = account.environments.join(", ");
+                let rows: Vec<AnyElement> = limits
+                    .windows
+                    .iter()
+                    .map(|window| {
+                        self.render_usage_account_row(
+                            account,
+                            window,
+                            many_accounts.then(|| name.clone()),
+                            now,
+                            colors,
+                            cx,
+                        )
+                    })
+                    .collect();
+                div()
+                    .flex()
+                    .flex_col()
+                    .when(many_accounts, |group| {
+                        group
+                            .when(index > 0, |group| {
+                                group
+                                    .mt_1()
+                                    .pt_1()
+                                    .border_t_1()
+                                    .border_color(with_alpha(colors.border, 0.6))
+                            })
+                            .child(account_heading(name.clone(), account.plan.clone(), colors))
+                    })
+                    .children(rows)
+                    .into_any_element()
+            })
             .collect();
         div()
             .flex()
             .flex_col()
             .child(flyout_heading(
-                Some(provider_icon(&pool.provider)),
-                provider_label(&pool.provider).to_owned(),
+                Some(provider_icon(&provider.provider)),
+                provider_label(&provider.provider).to_owned(),
                 colors,
             ))
-            .children(rows)
+            .children(groups)
             .into_any_element()
     }
 
-    /// One row for a window one account reports; a pooled total over one row per
-    /// account when several share it.
-    fn render_usage_pool_rows(
-        &self,
-        pool: &LimitPool,
-        window: &PoolWindow,
-        now: i64,
-        colors: ThemeColors,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        let members: Vec<(&LimitAccount, &xd_desktop::usage::PoolMember)> = pool
-            .accounts
-            .iter()
-            .filter_map(|account| {
-                let member = window
-                    .members
-                    .iter()
-                    .find(|member| member.account == account.key)?;
-                Some((account, member))
-            })
-            .collect();
-        let shared = members.len() > 1;
-        let mut rows = Vec::with_capacity(members.len() + 1);
-        if shared {
-            let next_refill = window
-                .resets
-                .iter()
-                .find(|reset| reset.restores_percent > 0);
-            rows.push(
-                limit_row(
-                    LimitRow {
-                        label: window.label.clone().into(),
-                        nested: false,
-                        remaining: window.remaining_percent,
-                        time_left: None,
-                        pace: window.pace,
-                        detail: next_refill
-                            .map(|reset| format!("+{}% next reset", reset.restores_percent)),
-                        credits: 0,
-                    },
-                    colors,
-                )
-                .id(gpui::ElementId::Name(
-                    format!("usage-pool-{}-{}", pool.provider, window.id).into(),
-                ))
-                .tooltip(usage_tooltip(
-                    std::iter::once(window.label.clone())
-                        .chain(window.pace.map(|pace| pace.label().to_owned()))
-                        .collect(),
-                    colors,
-                ))
-                .into_any_element(),
-            );
-        }
-        let many_accounts = pool.accounts.len() > 1;
-        for (account, member) in members {
-            let environments = account.environments.join(", ");
-            let label = if shared {
-                environments
-            } else if many_accounts {
-                format!("{} · {environments}", window.label)
-            } else {
-                window.label.clone()
-            };
-            let restores = window
-                .resets
-                .iter()
-                .find(|reset| reset.account == account.key)
-                .map(|reset| reset.restores_percent);
-            rows.push(self.render_usage_account_row(
-                pool,
-                window,
-                account,
-                &member.window,
-                label,
-                shared,
-                restores,
-                now,
-                colors,
-                cx,
-            ));
-        }
-        rows
-    }
-
-    #[allow(clippy::too_many_arguments)]
     fn render_usage_account_row(
         &self,
-        pool: &LimitPool,
-        pool_window: &PoolWindow,
         account: &LimitAccount,
         window: &xd_desktop::usage::LimitWindow,
-        label: String,
-        nested: bool,
-        restores: Option<i64>,
+        account_name: Option<String>,
         now: i64,
         colors: ThemeColors,
         cx: &mut Context<Self>,
@@ -4373,11 +4345,13 @@ impl XdDesktop {
         let time_left = window.pace_remaining_percent(now);
         let resets_in = window.resets_in(now);
         let credits = account_credits(account);
-        let key = format!("{}:{}:{}", pool.provider, pool_window.id, account.key);
+        let key = limit_key(account, window);
         let pace = window.pace(now);
-        // The row may clip a long name, so the tooltip leads with all of it.
+        let label = window.label.clone();
+        // The row may clip a long name, so the tooltip leads with all of it,
+        // and with the account the row sits under.
         let mut lines = vec![
-            label.clone(),
+            account_name.map_or_else(|| label.clone(), |name| format!("{label} · {name}")),
             format!(
                 "{remaining}% left{}",
                 time_left.map_or_else(String::new, |left| format!(" · {left}% of the window left"))
@@ -4398,14 +4372,12 @@ impl XdDesktop {
             lines.push(banked.summary(now));
         }
         let open = self.usage.segment.as_deref() == Some(key.as_str());
-        let popover = open.then(|| {
-            self.render_usage_segment_popover(account, window, restores, now, credits, colors, cx)
-        });
+        let popover = open
+            .then(|| self.render_usage_segment_popover(account, window, now, credits, colors, cx));
         let click_key = key.clone();
         let row = limit_row(
             LimitRow {
                 label: label.into(),
-                nested,
                 remaining,
                 time_left,
                 pace,
@@ -4446,7 +4418,6 @@ impl XdDesktop {
         &self,
         account: &LimitAccount,
         window: &xd_desktop::usage::LimitWindow,
-        restores: Option<i64>,
         now: i64,
         credits: u64,
         colors: ThemeColors,
@@ -4547,13 +4518,7 @@ impl XdDesktop {
                                 })
                                 .when_some(time_left, |rows, left| {
                                     rows.child(row("Even pace", format!("{left}% left by now")))
-                                })
-                                .when_some(
-                                    restores.filter(|percent| *percent > 0),
-                                    |rows, percent| {
-                                        rows.child(row("Restores", format!("+{percent}% of pool")))
-                                    },
-                                ),
+                                }),
                         )
                         .when_some(reset_credits, |popover, credits| {
                             popover.child(
@@ -5048,6 +5013,26 @@ mod tests {
             );
             assert!(!desktop.usage.full_page);
         });
+    }
+
+    #[test]
+    fn each_window_of_an_account_has_its_own_row() {
+        let accounts = parse_limit_accounts(
+            &json!({"accounts":[{"provider":"codex", "account_key":"a", "windows":[
+                {"id":"primary", "kind":"session", "label":"Session", "used_percent":10},
+                {"id":"primary", "kind":"weekly", "label":"Weekly", "used_percent":80},
+            ]}]}),
+            0,
+            "Local",
+        );
+        let limits = collect_limits(&accounts, 0);
+        let account = &limits[0].accounts[0];
+        let keys: HashSet<String> = account
+            .windows
+            .iter()
+            .map(|window| limit_key(&account.account, window))
+            .collect();
+        assert_eq!(keys.len(), 2);
     }
 
     #[gpui::test]
