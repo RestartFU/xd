@@ -3,7 +3,9 @@ package com.restartfu.xd.protocol
 import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class RepliesTest {
     @Test
@@ -157,5 +159,74 @@ class RepliesTest {
         ).jsonObject.decodeReply<AutoSettleSettingsReply>()
         assertEquals(3, on.afterDays)
         assertEquals(true, on.keepPullRequests)
+    }
+
+    @Test
+    fun aHostFromBeforeAccountsShowsItsOneSignIn() {
+        val reply = WireJson.parseToJsonElement(
+            """{"ok":true,"providers":[{"provider":"codex","display_name":"Codex","state":"signing-in",""" +
+                """"login_url":"https://auth.example.com/device","device_code":"ABCD-1234"}]}""",
+        ).jsonObject.decodeReply<AgentAuthReply>()
+        assertEquals(false, reply.multipleAccounts)
+        val codex = reply.providers.single()
+        assertFalse(codex.holdsSeveral)
+        assertFalse(codex.canAdd)
+        val only = codex.accountList().single()
+        assertEquals(AgentAccountReply.DEFAULT, only.id)
+        assertTrue(only.default && only.inUse)
+        assertEquals("Codex sign-in", only.label)
+        assertEquals("ABCD-1234", codex.signingIn()?.deviceCode)
+        assertTrue(codex.busy)
+        assertNull(codex.orderMoving(0, up = false))
+    }
+
+    @Test
+    fun accountsCarryTheirOrderLimitsAndSignIn() {
+        val reply = WireJson.parseToJsonElement(
+            """{"ok":true,"multiple_accounts":true,"providers":[{"provider":"codex","display_name":"Codex",""" +
+                """"state":"signed-in","needs_input":false,"auto_switch":true,"adding":true,"notice":"Already in the list.",""" +
+                """"accounts":[""" +
+                """{"id":"default","default":true,"pending":false,"label":"dana@example.com","email":"dana@example.com",""" +
+                """"plan":"Pro","state":"signed-in","needs_input":false,"in_use":false,"busy":false,"problem":null,""" +
+                """"limited_until_ms":7500000,"limited_reason":"5-hour limit","checked_at_ms":5,""" +
+                """"windows":[{"kind":"session","label":"5h","used_percent":100.0,"resets_at_ms":7500000}]},""" +
+                """{"id":"a1","default":false,"pending":false,"label":"dana.work@example.com","plan":"Plus",""" +
+                """"state":"signed-in","in_use":true,"problem":"mismatch","windows":[]},""" +
+                """{"id":"a2","default":false,"pending":true,"label":"Codex account","state":"signing-in",""" +
+                """"device_code":"WXYZ-9876","login_url":"https://auth.example.com/device","needs_input":false,"busy":true,"windows":[]}""" +
+                """]}]}""",
+        ).jsonObject.decodeReply<AgentAuthReply>()
+        assertTrue(reply.multipleAccounts)
+        val codex = reply.providers.single()
+        assertTrue(codex.holdsSeveral && codex.autoSwitch && codex.adding)
+        assertEquals("Already in the list.", codex.notice)
+        val (first, second) = codex.accountList()
+        assertEquals(7_500_000L, first.limitedUntilMs)
+        assertEquals("5-hour limit", first.limitedReason)
+        assertEquals(100.0, first.windows.single().usedPercent)
+        assertEquals("mismatch", second.problem)
+        assertTrue(second.inUse)
+        assertEquals("a2", codex.signingIn()?.id)
+        assertTrue(codex.busy)
+        assertFalse(codex.canAdd)
+        // One still signing in for the first time has no place in the order.
+        assertEquals(listOf("default", "a1"), codex.rankedAccounts().map { it.id })
+        assertEquals(listOf("a1", "default"), codex.orderMoving(1, up = true))
+        assertEquals(listOf("a1", "default"), codex.orderMoving(0, up = false))
+        assertNull(codex.orderMoving(0, up = true))
+        assertNull(codex.orderMoving(1, up = false))
+    }
+
+    @Test
+    fun usageLimitsSayWhichOfSeveralAccountsTheyAre() {
+        val accounts = WireJson.decodeFromJsonElement(
+            kotlinx.serialization.builtins.ListSerializer(UsageAccountReply.serializer()),
+            WireJson.parseToJsonElement(
+                """[{"provider":"codex","account_key":"a","account_rank":1,"windows":[]},""" +
+                    """{"provider":"codex","account_key":"b","account_rank":2,"windows":[]},""" +
+                    """{"provider":"claude","account_key":"c","windows":[]}]""",
+            ),
+        )
+        assertEquals(listOf(1, 2, null), accounts.map { it.accountRank })
     }
 }

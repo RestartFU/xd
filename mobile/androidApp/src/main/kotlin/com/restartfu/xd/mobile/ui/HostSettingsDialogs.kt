@@ -31,7 +31,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -40,9 +39,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.restartfu.xd.mobile.MainViewModel
-import com.restartfu.xd.mobile.SignInDraft
-import com.restartfu.xd.mobile.signInAttempt
-import com.restartfu.xd.protocol.AgentAuthProviderReply
 import com.restartfu.xd.protocol.AgentCliProviderReply
 import com.restartfu.xd.protocol.Ops
 import kotlinx.coroutines.CancellationException
@@ -61,6 +57,9 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
     val authStale by model.agentAuthStale.collectAsStateWithLifecycle()
     val clisStale by model.agentClisStale.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { model.loadAccounts() }
+    val now = rememberMinuteClock()
+    // The account whose removal is being confirmed, as its provider and id.
+    var confirming by rememberSaveable { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Assistant accounts") },
@@ -70,7 +69,9 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Text(
-                    "Sign-in and the assistant command-line tools on the connected host.",
+                    // A host that keeps only the user's own sign-in has nothing to rank.
+                    if (auth?.values?.any { it.holdsSeveral } == true) ACCOUNTS_INTRO
+                    else "Sign-in and the assistant command-line tools on the connected host.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -91,13 +92,17 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
                         TextButton(onClick = model::retryAccounts) { Text("Try again") }
                     }
                 }
-                val providers = auth?.values?.sortedBy { it.displayName }
+                val providers = auth?.values?.let(::accountProviderOrder)
                 if (providers == null) {
                     if (error == null && !authStale) CircularProgressIndicator(Modifier.align(Alignment.CenterHorizontally))
                 } else {
                     // Keyed, so an entered sign-in code stays with its assistant
                     // when another appears above it.
-                    providers.forEach { provider -> key(provider.provider) { AccountRow(provider, model) } }
+                    providers.forEach { provider ->
+                        key(provider.provider) {
+                            ProviderAccounts(provider, model, now, confirming) { confirming = it }
+                        }
+                    }
                 }
                 HorizontalDivider()
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -109,67 +114,6 @@ internal fun AssistantAccountsDialog(model: MainViewModel, onDismiss: () -> Unit
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
     )
-}
-
-@Composable
-private fun AccountRow(provider: AgentAuthProviderReply, model: MainViewModel) {
-    val openLink = rememberLinkOpener()
-    val signingIn = provider.state == "signing-in"
-    val drafts by model.signInDrafts.collectAsStateWithLifecycle()
-    val draft = drafts[provider.provider]?.takeIf { it.attempt == provider.signInAttempt() } ?: SignInDraft()
-    val sending = draft.sending
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).padding(end = 8.dp)) {
-                Text(provider.displayName, fontWeight = FontWeight.SemiBold)
-                Text(
-                    provider.detail ?: authLabel(provider.state),
-                    color = if (provider.state == "failed") MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            if (signingIn) {
-                TextButton(onClick = { model.cancelSignIn(provider.provider) }) { Text("Cancel sign-in") }
-            } else if (provider.state != "signed-in") {
-                OutlinedButton(onClick = { model.signIn(provider.provider) }) { Text("Sign in") }
-            }
-        }
-        if (signingIn) {
-            provider.deviceCode?.let { code ->
-                Text(code, fontFamily = XdMonoFamily, style = MaterialTheme.typography.titleMedium)
-            }
-            provider.loginUrl?.let { url ->
-                // If no browser can open it, the address is copied for another device.
-                TextButton(onClick = { openLink(url) }) { Text("Open sign-in page") }
-            }
-            if (provider.needsInput) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = draft.text,
-                        onValueChange = { model.editSignInInput(provider, it) },
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Code from the sign-in page") },
-                        singleLine = true,
-                        enabled = !sending,
-                    )
-                    TextButton(
-                        // Kept until the host takes it, so a failure can be sent again.
-                        onClick = { model.sendSignInInput(provider) },
-                        enabled = draft.text.isNotBlank() && !sending,
-                    ) { Text(if (sending) "Sending…" else "Send") }
-                }
-            }
-        }
-    }
-}
-
-private fun authLabel(state: String): String = when (state) {
-    "signed-in" -> "Signed in"
-    "signed-out" -> "Signed out"
-    "signing-in" -> "Signing in…"
-    "failed" -> "Could not check sign-in"
-    else -> "Checking…"
 }
 
 @Composable

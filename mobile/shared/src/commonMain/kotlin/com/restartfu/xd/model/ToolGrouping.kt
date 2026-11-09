@@ -17,6 +17,15 @@ public sealed interface TranscriptRow {
         val run: SubagentRun,
     ) : TranscriptRow
 
+    /**
+     * The host moved the chat to another of the assistant's accounts: a quiet
+     * notice, never a tool call, so it neither joins nor hides in a run.
+     */
+    public data class AccountSwitch(
+        val item: TranscriptItem,
+        val sentence: String,
+    ) : TranscriptRow
+
     /** A run of ordinary tool calls worth hiding behind one line. */
     public data class Tools(val items: List<TranscriptItem>) : TranscriptRow {
         val label: String get() = "${items.size} tool calls"
@@ -58,7 +67,11 @@ public object ToolGrouping {
             } else {
                 null
             }
-            if (pipeline != null) {
+            val switched = if (item.kind == TranscriptKind.TOOL) AccountSwitch.sentence(item.text) else null
+            if (switched != null) {
+                flush()
+                rows += TranscriptRow.AccountSwitch(item, switched)
+            } else if (pipeline != null) {
                 flush()
                 rows += TranscriptRow.Pipeline(item, pipeline)
             } else if (subagent != null) {
@@ -74,4 +87,13 @@ public object ToolGrouping {
         flush()
         return rows
     }
+}
+
+/** The row the host adds when a chat moves to another account. */
+public object AccountSwitch {
+    private const val PREFIX = "account_switch\n"
+
+    /** The row's one sentence, or null when [text] is not an account switch. */
+    public fun sentence(text: String): String? =
+        text.takeIf { it.startsWith(PREFIX) }?.removePrefix(PREFIX)?.trim()?.takeIf(String::isNotEmpty)
 }

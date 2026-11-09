@@ -63,6 +63,15 @@ class OpsTest {
         assertEquals("1234", Ops.agentAuthAction(Ops.AuthAction.INPUT, "codex", "1234")["input"]!!.jsonPrimitive.content)
         assertFailsWith<IllegalArgumentException> { Ops.agentAuthAction(Ops.AuthAction.INPUT, "codex", "") }
         assertFailsWith<IllegalArgumentException> { Ops.agentAuthAction(Ops.AuthAction.START, "jcode") }
+        assertFalse("account" in start)
+        assertEquals("agent-auth-add", Ops.agentAuthAction(Ops.AuthAction.ADD, "codex")["op"]!!.jsonPrimitive.content)
+        assertEquals("agent-auth-logout", Ops.agentAuthAction(Ops.AuthAction.LOGOUT, "codex")["op"]!!.jsonPrimitive.content)
+        assertEquals("a1", Ops.agentAuthAction(Ops.AuthAction.START, "codex", account = "a1")["account"]!!.jsonPrimitive.content)
+        assertEquals("a1", Ops.agentAuthAction(Ops.AuthAction.LOGOUT, "claude", account = "a1")["account"]!!.jsonPrimitive.content)
+        // Input and cancelling belong to the provider's one running sign-in, not an account.
+        assertFailsWith<IllegalArgumentException> { Ops.agentAuthAction(Ops.AuthAction.CANCEL, "codex", account = "a1") }
+        assertFailsWith<IllegalArgumentException> { Ops.agentAuthAction(Ops.AuthAction.ADD, "codex", account = "a1") }
+        assertFailsWith<IllegalArgumentException> { Ops.agentAuthAction(Ops.AuthAction.START, "codex", account = " ") }
         assertFailsWith<IllegalArgumentException> { Ops.agentCliUpdates("install") }
         assertEquals("codex", Ops.agentCliUpdates("install", "codex")["provider"]!!.jsonPrimitive.content)
         assertTrue(Ops.setChatTitleModel("codex", null)["model"] is JsonNull)
@@ -70,6 +79,22 @@ class OpsTest {
         assertTrue(Ops.setFolderContext("f", "   ")["context"] is JsonNull)
         assertEquals("notes", Ops.setFolderContext("f", " notes ")["context"]!!.jsonPrimitive.content)
         assertEquals(true, Ops.resumeInterrupted(true)["resume"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun accountOrderNamesEachAccountOnce() {
+        val order = Ops.agentAccountsOrder("codex", listOf("a1", "default"))
+        assertEquals("agent-accounts-order", order["op"]!!.jsonPrimitive.content)
+        assertEquals("codex", order["provider"]!!.jsonPrimitive.content)
+        assertEquals(listOf("a1", "default"), order["accounts"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertFailsWith<IllegalArgumentException> { Ops.agentAccountsOrder("codex", emptyList()) }
+        assertFailsWith<IllegalArgumentException> { Ops.agentAccountsOrder("codex", listOf("a1", "a1")) }
+        assertFailsWith<IllegalArgumentException> { Ops.agentAccountsOrder("codex", listOf("a1", "")) }
+        assertFailsWith<IllegalArgumentException> { Ops.agentAccountsOrder("jcode", listOf("a1")) }
+        val switch = Ops.agentAccountsAutoSwitch("claude", false)
+        assertEquals("agent-accounts-auto-switch", switch["op"]!!.jsonPrimitive.content)
+        assertEquals(false, switch["enabled"]!!.jsonPrimitive.boolean)
+        assertFailsWith<IllegalArgumentException> { Ops.agentAccountsAutoSwitch("jcode", true) }
     }
 
     @Test
