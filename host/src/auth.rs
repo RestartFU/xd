@@ -278,10 +278,23 @@ impl AuthManager {
 
     /// The account the chat's next turn runs on; see [`Accounts::choose`].
     pub(crate) fn choose(&self, provider: &str, chat_account: Option<&str>) -> Choice {
+        // Sign-in states are read before the accounts are, so choosing never
+        // holds the accounts lock while waiting on the states lock.
+        let signed_in: HashMap<String, bool> = self
+            .inner
+            .accounts
+            .ids(provider)
+            .into_iter()
+            .chain(self.inner.accounts.pending(provider))
+            .map(|account| {
+                let signed_in = self.signed_in(provider, &account);
+                (account, signed_in)
+            })
+            .collect();
         let mut choice = self.inner.accounts.choose(
             provider,
             chat_account,
-            |account| self.signed_in(provider, account),
+            |account| signed_in.get(account).copied().unwrap_or(false),
             now_ms(),
         );
         // Even a lone sign-in takes no turn while it is being signed in or out.
@@ -899,17 +912,19 @@ impl AuthManager {
             let session = sessions
                 .get(provider)
                 .filter(|session| session.serial == serial)?;
-            if let Some(mut snapshot) = settle(session)
-                && let Ok(mut states) = self.inner.states.lock()
-            {
+            let account = session.account.clone();
+            if let Some(mut snapshot) = settle(session) {
                 // Readings taken while the session ran may be of the login it
                 // replaced; they stop counting before the new state shows.
-                self.inner
-                    .accounts
-                    .forget_login_reading(provider, &session.account);
-                snapshot.generation = self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
-                snapshot.settled = Some(snapshot.state.clone());
-                states.insert(key(provider, &session.account), snapshot);
+                // Before taking the states lock: choosing an account takes the
+                // accounts lock first, so the two are never held the other way.
+                self.inner.accounts.forget_login_reading(provider, &account);
+                if let Ok(mut states) = self.inner.states.lock() {
+                    snapshot.generation =
+                        self.inner.next_generation.fetch_add(1, Ordering::Relaxed);
+                    snapshot.settled = Some(snapshot.state.clone());
+                    states.insert(key(provider, &account), snapshot);
+                }
             }
             sessions.remove(provider)
         };
