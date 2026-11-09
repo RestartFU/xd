@@ -6,7 +6,7 @@
 //! sender, and would take it away as soon as such a helper exited.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet},
     future::ready,
     num::NonZeroU32,
     pin::pin,
@@ -36,9 +36,6 @@ const CLOSE_AFTER: Duration = Duration::from_secs(10);
 /// How long a `Notify` call may go unanswered, as D-Bus's own default
 /// method-call timeout: after that the notification is not shown late.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(25);
-/// How many calls given up on are remembered, to close what they show if
-/// they are answered after all.
-const MAX_EXPIRED: usize = 32;
 
 /// How long the worker waits before acting on its own; shorter in tests.
 #[derive(Clone, Copy)]
@@ -198,17 +195,18 @@ async fn serve<T>(
                 // again, possibly to other applications.
                 let sender = message.header().sender().map(|sender| sender.to_string());
                 // Answered after it was given up on: whatever the server shows
-                // has been up for longer than its time already.
-                if let BusEvent::Reply {
-                    serial,
-                    id: Some(id),
-                } = &event
-                    && let Some(at) = tracker.expired.iter().position(|e| e == serial)
+                // has been up for longer than its time already. Unless the
+                // server has since given that id to a newer notification.
+                if let BusEvent::Reply { serial, id } = &event
+                    && tracker.expired.remove(serial)
                 {
-                    tracker.expired.remove(at);
-                    connection
-                        .send(&close_message(*id, sender.as_deref())?)
-                        .await?;
+                    if let Some(id) = id
+                        && !tracker.shown.contains_key(&(sender.clone(), *id))
+                    {
+                        connection
+                            .send(&close_message(*id, sender.as_deref())?)
+                            .await?;
+                    }
                     continue;
                 }
                 // A notification of ours was shown: close it when its time is up.
@@ -232,12 +230,11 @@ async fn serve<T>(
             // a server that has taken over the service never closes its own.
             // Not shown late as a click target, but remembered, so an answer
             // that does come still gets its notification closed.
+            // Every one is kept until answered: only a server that stopped
+            // answering adds to them, one per notification.
             Input::Due(Due::Unanswered(serial)) => {
                 if tracker.sent.remove(&serial).is_some() {
-                    if tracker.expired.len() == MAX_EXPIRED {
-                        tracker.expired.pop_front();
-                    }
-                    tracker.expired.push_back(serial);
+                    tracker.expired.insert(serial);
                 }
             }
             Input::Due(Due::Close(key, serial)) => {
@@ -341,8 +338,8 @@ type Key = (Option<String>, u32);
 struct Tracker<T> {
     /// `Notify` calls awaiting the id the server gives them, by call serial.
     sent: HashMap<NonZeroU32, T>,
-    /// `Notify` calls given up on unanswered, newest last.
-    expired: VecDeque<NonZeroU32>,
+    /// `Notify` calls given up on unanswered.
+    expired: HashSet<NonZeroU32>,
     shown: HashMap<Key, Shown<T>>,
 }
 
@@ -350,7 +347,7 @@ impl<T> Default for Tracker<T> {
     fn default() -> Self {
         Self {
             sent: HashMap::new(),
-            expired: VecDeque::new(),
+            expired: HashSet::new(),
             shown: HashMap::new(),
         }
     }
@@ -992,6 +989,40 @@ mod tests {
             assert_eq!(click, None);
             assert_eq!(closed, 7);
         }
+    }
+
+    #[test]
+    fn a_late_answer_leaves_a_newer_notification_with_its_id_alone() {
+        let outcome = on_a_private_bus(|address| {
+            zbus::block_on(async move {
+                let (server, mut calls) = notification_server(&address).await?;
+                against_notifier(&address, |requests, _clicked| async move {
+                    requests.send(request("first")).await.unwrap();
+                    let first = next_call(&mut calls, "Notify").await?;
+                    sleep(TEST_TIMING.reply_timeout * 2).await;
+                    requests.send(request("second")).await.unwrap();
+                    let second = next_call(&mut calls, "Notify").await?;
+                    server.reply(&second.header(), &7u32).await?;
+                    let shown = std::time::Instant::now();
+                    // The first is answered at last, with the id now the
+                    // second's.
+                    server.reply(&first.header(), &7u32).await?;
+                    let early = closes_during(&mut calls, TEST_CLOSE_AFTER / 2).await?;
+                    let close = next_call(&mut calls, "CloseNotification").await?;
+                    Ok((early, close.body().deserialize::<u32>()?, shown.elapsed()))
+                })
+                .await
+            })
+        });
+        let Some((early, closed, since)) = outcome else {
+            return;
+        };
+        assert_eq!(early, Vec::<u32>::new());
+        assert_eq!(closed, 7);
+        assert!(
+            since >= TEST_CLOSE_AFTER - Duration::from_millis(50),
+            "{since:?}"
+        );
     }
 
     #[test]
