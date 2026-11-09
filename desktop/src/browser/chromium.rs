@@ -212,7 +212,7 @@ fn listening(path: &Path) -> bool {
 fn profile_in_use(pid: u32) -> String {
     format!(
         "The browser is already open in another xd (process {pid}). \
-         Quit that xd, then open the browser again."
+         It opens here once that xd quits."
     )
 }
 
@@ -227,6 +227,17 @@ fn profile_taken(pid: u32) -> String {
 
 /// Whether CEF started, decided by the first browser.
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+/// The last start found the profile held by another process. CEF was left
+/// uninitialized, so a later start can still succeed.
+static PROFILE_HELD: AtomicBool = AtomicBool::new(false);
+
+/// Whether starting the browser failed only because another process held its
+/// profile, so trying again once that process lets go can succeed.
+pub(super) fn profile_held_elsewhere() -> bool {
+    PROFILE_HELD.load(Ordering::SeqCst)
+        && INITIALIZED.get().is_none()
+        && !SHUT_DOWN.load(Ordering::SeqCst)
+}
 /// Set once CEF has been shut down, after which no browser can be created.
 static SHUT_DOWN: AtomicBool = AtomicBool::new(false);
 /// Browsers CEF has accepted, whether or not created yet, and not finished
@@ -247,7 +258,9 @@ fn ensure_initialized(scale: f32) -> Result<(), String> {
     // Initializing against a profile another process holds fails, and CEF
     // allows no second try. Leaving it uninitialized lets a later pane start
     // once the other process has gone.
-    if let Some(pid) = profile_holder(&directory) {
+    let holder = profile_holder(&directory);
+    PROFILE_HELD.store(holder.is_some(), Ordering::SeqCst);
+    if let Some(pid) = holder {
         return Err(profile_in_use(pid));
     }
     INITIALIZED
