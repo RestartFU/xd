@@ -2170,8 +2170,8 @@ struct XdDesktop {
     transcript_loading: bool,
     transcript_page_loading: bool,
     transcript_refresh_pending: bool,
-    /// A request for the newest page made while another page was loading,
-    /// sent once that page lands.
+    /// The reader asked for the newest page and it has not arrived: sent
+    /// once a page still loading lands, and again after a reconnect.
     transcript_tail_pending: bool,
     transcript_has_older: bool,
     transcript_has_newer: bool,
@@ -5624,11 +5624,16 @@ impl XdDesktop {
                 self.transcript_page_loading = false;
                 self.transcript_loaded = true;
                 self.request_workflow_statuses();
-                if std::mem::take(&mut self.transcript_tail_pending) {
+                // Asked for while another page loaded; the newest page answers it.
+                let wanted_tail = std::mem::take(&mut self.transcript_tail_pending)
+                    && direction != MessagePageDirection::Tail;
+                if wanted_tail && self.transcript_has_newer {
                     // The newest page brings whatever a refresh would have.
                     self.transcript_refresh_pending = false;
-                    self.request_message_page(&chat_id, MessageCursor::Tail);
-                } else if std::mem::take(&mut self.transcript_refresh_pending) {
+                    self.request_tail_page(&chat_id);
+                } else if wanted_tail || std::mem::take(&mut self.transcript_refresh_pending) {
+                    // The newest rows are here already; only newer ones are missing.
+                    self.transcript_refresh_pending = false;
                     self.request_messages(&chat_id);
                 }
             }
@@ -9705,7 +9710,7 @@ impl XdDesktop {
         self.request_chat(&chat_id);
         if std::mem::take(&mut self.transcript_tail_pending) {
             // Asked for before the connection dropped, and still wanted.
-            self.request_message_page(&chat_id, MessageCursor::Tail);
+            self.request_tail_page(&chat_id);
         } else {
             self.request_messages(&chat_id);
         }
@@ -9777,14 +9782,19 @@ impl XdDesktop {
         self.request_message_page(&chat_id, cursor);
     }
 
-    /// Asks for the newest page. While another page loads it waits for that
-    /// page to land instead of being dropped.
+    /// Asks for the newest page, and remembers it until the page arrives.
+    /// While another page loads it waits for that page to land instead of
+    /// being dropped.
     fn request_tail_page(&mut self, chat_id: &str) {
+        self.transcript_tail_pending = true;
         if self.transcript_page_loading {
-            self.transcript_tail_pending = true;
             return;
         }
         self.request_message_page(chat_id, MessageCursor::Tail);
+        if !self.transcript_page_loading {
+            // Not sent: nothing is on its way to answer it.
+            self.transcript_tail_pending = false;
+        }
     }
 
     fn request_message_page(&mut self, chat_id: &str, cursor: MessageCursor) {
@@ -11141,7 +11151,8 @@ impl XdDesktop {
     }
 
     fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
-        if self.transcript_has_newer {
+        // A page still loading may drop the newest rows when it lands.
+        if self.transcript_has_newer || self.transcript_page_loading {
             // The newest page is not loaded; the tail request lands pinned.
             if let Some(chat_id) = self.model.selected_chat.clone() {
                 self.request_tail_page(&chat_id);
@@ -11468,7 +11479,8 @@ impl XdDesktop {
         self.sync_terminal_input_mode(cx);
         self.transcript_loading = !self.transcript_loaded;
         self.request_chat(&chat_id);
-        if land_on_newest && self.transcript_has_newer {
+        // A page still loading may drop the newest rows when it lands.
+        if land_on_newest && (self.transcript_has_newer || self.transcript_page_loading) {
             // The reader paged back far enough to drop the newest rows; going
             // into the chat shows them again, and the tail page lands pinned.
             self.request_tail_page(&chat_id);
@@ -21403,24 +21415,30 @@ Binary files /dev/null and b/image.png differ\n";
         });
     }
 
+    /// A host on one end of a socket, and the requests it receives.
     #[cfg(unix)]
-    #[gpui::test]
-    fn reopening_a_chat_paged_back_asks_for_the_newest_page_after_the_one_loading(
-        cx: &mut gpui::TestAppContext,
+    fn socket_host(
+        name: &str,
+    ) -> (
+        HostHandle,
+        std::io::BufReader<std::os::unix::net::UnixStream>,
     ) {
-        use std::{io::BufRead, os::unix::net::UnixStream};
-
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
         server
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
-        let (host, _updates) = HostHandle::connect_io(
-            client.try_clone().unwrap(),
-            client,
-            PathBuf::from("tail-after-page-test"),
-        );
-        let mut requests = std::io::BufReader::new(server);
-        let mut next_messages_request = || loop {
+        let (host, _updates) =
+            HostHandle::connect_io(client.try_clone().unwrap(), client, PathBuf::from(name));
+        (host, std::io::BufReader::new(server))
+    }
+
+    /// The next messages request the host received.
+    #[cfg(unix)]
+    fn next_messages_request(
+        requests: &mut std::io::BufReader<std::os::unix::net::UnixStream>,
+    ) -> Value {
+        use std::io::BufRead;
+        loop {
             let mut line = String::new();
             requests
                 .read_line(&mut line)
@@ -21429,42 +21447,71 @@ Binary files /dev/null and b/image.png differ\n";
             if request["op"] == "messages" {
                 return request;
             }
+        }
+    }
+
+    fn message_page(
+        ids: std::ops::RangeInclusive<i64>,
+        has_older: bool,
+        has_newer: bool,
+    ) -> serde_json::Map<String, Value> {
+        let messages = ids
+            .map(|id| serde_json::json!({"id": id, "role": "assistant", "content": format!("Message {id}")}))
+            .collect::<Vec<_>>();
+        serde_json::json!({"ok": true, "messages": messages, "has_older": has_older, "has_newer": has_newer})
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    fn reply_messages(
+        desktop: &mut XdDesktop,
+        cursor: MessageCursor,
+        page: serde_json::Map<String, Value>,
+        cx: &mut Context<XdDesktop>,
+    ) {
+        let chat_id = "implementation".into();
+        desktop.handle_reply(RequestKind::Messages { chat_id, cursor }, page, None, cx);
+    }
+
+    /// Shows the implementation chat's newest page through [host], or an
+    /// older window when [has_newer], then pages further back.
+    fn page_back_through_implementation(
+        desktop: &mut XdDesktop,
+        host: &HostHandle,
+        has_newer: bool,
+        cx: &mut Context<XdDesktop>,
+    ) {
+        desktop.model = grouped_workspace_fixture();
+        desktop.model.select_chat("implementation");
+        desktop.model.connected = true;
+        desktop.minimal_route = MinimalRoute::Cli {
+            project_id: "atlas".into(),
+            chat_id: "implementation".into(),
+            agent: AgentCli::Codex,
         };
-        let page = |ids: std::ops::RangeInclusive<i64>, has_older: bool, has_newer: bool| {
-            let messages = ids
-                .map(|id| serde_json::json!({"id": id, "role": "assistant", "content": format!("Message {id}")}))
-                .collect::<Vec<_>>();
-            serde_json::json!({"ok": true, "messages": messages, "has_older": has_older, "has_newer": has_newer})
-                .as_object()
-                .unwrap()
-                .clone()
-        };
+        desktop.host = Some(host.clone());
+        reply_messages(
+            desktop,
+            MessageCursor::Tail,
+            message_page(10..=19, true, has_newer),
+            cx,
+        );
+        assert_eq!(desktop.transcript_has_newer, has_newer);
+        desktop.request_older_messages();
+        assert!(desktop.transcript_page_loading);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn reopening_a_chat_paged_back_asks_for_the_newest_page_after_the_one_loading(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (host, mut requests) = socket_host("tail-after-page-test");
         let (desktop, cx) = cx.add_window_view(XdDesktop::new);
         desktop.update(cx, |desktop, cx| {
-            desktop.model = grouped_workspace_fixture();
-            desktop.model.select_chat("implementation");
-            desktop.model.connected = true;
-            desktop.minimal_route = MinimalRoute::Cli {
-                project_id: "atlas".into(),
-                chat_id: "implementation".into(),
-                agent: AgentCli::Codex,
-            };
-            desktop.host = Some(host.clone());
-            // A window of older messages, the newest of them dropped.
-            desktop.handle_reply(
-                RequestKind::Messages {
-                    chat_id: "implementation".into(),
-                    cursor: MessageCursor::Tail,
-                },
-                page(10..=19, true, true),
-                None,
-                cx,
-            );
-            assert!(desktop.transcript_has_newer);
-            // The reader pages further back.
-            desktop.request_older_messages();
-            assert!(desktop.transcript_page_loading);
-            assert_eq!(next_messages_request()["before"], 10);
+            page_back_through_implementation(desktop, &host, true, cx);
+            assert_eq!(next_messages_request(&mut requests)["before"], 10);
         });
 
         // Going into the chat while that page loads still asks for the newest.
@@ -21479,32 +21526,91 @@ Binary files /dev/null and b/image.png differ\n";
             assert!(desktop.transcript_tail_pending);
         });
         desktop.update(cx, |desktop, cx| {
-            desktop.handle_reply(
-                RequestKind::Messages {
-                    chat_id: "implementation".into(),
-                    cursor: MessageCursor::Before(10),
-                },
-                page(5..=9, false, true),
-                None,
+            reply_messages(
+                desktop,
+                MessageCursor::Before(10),
+                message_page(5..=9, false, true),
                 cx,
             );
-            let tail = next_messages_request();
+            let tail = next_messages_request(&mut requests);
             assert!(tail.get("before").is_none() && tail.get("after").is_none());
-            desktop.handle_reply(
-                RequestKind::Messages {
-                    chat_id: "implementation".into(),
-                    cursor: MessageCursor::Tail,
-                },
-                page(30..=39, true, false),
-                None,
+            reply_messages(
+                desktop,
+                MessageCursor::Tail,
+                message_page(30..=39, true, false),
                 cx,
             );
             assert!(!desktop.transcript_has_newer);
+            assert!(!desktop.transcript_tail_pending);
             assert_eq!(
                 desktop.model.messages.last().and_then(|message| message.id),
                 Some(39)
             );
             assert!(desktop.transcript_pinned());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn jumping_to_latest_while_an_older_page_loads_asks_for_the_newest_if_it_leaves(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (host, mut requests) = socket_host("jump-during-page-test");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            // The newest rows are here when the reader jumps, but the older
+            // page on its way leaves the window short of them.
+            page_back_through_implementation(desktop, &host, false, cx);
+            assert_eq!(next_messages_request(&mut requests)["before"], 10);
+            desktop.jump_to_latest(cx);
+            reply_messages(
+                desktop,
+                MessageCursor::Before(10),
+                message_page(5..=9, false, true),
+                cx,
+            );
+            assert!(desktop.transcript_has_newer);
+            let tail = next_messages_request(&mut requests);
+            assert!(tail.get("before").is_none() && tail.get("after").is_none());
+        });
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_reconnect_asks_again_for_a_newest_page_that_never_arrived(cx: &mut gpui::TestAppContext) {
+        let (host, mut requests) = socket_host("tail-across-reconnect-test");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            page_back_through_implementation(desktop, &host, true, cx);
+            assert_eq!(next_messages_request(&mut requests)["before"], 10);
+            desktop.jump_to_latest(cx);
+            reply_messages(
+                desktop,
+                MessageCursor::Before(10),
+                message_page(5..=9, false, true),
+                cx,
+            );
+            let tail = next_messages_request(&mut requests);
+            assert!(tail.get("before").is_none() && tail.get("after").is_none());
+
+            // The connection drops before the newest page comes back.
+            desktop.handle_host_update(
+                HostUpdate::Disconnected {
+                    message: "Connection lost".into(),
+                },
+                desktop.connection_generation,
+                cx,
+            );
+            desktop.host = Some(host.clone());
+            desktop.handle_host_update(
+                HostUpdate::Connected {
+                    path: PathBuf::from("reconnected"),
+                },
+                desktop.connection_generation,
+                cx,
+            );
+            let again = next_messages_request(&mut requests);
+            assert!(again.get("before").is_none() && again.get("after").is_none());
         });
     }
 
