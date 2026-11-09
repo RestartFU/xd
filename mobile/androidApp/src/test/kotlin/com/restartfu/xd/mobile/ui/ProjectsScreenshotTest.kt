@@ -89,14 +89,25 @@ class ProjectsScreenshotTest {
 
     @Test fun pickingAProjectStartsItsSession() = shoot("new-session-chosen-dark", MinimalThemePreset.DARK) {
         click("New session")
+        val before = SENT.size
         // Nothing waits on the next dialog: its title field never lets Compose go idle.
+        // The checkouts it reads say which project it is for.
         click("acme / Clients · No sessions")
+        check(placesRead(before) == listOf("shop")) { placesRead(before).toString() }
     }
 
     @Test fun anOpenProjectStartsASessionInItself() = shoot("new-session-here-dark", MinimalThemePreset.DARK) {
         check(shows("New session in web") && shows("New session in xd"))
+        val before = SENT.size
         click("New session in web")
+        check(placesRead(before) == listOf("web")) { placesRead(before).toString() }
     }
+
+    /** The projects whose checkouts the app asked for since request [from]. */
+    private fun placesRead(from: Int): List<String> = synchronized(SENT) { SENT.drop(from) }
+        .map { Json.parseToJsonElement(it).jsonObject }
+        .filter { it["op"]?.jsonPrimitive?.content == "folder-settings" }
+        .mapNotNull { it["folder"]?.jsonPrimitive?.content }
 
     @Test fun newMenu() = shoot("new-menu-dark", MinimalThemePreset.DARK) {
         click("New")

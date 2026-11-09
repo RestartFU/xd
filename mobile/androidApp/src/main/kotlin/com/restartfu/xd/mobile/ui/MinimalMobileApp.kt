@@ -2211,7 +2211,8 @@ private fun ProjectPickerDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Choose a project", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (choices.size > PROJECT_FILTER_AT) {
+                // Kept while it filters, so a list that shrinks cannot hide projects behind it.
+                if (choices.size > PROJECT_FILTER_AT || filter.isNotEmpty()) {
                     OutlinedTextField(
                         value = filter,
                         onValueChange = { filter = it },
