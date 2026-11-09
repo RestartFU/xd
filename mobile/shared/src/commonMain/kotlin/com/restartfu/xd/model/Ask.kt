@@ -82,6 +82,23 @@ public object AskBlock {
         return parse(last.text)?.ask
     }
 
+    /**
+     * The question each of the reader's messages answers, by item id.
+     *
+     * A message answers a question when the row right before it is the reply
+     * that asked it, as [pending] reads a waiting one. A question the agent
+     * moved past, with tool rows after it, is not answered by what follows.
+     */
+    public fun answered(items: List<TranscriptItem>): Map<String, String> {
+        val answered = mutableMapOf<String, String>()
+        items.zipWithNext { previous, item ->
+            if (item.kind == TranscriptKind.USER && previous.kind == TranscriptKind.ASSISTANT) {
+                parse(previous.text)?.let { answered[item.id] = it.ask.question }
+            }
+        }
+        return answered
+    }
+
     private fun parseAt(text: String, open: Int): Ask? {
         val bodyStart = open + OPEN.length
         val close = text.indexOf(CLOSE, bodyStart).takeIf { it >= 0 } ?: return null

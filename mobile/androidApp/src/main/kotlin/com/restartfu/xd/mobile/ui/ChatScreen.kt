@@ -1,5 +1,10 @@
 package com.restartfu.xd.mobile.ui
 
+import android.app.Activity
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.platform.LocalUriHandler
@@ -39,7 +44,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.gestures.animateScrollBy
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -68,7 +76,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -211,6 +218,7 @@ internal fun ChatScreen(
     // A run of ordinary tool calls collapses to one line; inline diffs keep
     // their own file-change row, and a lone call shows its command.
     val rows = remember(items) { ToolGrouping.rows(items) }
+    val answered = remember(items) { AskBlock.answered(items) }
     val leadingItemCount =
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
     // The working row sits below the last message, so it is what "the bottom"
@@ -219,33 +227,49 @@ internal fun ChatScreen(
     val waitingOn = if (state.working) 0 else backgroundTasks
     val trailingItemCount = if (state.working || waitingOn > 0) 1 else 0
     val lastTranscriptIndex = leadingItemCount + rows.lastIndex + trailingItemCount
-    val atBottom by remember(rows.size, leadingItemCount, trailingItemCount) {
-        derivedStateOf {
-            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            last >= lastTranscriptIndex - 1
+    // Whether new output keeps the end in view. Only the reader's own drags
+    // and flings change it (scrolling from code is not nested scrolling), so
+    // a follow still animating when the next words arrive keeps following,
+    // and a reader who scrolled back inside a long reply is left there.
+    // Saved, so a rotation does not pull a reader who scrolled away back down.
+    val following = rememberSaveable(state.chatId) { mutableStateOf(true) }
+    val followReader = remember(listState, following) {
+        object : NestedScrollConnection {
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                following.value = !listState.canScrollForward
+                return Offset.Zero
+            }
         }
     }
 
-    // Opening a chat lands on the newest message, not the oldest. This cannot
-    // be inferred from the list state: by the time an effect runs the items
-    // are already laid out, so "nothing measured yet" reads as a full list and
-    // the jump never happens. Track the first load for this chat instead.
-    // Saved, so a rotation does not re-land and throw away the scroll position
-    // rememberLazyListState just restored.
-    var landed by rememberSaveable(state.chatId) { mutableStateOf(false) }
+    // Going into a chat lands on the newest message, not the oldest. This
+    // cannot be inferred from the list state: by the time an effect runs the
+    // items are already laid out, so "nothing measured yet" reads as a full
+    // list and the jump never happens. Track whether this visit has landed.
+    // Kept on the chat's model rather than in saved state: each chat's saved
+    // state outlives leaving it, which would bring a reader back to wherever
+    // they last were. A rotation keeps the flag, so it does not re-land and
+    // throw away the scroll position rememberLazyListState just restored.
+    val activity = LocalContext.current as? Activity
+    DisposableEffect(model) {
+        onDispose {
+            if (activity?.isChangingConfigurations != true) model.landed = false
+        }
+    }
 
     LaunchedEffect(state.chatId, items.isNotEmpty()) {
-        if (!landed && items.isNotEmpty()) {
+        if (!model.landed && items.isNotEmpty()) {
             // Jumped, not animated: scrolling through a loaded history on open
             // is motion the reader did not ask for.
-            listState.scrollToItem(lastTranscriptIndex)
-            landed = true
+            listState.scrollToEnd(lastTranscriptIndex)
+            following.value = true
+            model.landed = true
         }
     }
 
     LaunchedEffect(items.size, items.lastOrNull()?.text, leadingItemCount, trailingItemCount) {
-        if (landed && items.isNotEmpty() && atBottom) {
-            listState.animateScrollToItem(lastTranscriptIndex)
+        if (model.landed && items.isNotEmpty() && following.value) {
+            listState.scrollToEnd(lastTranscriptIndex, animated = true)
         }
     }
 
@@ -432,7 +456,8 @@ internal fun ChatScreen(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                .nestedScroll(followReader),
             contentPadding = PaddingValues(12.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -459,7 +484,7 @@ internal fun ChatScreen(
             }
             items(rows, key = ::rowKey) { row ->
                 when (row) {
-                    is TranscriptRow.Single -> TranscriptRow(row.item, model)
+                    is TranscriptRow.Single -> TranscriptRow(row.item, model, answered[row.item.id])
                     is TranscriptRow.Tools -> ToolGroupRow(row)
                     is TranscriptRow.Pipeline -> PipelineCard(row.run, model.client)
                     is TranscriptRow.Subagent -> {
@@ -1209,6 +1234,28 @@ private fun AnalysisDisclosure(
     }
 }
 
+/**
+ * Shows the end of the item at [index]. Scrolling to an item alone puts its
+ * top at the top of the list, so a last message taller than the screen would
+ * show its start with the rest of it still below.
+ */
+private suspend fun LazyListState.scrollToEnd(index: Int, animated: Boolean = false) {
+    // An item already in view is scrolled on from where it is: going to its
+    // top first would run back through a tall reply before coming down again.
+    if (layoutInfo.visibleItemsInfo.none { it.index == index }) {
+        if (animated) animateScrollToItem(index) else scrollToItem(index)
+    }
+    while (canScrollForward) {
+        val info = layoutInfo
+        val last = info.visibleItemsInfo.lastOrNull() ?: break
+        // What is left of the last item in view below the list's end.
+        val left = last.offset + last.size - (info.viewportEndOffset - info.afterContentPadding)
+        val step = (if (left > 0) left else info.viewportSize.height).coerceAtLeast(1).toFloat()
+        val moved = if (animated) animateScrollBy(step) else scrollBy(step)
+        if (moved <= 0f) break
+    }
+}
+
 private fun rowKey(row: TranscriptRow): String = when (row) {
     is TranscriptRow.Single -> row.item.id
     // Keyed on the run's first call, which is stable as the run grows.
@@ -1335,7 +1382,7 @@ private fun ToolRow(item: TranscriptItem, nested: Boolean = false) {
  * boxes where the only difference is which side is narrower.
  */
 @Composable
-private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
+private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel, answering: String? = null) {
     if (item.kind == TranscriptKind.TOOL) {
         ToolRow(item)
         return
@@ -1377,7 +1424,28 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
-        Box(Modifier.fillMaxWidth(0.86f), contentAlignment = Alignment.CenterEnd) {
+        Column(Modifier.fillMaxWidth(0.86f), horizontalAlignment = Alignment.End) {
+            // What the message answers, attached above it like a reply's quote.
+            answering?.let { question ->
+                Row(
+                    modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        painterResource(com.restartfu.xd.mobile.R.drawable.ic_reply),
+                        contentDescription = null,
+                        tint = LocalXdSignals.current.faint,
+                        modifier = Modifier.padding(end = 5.dp).size(14.dp),
+                    )
+                    Text(
+                        answeredQuestionLabel(question),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = LocalXdSignals.current.faint,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             Surface(
                 // Tinted rather than the page colour: against plain reply text
                 // the bubble has to carry the distinction on its own.
@@ -1392,6 +1460,9 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel) {
         }
     }
 }
+
+/** The caption on a message sent in reply to a question, as on the desktop. */
+internal fun answeredQuestionLabel(question: String): String = "Answering \u201c${question.trim()}\u201d"
 
 private fun approvalTitle(request: com.restartfu.xd.model.PendingInteraction): String =
     when (request.tool) {

@@ -87,6 +87,23 @@ public fun TreeSnapshot.projectTree(collapsed: Set<String> = emptySet()): List<P
     return rows
 }
 
+/**
+ * The projects [folderId] holds at any depth, in the list's order: the run of
+ * deeper rows that follows it in this fully opened [projectTree]. A closed
+ * folder shows their sessions' signals, as the desktop sidebar does. Build
+ * the tree once and look up every folder in it, since building it reads
+ * every chat.
+ */
+public fun List<ProjectTreeRow>.projectsInside(folderId: String): List<String> {
+    val start = indexOfFirst { it is ProjectTreeRow.FolderRow && it.id == folderId }
+    if (start < 0) return emptyList()
+    val depth = this[start].depth
+    return drop(start + 1)
+        .takeWhile { it.depth > depth }
+        .filterIsInstance<ProjectTreeRow.ProjectRow>()
+        .map { it.id }
+}
+
 /** A folder that something can be moved into, indented as the list shows it. */
 public data class FolderDestination(
     val folder: MinimalFolder,
@@ -151,4 +168,37 @@ public fun organizationLogin(typed: String): String? {
         !login.endsWith('-') &&
         login.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it == '-' }
     return login.takeIf { valid }
+}
+
+/** A project offered when starting a session, with the folders it sits in. */
+public data class ProjectChoice(
+    val project: MinimalProject,
+    /** The names of the folders it sits inside, outermost first. */
+    val path: List<String>,
+)
+
+/**
+ * Every project a new session can start in, in the Projects list's order with
+ * nothing closed away. [lastUsed], the project the last session was started
+ * in, comes first so the usual choice is one tap.
+ */
+public fun TreeSnapshot.projectChoices(lastUsed: String? = null): List<ProjectChoice> {
+    val names = folders.associate { it.id to it.name }
+    val choices = projectTree().mapNotNull { row ->
+        (row as? ProjectTreeRow.ProjectRow)?.project?.let { project ->
+            ProjectChoice(project, ancestors(project.id).mapNotNull(names::get))
+        }
+    }
+    val last = choices.firstOrNull { it.project.id == lastUsed } ?: return choices
+    return listOf(last) + (choices - last)
+}
+
+/** The choices whose name or folders contain [query], ignoring case. */
+public fun List<ProjectChoice>.matching(query: String): List<ProjectChoice> {
+    val wanted = query.trim()
+    if (wanted.isEmpty()) return this
+    return filter { choice ->
+        choice.project.name.contains(wanted, ignoreCase = true) ||
+            choice.path.any { it.contains(wanted, ignoreCase = true) }
+    }
 }

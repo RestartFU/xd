@@ -115,7 +115,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import com.restartfu.xd.model.FolderDestination
 import com.restartfu.xd.model.MinimalFolder
+import com.restartfu.xd.model.projectsInside
 import com.restartfu.xd.model.ProjectTreeRow
+import com.restartfu.xd.model.projectChoices
 import com.restartfu.xd.model.ancestors
 import com.restartfu.xd.model.moveDestinations
 import com.restartfu.xd.model.organizationLogin
@@ -551,9 +553,14 @@ internal fun MinimalMobileApp(
             retryCatalog = model::loadCreationCatalog,
             chatTab = true,
             onDismiss = { createChatIn = null },
-            onCreate = { title, agent, _, _, effort, access, plan ->
+            onCreate = { request ->
                 createChatIn = null
-                activeProject?.let { project -> model.createDirectSession(project.id, title, agent, session.id, effort = effort, access = access, plan = plan) }
+                activeProject?.let { project ->
+                    model.createDirectSession(
+                        project.id, request.title, request.agent, session.id,
+                        effort = request.effort, access = request.access, plan = request.plan,
+                    )
+                }
             },
         )
     }
@@ -584,7 +591,6 @@ private fun MinimalProjectsHome(
     val secretsFor = tree.folders.firstOrNull { it.id == secretsForId }
     val settled = if (actions.settlement) tree.settledSessions() else emptyList()
     val operationError by model.error.collectAsStateWithLifecycle()
-    var selectedId by rememberSaveable { mutableStateOf<String?>(null) }
     // What the New menu or a folder's menu is making ("project" or "folder"), and in which folder.
     var creating by rememberSaveable { mutableStateOf<String?>(null) }
     var createParentId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -596,8 +602,9 @@ private fun MinimalProjectsHome(
     val creatingWorkspace by model.creatingWorkspace.collectAsStateWithLifecycle()
     val ownerIcons by model.client.ownerIcons.collectAsStateWithLifecycle()
     val rows = tree.projectTree(collapsed)
-    val folders = tree.projectTree().mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
-    val shownProjects = rows.mapNotNull { (it as? ProjectTreeRow.ProjectRow)?.project }
+    // Every row, as if no folder were closed: built once per tree, since building it reads every chat.
+    val openTree = remember(tree) { tree.projectTree() }
+    val folders = openTree.mapNotNull { (it as? ProjectTreeRow.FolderRow)?.folder }
     // Opens the folders [id] sits in, and [id] itself, so what lands there is in view.
     val reveal = { id: String? ->
         if (id != null) (tree.ancestors(id) + id).forEach { settings.setFolderOpen(it, true) }
@@ -605,14 +612,28 @@ private fun MinimalProjectsHome(
     val newProjectIn = { parentId: String? -> createParentId = parentId; creating = "project" }
     val newFolderIn = { parentId: String? -> createParentId = parentId; creating = "folder" }
     val canMove = { id: String, parentId: String? -> parentId != null || tree.moveDestinations(id).isNotEmpty() }
-    // The project the dialog was opened for; it closes if that project goes away.
+    // The project New session was opened for; it closes if that project goes away.
     var createSessionIn by rememberSaveable { mutableStateOf<String?>(null) }
+    // New session asks which project first, unless there is only one.
+    var pickingProject by rememberSaveable { mutableStateOf(false) }
+    // Opened on the list, so Back from the form returns to it.
+    var startedFromList by rememberSaveable { mutableStateOf(false) }
+    val newSession = {
+        val only = projects.singleOrNull()
+        if (only != null) {
+            createSessionIn = only.id
+            startedFromList = false
+        } else {
+            pickingProject = true
+            startedFromList = true
+        }
+    }
+    val newSessionIn = { projectId: String ->
+        createSessionIn = projectId
+        pickingProject = false
+        startedFromList = false
+    }
     var settingsOpen by rememberSaveable { mutableStateOf(false) }
-
-    // A project closed away in a folder stays chosen, but shows nothing until its folder opens.
-    val chosen = projects.firstOrNull { it.id == selectedId }
-    val selected = if (chosen != null) chosen.takeIf { it in shownProjects } else shownProjects.firstOrNull()
-    val sessions = selected?.let { tree.activeSessions(it.id) }.orEmpty()
     val waiting by model.client.waitingChats.collectAsStateWithLifecycle()
     val unread by model.client.unreadChats.collectAsStateWithLifecycle()
     val signalOf = { session: MinimalSession ->
@@ -623,10 +644,6 @@ private fun MinimalProjectsHome(
             session.chatIds.any { it in unread } -> SessionSignal.DONE
             else -> SessionSignal.IDLE
         }
-    }
-
-    LaunchedEffect(selected?.id, chosen == null) {
-        if (chosen == null && selectedId != selected?.id) selectedId = selected?.id
     }
 
     Column(
@@ -668,6 +685,9 @@ private fun MinimalProjectsHome(
                                 folder = row.folder,
                                 open = row.open,
                                 icon = ownerIcons[row.folder.owner],
+                                // A closed folder hides its projects, so it carries their signals.
+                                signals = if (row.open) emptyList() else openTree.projectsInside(row.folder.id)
+                                    .flatMap { tree.activeSessions(it).map(signalOf) },
                                 modifier = indent,
                                 toggle = { settings.setFolderOpen(row.folder.id, !row.open) },
                                 menu = {
@@ -690,36 +710,44 @@ private fun MinimalProjectsHome(
                             )
                             is ProjectTreeRow.ProjectRow -> Box(indent) {
                                 val project = row.project
-                                if (project.id == selected?.id) {
+                                // Projects open and close on their own, like folders,
+                                // so several can be open at once.
+                                val projectOpen = project.id !in collapsed
+                                val toggle = { settings.setFolderOpen(project.id, !projectOpen) }
+                                val menu: @Composable () -> Unit = {
+                                    ProjectMenu(
+                                        project = project,
+                                        onShortcuts = {
+                                            model.openShortcutEditor(project.id, "${project.name} shortcuts")
+                                        },
+                                        onRename = { onRenameProject(project) },
+                                        onMove = { movingId = project.id }
+                                            .takeIf { canMove(project.id, project.parentId) },
+                                        onDelete = { onDeleteProject(project) },
+                                        onContext = { contextForId = project.id },
+                                        onSecrets = { secretsForId = project.id },
+                                    )
+                                }
+                                if (projectOpen) {
                                     OpenDrawer(
                                         project = project,
                                         icon = ownerIcons[project.owner],
-                                        sessions = sessions,
+                                        sessions = tree.activeSessions(project.id),
                                         signalOf = signalOf,
                                         open = { session -> open(project, session) },
                                         actions = actions,
-                                        menu = {
-                                            ProjectMenu(
-                                                project = project,
-                                                onShortcuts = {
-                                                    model.openShortcutEditor(project.id, "${project.name} shortcuts")
-                                                },
-                                                onRename = { onRenameProject(project) },
-                                                onMove = { movingId = project.id }
-                                                    .takeIf { canMove(project.id, project.parentId) },
-                                                onDelete = { onDeleteProject(project) },
-                                                onContext = { contextForId = project.id },
-                                                onSecrets = { secretsForId = project.id },
-                                            )
-                                        },
+                                        toggle = toggle,
+                                        onNewSession = { newSessionIn(project.id) },
+                                        menu = menu,
                                     )
                                 } else {
                                     DrawerRow(
                                         project = project,
-                                        selected = false,
+                                        open = false,
                                         icon = ownerIcons[project.owner],
                                         signals = tree.activeSessions(project.id).map(signalOf),
-                                        onClick = { selectedId = project.id },
+                                        onClick = toggle,
+                                        menu = menu,
                                     )
                                 }
                             }
@@ -738,7 +766,7 @@ private fun MinimalProjectsHome(
                     }
                 }
             }
-            // The page's one New button: a session in the chosen project, a project, or a folder.
+            // The page's one New button: a session, a project, or a folder.
             // On phones it sits just above the floating bar's right end, clear of it at any width.
             // The tooltip's own layout drops alignment, so a plain box places it.
             Box(
@@ -747,9 +775,9 @@ private fun MinimalProjectsHome(
                     .padding(end = 16.dp, bottom = if (newSessionAboveBar) NewSessionBottom else 16.dp),
             ) {
                 NewMenu(
-                    sessionProject = selected?.name,
+                    canStartSession = projects.isNotEmpty(),
                     canCreateFolders = tree.canCreateFolders,
-                    onSession = { selected?.let { createSessionIn = it.id } },
+                    onSession = newSession,
                     onProject = { newProjectIn(null) },
                     onFolder = { newFolderIn(null) },
                 ) { open ->
@@ -860,23 +888,44 @@ private fun MinimalProjectsHome(
             AgentSecretsDialog(model, project.id, "${project.name} secrets", onDismiss = { secretsForId = null })
         }
     }
+    val lastSessionProject by settings.lastSessionProject.collectAsStateWithLifecycle()
     val creatingIn = projects.firstOrNull { it.id == createSessionIn }
     LaunchedEffect(createSessionIn, creatingIn == null, loading) {
         if (createSessionIn != null && creatingIn == null && !loading) createSessionIn = null
     }
-    if (creatingIn != null) key(creatingIn.id) {
-        LaunchedEffect(creatingIn.id) { model.loadCreationCatalog() }
-        NewSessionDialog(
-            projectName = creatingIn.name,
-            draftKey = "${creatingIn.id}/new",
+    if (pickingProject || creatingIn != null) {
+        LaunchedEffect(Unit) { model.loadCreationCatalog() }
+        NewSessionFlow(
+            choices = tree.projectChoices(lastSessionProject),
+            lastUsed = lastSessionProject,
+            icons = ownerIcons,
+            projectId = creatingIn?.id.takeUnless { pickingProject },
+            returnsToList = startedFromList,
+            onChoose = { id ->
+                createSessionIn = id
+                pickingProject = id == null
+                // Change goes back to the list, and Back then returns to it too.
+                if (id == null) startedFromList = true
+            },
             backends = model.hostCatalog.collectAsStateWithLifecycle().value,
             catalogError = model.hostCatalogError.collectAsStateWithLifecycle().value,
             retryCatalog = model::loadCreationCatalog,
-            places = { NewSessionPlaces.load(model.client, creatingIn.id) },
-            onDismiss = { createSessionIn = null },
-            onCreate = { title, agent, worktree, startFromRemote, effort, access, plan ->
+            places = { id -> NewSessionPlaces.load(model.client, id) },
+            onDismiss = {
                 createSessionIn = null
-                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree, startFromRemote = startFromRemote, effort = effort, access = access, plan = plan)
+                pickingProject = false
+            },
+            onCreate = { projectId, request ->
+                createSessionIn = null
+                pickingProject = false
+                settings.setLastSessionProject(projectId)
+                // Coming back to Projects, the new session's project is in view.
+                reveal(projectId)
+                model.createDirectSession(
+                    projectId, request.title, request.agent,
+                    worktree = request.worktree, startFromRemote = request.startFromRemote,
+                    effort = request.effort, access = request.access, plan = request.plan,
+                )
             },
         )
     }
@@ -1282,11 +1331,14 @@ private fun SignalMark(signal: SessionSignal, modifier: Modifier = Modifier, bac
 @Composable
 private fun DrawerRow(
     project: MinimalProject,
-    selected: Boolean,
+    open: Boolean,
     signals: List<SessionSignal>,
+    /** Opens or closes the project. */
     onClick: () -> Unit,
     /** The avatar of the account behind the project, in place of the folder icon. */
     icon: ByteArray? = null,
+    /** Starts a session here; offered on an open project. */
+    onNewSession: (() -> Unit)? = null,
     menu: (@Composable () -> Unit)? = null,
 ) {
     val faint = LocalXdSignals.current.faint
@@ -1295,13 +1347,13 @@ private fun DrawerRow(
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp),
+            .clickable(onClickLabel = if (open) "Close project" else "Open project", onClick = onClick)
+            .padding(start = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Icon(
-            painterResource(if (selected) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
+            painterResource(if (open) R.drawable.ic_chevron_down else R.drawable.ic_chevron_right),
             contentDescription = null,
             tint = faint,
             modifier = Modifier.size(14.dp),
@@ -1309,42 +1361,63 @@ private fun DrawerRow(
         OwnerAvatar(
             icon = icon,
             fallback = R.drawable.ic_folder,
-            tint = if (selected) MaterialTheme.colorScheme.onSurfaceVariant else faint,
+            tint = if (open) MaterialTheme.colorScheme.onSurfaceVariant else faint,
         )
-        Text(
-            project.name,
-            modifier = Modifier.weight(1f, fill = false),
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            color = if (selected) MaterialTheme.colorScheme.onSurface
-            else MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            project.sessions.toString(),
-            fontSize = 12.sp,
-            color = faint,
-        )
-        Spacer(Modifier.weight(1f))
+        // The name takes the room left, so the buttons line up at the end.
+        Row(
+            Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                project.name,
+                modifier = Modifier.weight(1f, fill = false),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = if (open) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                project.sessions.toString(),
+                fontSize = 12.sp,
+                color = faint,
+            )
+        }
+        // A closed project still shows which of its sessions need a look.
+        if (!open) SignalDots(signals)
+        onNewSession?.let { start ->
+            IconButton(onClick = start, modifier = Modifier.size(48.dp)) {
+                Icon(
+                    painterResource(R.drawable.ic_add),
+                    contentDescription = "New session in ${project.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
         menu?.invoke()
-        if (!selected) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                signals.filter { it != SessionSignal.IDLE }.take(5).forEach { signal ->
-                    if (signal == SessionSignal.BACKGROUND) {
-                        BackgroundRing(signal.color(), size = 6.dp)
-                    } else {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(signal.color()),
-                        )
-                    }
-                }
+    }
+}
+
+/** A dot for each of up to five sessions that need a look; quiet ones draw nothing. */
+@Composable
+private fun SignalDots(signals: List<SessionSignal>) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        signals.filter { it != SessionSignal.IDLE }.take(5).forEach { signal ->
+            if (signal == SessionSignal.BACKGROUND) {
+                BackgroundRing(signal.color(), size = 6.dp)
+            } else {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(signal.color()),
+                )
             }
         }
     }
@@ -1412,7 +1485,7 @@ private const val NEEDS_NEWER_HOST = "Needs a newer xd host"
 
 /** An account's avatar, or [fallback] until the host has one to show. */
 @Composable
-private fun OwnerAvatar(icon: ByteArray?, fallback: Int, tint: Color, size: Dp = 16.dp) {
+internal fun OwnerAvatar(icon: ByteArray?, fallback: Int, tint: Color, size: Dp = 16.dp) {
     val bitmap = remember(icon) {
         icon?.let { runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull() }
     }
@@ -1440,13 +1513,13 @@ private fun MenuLabel(label: String, detail: String? = null) {
 }
 
 /**
- * The page's New button and the menu it opens above itself: a session in [sessionProject]
- * when there is one, a project, or a folder, as the desktop's + offers. New session sits
- * last, nearest the button.
+ * The page's New button and the menu it opens above itself: a session when there is a
+ * project to hold one, a project, or a folder, as the desktop's + offers. New session sits
+ * last, nearest the button, and asks which project when there is more than one.
  */
 @Composable
 private fun NewMenu(
-    sessionProject: String?,
+    canStartSession: Boolean,
     canCreateFolders: Boolean,
     onSession: () -> Unit,
     onProject: () -> Unit,
@@ -1468,9 +1541,9 @@ private fun NewMenu(
                 leadingIcon = { Icon(painterResource(R.drawable.ic_projects), contentDescription = null) },
                 onClick = { open = false; onProject() },
             )
-            sessionProject?.let { project ->
+            if (canStartSession) {
                 DropdownMenuItem(
-                    text = { MenuLabel("New session", "in $project") },
+                    text = { Text("New session") },
                     leadingIcon = { Icon(painterResource(R.drawable.ic_sessions), contentDescription = null) },
                     onClick = { open = false; onSession() },
                 )
@@ -1485,6 +1558,8 @@ private fun FolderRow(
     folder: MinimalFolder,
     open: Boolean,
     icon: ByteArray?,
+    /** What the sessions of every project inside need, shown while it is closed. */
+    signals: List<SessionSignal>,
     toggle: () -> Unit,
     modifier: Modifier = Modifier,
     menu: @Composable () -> Unit,
@@ -1507,17 +1582,24 @@ private fun FolderRow(
             modifier = Modifier.size(14.dp),
         )
         OwnerAvatar(icon = icon, fallback = R.drawable.ic_folders, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(
-            folder.name,
-            modifier = Modifier.weight(1f, fill = false),
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(folder.items.toString(), fontSize = 12.sp, color = faint)
-        Spacer(Modifier.weight(1f))
+        Row(
+            Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                folder.name,
+                modifier = Modifier.weight(1f, fill = false),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(folder.items.toString(), fontSize = 12.sp, color = faint)
+        }
+        // A closed folder shows which of the sessions inside need a look.
+        if (!open) SignalDots(signals)
         menu()
     }
 }
@@ -1741,7 +1823,7 @@ private fun MoveRow(
     }
 }
 
-/** The current project, open, with one row per session beneath it. */
+/** An open project, with one row per session beneath it. */
 @Composable
 private fun OpenDrawer(
     project: MinimalProject,
@@ -1750,6 +1832,9 @@ private fun OpenDrawer(
     signalOf: (MinimalSession) -> SessionSignal,
     open: (MinimalSession) -> Unit,
     actions: SessionActions,
+    /** Closes the project. */
+    toggle: () -> Unit,
+    onNewSession: () -> Unit,
     menu: @Composable () -> Unit,
 ) {
     Column(
@@ -1758,12 +1843,21 @@ private fun OpenDrawer(
             .padding(vertical = 4.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        DrawerRow(project = project, selected = true, signals = emptyList(), onClick = {}, icon = icon, menu = menu)
+        DrawerRow(
+            project = project,
+            open = true,
+            signals = emptyList(),
+            onClick = toggle,
+            icon = icon,
+            onNewSession = onNewSession,
+            menu = menu,
+        )
+        // Kept to one quiet line: several empty projects can be open at once.
         if (sessions.isEmpty()) {
             Text(
-                "No sessions yet. Start one with Codex, Claude, or JCode.",
-                modifier = Modifier.padding(start = 30.dp, end = 10.dp, top = 4.dp, bottom = 8.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                "No sessions yet",
+                modifier = Modifier.padding(start = 30.dp, end = 10.dp, bottom = 6.dp),
+                color = LocalXdSignals.current.faint,
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -2024,405 +2118,6 @@ private fun EmptyCard(text: String) {
             .padding(20.dp),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-}
-
-@Composable
-internal fun NewSessionDialog(
-    projectName: String,
-    draftKey: String? = null,
-    backends: List<com.restartfu.xd.protocol.BackendReply> = emptyList(),
-    catalogError: String? = null,
-    retryCatalog: (() -> Unit)? = null,
-    chatTab: Boolean = false,
-    /** Where a new session can work; null for a chat joining an existing session. */
-    places: (suspend () -> NewSessionPlaces)? = null,
-    onDismiss: () -> Unit,
-    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?, Boolean, String?, String?, Boolean?) -> Unit,
-) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val drafts = remember(context) { context.getSharedPreferences("new-chat-drafts", android.content.Context.MODE_PRIVATE) }
-    val restored = remember(draftKey) { runCatching { org.json.JSONObject(draftKey?.let { drafts.getString(it, null) } ?: "{}") }.getOrDefault(org.json.JSONObject()) }
-    var title by rememberSaveable(draftKey) { mutableStateOf(restored.optString("title")) }
-    var agent by rememberSaveable(draftKey) { mutableStateOf(DirectAgent.entries.firstOrNull { it.wire == restored.optString("agent") } ?: DirectAgent.CODEX) }
-    var effort by rememberSaveable(draftKey) { mutableStateOf(restored.optString("effort").takeIf(String::isNotBlank)) }
-    var access by rememberSaveable(draftKey) { mutableStateOf(restored.optString("access").takeIf(String::isNotBlank)) }
-    var plan by rememberSaveable(draftKey) { mutableStateOf(restored.optBoolean("plan")) }
-    var startFromRemote by rememberSaveable(draftKey) { mutableStateOf(restored.optBoolean("startFromRemote", true)) }
-    var loaded by remember { mutableStateOf<NewSessionPlaces?>(null) }
-    var placesError by remember { mutableStateOf<String?>(null) }
-    var worktree by rememberSaveable(draftKey, stateSaver = WorktreeChoiceSaver) {
-        mutableStateOf<Ops.NewSessionWorktree?>(runCatching {
-            val saved = restored.optJSONObject("worktree") ?: return@runCatching null
-            when (saved.optString("kind")) {
-                "new" -> Ops.NewSessionWorktree.New
-                "existing" -> Ops.NewSessionWorktree.Existing(saved.getString("path"))
-                "branch" -> Ops.NewSessionWorktree.Branch(saved.getString("ref"), saved.getString("oid"))
-                "pull-request" -> Ops.NewSessionWorktree.PullRequest(saved.getLong("number"), saved.getString("oid"))
-                else -> null
-            }
-        }.getOrNull())
-    }
-    androidx.compose.runtime.LaunchedEffect(draftKey, title, agent, effort, access, plan, worktree, startFromRemote) {
-        draftKey?.let { key ->
-            drafts.edit().putString(key, org.json.JSONObject().put("title", title).put("agent", agent.wire)
-                .put("effort", effort).put("access", access).put("plan", plan).put("startFromRemote", startFromRemote)
-                .put("worktree", worktree?.let { choice ->
-                    org.json.JSONObject().apply {
-                        when (choice) {
-                            Ops.NewSessionWorktree.New -> put("kind", "new")
-                            is Ops.NewSessionWorktree.Existing -> { put("kind", "existing"); put("path", choice.path) }
-                            is Ops.NewSessionWorktree.Branch -> { put("kind", "branch"); put("ref", choice.reference); put("oid", choice.oid) }
-                            is Ops.NewSessionWorktree.PullRequest -> { put("kind", "pull-request"); put("number", choice.number); put("oid", choice.oid) }
-                        }
-                    }
-                }).toString()).apply()
-        }
-    }
-    if (places != null) {
-        LaunchedEffect(Unit) {
-            try {
-                val found = places()
-                loaded = found
-                worktree = found.reconcile(worktree)
-            } catch (error: kotlinx.coroutines.CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                // The host still picks the project's own checkout, so a choice
-                // restored from before a rotation is dropped rather than sent unseen.
-                worktree = null
-                placesError = error.message ?: "Could not list where a session can work"
-            }
-        }
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(if (chatTab) "New chat" else "New session") },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text(projectName, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    label = { Text("What are you working on?") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    DirectAgent.entries.forEach { candidate ->
-                        FilterChip(
-                            selected = agent == candidate,
-                            onClick = { agent = candidate; effort = null },
-                            label = { Text(candidate.label) },
-                            leadingIcon = { BackendIcon(candidate.wire, size = 16.dp) },
-                        )
-                    }
-                }
-                if (retryCatalog != null && backends.isEmpty()) {
-                    Text(catalogError ?: "Loading assistant options…", style = MaterialTheme.typography.bodySmall)
-                    if (catalogError != null) TextButton(onClick = retryCatalog) { Text("Retry") }
-                }
-                val efforts = backends.firstOrNull { it.id == agent.wire }?.efforts.orEmpty()
-                if (efforts.isNotEmpty()) CreationOption("Reasoning effort", effort ?: "Default", listOf("Default") + efforts) { effort = it.takeUnless { it == "Default" } }
-                CreationOption("Workspace access", if (plan) "Read only" else when (access) { "read-only" -> "Read only"; "edit" -> "Edit"; "full" -> "Full access"; else -> "Default" },
-                    listOf("Default", "Read only", "Edit", "Full access"), enabled = !plan) {
-                    access = when (it) { "Read only" -> "read-only"; "Edit" -> "edit"; "Full access" -> "full"; else -> null }
-                }
-                CreationOption("Chat mode", if (plan) "Plan" else "Build", listOf("Build", "Plan")) { plan = it == "Plan" }
-                if (places != null) {
-                    if (worktree is Ops.NewSessionWorktree.Branch) {
-                        SettingSwitch(
-                            title = "Start from remote",
-                            detail = "Use the latest remote branch when available.",
-                            checked = startFromRemote,
-                            onCheckedChange = { startFromRemote = it },
-                        )
-                    }
-                    WorkspacePicker(
-                        places = loaded,
-                        error = placesError,
-                        selected = worktree,
-                        onSelect = { worktree = it },
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onCreate(title.trim(), agent, worktree, startFromRemote, effort?.takeIf { it in backends.firstOrNull { b -> b.id == agent.wire }?.efforts.orEmpty() }, access, plan) },
-                // Wait for the choices, as the desktop does; if they cannot be
-                // read, the host's own default checkout still works.
-                // Only once this opening's choices have loaded, even if a choice
-                // was restored from before a rotation; a project with no
-                // checkout to list leaves the choice to the host, as before.
-                enabled = (retryCatalog == null || backends.isNotEmpty()) &&
-                    (places == null || placesError != null ||
-                    (loaded != null && (worktree != null || loaded?.default == null))),
-            ) {
-                Text(if (chatTab) "Create chat" else "Create session")
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun CreationOption(label: String, value: String, choices: List<String>, enabled: Boolean = true, onSelect: (String) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodyMedium)
-        Box {
-            TextButton(onClick = { open = true }, enabled = enabled) { Text(value) }
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                choices.forEach { choice -> DropdownMenuItem(text = { Text(choice) }, onClick = { open = false; onSelect(choice) }) }
-            }
-        }
-    }
-}
-
-/** Where a new session in a project can work, as the desktop's new session dialog offers. */
-internal data class NewSessionPlaces(
-    val worktrees: List<WorktreeReply>,
-    val canCreateWorktree: Boolean,
-    val branches: List<BranchSourceReply>,
-    val pullRequests: List<PullRequestSourceReply>,
-    val pullRequestError: String?,
-    /** Why branches and pull requests could not be listed at all. */
-    val sourcesError: String? = null,
-) {
-    /**
-     * A choice restored from before a rotation, matched against what the host
-     * lists now: a branch or pull request keeps its identity with its current
-     * commit, and anything no longer offered falls back to the default.
-     */
-    fun reconcile(choice: Ops.NewSessionWorktree?): Ops.NewSessionWorktree? = when (choice) {
-        null -> default
-        Ops.NewSessionWorktree.New -> if (canCreateWorktree) choice else default
-        is Ops.NewSessionWorktree.Existing -> if (worktrees.any { it.path == choice.path }) choice else default
-        // A failed listing says nothing about whether the choice still exists,
-        // so it is kept, and the host checks its commit again on creating.
-        is Ops.NewSessionWorktree.Branch -> if (sourcesError != null) choice else
-            branches.firstOrNull { it.reference == choice.reference }
-                ?.let { Ops.NewSessionWorktree.Branch(it.reference, it.oid) } ?: default
-        // Pull requests can fail to list on their own, while branches still list.
-        is Ops.NewSessionWorktree.PullRequest -> if (sourcesError != null || pullRequestError != null) choice else
-            pullRequests.firstOrNull { it.number == choice.number }
-                ?.let { Ops.NewSessionWorktree.PullRequest(it.number, it.oid) } ?: default
-    }
-
-    /** The checkout in use, else the project's own, as the desktop picks. */
-    val default: Ops.NewSessionWorktree?
-        get() = (worktrees.firstOrNull { it.current } ?: worktrees.firstOrNull { it.main } ?: worktrees.firstOrNull())
-            ?.let { Ops.NewSessionWorktree.Existing(it.path) }
-
-    companion object {
-        suspend fun load(client: com.restartfu.xd.XdClient, folderId: String): NewSessionPlaces = coroutineScope {
-            val settings = async { client.folderSettings(folderId) }
-            // Branches and pull requests are extras: a project without Git, or a
-            // host without them, still offers its checkouts.
-            val sources = async { runCatching { client.newChatSources(folderId) } }
-            val folder = settings.await()
-            val listed = sources.await()
-            val found = listed.getOrNull()
-            val worktrees = folder.worktrees.ifEmpty {
-                listOfNotNull(folder.effectiveWorkdir?.takeIf(String::isNotBlank)?.let {
-                    WorktreeReply(path = it, detached = false, main = true, current = true)
-                })
-            }
-            NewSessionPlaces(
-                worktrees = worktrees,
-                canCreateWorktree = folder.canCreateWorktree,
-                branches = found?.branches.orEmpty(),
-                pullRequests = found?.pullRequests.orEmpty(),
-                pullRequestError = found?.pullRequestError,
-                sourcesError = listed.exceptionOrNull()?.let { it.message ?: "Could not list branches and pull requests" },
-            )
-        }
-    }
-}
-
-/**
- * A checkout, a new worktree, a branch, or an open pull request. Branches and
- * pull requests get their own managed worktree on the host.
- */
-@Composable
-private fun WorkspacePicker(
-    places: NewSessionPlaces?,
-    error: String?,
-    selected: Ops.NewSessionWorktree?,
-    onSelect: (Ops.NewSessionWorktree) -> Unit,
-) {
-    var filter by rememberSaveable { mutableStateOf("") }
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text("Workspace", style = MaterialTheme.typography.titleSmall)
-        when {
-            error != null -> Text(
-                "$error The project's own checkout will be used.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            places == null -> Text(
-                "Reading the project's checkouts…",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            else -> {
-                // New worktree comes first, as on the desktop.
-                if (places.canCreateWorktree) {
-                    PlaceRow(
-                        label = "New worktree",
-                        detail = "A fresh branch in its own checkout",
-                        chosen = selected == Ops.NewSessionWorktree.New,
-                        onClick = { onSelect(Ops.NewSessionWorktree.New) },
-                    )
-                }
-                places.worktrees.forEach { checkout ->
-                    PlaceRow(
-                        label = checkout.branch ?: checkout.path.substringAfterLast('/'),
-                        detail = if (checkout.main) "Project directory" else checkout.path,
-                        chosen = selected == Ops.NewSessionWorktree.Existing(checkout.path),
-                        onClick = { onSelect(Ops.NewSessionWorktree.Existing(checkout.path)) },
-                    )
-                }
-                if (places.branches.isNotEmpty() || places.pullRequests.isNotEmpty()) {
-                    OutlinedTextField(
-                        value = filter,
-                        onValueChange = { filter = it },
-                        label = { Text("Find a branch or pull request") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                    )
-                    val query = filter.trim()
-                    // The chosen one always shows, whatever the filter and limit hide.
-                    places.pullRequests
-                        .filter { query.isEmpty() || it.title.contains(query, true) || "#${it.number}".contains(query) }
-                        .take(PLACE_LIMIT)
-                        .let { shown ->
-                            val chosen = (selected as? Ops.NewSessionWorktree.PullRequest)?.number
-                            shown + places.pullRequests.filter { it.number == chosen && it !in shown }
-                        }
-                        .forEach { pull ->
-                            PlaceRow(
-                                label = "#${pull.number} ${pull.title}",
-                                detail = "Pull request",
-                                chosen = selected == Ops.NewSessionWorktree.PullRequest(pull.number, pull.oid),
-                                onClick = { onSelect(Ops.NewSessionWorktree.PullRequest(pull.number, pull.oid)) },
-                            )
-                        }
-                    places.branches
-                        .filter { query.isEmpty() || it.name.contains(query, true) }
-                        .take(PLACE_LIMIT)
-                        .let { shown ->
-                            val chosen = (selected as? Ops.NewSessionWorktree.Branch)?.reference
-                            shown + places.branches.filter { it.reference == chosen && it !in shown }
-                        }
-                        .forEach { branch ->
-                            PlaceRow(
-                                label = branch.name,
-                                detail = "Branch",
-                                chosen = selected == Ops.NewSessionWorktree.Branch(branch.reference, branch.oid),
-                                onClick = { onSelect(Ops.NewSessionWorktree.Branch(branch.reference, branch.oid)) },
-                                mono = true,
-                            )
-                        }
-                }
-                // A choice kept through a failed listing still shows, so Create
-                // never uses something the picker does not show.
-                when (val kept = selected) {
-                    is Ops.NewSessionWorktree.PullRequest -> if (places.pullRequests.none { it.number == kept.number }) {
-                        PlaceRow(
-                            label = "#${kept.number}",
-                            detail = "Pull request, chosen before it could be listed",
-                            chosen = true,
-                            onClick = {},
-                        )
-                    }
-                    is Ops.NewSessionWorktree.Branch -> if (places.branches.none { it.reference == kept.reference }) {
-                        PlaceRow(
-                            label = kept.reference.removePrefix("refs/heads/").removePrefix("refs/remotes/"),
-                            detail = "Branch, chosen before it could be listed",
-                            chosen = true,
-                            onClick = {},
-                            mono = true,
-                        )
-                    }
-                    else -> Unit
-                }
-                places.sourcesError?.let {
-                    Text(
-                        "Branches and pull requests could not be listed: $it",
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                places.pullRequestError?.let {
-                    Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-        }
-    }
-}
-
-/** Keeps a workspace choice across rotation. */
-private val WorktreeChoiceSaver = listSaver<Ops.NewSessionWorktree?, String>(
-    save = { choice ->
-        when (choice) {
-            null -> emptyList()
-            Ops.NewSessionWorktree.New -> listOf("new")
-            is Ops.NewSessionWorktree.Existing -> listOf("existing", choice.path)
-            is Ops.NewSessionWorktree.Branch -> listOf("branch", choice.reference, choice.oid)
-            is Ops.NewSessionWorktree.PullRequest -> listOf("pull-request", choice.number.toString(), choice.oid)
-        }
-    },
-    restore = { saved ->
-        when (saved.firstOrNull()) {
-            "new" -> Ops.NewSessionWorktree.New
-            "existing" -> Ops.NewSessionWorktree.Existing(saved[1])
-            "branch" -> Ops.NewSessionWorktree.Branch(saved[1], saved[2])
-            "pull-request" -> Ops.NewSessionWorktree.PullRequest(saved[1].toLong(), saved[2])
-            else -> null
-        }
-    },
-)
-
-/** Branches and pull requests shown at once; the filter finds the rest. */
-private const val PLACE_LIMIT = 12
-
-@Composable
-private fun PlaceRow(label: String, detail: String, chosen: Boolean, onClick: () -> Unit, mono: Boolean = false) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 48.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        RadioButton(selected = chosen, onClick = null)
-        Column(Modifier.weight(1f)) {
-            Text(
-                label,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                fontFamily = if (mono) XdMonoFamily else null,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Text(
-                detail,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = LocalXdSignals.current.faint,
-                style = MaterialTheme.typography.labelSmall,
-            )
-        }
-    }
 }
 
 @Composable

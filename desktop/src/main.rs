@@ -115,7 +115,7 @@ use input::{
 use minimal::{
     AgentCli, MinimalRoute, ProjectCard, SessionCard, SettledCard, age_label, folder_tree,
     next_active_session, project_cards, project_sessions, reconcile_route, resumable_session,
-    settled_cards,
+    settled_cards, tree_descendants,
 };
 use selection::{TextSelection, selectable_in_document, selectable_links_in_document};
 use settings::{AppSettings, BrowserState, ThemePreset};
@@ -165,6 +165,7 @@ const ARROW_RIGHT_ICON: &str = "icons/arrow-right.svg";
 const ROTATE_CW_ICON: &str = "icons/rotate-cw.svg";
 const EXTERNAL_LINK_ICON: &str = "icons/external-link.svg";
 const CHECK_ICON: &str = "icons/check.svg";
+const REPLY_ICON: &str = "icons/reply.svg";
 const UNDO_ICON: &str = "icons/undo.svg";
 const SIDE_LAYOUT_ICON: &str = "icons/panel-right.svg";
 const BOTTOM_LAYOUT_ICON: &str = "icons/panel-bottom.svg";
@@ -574,6 +575,11 @@ fn first_line(text: &str) -> String {
 }
 
 /// A small status label on a soft tint of its own color.
+/// The caption on a message sent in reply to a question.
+fn answered_question_label(question: &str) -> String {
+    format!("Answering “{}”", question.trim())
+}
+
 fn stamp(label: impl Into<SharedString>, color: u32) -> gpui::AnyElement {
     pill(label, color)
 }
@@ -1623,6 +1629,9 @@ struct TranscriptSnapshot {
     /// Each row's place in its work log, kept with the rows so measuring a long
     /// log need not compare its text again for every row.
     work_runs: Arc<Vec<Option<WorkRun>>>,
+    /// For each row the user sent in reply to a tagged question, that
+    /// question, so the bubble can say what it answers.
+    answered_questions: Arc<Vec<Option<String>>>,
 }
 
 impl TranscriptSnapshot {
@@ -1657,6 +1666,42 @@ impl TranscriptSnapshot {
     fn sync_derived_rows(&mut self) {
         self.sync_running_agents();
         self.sync_work_runs();
+        self.sync_answered_questions();
+    }
+
+    /// A user row answers the question a reply asked when that reply is the
+    /// row before it, as `sync_question_from_history` reads a waiting one.
+    ///
+    /// Only a reply with a message right after it is parsed, so a live update
+    /// does not read every reply in a long chat again.
+    fn sync_answered_questions(&mut self) {
+        let mut reply: Option<&Message> = None;
+        self.answered_questions = Arc::new(
+            self.messages
+                .iter()
+                .chain(self.live_items.iter())
+                .map(|message| match message.role.as_str() {
+                    // The turn's duration sits between a reply and the answer.
+                    "duration" => None,
+                    "user" => reply
+                        .take()
+                        .and_then(|reply| markdown::ask(&reply.content))
+                        .map(|ask| ask.question),
+                    "assistant" => {
+                        reply = Some(message);
+                        None
+                    }
+                    _ => {
+                        reply = None;
+                        None
+                    }
+                })
+                .collect(),
+        );
+    }
+
+    fn answered_question(&self, index: usize) -> Option<&str> {
+        self.answered_questions.get(index)?.as_deref()
     }
 
     fn sync_running_agents(&mut self) {
@@ -2176,7 +2221,6 @@ struct XdDesktop {
     sidebar_move_destination: Option<Option<String>>,
     collapsed_folders: HashSet<String>,
     /// Drawers other than the current project that the user opened by hand.
-    opened_drawers: HashSet<String>,
     /// Filters the catalog to projects and sessions whose names match.
     catalog_find_input: Entity<ComposerInput>,
     catalog_query: String,
@@ -2844,7 +2888,6 @@ impl XdDesktop {
             sidebar_move_submitting: false,
             sidebar_move_destination: None,
             collapsed_folders,
-            opened_drawers: HashSet::new(),
             catalog_find_input,
             catalog_query: String::new(),
             creating_workspace: false,
@@ -7282,6 +7325,13 @@ impl XdDesktop {
         self.new_chat_default_branch = None;
         self.new_chat_query.clear();
         self.new_chat_menu = None;
+        // A new chat starts without the browser the last view had open. Focus
+        // goes to the message box below, not where closing a browser, now or
+        // just before, sends it.
+        if self.browser_is_open() {
+            self.close_browser(cx);
+        }
+        self.browser_restore_focus = false;
         self.restore_new_chat_choices(&folder_id);
         self.new_chat_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
@@ -10365,10 +10415,19 @@ impl XdDesktop {
             return;
         };
         // A file still being read would be left behind for the next message.
-        if text.is_empty()
-            || !self.model.draft_attachments.is_empty()
-            || self.attachments_reading > 0
-        {
+        if self.attachments_reading > 0 {
+            return;
+        }
+        // The queue op carries text alone. A send that arrives mid-turn is
+        // queued by the host with its files saved and referenced, so that is
+        // how a draft with files is queued.
+        if !self.model.draft_attachments.is_empty() {
+            if self.model.working {
+                self.submit_composer(false, cx);
+            }
+            return;
+        }
+        if text.is_empty() {
             return;
         }
         let Some(host) = self.active_host().cloned() else {
@@ -11246,7 +11305,7 @@ impl XdDesktop {
         {
             self.pending_minimal_session = None;
         }
-        self.select_minimal_session(project_id, chat_id, agent, cx);
+        self.route_minimal_session(project_id, chat_id, agent, true, cx);
         let focus = self.composer_input.read(cx).focus_handle(cx);
         window.focus(&focus);
         cx.notify();
@@ -11304,6 +11363,20 @@ impl XdDesktop {
         agent: AgentCli,
         cx: &mut Context<Self>,
     ) {
+        self.route_minimal_session(project_id, chat_id, agent, false, cx);
+    }
+
+    /// Shows a chat. Another chat always opens on its newest message; with
+    /// `land_on_newest`, so does the chat already selected, which keeps its
+    /// place otherwise (a tree update that re-routes to it, say).
+    fn route_minimal_session(
+        &mut self,
+        project_id: String,
+        chat_id: String,
+        agent: AgentCli,
+        land_on_newest: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.model.selected_chat.as_deref() != Some(chat_id.as_str())
             && !self.flush_draft_before_navigation()
         {
@@ -11334,7 +11407,9 @@ impl XdDesktop {
         let same_workspace = self.model.selected_chat.as_deref().is_some_and(|current| {
             self.model.session_key_for_chat(current) == self.model.session_key_for_chat(&chat_id)
         });
-        if self.model.selected_chat.as_deref() != Some(chat_id.as_str()) {
+        let reopened = self.model.selected_chat.as_deref() == Some(chat_id.as_str());
+        let land_on_newest = land_on_newest && reopened;
+        if !reopened {
             if !same_workspace {
                 self.native_pane = NativePane::Chat;
                 self.bottom_terminal_open = false;
@@ -11367,7 +11442,18 @@ impl XdDesktop {
         self.sync_terminal_input_mode(cx);
         self.transcript_loading = !self.transcript_loaded;
         self.request_chat(&chat_id);
-        self.request_messages(&chat_id);
+        if land_on_newest && self.transcript_has_newer {
+            // The reader paged back far enough to drop the newest rows; going
+            // into the chat shows them again, and the tail page lands pinned.
+            self.request_message_page(&chat_id, MessageCursor::Tail);
+        } else {
+            self.request_messages(&chat_id);
+        }
+        if land_on_newest {
+            // Going into a chat lands on its newest message, even the one
+            // already selected and scrolled back through.
+            self.pin_transcript();
+        }
         self.list_tree_directory(String::new(), cx);
         let _ = self.request_git_state(&chat_id);
         cx.notify();
@@ -12544,15 +12630,11 @@ impl XdDesktop {
         cx.notify();
     }
 
-    fn toggle_drawer(&mut self, project_id: String, current: bool, cx: &mut Context<Self>) {
-        if current {
-            self.toggle_folder_collapsed(project_id, cx);
-        } else {
-            if !self.opened_drawers.remove(&project_id) {
-                self.opened_drawers.insert(project_id);
-            }
-            cx.notify();
-        }
+    /// Whether a project shows its sessions. Every project opens and closes on
+    /// its own, like a folder, and starts open; what is closed is saved per
+    /// connection, so it stays as it was left after a restart, as on Android.
+    fn project_open(&self, project_id: &str, finding: bool) -> bool {
+        finding || !self.collapsed_folders.contains(project_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -12995,6 +13077,7 @@ impl XdDesktop {
         indent: Pixels,
         open: bool,
         held: usize,
+        signals: &[SessionSignal],
         folders: Rc<[Folder]>,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
@@ -13084,6 +13167,7 @@ impl XdDesktop {
                     .child(held.to_string()),
             )
             .child(div().flex_1())
+            .when(!open, |header| header.child(drawer_tabs(signals, colors)))
             .child(
                 div()
                     .id(("catalog-folder-add", index))
@@ -13328,7 +13412,7 @@ impl XdDesktop {
         }
         let mut matches = 0usize;
         let mut hidden_below = None;
-        for row in &tree {
+        for (position, row) in tree.iter().enumerate() {
             let project_index = row.index;
             let project = &projects[project_index];
             let indent = px(row.depth as f32 * CATALOG_INDENT);
@@ -13349,6 +13433,17 @@ impl XdDesktop {
                     .iter()
                     .filter(|parent| **parent == Some(project_index))
                     .count();
+                // A closed folder hides its projects, so it carries their
+                // signals the way a closed project carries its sessions'.
+                let signals = if open {
+                    Vec::new()
+                } else {
+                    tree_descendants(&tree, position)
+                        .filter(|row| !folders[row.index].group)
+                        .flat_map(|row| project_sessions(&folders[row.index].id, &active_chats))
+                        .map(|session| self.session_signal(&session))
+                        .collect()
+                };
                 drawers.push(self.render_folder_group(
                     colors,
                     project,
@@ -13356,6 +13451,7 @@ impl XdDesktop {
                     indent,
                     open,
                     held,
+                    &signals,
                     folders.clone(),
                     cx,
                 ));
@@ -13375,12 +13471,7 @@ impl XdDesktop {
                 }
             }
             matches += 1;
-            let open = finding
-                || if current {
-                    !self.collapsed_folders.contains(&project.id)
-                } else {
-                    self.opened_drawers.contains(&project.id)
-                };
+            let open = self.project_open(&project.id, finding);
             let signals = sessions
                 .iter()
                 .map(|session| self.session_signal(session))
@@ -13441,7 +13532,7 @@ impl XdDesktop {
                 .cursor_pointer()
                 .hover(|style| style.bg(rgb(colors.surface_high)))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_drawer(toggle_project.clone(), current, cx);
+                    this.toggle_folder_collapsed(toggle_project.clone(), cx);
                 }))
                 .when(self.model.folder_reorder_supported, |header| {
                     header.on_drag(drag_payload, move |drag, position, _, cx| {
@@ -15167,6 +15258,7 @@ impl XdDesktop {
         expanded: bool,
         images: &MessageImages,
         column: f32,
+        answering: Option<&str>,
     ) -> gpui::AnyElement {
         let role = message.role.as_str();
         if role == "duration" {
@@ -15365,6 +15457,27 @@ impl XdDesktop {
                 })
                 .child("Copy")
         });
+        // What the message answers, attached above it like a reply's quote.
+        let answered = answering.filter(|_| user).map(|question| {
+            div()
+                .debug_selector(|| "native-answered-question".into())
+                .max_w(px(column.min(600.0)))
+                .min_w_0()
+                .mb(px(4.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(px(11.5))
+                .text_color(rgb(colors.faint))
+                .child(icon(REPLY_ICON, 12.0, colors.faint))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink()
+                        .child(truncating_label(answered_question_label(question))),
+                )
+        });
         div()
             .id(("native-message", index))
             .group("native-message")
@@ -15372,6 +15485,7 @@ impl XdDesktop {
             .flex()
             .flex_col()
             .when(user, |row| row.items_end())
+            .children(answered)
             .child(card)
             .children(copy)
             .child(div().h(px(if user { 10.0 } else { 6.0 })))
@@ -15891,6 +16005,7 @@ impl XdDesktop {
                         expanded_activities.contains(&message.id.unwrap_or(-(index as i64) - 1)),
                         &message_images,
                         column,
+                        messages.answered_question(index),
                     )))
                     .into_any_element()
             })
@@ -16038,10 +16153,15 @@ impl XdDesktop {
             && !self.sending
             && self.attachments_reading == 0
             && (!self.composer.trim().is_empty() || !self.model.draft_attachments.is_empty());
+        // A draft with files is queued by sending it, which queues only while
+        // a turn runs, and waits on a send in flight like the send button does.
         let can_queue = self.model.connected
-            && !self.composer.trim().is_empty()
-            && self.model.draft_attachments.is_empty()
-            && self.attachments_reading == 0;
+            && self.attachments_reading == 0
+            && if self.model.draft_attachments.is_empty() {
+                !self.composer.trim().is_empty()
+            } else {
+                self.model.working && !self.sending
+            };
         let working = self.model.working;
         // Between turns, the background agents and shells still running.
         let waiting_on = if working {
@@ -19591,6 +19711,9 @@ impl AssetSource for EmbeddedIcons {
             CHECK_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/check.svg").as_slice(),
             )),
+            REPLY_ICON => Some(Cow::Borrowed(
+                include_bytes!("../assets/icons/reply.svg").as_slice(),
+            )),
             SIDE_LAYOUT_ICON => Some(Cow::Borrowed(
                 include_bytes!("../assets/icons/panel-right.svg").as_slice(),
             )),
@@ -21024,6 +21147,42 @@ Binary files /dev/null and b/image.png differ\n";
     }
 
     #[gpui::test]
+    fn an_answer_in_the_transcript_carries_its_question(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "claude".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Claude,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages = Arc::new(vec![
+                Message::new(
+                    Some(1),
+                    "assistant",
+                    "<ask>\nWhich region?\n- us-east-1\n- eu-west-1\n</ask>",
+                    None,
+                ),
+                Message::new(Some(2), "duration", "3", None),
+                Message::new(Some(3), "user", "eu-west-1", None),
+            ]);
+            desktop.transcript_snapshot.sync_derived_rows();
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(1100.0), px(800.0)));
+        cx.run_until_parked();
+        let caption = cx.debug_bounds("native-answered-question").unwrap();
+        let composer = cx.debug_bounds("chat-composer").unwrap();
+        assert!(caption.bottom() < composer.top());
+    }
+
+    #[gpui::test]
     fn dragging_across_a_code_block_selects_its_text(cx: &mut gpui::TestAppContext) {
         let code = "first line of code\nsecond line of code";
         let cx = table_transcript(cx, 1100.0, &format!("Run this:\n\n```sh\n{code}\n```"));
@@ -21150,6 +21309,71 @@ Binary files /dev/null and b/image.png differ\n";
                 .bounds_for_item(0)
                 .expect("first message is reachable");
             assert!(first.top() >= desktop.transcript.viewport_bounds().top() - px(1.0));
+        });
+    }
+
+    #[gpui::test]
+    fn going_into_the_open_chat_lands_on_its_newest_message(cx: &mut gpui::TestAppContext) {
+        install_embedded_fonts(cx.text_system()).unwrap();
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, _| {
+            desktop.model = grouped_workspace_fixture();
+            desktop.model.select_chat("implementation");
+            desktop.model.backend = "codex".into();
+            desktop.minimal_route = MinimalRoute::Cli {
+                project_id: "atlas".into(),
+                chat_id: "implementation".into(),
+                agent: AgentCli::Codex,
+            };
+            desktop.settings.browser_sessions.clear();
+            desktop.transcript_snapshot.messages = Arc::new(
+                (0..12)
+                    .map(|index| {
+                        Message::new(
+                            Some(index),
+                            "assistant",
+                            format!("Message {index}. {}", "A long paragraph. ".repeat(40)),
+                            None,
+                        )
+                    })
+                    .collect(),
+            );
+            desktop.transcript_loaded = true;
+            desktop.transcript_loading = false;
+            desktop.sync_transcript_count(true);
+        });
+        cx.simulate_resize(size(px(760.0), px(560.0)));
+        cx.run_until_parked();
+        let scroll_back = |desktop: &mut XdDesktop| {
+            desktop.transcript.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            assert!(!desktop.transcript_pinned());
+        };
+
+        // A tree update that routes to the open chat leaves the reader's place.
+        desktop.update(cx, |desktop, cx| {
+            scroll_back(desktop);
+            desktop.select_minimal_session(
+                "atlas".into(),
+                "implementation".into(),
+                AgentCli::Codex,
+                cx,
+            );
+            assert!(!desktop.transcript_pinned());
+        });
+
+        // Going into it, from the sidebar say, shows the newest message.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_minimal_session(
+                "atlas".into(),
+                "implementation".into(),
+                AgentCli::Codex,
+                window,
+                cx,
+            );
+            assert!(desktop.transcript_pinned());
         });
     }
 
@@ -21385,6 +21609,47 @@ Binary files /dev/null and b/image.png differ\n";
         let mut snapshot = TranscriptSnapshot::default();
         snapshot.sync_messages(&model);
         snapshot
+    }
+
+    #[test]
+    fn a_message_sent_right_after_a_question_says_what_it_answers() {
+        let mut model = AppModel::default();
+        let ask = "Ready.\n\n<ask>\nWhich region?\n- us-east-1\n- eu-west-1\n</ask>";
+        model.messages = vec![
+            Message::new(Some(1), "user", "Deploy staging.", None),
+            Message::new(Some(2), "assistant", ask, None),
+            Message::new(Some(3), "duration", "4", None),
+            Message::new(Some(4), "user", "eu-west-1", None),
+            Message::new(Some(5), "assistant", "Done.", None),
+            Message::new(Some(6), "user", "Thanks", None),
+            // A question the agent moved past before anyone answered.
+            Message::new(Some(7), "assistant", ask, None),
+            Message::new(Some(8), "tool", "Read a", None),
+            Message::new(Some(9), "user", "Unrelated", None),
+        ];
+        let mut snapshot = TranscriptSnapshot::default();
+        snapshot.sync_messages(&model);
+        let answered = (0..snapshot.len())
+            .map(|index| snapshot.answered_question(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            answered,
+            [
+                None,
+                None,
+                None,
+                Some("Which region?"),
+                None,
+                None,
+                None,
+                None,
+                None
+            ]
+        );
+        assert_eq!(
+            answered_question_label("Which region?"),
+            "Answering \u{201c}Which region?\u{201d}"
+        );
     }
 
     /// The rows a work log draws an entry for, and the count each one shows.
@@ -21864,7 +22129,7 @@ Binary files /dev/null and b/image.png differ\n";
                         .flex()
                         .justify_center()
                         .child(div().w(px(COLUMN)).child(XdDesktop::render_native_message(
-                            colors, message, None, None, index, false, &images, COLUMN,
+                            colors, message, None, None, index, false, &images, COLUMN, None,
                         )))
                         .into_any_element()
                 })
@@ -21961,6 +22226,7 @@ Binary files /dev/null and b/image.png differ\n";
                         false,
                         &MessageImages::default(),
                         720.0,
+                        None,
                     )
                 })
                 .size_full()
@@ -22156,6 +22422,12 @@ Binary files /dev/null and b/image.png differ\n";
             .expect("end of native composer actions")
             .0;
         assert!(actions.contains("host.queue_message(&chat_id, &text)"));
+        let queue = actions
+            .split_once("fn drop_queued(")
+            .expect("end of native queue action")
+            .0;
+        // The queue op carries text alone, so files go as a mid-turn send.
+        assert!(queue.contains("self.submit_composer(false, cx)"));
         assert!(actions.contains("host.drop_queue(&chat_id, index)"));
         assert!(actions.contains("host.steer_queue(&chat_id, index, &text)"));
         assert!(actions.contains("host.cancel(&chat_id)"));
@@ -23328,6 +23600,7 @@ Binary files /dev/null and b/image.png differ\n";
                     false,
                     &self.images,
                     720.0,
+                    None,
                 ))
             }
         }
@@ -25673,7 +25946,6 @@ Binary files /dev/null and b/image.png differ\n";
             "minimal-project-list",
             "minimal-new-project",
             "truncating_label(session.branch)",
-            "self.toggle_folder_collapsed(project_id, cx)",
             "this.begin_chat_create",
             "signal_tab(signal, colors)",
             "drawer_tabs(&signals, colors)",
@@ -25682,7 +25954,8 @@ Binary files /dev/null and b/image.png differ\n";
         }
         assert!(!home.contains("minimal-new-session"));
         assert!(!board.contains("this.minimal_route ="));
-        assert!(board.contains("this.toggle_drawer(toggle_project.clone(), current, cx)"));
+        assert!(board.contains("this.toggle_folder_collapsed(toggle_project.clone(), cx)"));
+        assert!(!production.contains("opened_drawers"));
         assert!(home.contains("minimal-project-content"));
         assert!(home.contains("Welcome to xd"));
         assert!(!home.contains("self.render_catalog("));
@@ -26166,6 +26439,38 @@ Binary files /dev/null and b/image.png differ\n";
             );
 
             assert!(desktop.terminal_panel.as_ref().unwrap().sessions.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn every_project_opens_on_its_own_and_stays_as_left(cx: &mut gpui::TestAppContext) {
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        desktop.update(cx, |desktop, cx| {
+            desktop.active_endpoint = ChatEndpoint::Remote;
+            desktop.settings.remote_ssh_command = Some("ssh dev.example -p 22".into());
+            desktop.collapsed_folders.clear();
+            // Projects start open, the current one or not, so several show at once.
+            assert!(desktop.project_open("project-a", false));
+            assert!(desktop.project_open("project-b", false));
+
+            desktop.toggle_folder_collapsed("project-b".into(), cx);
+            assert!(desktop.project_open("project-a", false));
+            assert!(!desktop.project_open("project-b", false));
+            assert!(
+                desktop.project_open("project-b", true),
+                "a search still shows what it finds"
+            );
+
+            // A restart restores what was closed, and only that.
+            desktop.collapsed_folders.clear();
+            desktop.restore_collapsed_folders();
+            assert!(desktop.project_open("project-a", false));
+            assert!(!desktop.project_open("project-b", false));
+
+            desktop.toggle_folder_collapsed("project-b".into(), cx);
+            desktop.collapsed_folders.clear();
+            desktop.restore_collapsed_folders();
+            assert!(desktop.project_open("project-b", false));
         });
     }
 
