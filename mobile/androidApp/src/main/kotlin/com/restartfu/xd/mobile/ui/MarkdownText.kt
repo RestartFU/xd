@@ -170,7 +170,16 @@ private fun List<Span>.annotated(): AnnotatedString {
                     withLink(
                         LinkAnnotation.Url(
                             url,
-                            TextLinkStyles(style.copy(color = linkColour)),
+                            TextLinkStyles(
+                                style.copy(
+                                    color = linkColour,
+                                    textDecoration = if (span.strike) {
+                                        TextDecoration.Underline + TextDecoration.LineThrough
+                                    } else {
+                                        TextDecoration.Underline
+                                    },
+                                ),
+                            ),
                         ),
                     ) {
                         append(span.text)
