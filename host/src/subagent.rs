@@ -62,6 +62,8 @@ pub struct SubagentStep {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SubagentRun {
     pub key: String,
+    /// Claude's own id for the agent, which its lead addresses messages to.
+    pub task_id: String,
     pub provider: String,
     pub agent: String,
     /// The assistant whose shell started this one, for an agent run as a
@@ -152,6 +154,7 @@ impl SubagentRun {
             set(&mut self.agent, patch.agent, 80);
         }
         set(&mut self.launcher, patch.launcher, 40);
+        set(&mut self.task_id, patch.task_id, 80);
         set(&mut self.model, patch.model, 80);
         let mut status = patch.status;
         let mut summary = patch.summary;
@@ -253,6 +256,7 @@ impl SubagentRun {
         });
         for (field, value) in [
             ("launcher", &self.launcher),
+            ("task_id", &self.task_id),
             ("model", &self.model),
             ("prompt", &self.prompt),
             ("activity", &self.activity),
@@ -408,6 +412,25 @@ mod tests {
         assert_eq!(decoded["status"], "completed");
         assert_eq!(decoded["agent"], "Explore");
         assert_eq!(decoded["steps"][1]["tool"], "Read");
+    }
+
+    #[test]
+    fn the_record_carries_the_id_its_lead_addresses_it_by() {
+        let mut run = SubagentRun::new("toolu_1");
+        assert!(decode(&run.encode()).unwrap().get("task_id").is_none());
+        run.apply(SubagentPatch {
+            task_id: Some("a22197aff550fdfd9".into()),
+            ..SubagentPatch::new("toolu_1")
+        });
+        // A later report without the id keeps it.
+        run.apply(SubagentPatch {
+            activity: Some("Reading".into()),
+            ..SubagentPatch::new("toolu_1")
+        });
+        assert_eq!(
+            decode(&run.encode()).unwrap()["task_id"],
+            "a22197aff550fdfd9"
+        );
     }
 
     #[test]

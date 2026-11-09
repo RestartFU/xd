@@ -335,7 +335,7 @@ internal fun MinimalMobileApp(
                             }
                             hiddenChatIds = hiddenChatIds + id
                         }
-                        val tabStrip: @Composable () -> Unit = {
+                        val tabStrip: @Composable (AgentTabs) -> Unit = { agents ->
                             SessionTabStrip(
                                 compact = !expanded,
                                 chats = sessionChats,
@@ -348,6 +348,7 @@ internal fun MinimalMobileApp(
                                 deleteChat = { deleteChat = it },
                                 session = activeSession,
                                 actions = sessionActions,
+                                agents = agents,
                             )
                         }
                         if (activeChat != null) {
@@ -387,7 +388,7 @@ internal fun MinimalMobileApp(
                         } else {
                             Column(Modifier.fillMaxSize()) {
                                 ProductHeader(link, activeSession.title, onSettings = { settingsOpen = true })
-                                tabStrip()
+                                tabStrip(AgentTabs())
                                 Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                         Text("Your chats are saved", style = MaterialTheme.typography.titleLarge)
@@ -1024,6 +1025,8 @@ private fun SessionTabStrip(
     deleteChat: (ChatSummary) -> Unit,
     session: MinimalSession,
     actions: SessionActions,
+    /** The open chat's agent tabs, after its chat tabs. */
+    agents: AgentTabs = AgentTabs(),
 ) {
     var openMenu by remember { mutableStateOf(false) }
     Row(
@@ -1036,7 +1039,7 @@ private fun SessionTabStrip(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             chats.filterNot { it.id in hiddenChatIds }.forEach { chat ->
-                val selected = chat.id == selectedChatId
+                val selected = chat.id == selectedChatId && agents.viewing == null
                 val reveal = remember(chat.id) { BringIntoViewRequester() }
                 LaunchedEffect(chat.id, selected) {
                     if (selected) {
@@ -1052,7 +1055,7 @@ private fun SessionTabStrip(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Row(
-                            modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { selectTab(chat.id) }.padding(start = 12.dp, end = 8.dp),
+                            modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { agents.showChat(); selectTab(chat.id) }.padding(start = 12.dp, end = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
@@ -1069,6 +1072,9 @@ private fun SessionTabStrip(
                         }
                     }
                 }
+            }
+            agents.tabs.forEach { agent ->
+                key(agent.key) { AgentTabChip(agent, selected = agent.key == agents.viewing, agents) }
             }
         }
         IconButton(onClick = addTab, modifier = Modifier.size(48.dp)) {
@@ -1116,6 +1122,45 @@ private fun SessionTabStrip(
         }
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+}
+
+/** One of the open chat's agents in the tab row: its provider, task, a dot while it runs, and close. */
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun AgentTabChip(agent: AgentTab, selected: Boolean, agents: AgentTabs) {
+    val reveal = remember { BringIntoViewRequester() }
+    LaunchedEffect(selected) {
+        if (selected) {
+            androidx.compose.runtime.withFrameNanos { }
+            reveal.bringIntoView()
+        }
+    }
+    Surface(
+        modifier = Modifier.bringIntoViewRequester(reveal),
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+        border = if (selected) androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant) else null,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Tab) { agents.open(agent.key) }.padding(start = 12.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                BackendIcon(agent.provider.lowercase(), size = 16.dp)
+                Text(
+                    agent.title, modifier = Modifier.widthIn(max = 140.dp),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (agent.running) PulseDot(LocalXdSignals.current.working)
+            }
+            IconButton(onClick = { agents.close(agent.key) }, modifier = Modifier.size(48.dp)) {
+                Icon(painterResource(R.drawable.ic_close), "Close ${agent.title}", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
 }
 
 @Composable

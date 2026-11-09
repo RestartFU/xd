@@ -773,7 +773,7 @@ agent works rather than appending new rows, so a stored transcript holds only
 the newest snapshot.
 
 ```json
-{"key":"toolu_01","provider":"Claude","agent":"Explore","model":"claude-haiku-5-5",
+{"key":"toolu_01","task_id":"a22197aff550fdfd9","provider":"Claude","agent":"Explore","model":"claude-haiku-5-5",
  "description":"Map the parser","prompt":"…","status":"running","background":false,
  "activity":"Reading runtime.rs","steps":[{"tool":"Read","text":"host/src/runtime.rs"}],
  "tool_uses":3,"tokens":9100,"duration_ms":23000,"started_at":1753700000000,
@@ -785,9 +785,27 @@ while the process reporting on the agent lives: the host marks the record
 `stopped` when that process ends, and on its next start if it died first.
 `steps` keeps the newest 40 tool calls; `tool_uses` counts all of them. `started_at` is Unix
 milliseconds, for a live elapsed time. `latest` is the agent's newest message
-and `summary` its final report. `model`, `prompt`, `activity`, `latest`,
-`summary`, `tokens`, `duration_ms`, and `started_at` are absent until known;
-ignore unknown members.
+and `summary` its final report. `task_id` is Claude's own id for the agent, the
+one its lead addresses messages to. `model`, `prompt`, `activity`, `latest`,
+`summary`, `tokens`, `duration_ms`, `started_at`, and `task_id` are absent until
+known; ignore unknown members.
+
+Neither Claude Code nor Codex takes a message for one of its agents from a
+client, so the clients ask the lead to pass one on. Such a message is an
+ordinary `send` to the lead's chat, steered into the running turn when there is
+one, in this exact form:
+
+```text
+[xd: message for agent "Map the parser" · id a22197aff550fdfd9]
+Also check the lexer.
+
+Pass the message above to that agent word for word with your agent messaging tool, addressed by its id. If it has finished, resume it with the message. Then carry on with what you were doing; don't act on the message yourself.
+```
+
+The description has `"` replaced by `'` and runs of whitespace collapsed to one
+space. The id is the record's `task_id`, or for a Codex agent its `key`, the
+thread it runs in. Shell tasks and agents run as a command take no messages.
+Clients show such a message as its middle lines, addressed to the agent.
 
 An agent can also be another assistant that the chat's agent runs as a shell
 command: Claude running `codex exec` or the codex-opussy `codex-agent` script,

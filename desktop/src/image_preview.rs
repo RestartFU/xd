@@ -1563,6 +1563,7 @@ mod tests {
                 attachments: vec![sent.clone()],
                 restore: true,
                 optimistic: OptimisticSend::Queued,
+                agent_draft: None,
             });
             // The same picture under another name arrived meanwhile too.
             let png = png(4, 4, |_, _| [1, 2, 3, 255]);
@@ -1603,6 +1604,7 @@ mod tests {
                 attachments: vec![big("sent.bin", 1)],
                 restore: true,
                 optimistic: OptimisticSend::Queued,
+                agent_draft: None,
             });
             desktop.model.draft_attachments = vec![big("fits.bin", 2), big("over.bin", 3)];
             desktop.model.connection_error = None;

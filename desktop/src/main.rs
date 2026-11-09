@@ -45,6 +45,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use xd_desktop::{
     activity::{self, ActivityCard, ActivityKind, SubagentState, SubagentView},
+    agent_relay,
     host::{
         FirstMessage, HostHandle, HostUpdate, MessageCursor, NewFolder, NewSessionWorktree,
         RESUME_TEXT, RequestKind, StartedHost,
@@ -826,12 +827,16 @@ struct ToggleActivity {
     id: i64,
 }
 
-/// Scrolls to an agent's card and opens it.
+/// Opens or closes the list of running agents above the composer.
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = xd, no_json)]
-struct RevealSubagent {
-    row: usize,
-    card_id: i64,
+struct ToggleAgentsTray;
+
+/// Opens a delegated agent in a tab of its own, by its record key.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = xd, no_json)]
+struct OpenAgentTab {
+    key: String,
 }
 
 /// Stops a running agent or sends it to the background, by its record key.
@@ -1400,6 +1405,9 @@ struct PendingSend {
     attachments: Vec<Attachment>,
     restore: bool,
     optimistic: OptimisticSend,
+    /// For a message to an agent, the agent's record key and the words typed
+    /// to it, which go back to its box if the send fails.
+    agent_draft: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -1552,11 +1560,9 @@ impl WorkRun {
 /// Live replies up to this size are formatted on every flush.
 const LIVE_MARKDOWN_BYTES: usize = 48 * 1024;
 
-/// A delegated agent still at work, and where its card is.
+/// A delegated agent still at work.
 #[derive(Clone)]
 struct RunningAgent {
-    row: usize,
-    card_id: i64,
     view: SubagentView,
 }
 
@@ -1704,15 +1710,10 @@ impl TranscriptSnapshot {
     fn sync_running_agents(&mut self) {
         let rows = self.messages.iter().chain(self.live_items.iter());
         self.running_agents = Arc::new(
-            rows.enumerate()
-                .filter(|(_, message)| message.role == "tool")
-                .filter_map(|(row, message)| match message.tool_view() {
+            rows.filter(|message| message.role == "tool")
+                .filter_map(|message| match message.tool_view() {
                     Some(ToolView::Subagent(view)) if view.status == SubagentState::Running => {
-                        Some(RunningAgent {
-                            row,
-                            card_id: message.id.unwrap_or(-(row as i64) - 1),
-                            view: view.clone(),
-                        })
+                        Some(RunningAgent { view: view.clone() })
                     }
                     _ => None,
                 })
@@ -2119,6 +2120,23 @@ struct XdDesktop {
     /// Agents asked to stop or move to the background, until their record
     /// says they did.
     subagent_actions: HashMap<String, &'static str>,
+    /// Whether the running agents above the composer are listed one by one.
+    agents_tray_open: bool,
+    /// Agents open in tabs of their own, by the chat that started them. They
+    /// last as long as the window, like the cards they come from.
+    agent_tabs: HashMap<String, Vec<String>>,
+    /// The agent tab in front, as its chat and record key.
+    open_agent: Option<(String, String)>,
+    agent_input: Entity<FileEditor>,
+    /// What is typed to each agent, by record key.
+    agent_drafts: HashMap<String, String>,
+    /// The agent whose draft the box holds. Every agent shares one box, so
+    /// it is filled from `agent_drafts` whenever it is drawn for another.
+    agent_input_key: Option<String>,
+    agent_scroll: ScrollHandle,
+    /// Holds focus in an agent tab that has no box to type in, so actions
+    /// dispatched from it still reach the window.
+    agent_view_focus: FocusHandle,
     pending_minimal_session: Option<(String, String)>,
     #[cfg(target_os = "linux")]
     turn_notifier: notifications::Notifier<TurnNotificationTarget>,
@@ -2438,6 +2456,18 @@ impl XdDesktop {
             EditorEvent::Submit => this.send_composer(cx),
             EditorEvent::SubmitNow => this.steer_composer(cx),
             EditorEvent::Save => {}
+        })
+        .detach();
+        let agent_input = cx.new(|cx| FileEditor::message(cx, "Message this agent…"));
+        cx.subscribe(&agent_input, |this, _, event, cx| match event {
+            EditorEvent::Changed(text) => {
+                if let Some(key) = this.agent_input_key.clone() {
+                    this.agent_drafts.insert(key, text.clone());
+                }
+                cx.notify();
+            }
+            EditorEvent::Submit | EditorEvent::SubmitNow => this.send_agent_message(cx),
+            EditorEvent::PasteImage { .. } | EditorEvent::Save => {}
         })
         .detach();
         let queue_edit_input = cx.new(|cx| FileEditor::message(cx, "Edit queued message…"));
@@ -2798,6 +2828,14 @@ impl XdDesktop {
             background_visible: false,
             expanded_work_logs: HashSet::new(),
             subagent_actions: HashMap::new(),
+            agents_tray_open: false,
+            agent_tabs: HashMap::new(),
+            open_agent: None,
+            agent_input,
+            agent_drafts: HashMap::new(),
+            agent_input_key: None,
+            agent_scroll: ScrollHandle::new(),
+            agent_view_focus: cx.focus_handle(),
             pending_minimal_session: None,
             #[cfg(target_os = "linux")]
             turn_notifier,
@@ -7185,11 +7223,12 @@ impl XdDesktop {
             }
         }
         let can_close = chats.len() > 1;
+        let front_agent = self.open_agent_key().map(str::to_owned);
         let tabs = chats
             .into_iter()
             .enumerate()
             .map(|(index, chat)| {
-                let selected = chat.id == active;
+                let selected = chat.id == active && front_agent.is_none();
                 let open = chat.clone();
                 let close_id = chat.id.clone();
                 let rename_id = chat.id.clone();
@@ -7221,6 +7260,12 @@ impl XdDesktop {
                     .cursor_pointer()
                     .hover(|style| style.bg(rgb(colors.surface_high)))
                     .on_click(cx.listener(move |this, _, window, cx| {
+                        // Its own chat is already open behind an agent tab.
+                        if this.model.selected_chat.as_deref() == Some(open.id.as_str()) {
+                            this.open_agent = None;
+                            cx.notify();
+                            return;
+                        }
                         if this.flush_draft_before_navigation()
                             && let Some(agent) = AgentCli::from_backend(&open.backend)
                         {
@@ -7278,6 +7323,92 @@ impl XdDesktop {
                     })
             })
             .collect::<Vec<_>>();
+        let agent_tabs = self
+            .agent_tabs
+            .get(&active)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let view = self.find_agent(&key);
+                let selected = front_agent.as_deref() == Some(key.as_str());
+                let running = view
+                    .as_ref()
+                    .is_some_and(|view| view.status == SubagentState::Running);
+                let provider_icon = view.as_ref().and_then(|view| {
+                    match view.provider.to_ascii_lowercase().as_str() {
+                        "claude" => Some(CLAUDE_ICON),
+                        "codex" => Some(CODEX_ICON),
+                        _ => None,
+                    }
+                });
+                let title = view
+                    .as_ref()
+                    .map(|view| view.description.clone())
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| "Agent".into());
+                let chat = active.clone();
+                let show = key.clone();
+                let close = key.clone();
+                div()
+                    .id(("session-agent-tab", index))
+                    .h(px(30.0))
+                    .max_w(px(210.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .rounded(px(7.0))
+                    .border_1()
+                    .border_color(rgba(if selected {
+                        (colors.border << 8) | 0xff
+                    } else {
+                        0
+                    }))
+                    .when(selected, |tab| tab.bg(rgb(colors.selected_surface)))
+                    .text_size(px(12.0))
+                    .text_color(rgb(if selected { colors.text } else { colors.muted }))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.show_agent_tab(chat.clone(), show.clone(), window, cx);
+                    }))
+                    .when_some(provider_icon, |tab, path| {
+                        tab.child(assistant_icon(path, 13.0, colors.muted, colors))
+                    })
+                    .child(truncating_label(title))
+                    .when(running, |tab| {
+                        tab.child(
+                            div()
+                                .size(px(6.0))
+                                .mx(px(2.0))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(rgb(colors.working))
+                                .opacity(pulse_opacity()),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("close-session-agent-tab", index))
+                            .size(px(22.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(5.0))
+                            .hover(|style| style.bg(rgb(colors.surface_high)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.close_agent_tab(&close, cx);
+                            }))
+                            .child(icon(CLOSE_ICON, 11.0, colors.muted)),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
         div()
             .id("session-chat-tab-bar")
             .h(px(browser::TAB_BAR_HEIGHT))
@@ -7300,7 +7431,19 @@ impl XdDesktop {
                     .gap_1()
                     .overflow_x_scroll()
                     .track_scroll(&self.session_chat_tabs_scroll)
-                    .children(tabs),
+                    .children(tabs)
+                    .when(!agent_tabs.is_empty(), |row| {
+                        // Agents follow the chats, apart from them.
+                        row.child(
+                            div()
+                                .w(px(1.0))
+                                .h(px(16.0))
+                                .mx(px(4.0))
+                                .flex_none()
+                                .bg(rgb(colors.border)),
+                        )
+                        .children(agent_tabs)
+                    }),
             )
             .when(!hidden.is_empty(), |bar| {
                 bar.child(
@@ -10246,6 +10389,7 @@ impl XdDesktop {
             attachments,
             restore: true,
             optimistic,
+            agent_draft: None,
         });
         self.set_composer_text(String::new(), cx);
         self.model.draft_attachments.clear();
@@ -10351,6 +10495,21 @@ impl XdDesktop {
             return;
         };
         self.rollback_optimistic_send(&pending);
+        // A message to an agent goes back to that agent's box, before
+        // anything typed to it since.
+        if let Some((key, text)) = pending.agent_draft.clone() {
+            let since = self.agent_drafts.remove(&key).unwrap_or_default();
+            let draft = if since.trim().is_empty() {
+                text
+            } else {
+                format!("{text}\n{since}")
+            };
+            self.agent_drafts.insert(key.clone(), draft.clone());
+            if self.agent_input_key.as_deref() == Some(key.as_str()) {
+                self.agent_input
+                    .update(cx, |input, cx| input.set_text(draft, cx));
+            }
+        }
         if !pending.restore {
             return;
         }
@@ -10417,6 +10576,7 @@ impl XdDesktop {
             attachments: Vec::new(),
             restore: false,
             optimistic,
+            agent_draft: None,
         });
         true
     }
@@ -10457,6 +10617,7 @@ impl XdDesktop {
             attachments: Vec::new(),
             restore: false,
             optimistic,
+            agent_draft: None,
         });
         cx.notify();
     }
@@ -14605,112 +14766,147 @@ impl XdDesktop {
         }
     }
 
+    /// What an agent is doing, in a few words. Everything in the tray is
+    /// running, so Claude's "Running …" prefix says nothing there.
+    fn tray_task(view: &SubagentView) -> String {
+        let text = if view.description.is_empty() {
+            &view.activity
+        } else {
+            &view.description
+        };
+        text.strip_prefix("Running ").unwrap_or(text).to_owned()
+    }
+
+    fn now_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
     /// Every agent still at work, above the composer: background agents keep
     /// running after the turn and the reader may have scrolled far away from
-    /// their cards. A pill jumps to its card and opens it.
+    /// their cards. One line says how many and what they do; opened, a row
+    /// per agent opens that agent's tab.
     fn render_agents_tray(
         colors: ThemeColors,
         agents: &[RunningAgent],
+        open: bool,
     ) -> Option<gpui::AnyElement> {
         if agents.is_empty() {
             return None;
         }
-        const SHOWN: usize = 4;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis() as u64)
-            .unwrap_or(0);
-        let pills = agents
+        let now = Self::now_millis();
+        let tasks = agents
             .iter()
-            .take(SHOWN)
-            .enumerate()
-            .map(|(index, agent)| {
-                let reveal = RevealSubagent {
-                    row: agent.row,
-                    card_id: agent.card_id,
-                };
-                let elapsed = agent
-                    .view
-                    .started_at
-                    .map(|started| activity::compact_duration(now.saturating_sub(started)));
+            .map(|agent| Self::tray_task(&agent.view))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let summary = div()
+            .id("agents-tray-summary")
+            .debug_selector(|| "agents-tray-summary".into())
+            .w_full()
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .gap(px(9.0))
+            .rounded(px(6.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(colors.surface_high)))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleAgentsTray), cx))
+            .child(
                 div()
-                    .id(("agents-tray-pill", index))
-                    .h(px(28.0))
-                    .px(px(11.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
+                    .size(px(6.0))
+                    .flex_none()
                     .rounded_full()
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .bg(rgb(colors.surface))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(colors.surface_high)))
-                    .on_click(move |_, window, cx| {
-                        window.dispatch_action(Box::new(reveal.clone()), cx);
-                    })
-                    .child(
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(rgb(colors.working))
-                            .opacity(pulse_opacity()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(12.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(colors.text))
-                            .child(agent.view.agent.clone()),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(220.0))
-                            .truncate()
-                            .text_size(px(12.0))
-                            .text_color(rgb(colors.muted))
-                            .child(if agent.view.activity.is_empty() {
-                                agent.view.description.clone()
-                            } else {
-                                agent.view.activity.clone()
-                            }),
-                    )
-                    .when_some(elapsed, |pill, elapsed| {
-                        pill.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(11.0))
-                                .text_color(rgb(colors.faint))
-                                .child(elapsed),
-                        )
-                    })
-                    .into_any_element()
-            })
-            .collect::<Vec<_>>();
-        Some(
+                    .bg(rgb(colors.working))
+                    .opacity(pulse_opacity()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.text))
+                    .child(Self::agents_tray_label(agents)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.5))
+                    .text_color(rgb(colors.faint))
+                    .when(!open, |text| text.child(tasks)),
+            )
+            .child(icon(
+                if open {
+                    CHEVRON_DOWN_ICON
+                } else {
+                    CHEVRON_RIGHT_ICON
+                },
+                13.0,
+                colors.faint,
+            ));
+        let rows = agents.iter().enumerate().map(|(index, agent)| {
+            let key = agent.view.key.clone();
+            let elapsed = agent
+                .view
+                .started_at
+                .map(|started| activity::compact_duration(now.saturating_sub(started)));
             div()
+                .id(("agents-tray-row", index))
                 .w_full()
-                .max_w(px(780.0))
-                .mb_2()
+                .h(px(26.0))
+                .pl(px(25.0))
+                .pr(px(10.0))
                 .flex()
-                .flex_wrap()
                 .items_center()
-                .gap_2()
+                .gap(px(10.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgb(colors.surface_high)))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(Box::new(OpenAgentTab { key: key.clone() }), cx);
+                })
                 .child(
                     div()
-                        .text_size(px(11.5))
-                        .text_color(rgb(colors.faint))
-                        .child(Self::agents_tray_label(agents)),
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(rgb(colors.text))
+                        .child(Self::tray_task(&agent.view)),
                 )
-                .children(pills)
-                .when(agents.len() > SHOWN, |tray| {
+                .when_some(elapsed, |row, elapsed| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.0))
+                            .text_color(rgb(colors.faint))
+                            .child(elapsed),
+                    )
+                })
+        });
+        Some(
+            div()
+                .w(px(736.0))
+                .max_w(relative(1.0))
+                .mb_2()
+                .flex()
+                .flex_col()
+                .child(summary)
+                .when(open, |tray| {
                     tray.child(
                         div()
-                            .text_size(px(11.5))
-                            .text_color(rgb(colors.faint))
-                            .child(format!("+{} more", agents.len() - SHOWN)),
+                            .id("agents-tray-rows")
+                            .w_full()
+                            .max_h(px(26.0 * 6.0))
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .children(rows),
                     )
                 })
                 .into_any_element(),
@@ -15108,6 +15304,29 @@ impl XdDesktop {
                         })
                 },
             )
+            .child({
+                let key = view.key.clone();
+                div()
+                    .id(("native-subagent-open", index))
+                    .flex_none()
+                    .h(px(22.0))
+                    .px(px(8.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(colors.border))
+                    .cursor_pointer()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(colors.muted))
+                    .hover(|style| style.bg(rgb(colors.surface_high)))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        window.dispatch_action(Box::new(OpenAgentTab { key: key.clone() }), cx);
+                    })
+                    .child("Open")
+            })
             .child(match view.status {
                 SubagentState::Running => div()
                     .flex_none()
@@ -15390,6 +15609,13 @@ impl XdDesktop {
 
         let user = role == "user";
         let error = role == "error";
+        // A message for one of the lead's agents shows as the words it carries,
+        // under the agent's name.
+        let relay = user.then(|| agent_relay::parse(&message.content)).flatten();
+        let relayed = relay
+            .as_ref()
+            .map(|relay| Message::new(message.id, "user", relay.text.clone(), None));
+        let message = relayed.as_ref().unwrap_or(message);
         let markdown = message.markdown();
         let block_scope = format!("native-message:{}", message.id.unwrap_or(index as i64));
         // The widths the card below allows its content.
@@ -15540,6 +15766,26 @@ impl XdDesktop {
                         .child(truncating_label(answered_question_label(question))),
                 )
         });
+        let recipient = relay.map(|relay| {
+            div()
+                .debug_selector(|| "native-agent-message".into())
+                .max_w(px(column.min(600.0)))
+                .min_w_0()
+                .mb(px(4.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .text_size(px(11.5))
+                .text_color(rgb(colors.faint))
+                .child(icon(ARROW_RIGHT_ICON, 12.0, colors.faint))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink()
+                        .child(truncating_label(format!("To {}", relay.description))),
+                )
+        });
         div()
             .id(("native-message", index))
             .group("native-message")
@@ -15548,6 +15794,7 @@ impl XdDesktop {
             .flex_col()
             .when(user, |row| row.items_end())
             .children(answered)
+            .children(recipient)
             .child(card)
             .children(copy)
             .child(div().h(px(if user { 10.0 } else { 6.0 })))
@@ -15578,6 +15825,592 @@ impl XdDesktop {
                     .text_color(rgb(colors.text))
                     .child(xd_desktop::model::attached_file_name(path).to_owned()),
             )
+            .into_any_element()
+    }
+
+    /// The newest record of the agent with this key, among the loaded rows.
+    fn find_agent(&self, key: &str) -> Option<SubagentView> {
+        let snapshot = &self.transcript_snapshot;
+        snapshot
+            .messages
+            .iter()
+            .chain(snapshot.live_items.iter())
+            .rev()
+            .find_map(|message| match message.tool_view() {
+                Some(ToolView::Subagent(view)) if view.key == key => Some(view.clone()),
+                _ => None,
+            })
+    }
+
+    /// The agent tab in front of the open chat, if one is.
+    fn open_agent_key(&self) -> Option<&str> {
+        let (chat, key) = self.open_agent.as_ref()?;
+        (self.model.selected_chat.as_deref() == Some(chat.as_str())).then_some(key.as_str())
+    }
+
+    fn open_agent_tab(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat) = self.model.selected_chat.clone() else {
+            return;
+        };
+        let tabs = self.agent_tabs.entry(chat.clone()).or_default();
+        if !tabs.contains(&key) {
+            tabs.push(key.clone());
+        }
+        self.show_agent_tab(chat, key, window, cx);
+    }
+
+    fn show_agent_tab(
+        &mut self,
+        chat: String,
+        key: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let can_message = self
+            .find_agent(&key)
+            .is_some_and(|view| agent_relay::address(&view).is_ok());
+        self.load_agent_input(&key, cx);
+        self.open_agent = Some((chat, key));
+        if can_message {
+            window.focus(&self.agent_input.read(cx).focus_handle(cx));
+        } else {
+            window.focus(&self.agent_view_focus);
+        }
+        self.agent_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// Fills the shared box with what is typed to the agent at `key`.
+    fn load_agent_input(&mut self, key: &str, cx: &mut Context<Self>) {
+        let draft = self.agent_drafts.get(key).cloned().unwrap_or_default();
+        self.agent_input_key = Some(key.to_owned());
+        self.agent_input
+            .update(cx, |input, cx| input.set_text(draft, cx));
+    }
+
+    fn close_agent_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(chat) = self.model.selected_chat.clone() else {
+            return;
+        };
+        if let Some(tabs) = self.agent_tabs.get_mut(&chat) {
+            tabs.retain(|open| open != key);
+        }
+        if self.open_agent_key() == Some(key) {
+            self.open_agent = None;
+        }
+        if self.agent_input_key.as_deref() == Some(key) {
+            self.agent_input_key = None;
+        }
+        self.agent_drafts.remove(key);
+        cx.notify();
+    }
+
+    /// What the user has asked the open chat's lead to pass to the agent at
+    /// `address`, oldest first, and whether each is still queued.
+    fn agent_messages(&self, address: &str) -> Vec<(String, bool)> {
+        let snapshot = &self.transcript_snapshot;
+        let sent = snapshot
+            .messages
+            .iter()
+            .chain(snapshot.live_items.iter())
+            .filter(|message| message.role == "user")
+            .map(|message| (message.content.as_str(), false));
+        let queued = self.model.queue.iter().map(|text| (text.as_str(), true));
+        sent.chain(queued)
+            .filter_map(|(content, queued)| {
+                agent_relay::parse(content)
+                    .filter(|relay| relay.address == address)
+                    .map(|relay| (relay.text, queued))
+            })
+            .collect()
+    }
+
+    /// Asks the agent's lead to pass on what is typed to it. Into the running
+    /// turn when there is one, so the lead does it now rather than after.
+    fn send_agent_message(&mut self, cx: &mut Context<Self>) {
+        let Some((chat, key)) = self.open_agent.clone() else {
+            return;
+        };
+        if self.sending || self.model.selected_chat.as_deref() != Some(chat.as_str()) {
+            return;
+        }
+        let text = self
+            .agent_drafts
+            .get(&key)
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_default();
+        if text.is_empty() {
+            return;
+        }
+        let Some(view) = self.find_agent(&key) else {
+            return;
+        };
+        let Ok(address) = agent_relay::address(&view) else {
+            return;
+        };
+        let prompt = agent_relay::format(&view.description, address, &text);
+        let Some(host) = self.active_host().cloned() else {
+            self.model.connection_error = Some("xd is not connected to a host.".into());
+            cx.notify();
+            return;
+        };
+        if let Err(error) = host.send_message(
+            &chat,
+            &prompt,
+            &[],
+            self.settings.git_writer.backend(),
+            self.settings.git_writer_model.as_deref(),
+            self.model.working,
+        ) {
+            self.model.connection_error = Some(error);
+            cx.notify();
+            return;
+        }
+        self.sending = true;
+        let optimistic = self.apply_optimistic_send(&prompt);
+        self.pending_send = Some(PendingSend {
+            chat_id: chat,
+            text: prompt,
+            attachments: Vec::new(),
+            restore: false,
+            optimistic,
+            agent_draft: Some((key.clone(), text)),
+        });
+        self.agent_drafts.remove(&key);
+        self.agent_input
+            .update(cx, |input, cx| input.set_text("", cx));
+        self.agent_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// An agent in a tab of its own: what it was asked, what it did, what it
+    /// says, and what the user has sent it, over a box to message it.
+    fn render_agent_view(
+        &mut self,
+        colors: ThemeColors,
+        key: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let column = px(self.chat_column_width);
+        let view = self.find_agent(key);
+        let address = view
+            .as_ref()
+            .map(|view| agent_relay::address(view).map(str::to_owned));
+        let can_message = matches!(address, Some(Ok(_)));
+        // Focus belongs to what the tab draws: its box when the agent takes
+        // messages, the tab itself when not. Coming back to the chat behind
+        // it leaves focus on that chat's composer, which is not drawn now.
+        let input_focus = self.agent_input.read(cx).focus_handle(cx);
+        let composer_focused = self
+            .composer_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        if can_message && self.agent_input_key.as_deref() != Some(key) {
+            self.load_agent_input(key, cx);
+        }
+        if can_message && (composer_focused || self.agent_view_focus.is_focused(window)) {
+            window.focus(&input_focus);
+        } else if !can_message && (composer_focused || input_focus.is_focused(window)) {
+            window.focus(&self.agent_view_focus);
+        }
+        let (Some(view), Some(address)) = (view, address) else {
+            return div()
+                .id("agent-view")
+                .track_focus(&self.agent_view_focus)
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgb(colors.background))
+                .text_size(px(13.0))
+                .text_color(rgb(colors.muted))
+                .child("This agent's record is not loaded. Scroll the chat back to it and open it again.")
+                .into_any_element();
+        };
+        let running = view.status == SubagentState::Running;
+        let pending = self.subagent_actions.get(view.key.as_str()).copied();
+        let messages = address
+            .as_ref()
+            .map(|address| self.agent_messages(address))
+            .unwrap_or_default();
+        let stats = view.stats_at(Self::now_millis());
+        let caption = |label: String| {
+            div()
+                .text_size(px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(colors.faint))
+                .child(label)
+        };
+        let bubble = |text: String| {
+            div()
+                .max_w(px(600.0))
+                .px(px(14.0))
+                .py(px(9.0))
+                .rounded(px(18.0))
+                .bg(rgb(colors.surface_high))
+                .text_size(px(14.0))
+                .line_height(px(21.0))
+                .text_color(rgb(colors.text))
+                .child(text)
+        };
+        let provider_icon = match view.provider.to_ascii_lowercase().as_str() {
+            "claude" => Some(CLAUDE_ICON),
+            "codex" => Some(CODEX_ICON),
+            _ => None,
+        };
+        let action = |id: &'static str, label: &'static str, verb: &'static str, tone: u32| {
+            let key = view.key.clone();
+            div()
+                .id(id)
+                .flex_none()
+                .h(px(24.0))
+                .px(px(9.0))
+                .flex()
+                .items_center()
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgb(colors.border))
+                .cursor_pointer()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(tone))
+                .hover(|style| style.bg(rgb(colors.surface_high)))
+                .on_click(move |_, window, cx| {
+                    window.dispatch_action(
+                        Box::new(ControlSubagent {
+                            key: key.clone(),
+                            action: verb.to_owned(),
+                        }),
+                        cx,
+                    );
+                })
+                .child(label)
+        };
+        let status = match view.status {
+            SubagentState::Running => div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(colors.muted))
+                .child(
+                    div()
+                        .size(px(7.0))
+                        .rounded_full()
+                        .bg(rgb(colors.working))
+                        .opacity(pulse_opacity()),
+                )
+                .child(pending.map_or(view.status.label().to_owned(), |label| format!("{label}…")))
+                .into_any_element(),
+            SubagentState::Failed => stamp(view.status.label(), colors.danger),
+            _ => div()
+                .flex_none()
+                .text_size(px(12.0))
+                .text_color(rgb(colors.faint))
+                .child(view.status.label())
+                .into_any_element(),
+        };
+        let header = div()
+            .w_full()
+            .pb(px(14.0))
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .when_some(provider_icon, |row, path| {
+                        row.child(assistant_icon(path, 14.0, colors.muted, colors))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(15.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(colors.text))
+                            .child(view.description.clone()),
+                    )
+                    .when(running && pending.is_none(), |row| {
+                        row.when(view.can_background(), |row| {
+                            row.child(action(
+                                "agent-view-background",
+                                "Background",
+                                "background",
+                                colors.muted,
+                            ))
+                        })
+                        .when(view.can_stop(), |row| {
+                            row.child(action("agent-view-stop", "Stop", "stop", colors.danger))
+                        })
+                    })
+                    .child(status),
+            )
+            .child(
+                div()
+                    .pl(px(if provider_icon.is_some() { 22.0 } else { 0.0 }))
+                    .text_size(px(12.0))
+                    .text_color(rgb(colors.faint))
+                    .child(
+                        [
+                            view.agent.clone(),
+                            if view.model.is_empty() {
+                                String::new()
+                            } else {
+                                presentation::model_name(&view.model, None)
+                            },
+                            stats,
+                        ]
+                        .into_iter()
+                        .filter(|part| !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    ),
+            );
+        let mut body = vec![header.into_any_element()];
+        if !view.prompt.is_empty() {
+            body.push(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(4.0))
+                    .child(caption("Task".into()))
+                    .child(bubble(view.prompt.clone()))
+                    .into_any_element(),
+            );
+        }
+        if !view.steps.is_empty() {
+            let earlier = view.dropped_steps();
+            body.push(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(caption(format!(
+                        "Steps · {}",
+                        view.steps.len() as u64 + earlier
+                    )))
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(12.0))
+                            .py(px(9.0))
+                            .rounded(px(8.0))
+                            .border_1()
+                            .border_color(rgb(colors.border))
+                            .bg(rgb(colors.surface))
+                            .flex()
+                            .flex_col()
+                            .when(earlier > 0, |steps| {
+                                steps.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(colors.faint))
+                                        .child(format!("{earlier} earlier steps not kept")),
+                                )
+                            })
+                            .children(view.steps.iter().map(|step| {
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .gap_2()
+                                    .font_family(MONO)
+                                    .text_size(px(12.0))
+                                    .line_height(px(19.0))
+                                    .child(
+                                        div()
+                                            .w(px(52.0))
+                                            .flex_none()
+                                            .truncate()
+                                            .text_color(rgb(colors.faint))
+                                            .child(step.tool.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex_1()
+                                            .truncate()
+                                            .text_color(rgb(colors.muted))
+                                            .child(step.text.clone()),
+                                    )
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let (report_label, report) = if !view.summary.is_empty() {
+            ("Report", view.summary.as_str())
+        } else {
+            ("Latest message", view.latest.as_str())
+        };
+        if !report.is_empty() {
+            let document = markdown::parse_assistant(report);
+            let scope = format!("agent-view-report:{key}");
+            body.push(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(caption(report_label.into()))
+                    .children(document.blocks.iter().enumerate().map(|(index, block)| {
+                        Self::render_native_markdown_block(
+                            colors,
+                            block,
+                            scoped_element_id(&scope, index) as usize,
+                            &MessageImages::default(),
+                            0.0,
+                        )
+                    }))
+                    .into_any_element(),
+            );
+        }
+        for (text, queued) in messages {
+            body.push(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap(px(4.0))
+                    .child(caption(
+                        if queued {
+                            "Queued in the main chat"
+                        } else {
+                            "Sent through the main chat"
+                        }
+                        .into(),
+                    ))
+                    .child(bubble(text))
+                    .into_any_element(),
+            );
+        }
+        if running && !view.activity.is_empty() {
+            body.push(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .text_size(px(12.5))
+                    .text_color(rgb(colors.muted))
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(colors.working))
+                            .opacity(pulse_opacity()),
+                    )
+                    .child(div().min_w_0().truncate().child(view.activity.clone()))
+                    .into_any_element(),
+            );
+        }
+        let composer = match &address {
+            Ok(_) => {
+                let draft_ready = self
+                    .agent_drafts
+                    .get(key)
+                    .is_some_and(|draft| !draft.trim().is_empty())
+                    && !self.sending;
+                self.agent_input.update(cx, |input, _| {
+                    input.set_wrap_width(composer::composer_text_width(column) - px(40.0))
+                });
+                let focused = self
+                    .agent_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window);
+                div()
+                    .id("agent-composer")
+                    .debug_selector(|| "agent-composer".into())
+                    .w(column)
+                    .max_w(relative(1.0))
+                    .p(px(8.0))
+                    .flex()
+                    .items_end()
+                    .gap_2()
+                    .rounded(px(16.0))
+                    .border_1()
+                    .border_color(rgb(if focused {
+                        colors.selected_border
+                    } else {
+                        colors.border
+                    }))
+                    .bg(rgb(colors.composer))
+                    .shadow_md()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .py(px(4.0))
+                            .child(self.agent_input.clone()),
+                    )
+                    .child(
+                        composer::composer_send_button(
+                            "agent-send-message",
+                            draft_ready,
+                            SEND_ICON,
+                            colors,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.send_agent_message(cx))),
+                    )
+                    .into_any_element()
+            }
+            Err(note) => div()
+                .w(column)
+                .max_w(relative(1.0))
+                .py(px(12.0))
+                .flex()
+                .justify_center()
+                .text_size(px(12.5))
+                .text_color(rgb(colors.muted))
+                .child(*note)
+                .into_any_element(),
+        };
+        div()
+            .id("agent-view")
+            .track_focus(&self.agent_view_focus)
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(px(24.0))
+            .bg(rgb(colors.background))
+            .child(
+                div()
+                    .id("agent-view-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.agent_scroll)
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(column)
+                            .max_w(relative(1.0))
+                            .pt(px(20.0))
+                            .pb(px(16.0))
+                            .flex()
+                            .flex_col()
+                            .gap(px(18.0))
+                            .children(body),
+                    ),
+            )
+            .child(div().pb(px(18.0)).child(composer))
             .into_any_element()
     }
 
@@ -16134,7 +16967,10 @@ impl XdDesktop {
                             .flex_1()
                             .text_sm()
                             .text_color(rgb(colors.text))
-                            .child(text),
+                            .child(match agent_relay::parse(&text) {
+                                Some(relay) => format!("To {}: {}", relay.description, relay.text),
+                                None => text,
+                            }),
                     )
                     .when(can_steer, |row| {
                         row.child(
@@ -16275,8 +17111,11 @@ impl XdDesktop {
         let agent = AgentCli::from_backend(&self.model.backend);
 
         let interaction = self.render_interaction(colors, cx);
-        let agents_tray =
-            Self::render_agents_tray(colors, &self.transcript_snapshot.running_agents);
+        let agents_tray = Self::render_agents_tray(
+            colors,
+            &self.transcript_snapshot.running_agents,
+            self.agents_tray_open,
+        );
         let supports_effort = self
             .model
             .agent_backends
@@ -17228,7 +18067,23 @@ impl XdDesktop {
     ) -> gpui::AnyElement {
         let available = self.minimal_workspace_width(window);
         self.chat_column_width = (available - 48.0).clamp(240.0, 736.0);
-        let chat = self.render_native_chat(colors, window, cx);
+        let chat = match self.open_agent_key().map(str::to_owned) {
+            Some(key) => self.render_agent_view(colors, &key, window, cx),
+            None => {
+                // Typing goes back to the chat once its agent tab is gone, and
+                // actions dispatched from the chat need a focus that is drawn.
+                if self
+                    .agent_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+                    || self.agent_view_focus.is_focused(window)
+                {
+                    window.focus(&self.composer_input.read(cx).focus_handle(cx));
+                }
+                self.render_native_chat(colors, window, cx)
+            }
+        };
         let chat_tabs = self.render_session_chat_tabs(colors, window, cx);
         let terminal = self
             .bottom_terminal_open
@@ -18945,19 +19800,12 @@ impl XdDesktop {
                 }
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, action: &RevealSubagent, _, cx| {
-                this.expanded_activities.insert(action.card_id);
-                if action.row < this.transcript.item_count() {
-                    // The card's top at the top of the view: its height is not
-                    // known until it is drawn open, so "just visible" would
-                    // land below the fold.
-                    this.transcript.splice(action.row..action.row + 1, 1);
-                    this.transcript.scroll_to(ListOffset {
-                        item_ix: action.row,
-                        offset_in_item: px(0.0),
-                    });
-                }
+            .on_action(cx.listener(|this, _: &ToggleAgentsTray, _, cx| {
+                this.agents_tray_open = !this.agents_tray_open;
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, action: &OpenAgentTab, window, cx| {
+                this.open_agent_tab(action.key.clone(), window, cx);
             }))
             .on_action(cx.listener(|this, action: &ControlSubagent, _, cx| {
                 this.control_subagent(action.key.clone(), &action.action, cx);
@@ -21422,6 +22270,128 @@ Binary files /dev/null and b/image.png differ\n";
         assert_eq!(desktop.transcript_has_newer, has_newer);
         desktop.request_older_messages();
         assert!(desktop.transcript_page_loading);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn an_agent_opens_in_its_own_tab_and_messages_go_through_its_lead(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::io::BufRead;
+        let (host, mut requests) = socket_host("agent-tab-test");
+        let (desktop, cx) = cx.add_window_view(XdDesktop::new);
+        let record = r#"subagent_run
+{"key":"toolu_1","task_id":"a1b2","provider":"Claude","agent":"Explore","description":"Read the \"parser\"","status":"running","steps":[{"tool":"Read","text":"src/parser.rs"}]}"#;
+        // Claude has not reported this one's id yet, so it takes no messages.
+        let unaddressed = r#"subagent_run
+{"key":"toolu_2","provider":"Claude","agent":"Explore","description":"Check the lexer","status":"running"}"#;
+        desktop.update(cx, |desktop, cx| {
+            page_back_through_implementation(desktop, &host, false, cx);
+            desktop.model.messages = vec![
+                Message::new(Some(1), "user", "Map the parser", None),
+                Message::new(Some(2), "tool", record, None),
+                Message::new(Some(4), "tool", unaddressed, None),
+                Message::new(
+                    Some(3),
+                    "user",
+                    agent_relay::format("Read 'parser'", "a1b2", "Earlier note"),
+                    None,
+                ),
+            ];
+            desktop.transcript_snapshot.sync_messages(&desktop.model);
+        });
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            // With no box to type in, focus stays on the tab itself.
+            desktop.open_agent_tab("toolu_2".into(), window, cx);
+            assert!(desktop.agent_view_focus.is_focused(window));
+            desktop.open_agent_tab("toolu_1".into(), window, cx);
+            assert!(
+                desktop
+                    .agent_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+            assert_eq!(desktop.open_agent_key(), Some("toolu_1"));
+            assert_eq!(
+                desktop.agent_messages("a1b2"),
+                vec![("Earlier note".to_owned(), false)]
+            );
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("agent-composer").is_some());
+        // An agent whose record is not loaded draws a note, and holds focus
+        // there even after the chat's composer had it.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            desktop.open_agent_tab("toolu_gone".into(), window, cx);
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(desktop.agent_view_focus.is_focused(window));
+            desktop.close_agent_tab("toolu_gone", cx);
+            desktop.open_agent_tab("toolu_1".into(), window, cx);
+        });
+        cx.run_until_parked();
+        // Back from another chat, focus is on this chat's composer, which the
+        // agent tab hides; drawing the tab hands it to the agent's box.
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            window.focus(&desktop.composer_input.read(cx).focus_handle(cx));
+        });
+        cx.run_until_parked();
+        cx.update_window_entity(&desktop, |desktop, window, cx| {
+            assert!(
+                desktop
+                    .agent_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+            );
+        });
+        desktop.update(cx, |desktop, cx| {
+            desktop
+                .agent_drafts
+                .insert("toolu_1".into(), "  Check the lexer too ".into());
+            desktop.send_agent_message(cx);
+            assert!(!desktop.agent_drafts.contains_key("toolu_1"));
+        });
+        let send = loop {
+            let mut line = String::new();
+            requests
+                .read_line(&mut line)
+                .expect("a send request must reach the host");
+            let request: Value = serde_json::from_str(&line).unwrap();
+            if request["op"] == "send" {
+                break request;
+            }
+        };
+        assert_eq!(send["chat"], "implementation");
+        let relay = agent_relay::parse(send["text"].as_str().unwrap()).unwrap();
+        assert_eq!(relay.address, "a1b2");
+        assert_eq!(relay.description, "Read the 'parser'");
+        assert_eq!(relay.text, "Check the lexer too");
+        desktop.update(cx, |desktop, cx| {
+            // A send the host turns away puts the words back in the agent's
+            // box, even while another chat is in front.
+            desktop
+                .agent_drafts
+                .insert("toolu_1".into(), "typed since".into());
+            let shown = desktop.open_agent.take();
+            desktop.restore_pending_send(cx);
+            desktop.open_agent = shown;
+            assert_eq!(
+                desktop.agent_drafts["toolu_1"],
+                "Check the lexer too\ntyped since"
+            );
+            assert_eq!(
+                desktop.agent_input.read(cx).text(),
+                "Check the lexer too\ntyped since"
+            );
+            assert!(desktop.composer.is_empty());
+            desktop.close_agent_tab("toolu_1", cx);
+            assert_eq!(desktop.open_agent_key(), None);
+            assert_eq!(desktop.agent_tabs["implementation"], vec!["toolu_2"]);
+        });
     }
 
     #[cfg(unix)]

@@ -55,6 +55,28 @@ internal class SessionChats(
     val renameSession: () -> Unit = {},
 )
 
+/** A delegated agent opened as its own tab inside the chat that started it. */
+internal class AgentTab(
+    /** The agent's record key. */
+    val key: String,
+    val title: String,
+    val provider: String,
+    val running: Boolean,
+)
+
+/**
+ * The open chat's agent tabs. They are views of the chat's own agents, kept
+ * only while the chat is open, never chats of their own.
+ */
+internal class AgentTabs(
+    val tabs: List<AgentTab> = emptyList(),
+    /** The tab shown in place of the conversation, if one is. */
+    val viewing: String? = null,
+    val open: (String) -> Unit = {},
+    val close: (String) -> Unit = {},
+    val showChat: () -> Unit = {},
+)
+
 internal val Pane.icon: Int
     get() = when (this) {
         Pane.CHAT -> R.drawable.ic_chat
@@ -83,6 +105,7 @@ internal fun CompactChatBar(
     onBack: () -> Unit,
     onChatSettings: () -> Unit,
     chats: SessionChats,
+    agents: AgentTabs = AgentTabs(),
 ) {
     var choosingChat by remember { mutableStateOf(false) }
     var choosingPane by remember { mutableStateOf(false) }
@@ -151,13 +174,42 @@ internal fun CompactChatBar(
                         DropdownMenuItem(
                             text = { Text(chat.title.ifBlank { "New chat" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                             leadingIcon = { BackendIcon(chat.backend, size = 18.dp) },
-                            trailingIcon = if (chat.id == chats.selectedId) {
+                            trailingIcon = if (chat.id == chats.selectedId && agents.viewing == null) {
                                 { Icon(painterResource(R.drawable.ic_check), "Open", Modifier.size(18.dp)) }
                             } else {
                                 null
                             },
-                            onClick = { choosingChat = false; chats.select(chat.id) },
+                            onClick = { choosingChat = false; agents.showChat(); chats.select(chat.id) },
                         )
+                    }
+                    // The open chat's agents, so one can be returned to.
+                    if (agents.tabs.isNotEmpty()) {
+                        HorizontalDivider()
+                        agents.tabs.forEach { agent ->
+                            DropdownMenuItem(
+                                text = { Text(agent.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                leadingIcon = { BackendIcon(agent.provider.lowercase(), size = 18.dp) },
+                                trailingIcon = {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (agent.running) PulseDot(LocalXdSignals.current.working)
+                                        if (agent.key == agents.viewing) {
+                                            Icon(
+                                                painterResource(R.drawable.ic_check), "Open",
+                                                Modifier.padding(start = 8.dp).size(18.dp),
+                                            )
+                                        }
+                                        IconButton(onClick = { agents.close(agent.key) }) {
+                                            Icon(
+                                                painterResource(R.drawable.ic_close), "Close ${agent.title}",
+                                                modifier = Modifier.size(16.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                },
+                                onClick = { choosingChat = false; agents.open(agent.key) },
+                            )
+                        }
                     }
                     HorizontalDivider()
                     DropdownMenuItem(
@@ -215,6 +267,10 @@ internal fun CompactChatBar(
                         leadingIcon = { Icon(painterResource(R.drawable.ic_settings), null, Modifier.size(18.dp)) },
                         onClick = { more = false; onChatSettings() },
                     )
+                    agents.viewing?.let { key ->
+                        HorizontalDivider()
+                        DropdownMenuItem(text = { Text("Close agent") }, onClick = { more = false; agents.close(key) })
+                    }
                     if (selected != null) {
                         HorizontalDivider()
                         DropdownMenuItem(text = { Text("Close chat") }, onClick = { more = false; chats.close(selected.id) })

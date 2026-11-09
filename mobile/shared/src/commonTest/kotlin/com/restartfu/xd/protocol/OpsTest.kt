@@ -234,6 +234,12 @@ class OpsTest {
     }
 
     @Test
+    fun sendSteersOnlyWhenAsked() {
+        assertEquals(null, Ops.send("chat", "hi")["steer"])
+        assertEquals("true", Ops.send("chat", "hi", steer = true)["steer"].toString())
+    }
+
+    @Test
     fun draftTextOmitsUnchangedAttachmentsAndCanReplaceThem() {
         val png = PngAttachment(PNG_HEADER + byteArrayOf(4, 5, 6))
         val text = Ops.setDraft("chat", "typing")

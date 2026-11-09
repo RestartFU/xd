@@ -112,6 +112,7 @@ import com.restartfu.xd.model.AssistantSection
 import com.restartfu.xd.model.AssistantSectionKind
 import com.restartfu.xd.model.AssistantSections
 import com.restartfu.xd.model.SubagentState
+import com.restartfu.xd.model.AgentRelay
 import com.restartfu.xd.model.ToolGrouping
 import com.restartfu.xd.model.ToolText
 import com.restartfu.xd.model.TranscriptItem
@@ -156,7 +157,8 @@ internal fun ChatScreen(
     terminalChatId: String = model.state.value.chatId,
     workspaceOwner: ViewModelStoreOwner? = null,
     productHeader: @Composable () -> Unit = {},
-    sessionTabs: @Composable () -> Unit = {},
+    /** The tablet's chat tabs, given the open chat's agent tabs to show after them. */
+    sessionTabs: @Composable (AgentTabs) -> Unit = {},
     /** The session's chats; given on phones, where one header bar holds them. */
     sessionChats: SessionChats? = null,
 ) {
@@ -165,6 +167,10 @@ internal fun ChatScreen(
     val cancelling by model.cancelling.collectAsStateWithLifecycle()
     val steering by model.steering.collectAsStateWithLifecycle()
     val subagentActions by model.subagentActions.collectAsStateWithLifecycle()
+    val agentTabKeys by model.agentTabs.collectAsStateWithLifecycle()
+    val viewingAgent by model.viewingAgent.collectAsStateWithLifecycle()
+    val agentDrafts by model.agentDrafts.collectAsStateWithLifecycle()
+    val messagingAgent by model.messagingAgent.collectAsStateWithLifecycle()
     val composer by model.draft.collectAsStateWithLifecycle()
     val catalog by model.catalog.collectAsStateWithLifecycle()
     val speechEnabled by settings.speechEnabled.collectAsStateWithLifecycle()
@@ -185,6 +191,8 @@ internal fun ChatScreen(
     // On a phone the workspace views replace the chat under one header, so
     // Back returns to the chat before it leaves the session.
     androidx.activity.compose.BackHandler(enabled = sessionChats != null && pane != Pane.CHAT) { pane = Pane.CHAT }
+    // An agent tab sits over the chat it belongs to, so Back returns to the chat.
+    androidx.activity.compose.BackHandler(enabled = pane == Pane.CHAT && viewingAgent != null) { model.showChat() }
     var choosingModel by rememberSaveable(state.chatId) { mutableStateOf(false) }
     var choosingOptions by rememberSaveable(state.chatId) { mutableStateOf(false) }
 
@@ -219,6 +227,38 @@ internal fun ChatScreen(
     // their own file-change row, and a lone call shows its command.
     val rows = remember(items) { ToolGrouping.rows(items) }
     val answered = remember(items) { AskBlock.answered(items) }
+    // The chat's agents by record key: the host rewrites one record per agent,
+    // so each key is one row holding the agent's newest snapshot.
+    val agentRuns = remember(rows) {
+        rows.filterIsInstance<TranscriptRow.Subagent>()
+            .mapNotNull { row -> row.run.key?.let { it to row.run } }
+            .toMap()
+    }
+    val runningAgents = remember(rows) {
+        rows.filterIsInstance<TranscriptRow.Subagent>()
+            .map { it.run }
+            .filter { it.state == SubagentState.RUNNING }
+    }
+    val agents = AgentTabs(
+        tabs = agentTabKeys.map { key ->
+            val run = agentRuns[key]
+            AgentTab(
+                key = key,
+                title = run?.let(::agentTitle) ?: "Agent",
+                provider = run?.provider.orEmpty(),
+                running = run?.state == SubagentState.RUNNING,
+            )
+        },
+        viewing = viewingAgent,
+        open = { key ->
+            pane = Pane.CHAT
+            model.openAgent(key)
+        },
+        close = model::closeAgent,
+        showChat = model::showChat,
+    )
+    val shownAgent = viewingAgent?.let { agentRuns[it] }
+    var trayOpen by rememberSaveable(state.chatId) { mutableStateOf(false) }
     val leadingItemCount =
         (if (state.hasOlderMessages) 1 else 0) + (if (state.error != null) 1 else 0)
     // The working row sits below the last message, so it is what "the bottom"
@@ -280,18 +320,32 @@ internal fun ChatScreen(
                 Column {
                     productHeader()
                     val active = sessionChats.chats.firstOrNull { it.id == sessionChats.selectedId }
+                    val chatTitle = active?.title?.ifBlank { null } ?: state.title.ifEmpty { "New chat" }
+                    // An open agent names itself, under the chat it belongs to.
+                    val agentTab = agents.tabs.firstOrNull { it.key == viewingAgent }.takeIf { pane == Pane.CHAT }
                     CompactChatBar(
-                        title = active?.title?.ifBlank { null } ?: state.title.ifEmpty { "New chat" },
-                        subtitle = listOf(sessionTitle, projectName).filter { it.isNotBlank() }.joinToString(" · "),
-                        backend = state.backend.ifBlank { null },
+                        title = agentTab?.title ?: chatTitle,
+                        subtitle = if (agentTab != null) {
+                            chatTitle
+                        } else {
+                            listOf(sessionTitle, projectName).filter { it.isNotBlank() }.joinToString(" · ")
+                        },
+                        backend = (if (agentTab != null) agentTab.provider.lowercase() else state.backend).ifBlank { null },
                         pullRequest = pullRequest,
                         openPullRequest = openLink,
                         pane = pane,
                         onPane = { pane = it },
-                        // Back steps out of a workspace view to the chat first, as system Back does.
-                        onBack = { if (pane != Pane.CHAT) pane = Pane.CHAT else goBack() },
+                        // Back steps out of a workspace view or an agent to the chat first, as system Back does.
+                        onBack = {
+                            when {
+                                pane != Pane.CHAT -> pane = Pane.CHAT
+                                viewingAgent != null -> model.showChat()
+                                else -> goBack()
+                            }
+                        },
                         onChatSettings = { choosingOptions = true },
                         chats = sessionChats,
+                        agents = agents,
                     )
                 }
             } else Column {
@@ -358,7 +412,7 @@ internal fun ChatScreen(
                         }
                     },
                 )
-                sessionTabs()
+                sessionTabs(agents)
                 TabRow(
                     selectedTabIndex = pane.ordinal,
                     containerColor = MaterialTheme.colorScheme.surface,
@@ -378,8 +432,25 @@ internal fun ChatScreen(
             }
         },
         bottomBar = {
-            if (pane == Pane.CHAT) {
+            if (pane == Pane.CHAT && viewingAgent != null) {
+                val key = viewingAgent
+                AgentComposer(
+                    run = shownAgent,
+                    draft = key?.let { agentDrafts[it] }.orEmpty(),
+                    onDraft = { text -> key?.let { model.updateAgentDraft(it, text) } },
+                    sending = messagingAgent,
+                    onSend = { shownAgent?.let(model::messageAgent) },
+                    compact = sessionChats != null,
+                )
+            } else if (pane == Pane.CHAT) {
                 Column {
+                    AgentsTray(
+                        running = runningAgents,
+                        open = trayOpen,
+                        onToggle = { trayOpen = !trayOpen },
+                        onOpenAgent = agents.open,
+                        compact = sessionChats != null,
+                    )
                     state.interactions.firstOrNull()?.let { request -> InteractionCard(request, model) }
                 Composer(
                     state = state,
@@ -422,6 +493,34 @@ internal fun ChatScreen(
                     }
                     else -> Unit
                 }
+            }
+            return@Scaffold
+        }
+        if (viewingAgent != null) {
+            val address = shownAgent?.messageAddress
+            val sent = remember(items, address) {
+                if (address == null) {
+                    emptyList()
+                } else {
+                    items.filter { it.kind == TranscriptKind.USER }
+                        .mapNotNull { AgentRelay.parse(it.text) }
+                        .filter { it.address == address }
+                }
+            }
+            val queued = remember(state.queue, address) {
+                if (address == null) emptyList() else state.queue.mapNotNull(AgentRelay::parse).filter { it.address == address }
+            }
+            val pending = viewingAgent?.let { subagentActions[it] }
+            shownAgent?.let { SettleSubagentAction(it, pending, model) }
+            androidx.compose.runtime.key(viewingAgent) {
+                AgentView(
+                    run = shownAgent,
+                    sent = sent,
+                    queued = queued,
+                    pendingAction = pending,
+                    onAction = model::controlSubagent,
+                    modifier = Modifier.padding(padding),
+                )
             }
             return@Scaffold
         }
@@ -491,12 +590,13 @@ internal fun ChatScreen(
                     is TranscriptRow.Subagent -> {
                         val key = row.run.key
                         val pending = key?.let { subagentActions[it] }
-                        if (key != null && pending != null) {
-                            val settled = row.run.state != SubagentState.RUNNING ||
-                                (pending == "Moving to background" && row.run.background)
-                            LaunchedEffect(settled) { if (settled) model.settleSubagentAction(key) }
-                        }
-                        SubagentCard(row.run, pending, model::controlSubagent)
+                        SettleSubagentAction(row.run, pending, model)
+                        SubagentCard(
+                            row.run,
+                            pending,
+                            model::controlSubagent,
+                            onOpen = key?.let { { agents.open(it) } },
+                        )
                     }
                 }
             }
@@ -515,6 +615,16 @@ internal fun ChatScreen(
             }
         }
     }
+}
+
+/** Forgets an agent's pending Stop or Background once its record shows it took effect. */
+@Composable
+private fun SettleSubagentAction(run: com.restartfu.xd.model.SubagentRun, pending: String?, model: ChatViewModel) {
+    val key = run.key ?: return
+    if (pending == null) return
+    val settled = run.state != SubagentState.RUNNING ||
+        (pending == "Moving to background" && run.background)
+    LaunchedEffect(settled) { if (settled) model.settleSubagentAction(key) }
 }
 
 @Composable
@@ -766,7 +876,7 @@ private fun Composer(
                         onClick = { model.openQueuedMessage(index) },
                         label = {
                             Text(
-                                queued,
+                                AgentRelay.parse(queued)?.let { "${agentRelayLabel(it.description)}: ${it.text}" } ?: queued,
                                 modifier = Modifier.widthIn(max = 220.dp),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -1445,13 +1555,17 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel, answering:
         }
         return
     }
+    // A message the reader sent one of the agents shows only what they wrote,
+    // under the agent it went to; the lead's instructions around it are xd's.
+    val relay = remember(item.text) { AgentRelay.parse(item.text) }
+    val shown = if (relay != null) item.copy(text = relay.text) else item
     Box(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         contentAlignment = Alignment.CenterEnd,
     ) {
         Column(Modifier.fillMaxWidth(0.86f), horizontalAlignment = Alignment.End) {
             // What the message answers, attached above it like a reply's quote.
-            answering?.let { question ->
+            (answering?.let(::answeredQuestionLabel) ?: relay?.let { agentRelayLabel(it.description) })?.let { caption ->
                 Row(
                     modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -1463,7 +1577,7 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel, answering:
                         modifier = Modifier.padding(end = 5.dp).size(14.dp),
                     )
                     Text(
-                        answeredQuestionLabel(question),
+                        caption,
                         style = MaterialTheme.typography.labelMedium,
                         color = LocalXdSignals.current.faint,
                         maxLines = 1,
@@ -1479,12 +1593,15 @@ private fun TranscriptRow(item: TranscriptItem, model: ChatViewModel, answering:
                 shape = RoundedCornerShape(20.dp),
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    SelectableMessageBody(item, model)
+                    SelectableMessageBody(shown, model)
                 }
             }
         }
     }
 }
+
+/** The caption on a message the reader sent one of the agents, as on the desktop. */
+internal fun agentRelayLabel(description: String): String = "To $description"
 
 /** The caption on a message sent in reply to a question, as on the desktop. */
 internal fun answeredQuestionLabel(question: String): String = "Answering \u201c${question.trim()}\u201d"

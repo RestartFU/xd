@@ -51,6 +51,8 @@ internal fun SubagentCard(
     run: SubagentRun,
     pendingAction: String? = null,
     onAction: (key: String, action: String) -> Unit = { _, _ -> },
+    /** Opens the agent as its own tab; null when it has no key to find it by. */
+    onOpen: (() -> Unit)? = null,
 ) {
     // Keyed by the agent, not the text: the host rewrites the record as the
     // agent works, and an open card stays open through those updates.
@@ -125,40 +127,19 @@ internal fun SubagentCard(
                     style = MaterialTheme.typography.labelMedium,
                 )
             }
-            val key = run.key
-            if (key != null && (run.canStop || run.canBackground || pendingAction != null)) {
+            if (run.hasControls(pendingAction) || onOpen != null) {
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (pendingAction != null) {
-                        Text(
-                            "$pendingAction…",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    } else {
-                        if (run.canBackground) {
-                            OutlinedButton(
-                                onClick = { onAction(key, "background") },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.heightIn(min = 48.dp),
-                            ) { Text("Background", style = MaterialTheme.typography.labelMedium) }
-                        }
-                        if (run.canStop) {
-                            OutlinedButton(
-                                onClick = { onAction(key, "stop") },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.heightIn(min = 48.dp),
-                            ) {
-                                Text(
-                                    "Stop",
-                                    color = MaterialTheme.colorScheme.error,
-                                    style = MaterialTheme.typography.labelMedium,
-                                )
-                            }
-                        }
+                    if (onOpen != null) {
+                        OutlinedButton(
+                            onClick = onOpen,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.heightIn(min = 48.dp),
+                        ) { Text("Open", style = MaterialTheme.typography.labelMedium) }
                     }
+                    SubagentControls(run, pendingAction, onAction)
                 }
             }
             if (run.detail.isNotBlank()) {
@@ -201,7 +182,7 @@ internal fun SubagentCard(
             }
             if (expanded) {
                 if (run.prompt.isNotBlank()) {
-                    Section("Task")
+                    SubagentSection("Task")
                     Text(
                         run.prompt,
                         modifier = Modifier
@@ -213,7 +194,7 @@ internal fun SubagentCard(
                 }
                 if (run.steps.isNotEmpty()) {
                     val earlier = run.droppedSteps
-                    Section("Steps · ${run.steps.size + earlier}")
+                    SubagentSection("Steps · ${run.steps.size + earlier}")
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -235,7 +216,7 @@ internal fun SubagentCard(
                 }
                 val report = run.summary.ifBlank { run.latest }
                 if (report.isNotBlank()) {
-                    Section(if (run.summary.isNotBlank()) "Report" else "Latest message")
+                    SubagentSection(if (run.summary.isNotBlank()) "Report" else "Latest message")
                     Text(
                         report,
                         color = MaterialTheme.colorScheme.onSurface,
@@ -256,8 +237,50 @@ internal fun SubagentCard(
     }
 }
 
+/** Whether [SubagentControls] has anything to show. */
+internal fun SubagentRun.hasControls(pendingAction: String?): Boolean =
+    key != null && (canStop || canBackground || pendingAction != null)
+
+/** Background and Stop for an agent its lead still controls, or the action under way. */
 @Composable
-private fun Section(label: String) {
+internal fun SubagentControls(
+    run: SubagentRun,
+    pendingAction: String?,
+    onAction: (key: String, action: String) -> Unit,
+) {
+    val key = run.key ?: return
+    if (pendingAction != null) {
+        Text(
+            "$pendingAction…",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelMedium,
+        )
+        return
+    }
+    if (run.canBackground) {
+        OutlinedButton(
+            onClick = { onAction(key, "background") },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            modifier = Modifier.heightIn(min = 48.dp),
+        ) { Text("Background", style = MaterialTheme.typography.labelMedium) }
+    }
+    if (run.canStop) {
+        OutlinedButton(
+            onClick = { onAction(key, "stop") },
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+            modifier = Modifier.heightIn(min = 48.dp),
+        ) {
+            Text(
+                "Stop",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+    }
+}
+
+@Composable
+internal fun SubagentSection(label: String) {
     Text(
         label,
         modifier = Modifier.padding(top = 6.dp),
@@ -268,7 +291,7 @@ private fun Section(label: String) {
 }
 
 @Composable
-private fun StepLine(tool: String, text: String) {
+internal fun StepLine(tool: String, text: String) {
     Row {
         Text(
             tool,

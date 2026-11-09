@@ -170,6 +170,12 @@ impl FileEditor {
         }
     }
 
+    /// Only the Unix-only agent tab test reads the box back.
+    #[cfg(all(test, unix))]
+    pub fn text(&self) -> &str {
+        &self.content
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.clipboard_generation = self.clipboard_generation.wrapping_add(1);
         self.content = text.into();

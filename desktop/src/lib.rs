@@ -1,4 +1,5 @@
 pub mod activity;
+pub mod agent_relay;
 pub mod channel;
 pub mod host;
 #[cfg(all(test, unix))]
