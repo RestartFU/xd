@@ -1895,30 +1895,43 @@ impl Engine {
             }
         }
         let mut paused = Vec::new();
-        for chat_id in chats {
-            // Held so no message can start a turn between marking the chat and
-            // stopping it: the stop would take the new turn instead.
-            let Ok(gate) = self.chat_execution_gate(&chat_id) else {
-                continue;
-            };
-            let Ok(_execution) = gate.lock() else {
-                continue;
-            };
+        let mut pause = |chat_id: String, gate: std::sync::MutexGuard<'_, ()>| {
+            // The gate is held so no message can start a turn between marking
+            // the chat and stopping it: the stop would take the new turn instead.
             match store.pause_chat(&chat_id, background.contains_key(&chat_id)) {
                 Ok(true) => {}
-                Ok(false) => continue,
+                Ok(false) => return,
                 Err(error) => {
                     eprintln!("xd-host: cannot pause chat {chat_id}: {error}");
-                    continue;
+                    return;
                 }
             }
             // As with stop: a turn that died with a previous host still ends.
             if !runtime.stop_chat(&chat_id) {
                 let _ = store.clear_interrupted_turn(&chat_id);
             }
+            drop(gate);
             self.events
                 .publish(json!({"event": "changed", "chat": chat_id}));
             paused.push(chat_id);
+        };
+        // Chats a message is being sent to wait until it is: everything else
+        // stops first, so one slow send does not hold up the rest.
+        let mut busy = Vec::new();
+        for chat_id in chats {
+            let Ok(gate) = self.chat_execution_gate(&chat_id) else {
+                continue;
+            };
+            match gate.try_lock() {
+                Ok(execution) => pause(chat_id, execution),
+                Err(std::sync::TryLockError::WouldBlock) => busy.push((chat_id, gate.clone())),
+                Err(std::sync::TryLockError::Poisoned(_)) => {}
+            }
+        }
+        for (chat_id, gate) in &busy {
+            if let Ok(execution) = gate.lock() {
+                pause(chat_id.clone(), execution);
+            }
         }
         if !paused.is_empty() {
             self.events.publish(json!({"event": "tree"}));
@@ -1979,6 +1992,11 @@ impl Engine {
                 self.events.publish(event);
                 let chat_id = request["chat"].as_str().unwrap_or_default();
                 let text = request["text"].as_str().unwrap_or_default();
+                // Steering asks for this message now, so a paused chat goes on:
+                // a turn still stopping for the pause then hands it over.
+                if store.unpause_chat(chat_id).unwrap_or(false) {
+                    self.events.publish(json!({"event": "tree"}));
+                }
                 let steered = self
                     .runtime
                     .as_ref()
@@ -2404,6 +2422,7 @@ pub fn serve_daemon_connection(
                     Some(
                         "ping"
                             | "cancel"
+                            | "pause-all"
                             | "respond"
                             | "subagent"
                             | "agent-auth-cancel"

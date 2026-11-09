@@ -545,6 +545,32 @@ fn pausing_all_holds_working_chats_until_they_resume() {
     });
     let reply = client.call(json!({"op":"resume-all"}));
     assert_eq!(reply["resumed"], json!([idle_chat]), "{reply}");
+    client.wait_for(json!({"op":"chat", "chat":idle_chat}), |reply| {
+        reply["working"] == false
+    });
+
+    // Steering a paused chat's queued message runs it, and only that chat.
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = client.call(json!({"op":"send", "chat":busy, "text":"steered"}));
+    assert_eq!(reply["queued"], true, "{reply}");
+    let reply = client.call(json!({"op":"send", "chat":idle_chat, "text":"forever"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let reply = client.call(json!({"op":"pause-all"}));
+    assert_eq!(reply["paused"].as_array().unwrap().len(), 2, "{reply}");
+    let chat = client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false
+    });
+    assert_eq!(chat["queue"], json!(["steered"]), "{chat}");
+    let reply = client.call(
+        json!({"op":"steer-queue", "chat":busy, "index":0, "text":"steered", "queue_revision":chat["queue_revision"]}),
+    );
+    assert_eq!(reply["ok"], true, "{reply}");
+    client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
+        reply["working"] == false && reply["queue"] == json!([])
+    });
+    assert_eq!(user_messages(&mut client, "steered"), 1);
+    assert_eq!(paused_in_tree(&mut client), vec![idle_chat.clone()]);
 }
 
 #[test]

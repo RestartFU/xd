@@ -48,8 +48,8 @@ rather than by arrival position:
 ```
 
 This matters because the host answers requests concurrently. The operations
-that must stay responsive — `cancel`, `voice-cancel`, `agent-auth-cancel`, and
-`ping` — bypass the serialized command path entirely. Without ids, a `cancel`
+that must stay responsive — `cancel`, `pause-all`, `voice-cancel`,
+`agent-auth-cancel`, and `ping` — bypass the serialized command path entirely. Without ids, a `cancel`
 answered promptly by the host would still sit behind a slow `diff-read` in
 the reply stream.
 
@@ -749,7 +749,10 @@ running background tasks between turns, so nothing goes on while the user is
 away. Each one it stops is marked `paused` in `tree`, keeps its queue instead of
 starting the next message, and becomes `resumable`. A paused chat is not
 settled or deleted by the automatic rules. A chat that was already idle is left
-alone.
+alone. `pause-all` is a control operation, like `cancel`. It stops a chat a
+message is being sent to once that send has started its turn, after the others.
+The host never continues a paused chat by itself: not after a restart, not on
+another account after a usage limit, and not for an agent's background report.
 
 `resume-all` continues each paused chat as [`resume-turn`](#resume-turn) does,
 then lets its queue run as usual. A paused chat that can no longer be resumed,

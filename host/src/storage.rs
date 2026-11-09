@@ -1775,11 +1775,17 @@ impl StateStore {
         let mut message = self.materialize_message(request, text)?;
         let mut database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let transaction = database.transaction()?;
-        let (working, backend) = transaction
+        let (working, backend, paused) = transaction
             .query_row(
-                "SELECT host_working, backend FROM chats WHERE id = ?",
+                "SELECT host_working, backend, paused FROM chats WHERE id = ?",
                 [chat_id],
-                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| StorageError::NoChat(chat_id.into()))?;
@@ -1792,7 +1798,8 @@ impl StateStore {
                     [chat_id],
                     |row| row.get::<_, i64>(0),
                 )?;
-                if working || latest != last_message {
+                // A paused chat waits for the user, not for the host.
+                if working || paused || latest != last_message {
                     return Err(StorageError::InvalidRequest(
                         "This chat has already continued.".into(),
                     ));
@@ -1805,7 +1812,7 @@ impl StateStore {
                     [chat_id],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
                 )?;
-                if working || latest != last_message || !resumable {
+                if working || paused || latest != last_message || !resumable {
                     return Err(StorageError::InvalidRequest(
                         "This chat has moved on since its account ran out.".into(),
                     ));
@@ -2970,7 +2977,7 @@ impl StateStore {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         let changed = database.execute(
             "UPDATE chats SET host_working = 1, turn_resumable = 0, updated_at = ? \
-             WHERE id = ? AND host_working = 0",
+             WHERE id = ? AND host_working = 0 AND paused = 0",
             params![now_seconds(), chat_id],
         )?;
         Ok(changed > 0)
@@ -13562,6 +13569,13 @@ mod tests {
         assert_eq!(store.tree().unwrap()["chats"][0]["paused"], true);
         assert_eq!(store.paused_chats().unwrap(), ["chat"]);
         assert!(store.settlement_candidates().unwrap().is_empty());
+        // Nothing the host does by itself picks a paused chat back up.
+        let latest = store.latest_user_message("chat").unwrap();
+        let go_on = json!({"chat": "chat", "text": "go on"});
+        assert!(store.prepare_after_limit(&go_on, latest).is_err());
+        assert!(store.prepare_continuation(&go_on, latest).is_err());
+        assert!(!store.begin_background_turn("chat").unwrap());
+        assert!(store.chat_is_paused("chat").unwrap());
 
         // Resuming starts a turn, and any turn picks the chat back up.
         store

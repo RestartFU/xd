@@ -56,6 +56,11 @@ struct RuntimeInner {
     store: Arc<StateStore>,
     events: Arc<EventBus>,
     active: Mutex<HashMap<String, ActiveProcess>>,
+    /// Held by a chat's ending turn from the moment it leaves `active` until
+    /// the queued turn after it, if any, has started, and by
+    /// [`TurnRuntime::stop_chat`]. Stopping a chat therefore sees either the
+    /// turn that ends or the one that follows it, never the gap between.
+    successions: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     next_turn: AtomicU64,
     secrets: Arc<SecretsStore>,
     commands: Mutex<HashMap<String, (String, Vec<String>)>>,
@@ -523,6 +528,7 @@ impl TurnRuntime {
                 store,
                 events,
                 active: Mutex::new(HashMap::new()),
+                successions: Mutex::new(HashMap::new()),
                 next_turn: AtomicU64::new(0),
                 secrets,
                 commands: Mutex::new(HashMap::new()),
@@ -1802,12 +1808,23 @@ impl TurnRuntime {
     /// background agents and shells it runs between turns. True when a turn
     /// was running.
     pub(crate) fn stop_chat(&self, chat_id: &str) -> bool {
+        let succession = self.succession(chat_id);
+        let _succession = succession.lock().unwrap_or_else(|error| error.into_inner());
         let killed = self.cancel(chat_id);
         if !killed {
             self.drop_session(chat_id);
             self.publish_background_tasks(chat_id);
         }
         killed
+    }
+
+    fn succession(&self, chat_id: &str) -> Arc<Mutex<()>> {
+        let mut successions = self
+            .inner
+            .successions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        successions.entry(chat_id.to_owned()).or_default().clone()
     }
 
     /// Releases running and idle resources when a conversation is deleted.
@@ -1825,6 +1842,9 @@ impl TurnRuntime {
         }
         if let Ok(mut records) = self.inner.records.lock() {
             records.remove(chat_id);
+        }
+        if let Ok(mut successions) = self.inner.successions.lock() {
+            successions.remove(chat_id);
         }
     }
 
@@ -2208,6 +2228,8 @@ impl TurnRuntime {
         } {
             Ok(parser) => parser,
             Err(error) => {
+                let succession = self.succession(&turn.chat_id);
+                let _succession = succession.lock().unwrap_or_else(|error| error.into_inner());
                 self.finish(turn, turn_id, 0, false, Some(error), 0, true, None, None);
                 return;
             }
@@ -2731,6 +2753,10 @@ impl TurnRuntime {
                 })
             })
         };
+        // Released once `finish` has started any queued turn, and before the
+        // account-switch continuation below, which takes the chat's gate.
+        let succession = self.succession(&turn.chat_id);
+        let succession = succession.lock().unwrap_or_else(|error| error.into_inner());
         if let Ok(mut active) = self.inner.active.lock()
             && active
                 .get(&turn.chat_id)
@@ -2781,6 +2807,7 @@ impl TurnRuntime {
             asked,
             context_usage,
         );
+        drop(succession);
         if let Some((outcome, message)) = limited {
             self.continue_after_limit(&chat_id, outcome, message);
         }
