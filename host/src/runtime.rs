@@ -532,7 +532,7 @@ impl TurnRuntime {
     /// it changed. A Claude session follows the chat to any account. A Codex
     /// session cannot: its reasoning is sealed to the account that wrote it,
     /// so the new account starts a session with the conversation's text.
-    fn place_on_account(&self, turn: &mut TurnSpec) {
+    fn place_on_account(&self, turn: &mut TurnSpec) -> Result<(), String> {
         let chat_account = turn
             .session_account
             .as_deref()
@@ -561,11 +561,11 @@ impl TurnRuntime {
                 unconfirmed = turn.session_id.is_some();
             }
         }
-        if turn.backend == "claude" && !self.runs_as(&choice.account) {
-            self.inner
-                .auth
-                .accounts()
-                .share_settings(&turn.backend, &choice.account);
+        if choice.unavailable {
+            return Err(format!(
+                "No {} account can take this turn. Sign in again in Settings, Agents, Accounts.",
+                provider_name(&turn.backend)
+            ));
         }
         // The account decides the home; a secret cannot point a turn at another
         // one, where it would run as a login nothing here has checked.
@@ -586,7 +586,7 @@ impl TurnRuntime {
                     .as_deref()
                     .is_some_and(|stored| crate::accounts::same_login(stored, &turn.account)));
         if !moved {
-            return;
+            return Ok(());
         }
         let explained = self
             .inner
@@ -604,7 +604,7 @@ impl TurnRuntime {
             self.post_account_notice(&turn.chat_id, &sentence);
         }
         if turn.backend != "codex" {
-            return;
+            return Ok(());
         }
         turn.session_id = None;
         turn.fresh_session = true;
@@ -623,15 +623,7 @@ impl TurnRuntime {
                 turn.prompt
             );
         }
-    }
-
-    /// Whether a kept agent process runs as this account.
-    fn runs_as(&self, account: &str) -> bool {
-        self.inner.sessions.lock().map_or(true, |sessions| {
-            sessions
-                .values()
-                .any(|session| crate::accounts::tag_account(&session.account) == account)
-        })
+        Ok(())
     }
 
     fn switch_sentence(&self, provider: &str, choice: &Choice) -> String {
@@ -1174,7 +1166,7 @@ impl TurnRuntime {
         let secrets = self.inner.secrets.effective(&lineage)?;
         turn.environment = secrets.environment;
         // After the secrets, so a secret cannot point the turn at another home.
-        self.place_on_account(&mut turn);
+        self.place_on_account(&mut turn)?;
         if let Some(secret_prompt) = secrets.prompt {
             turn.system_prompt = Some(match turn.system_prompt.take() {
                 Some(prompt) if !prompt.is_empty() => format!("{prompt}\n\n{secret_prompt}"),
@@ -4258,7 +4250,7 @@ done
             panic!("the message was queued");
         };
         assert_eq!(turn.session_id.as_deref(), Some("thread-a"));
-        runtime.place_on_account(&mut turn);
+        runtime.place_on_account(&mut turn).unwrap();
         assert_eq!(turn.account, second);
         assert_eq!(turn.session_id, None);
         assert_eq!(

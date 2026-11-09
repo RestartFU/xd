@@ -466,6 +466,9 @@ impl AuthManager {
         account: &str,
         kind: SessionKind,
     ) -> Result<(), String> {
+        // Whatever login the account had is about to change; a reading of it no
+        // longer confirms anything.
+        self.inner.accounts.forget_login_reading(provider, account);
         let serial = self.inner.next_session.fetch_add(1, Ordering::Relaxed);
         {
             let mut sessions = self
@@ -681,6 +684,8 @@ impl AuthManager {
         };
         let account = session.account.as_str();
         let accounts = &self.inner.accounts;
+        // The login may have changed while the session ran.
+        accounts.forget_login_reading(provider, account);
         match (session.kind, result) {
             (SessionKind::Add, _) if session.cancelled => {
                 accounts.forget(provider, account);
@@ -732,10 +737,10 @@ impl AuthManager {
         let accounts = &self.inner.accounts;
         // Every account already in the list must be known by its login first,
         // or a repeat of it could not be told apart.
+        // Read again even when known: any of them may have signed in to
+        // another login since it was last read.
         for existing in accounts.ids(provider) {
-            if !accounts.knows_login(provider, &existing) {
-                crate::usage::check_account(accounts, provider, &existing);
-            }
+            crate::usage::check_account(accounts, provider, &existing);
         }
         // An account whose login cannot be read is never taken in: it could be
         // another account's sign-in under a shared keychain entry.

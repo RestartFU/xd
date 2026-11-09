@@ -253,6 +253,10 @@ pub(crate) struct Choice {
     pub passed_over: Option<PassedOver>,
     /// Every usable account is out of usage; this is the soonest back.
     pub all_spent_until: Option<i64>,
+    /// No account can take the turn: each is signed out or held back for its
+    /// login. Only said when there are several; a lone sign-in runs as before
+    /// and the CLI says what is wrong.
+    pub unavailable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -436,14 +440,18 @@ impl Accounts {
         });
     }
 
-    /// Whether the account's login has been read.
-    pub(crate) fn knows_login(&self, provider: &str, id: &str) -> bool {
-        self.with(provider, |state| {
-            state
-                .account(id)
-                .is_some_and(|account| account.account_key.is_some())
-        })
-        .unwrap_or(false)
+    /// Forgets when the account's login was read, after it signed in or out:
+    /// the reading may be of the login it had before.
+    pub(crate) fn forget_login_reading(&self, provider: &str, id: &str) {
+        let _ = self.update(provider, |state| {
+            if let Some(account) = state.account_mut(id) {
+                account.live.login_read_at_ms = None;
+                account.live.checked_at_ms = None;
+                // A reading begun before now may be of the old login.
+                account.live.identity_at_ms = Some(now_ms());
+            }
+            Ok(())
+        });
     }
 
     /// The account last seen signed in as this login.
@@ -845,6 +853,7 @@ impl Accounts {
             environment: Vec::new(),
             passed_over: None,
             all_spent_until: None,
+            unavailable: self.has_several(provider),
         });
         choice.environment = self.environment(provider, &choice.account);
         choice
@@ -927,6 +936,7 @@ fn choose(
         environment: Vec::new(),
         passed_over: None,
         all_spent_until: None,
+        unavailable: false,
     };
     let first_usable = state.accounts.iter().find(usable);
     if !state.auto_switch || state.accounts.len() < 2 {
@@ -1478,6 +1488,16 @@ mod tests {
             150,
         );
         assert!(accounts.describe("codex", 200)[0]["limited_until_ms"].is_null());
+    }
+
+    #[test]
+    fn with_several_accounts_and_none_usable_the_turn_is_refused() {
+        let data = temp("none");
+        let accounts = Accounts::with_homes(&data, &[]);
+        assert!(!accounts.choose("codex", None, |_| false, 0).unavailable);
+        added(&accounts, "codex", "b@example.com");
+        let choice = accounts.choose("codex", None, |_| false, 0);
+        assert!(choice.unavailable);
     }
 
     #[test]
