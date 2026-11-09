@@ -21450,6 +21450,7 @@ Binary files /dev/null and b/image.png differ\n";
         }
     }
 
+    #[cfg(unix)]
     fn message_page(
         ids: std::ops::RangeInclusive<i64>,
         has_older: bool,
@@ -21464,6 +21465,7 @@ Binary files /dev/null and b/image.png differ\n";
             .clone()
     }
 
+    #[cfg(unix)]
     fn reply_messages(
         desktop: &mut XdDesktop,
         cursor: MessageCursor,
@@ -21476,6 +21478,7 @@ Binary files /dev/null and b/image.png differ\n";
 
     /// Shows the implementation chat's newest page through [host], or an
     /// older window when [has_newer], then pages further back.
+    #[cfg(unix)]
     fn page_back_through_implementation(
         desktop: &mut XdDesktop,
         host: &HostHandle,
