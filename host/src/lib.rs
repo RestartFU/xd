@@ -2168,6 +2168,12 @@ impl Engine {
         };
         let mut resumed = Vec::new();
         for chat_id in chats {
+            // Asked again as each chat's turn comes: one moved to another
+            // project since the list was read stays paused. A move racing this
+            // check is ordered either way, as if it came just after the resume.
+            if !in_scope(store, &chat_id, folder) {
+                continue;
+            }
             let before = store.latest_user_message(&chat_id).ok();
             let reply = self.send_message_inner(
                 &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
@@ -2194,7 +2200,9 @@ impl Engine {
                 let Ok(_execution) = gate.lock() else {
                     continue;
                 };
-                if !store.unpause_chat(&chat_id).unwrap_or(false) {
+                if !in_scope(store, &chat_id, folder)
+                    || !store.unpause_chat(&chat_id).unwrap_or(false)
+                {
                     continue;
                 }
                 self.events.publish(json!({"event": "tree"}));
