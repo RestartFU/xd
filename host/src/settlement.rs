@@ -302,22 +302,27 @@ fn sweep(
         }
         // Inactivity alone decides unless the pull request could veto it, so
         // the network is only asked about sessions that are still in doubt.
+        // The links a lookup looked at. One linked or removed during it voids
+        // the decision.
+        let mut links_seen = None;
         let without_lookup = (!settings.keep_pull_requests)
             .then(|| auto_settled_at(&candidate, &[], now, &settings))
             .flatten();
         let settled_at = match without_lookup {
             Some(settled_at) => Some(settled_at),
             None => {
-                let Some(found) = pull_requests_for(store, &candidate, pull_requests) else {
+                let Some((found, linked)) = pull_requests_for(store, &candidate, pull_requests)
+                else {
                     continue;
                 };
+                links_seen = Some(linked);
                 auto_settled_at(&candidate, &found, now, &settings)
             }
         };
         let Some(settled_at) = settled_at else {
             continue;
         };
-        if store.auto_settle_session(&candidate, settled_at, &settings)? {
+        if store.auto_settle_session(&candidate, settled_at, &settings, links_seen.as_deref())? {
             settled += 1;
         }
     }
@@ -326,12 +331,13 @@ fn sweep(
 
 /// The session's pull requests: its branch's, unless the user removed that
 /// one from every chat in it, and those linked to its chats. `None` when a
-/// lookup failed and the session has to wait for a sweep that can tell.
+/// lookup failed and the session has to wait for a sweep that can tell. Also
+/// returns the linked addresses it read.
 fn pull_requests_for(
     store: &StateStore,
     candidate: &SettlementCandidate,
     cache: &mut PullRequestCache,
-) -> Option<Vec<PullRequestSnapshot>> {
+) -> Option<(Vec<PullRequestSnapshot>, Vec<String>)> {
     let mut found = Vec::new();
     if let Some(workdir) = &candidate.workdir
         && let Some(branch) = store.checked_out_branch(workdir)
@@ -390,14 +396,14 @@ fn pull_requests_for(
         .clone()
         .filter(|workdir| workdir.is_dir())
         .unwrap_or_else(|| store.workspace_path().to_path_buf());
-    for url in linked {
-        let snapshot = match cache.linked.get(&url) {
+    for url in &linked {
+        let snapshot = match cache.linked.get(url) {
             Some((_, known)) => *known,
-            None => match store.pull_request_snapshot_at(&directory, &url) {
+            None => match store.pull_request_snapshot_at(&directory, url) {
                 Ok(snapshot) => {
                     if let Some(snapshot) = &snapshot {
                         cache.states_changed |= store
-                            .set_pull_request_state(&url, snapshot.state)
+                            .set_pull_request_state(url, snapshot.state)
                             .unwrap_or(false);
                     }
                     cache.linked.insert(url.clone(), (Instant::now(), snapshot));
@@ -411,7 +417,7 @@ fn pull_requests_for(
         };
         found.extend(snapshot);
     }
-    Some(found)
+    Some((found, linked))
 }
 
 #[cfg(test)]
@@ -1016,11 +1022,135 @@ mod tests {
                 .auto_settle_session(
                     &candidate,
                     candidate.activity_at,
-                    &AutoSettleSettings::default()
+                    &AutoSettleSettings::default(),
+                    None
                 )
                 .unwrap()
         );
         assert_eq!(fixture.listed_settled_at(), None);
+    }
+
+    #[test]
+    fn a_link_added_after_the_sweep_looked_stops_it_settling() {
+        let fixture = Fixture::new();
+        fixture.age(10);
+        let candidate = fixture.store.settlement_candidates().unwrap().remove(0);
+        let seen = fixture
+            .store
+            .linked_pull_request_urls(&candidate.chats)
+            .unwrap();
+        fixture
+            .store
+            .link_pull_requests(
+                &fixture.chat,
+                &["https://github.com/o/r/pull/9".into()],
+                LinkSource::User,
+            )
+            .unwrap();
+        let settings = AutoSettleSettings::default();
+        assert!(
+            !fixture
+                .store
+                .auto_settle_session(&candidate, candidate.activity_at, &settings, Some(&seen))
+                .unwrap()
+        );
+        let now_seen = fixture
+            .store
+            .linked_pull_request_urls(&candidate.chats)
+            .unwrap();
+        assert!(
+            fixture
+                .store
+                .auto_settle_session(
+                    &candidate,
+                    candidate.activity_at,
+                    &settings,
+                    Some(&now_seen)
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn restoring_removed_links_keeps_to_the_limit() {
+        let fixture = Fixture::new();
+        let batch = |from: usize| {
+            (from..from + pull_requests::MAX_PER_REQUEST)
+                .map(|number| format!("https://github.com/o/r/pull/{number}"))
+                .collect::<Vec<_>>()
+        };
+        let link = |urls: &[String]| {
+            fixture
+                .store
+                .link_pull_requests(&fixture.chat, urls, LinkSource::User)
+        };
+        let first = [batch(1), batch(17)];
+        for urls in &first {
+            link(urls).unwrap();
+        }
+        for url in first.iter().flatten() {
+            fixture
+                .store
+                .unlink_pull_request(&fixture.chat, url)
+                .unwrap();
+        }
+        link(&batch(101)).unwrap();
+        link(&batch(201)).unwrap();
+        assert!(link(&first[0][..1]).is_err(), "restoring one would make 33");
+        assert_eq!(
+            fixture
+                .store
+                .linked_pull_request_urls(std::slice::from_ref(&fixture.chat))
+                .unwrap()
+                .len(),
+            pull_requests::MAX_PER_CHAT
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn refreshes_take_turns_so_every_link_is_asked_about() {
+        let log = std::env::temp_dir().join(format!("xd-gh-log-{}", uuid::Uuid::new_v4()));
+        with_fake_gh(
+            &format!(
+                "echo \"$3\" >> '{}'; \
+                 echo '{{\"url\":\"'\"$3\"'\",\"state\":\"OPEN\",\"finished_at\":null}}'",
+                log.display()
+            ),
+            |fixture, _| {
+                let urls = (1..=10)
+                    .map(|number| format!("https://github.com/o/r/pull/{number}"))
+                    .collect::<Vec<_>>();
+                fixture
+                    .store
+                    .link_pull_requests(&fixture.chat, &urls, LinkSource::User)
+                    .unwrap();
+                assert!(
+                    fixture
+                        .store
+                        .refresh_linked_pull_request_states(&fixture.chat)
+                        .unwrap()
+                );
+                fixture.sql("UPDATE chat_pull_requests SET checked_at = checked_at - 100");
+                fixture
+                    .store
+                    .refresh_linked_pull_request_states(&fixture.chat)
+                    .unwrap();
+                let asked = std::fs::read_to_string(&log).unwrap();
+                let asked = asked.lines().collect::<Vec<_>>();
+                assert_eq!(asked.len(), 16);
+                assert_eq!(&asked[8..10], [urls[8].as_str(), urls[9].as_str()]);
+                let tree = fixture.store.tree().unwrap();
+                assert!(
+                    tree["chats"][0]["pull_requests"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|link| link["state"] == "open")
+                );
+            },
+        );
+        let _ = std::fs::remove_file(log);
     }
 
     #[test]
@@ -1036,14 +1166,14 @@ mod tests {
         assert!(
             !fixture
                 .store
-                .auto_settle_session(&candidate, candidate.activity_at, &decided_under)
+                .auto_settle_session(&candidate, candidate.activity_at, &decided_under, None)
                 .unwrap()
         );
         assert_eq!(fixture.listed_settled_at(), None);
         assert!(
             fixture
                 .store
-                .auto_settle_session(&candidate, candidate.activity_at, &changed)
+                .auto_settle_session(&candidate, candidate.activity_at, &changed, None)
                 .unwrap()
         );
     }

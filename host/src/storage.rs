@@ -3562,9 +3562,26 @@ impl StateStore {
                     |row| row.get::<_, bool>(0),
                 )
                 .optional()?;
+            let full = || -> Result<bool, StorageError> {
+                let count: i64 = transaction.query_row(
+                    "SELECT COUNT(*) FROM chat_pull_requests WHERE chat_id = ? AND dismissed = 0",
+                    [chat_id],
+                    |row| row.get(0),
+                )?;
+                Ok(count as usize >= pull_requests::MAX_PER_CHAT)
+            };
+            let refuse = || {
+                StorageError::InvalidRequest(format!(
+                    "A chat can link at most {} pull requests.",
+                    pull_requests::MAX_PER_CHAT
+                ))
+            };
             match known {
                 Some(false) => {}
                 Some(true) if source.restores() => {
+                    if full()? {
+                        return Err(refuse());
+                    }
                     transaction.execute(
                         "UPDATE chat_pull_requests SET dismissed = 0, source = ?, created_at = ? \
                          WHERE chat_id = ? AND url = ?",
@@ -3574,16 +3591,8 @@ impl StateStore {
                 }
                 Some(true) => {}
                 None => {
-                    let count: i64 = transaction.query_row(
-                        "SELECT COUNT(*) FROM chat_pull_requests WHERE chat_id = ? AND dismissed = 0",
-                        [chat_id],
-                        |row| row.get(0),
-                    )?;
-                    if count as usize >= pull_requests::MAX_PER_CHAT {
-                        return Err(StorageError::InvalidRequest(format!(
-                            "A chat can link at most {} pull requests.",
-                            pull_requests::MAX_PER_CHAT
-                        )));
+                    if full()? {
+                        return Err(refuse());
                     }
                     transaction.execute(
                         "INSERT INTO chat_pull_requests (chat_id, url, source, created_at) \
@@ -3625,37 +3634,13 @@ impl StateStore {
         Ok(changed > 0)
     }
 
-    /// The pull requests linked to a chat, oldest first, with what is known of
-    /// their state.
-    pub(crate) fn chat_linked_pull_requests(
-        &self,
-        chat_id: &str,
-    ) -> Result<Vec<(String, Option<String>)>, StorageError> {
-        let database = self.reader()?;
-        let mut statement = database.prepare(
-            "SELECT url, state FROM chat_pull_requests WHERE chat_id = ? AND dismissed = 0 \
-             ORDER BY created_at, rowid",
-        )?;
-        let links = statement
-            .query_map([chat_id], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(links)
-    }
-
     /// The pull requests linked to any of these chats, each once.
     pub(crate) fn linked_pull_request_urls(
         &self,
         chats: &[String],
     ) -> Result<Vec<String>, StorageError> {
-        let mut urls = Vec::new();
-        for chat in chats {
-            for (url, _) in self.chat_linked_pull_requests(chat)? {
-                if !urls.contains(&url) {
-                    urls.push(url);
-                }
-            }
-        }
-        Ok(urls)
+        let database = self.reader()?;
+        linked_urls(&database, chats)
     }
 
     /// Whether the user removed this pull request from every one of these chats.
@@ -3697,44 +3682,65 @@ impl StateStore {
             "UPDATE chat_pull_requests SET state = ? WHERE url = ? AND state IS NOT ?",
             params![state, url, state],
         )?;
+        database.execute(
+            "UPDATE chat_pull_requests SET checked_at = ? WHERE url = ?",
+            params![now_seconds(), url],
+        )?;
         Ok(changed > 0)
     }
 
-    /// Asks GitHub again about the open pull requests linked to a chat, at
-    /// most a few at a time, and records what changed. Merged ones cannot
-    /// change, so they are left alone. Returns whether any state changed.
+    /// Asks GitHub again about the pull requests linked to a chat that have
+    /// not merged, a few at a time, longest unchecked first, and records what
+    /// changed. Merged ones cannot change, so they are left alone. Returns
+    /// whether any state changed.
     pub(crate) fn refresh_linked_pull_request_states(
         &self,
         chat_id: &str,
     ) -> Result<bool, StorageError> {
-        const MAX_REFRESHED: usize = 8;
-        let links = self.chat_linked_pull_requests(chat_id)?;
-        if links.is_empty() {
-            return Ok(false);
-        }
-        let workdir = {
+        const MAX_REFRESHED: i64 = 8;
+        let (urls, workdir) = {
             let database = self.reader()?;
-            resolve_chat_workdir(&database, &self.workspace_root, chat_id)
+            let mut statement = database.prepare(
+                "SELECT url FROM chat_pull_requests \
+                 WHERE chat_id = ? AND dismissed = 0 AND state IS NOT 'merged' \
+                 ORDER BY checked_at IS NOT NULL, checked_at, created_at, rowid LIMIT ?",
+            )?;
+            let urls = statement
+                .query_map(params![chat_id, MAX_REFRESHED], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            let workdir = resolve_chat_workdir(&database, &self.workspace_root, chat_id)
                 .map(PathBuf::from)
                 .ok()
                 .filter(|workdir| workdir.is_dir())
-                .unwrap_or_else(|| self.workspace_root.clone())
+                .unwrap_or_else(|| self.workspace_root.clone());
+            (urls, workdir)
         };
         let mut changed = false;
-        for (url, _) in links
-            .into_iter()
-            .filter(|(_, state)| state.as_deref() != Some("merged"))
-            .take(MAX_REFRESHED)
-        {
+        for url in urls {
             match self.pull_request_snapshot_at(&workdir, &url) {
                 Ok(Some(snapshot)) => {
                     changed |= self.set_pull_request_state(&url, snapshot.state)?
                 }
-                Ok(None) => {}
-                Err(error) => eprintln!("xd: cannot read pull request {url}: {error}"),
+                Ok(None) => self.mark_pull_request_checked(&url)?,
+                Err(error) => {
+                    self.mark_pull_request_checked(&url)?;
+                    eprintln!("xd: cannot read pull request {url}: {error}");
+                }
             }
         }
         Ok(changed)
+    }
+
+    fn mark_pull_request_checked(&self, url: &str) -> Result<(), StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        database.execute(
+            "UPDATE chat_pull_requests SET checked_at = ? WHERE url = ?",
+            params![now_seconds(), url],
+        )?;
+        Ok(())
     }
 
     /// What GitHub says about a pull request named by its address. Answers
@@ -5050,14 +5056,22 @@ impl StateStore {
     /// the sweep looked: what the user does always outranks the rules. One
     /// statement both checks and updates, so no message can land between them,
     /// and the rules the sweep decided under must still be the ones in force.
+    /// `links_seen`, when given, is the session's linked pull requests the
+    /// decision looked at. A link added or removed since then voids it.
     pub(crate) fn auto_settle_session(
         &self,
         candidate: &SettlementCandidate,
         settled_at: i64,
         decided_under: &AutoSettleSettings,
+        links_seen: Option<&[String]>,
     ) -> Result<bool, StorageError> {
         let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
         if read_auto_settle_settings(&database)? != *decided_under {
+            return Ok(false);
+        }
+        if let Some(links_seen) = links_seen
+            && linked_urls(&database, &candidate.chats)? != links_seen
+        {
             return Ok(false);
         }
         let changed = database.execute(
@@ -9639,15 +9653,36 @@ fn ensure_draft_chunks(database: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// The pull requests linked to any of `chats`, each once, in the order the
+/// chats and their links come.
+fn linked_urls(database: &Connection, chats: &[String]) -> Result<Vec<String>, StorageError> {
+    let mut statement = database.prepare_cached(
+        "SELECT url FROM chat_pull_requests WHERE chat_id = ? AND dismissed = 0 \
+         ORDER BY created_at, rowid",
+    )?;
+    let mut urls = Vec::new();
+    for chat in chats {
+        for url in statement.query_map([chat], |row| row.get::<_, String>(0))? {
+            let url = url?;
+            if !urls.contains(&url) {
+                urls.push(url);
+            }
+        }
+    }
+    Ok(urls)
+}
+
 /// Pull requests linked to each chat. A link the user removed stays, marked
 /// `dismissed`, so automatic linking does not bring it back. `state` is the
-/// last state GitHub reported, if any: `open`, `closed` or `merged`.
+/// last state GitHub reported, if any: `open`, `closed` or `merged`, and
+/// `checked_at` when the host last asked, so refreshes take turns.
 fn ensure_chat_pull_requests(database: &Connection) -> Result<(), StorageError> {
     database.execute_batch(
         "CREATE TABLE IF NOT EXISTS chat_pull_requests (
             chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
             url TEXT NOT NULL, source TEXT NOT NULL, state TEXT,
             dismissed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            checked_at INTEGER,
             PRIMARY KEY(chat_id, url));
          CREATE INDEX IF NOT EXISTS chat_pull_requests_url ON chat_pull_requests (url);
          UPDATE meta SET value = '27' WHERE key = 'schema_version';",

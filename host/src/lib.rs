@@ -2748,6 +2748,57 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn linking_over_the_protocol_updates_every_client_only_when_the_list_changes() {
+        let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
+        let root = env::temp_dir().join(format!("xd-engine-links-{}-{id}", std::process::id()));
+        let workspaces = root.join("Workspaces");
+        std::fs::create_dir_all(&workspaces).unwrap();
+        let store = StateStore::open(root.join("chats.db"), &workspaces).unwrap();
+        let engine = Engine::with_store(store);
+        let folder = engine.dispatch(json!({"op": "new-folder", "name": "Project"}))["id"].clone();
+        let chat = engine.dispatch(json!({"op": "new-chat", "folder": folder}))["id"].clone();
+        let (sender, events) = sync_channel::<Value>(64);
+        let (connection, _peer) = UnixStream::pair().unwrap();
+        let _subscriber = engine.events.subscribe(sender, connection).unwrap();
+        let saw_tree = |events: &std::sync::mpsc::Receiver<Value>| {
+            std::iter::from_fn(|| events.try_recv().ok()).any(|event| event["event"] == "tree")
+        };
+        let url = "https://github.com/o/r/pull/3";
+
+        let linked = engine.dispatch(json!({"op": "link-pull-requests", "chat": chat,
+            "urls": [format!("{url}/files"), "not a link"], "source": "agent"}));
+        assert_eq!(linked["linked"], json!([url]), "{linked}");
+        assert_eq!(linked["invalid"], json!(["not a link"]));
+        assert!(saw_tree(&events));
+        engine.dispatch(json!({"op": "link-pull-requests", "chat": chat, "urls": [url]}));
+        assert!(!saw_tree(&events), "nothing changed");
+        assert_eq!(
+            engine.dispatch(json!({"op": "tree"}))["chats"][0]["pull_requests"],
+            json!([{"url": url}])
+        );
+        for refused in [
+            json!({"op": "link-pull-requests", "chat": chat, "urls": []}),
+            json!({"op": "link-pull-requests", "chat": chat, "urls": [url], "source": "branch"}),
+            json!({"op": "link-pull-requests", "chat": "missing", "urls": [url]}),
+            json!({"op": "unlink-pull-request", "chat": chat, "url": "https://example.com"}),
+        ] {
+            assert_eq!(engine.dispatch(refused.clone())["ok"], false, "{refused}");
+        }
+
+        let unlinked =
+            engine.dispatch(json!({"op": "unlink-pull-request", "chat": chat, "url": url}));
+        assert_eq!(unlinked["changed"], true);
+        assert!(saw_tree(&events));
+        assert!(
+            engine.dispatch(json!({"op": "tree"}))["chats"][0]
+                .get("pull_requests")
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn settling_over_the_protocol_updates_every_client_and_respects_a_pending_question() {
         let id = NEXT_TEST.fetch_add(1, Ordering::Relaxed);
         let root = env::temp_dir().join(format!("xd-engine-settle-{}-{id}", std::process::id()));
