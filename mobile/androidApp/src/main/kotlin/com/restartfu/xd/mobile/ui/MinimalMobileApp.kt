@@ -518,7 +518,7 @@ internal fun MinimalMobileApp(
             projectName = session.title,
             chatTab = true,
             onDismiss = { createChatIn = null },
-            onCreate = { title, agent, _ ->
+            onCreate = { title, agent, _, _ ->
                 createChatIn = null
                 activeProject?.let { project -> model.createDirectSession(project.id, title, agent, session.id) }
             },
@@ -818,9 +818,9 @@ private fun MinimalProjectsHome(
             projectName = creatingIn.name,
             places = { NewSessionPlaces.load(model.client, creatingIn.id) },
             onDismiss = { createSessionIn = null },
-            onCreate = { title, agent, worktree ->
+            onCreate = { title, agent, worktree, startFromRemote ->
                 createSessionIn = null
-                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree)
+                model.createDirectSession(creatingIn.id, title, agent, worktree = worktree, startFromRemote = startFromRemote)
             },
         )
     }
@@ -1939,8 +1939,9 @@ internal fun NewSessionDialog(
     /** Where a new session can work; null for a chat joining an existing session. */
     places: (suspend () -> NewSessionPlaces)? = null,
     onDismiss: () -> Unit,
-    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?) -> Unit,
+    onCreate: (String, DirectAgent, Ops.NewSessionWorktree?, Boolean) -> Unit,
 ) {
+    var startFromRemote by rememberSaveable { mutableStateOf(true) }
     var title by rememberSaveable { mutableStateOf("") }
     var agent by rememberSaveable { mutableStateOf(DirectAgent.CODEX) }
     var loaded by remember { mutableStateOf<NewSessionPlaces?>(null) }
@@ -1993,6 +1994,14 @@ internal fun NewSessionDialog(
                     }
                 }
                 if (places != null) {
+                    if (worktree is Ops.NewSessionWorktree.Branch) {
+                        SettingSwitch(
+                            title = "Start from remote",
+                            detail = "Use the latest remote branch when available.",
+                            checked = startFromRemote,
+                            onCheckedChange = { startFromRemote = it },
+                        )
+                    }
                     WorkspacePicker(
                         places = loaded,
                         error = placesError,
@@ -2004,7 +2013,7 @@ internal fun NewSessionDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onCreate(title.trim(), agent, worktree) },
+                onClick = { onCreate(title.trim(), agent, worktree, startFromRemote) },
                 // Wait for the choices, as the desktop does; if they cannot be
                 // read, the host's own default checkout still works.
                 // Only once this opening's choices have loaded, even if a choice

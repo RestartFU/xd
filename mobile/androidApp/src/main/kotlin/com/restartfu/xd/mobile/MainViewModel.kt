@@ -561,6 +561,7 @@ class MainViewModel @JvmOverloads constructor(
         agent: DirectAgent,
         sessionId: String? = null,
         worktree: Ops.NewSessionWorktree? = null,
+        startFromRemote: Boolean = true,
     ) {
         if (_creatingChat.value) return
         _creatingChat.value = true
@@ -573,6 +574,7 @@ class MainViewModel @JvmOverloads constructor(
                     backend = agent.wire,
                     sessionId = sessionId,
                     worktree = worktree,
+                    startFromRemote = startFromRemote,
                 )
                 _createdDirectSession.value = CreatedDirectSession(
                     folderId,
