@@ -31,6 +31,31 @@ public data class ChatSummaryReply(
     @SerialName("session_mode")
     val sessionMode: String = "chat",
     val session: String? = null,
+    /** Linked pull requests, oldest first, on hosts with `linked_pull_requests`. */
+    @SerialName("pull_requests")
+    val pullRequests: List<LinkedPullRequestReply> = emptyList(),
+)
+
+/** One pull request linked to a chat; [state] is absent until the host has asked GitHub. */
+@Serializable
+public data class LinkedPullRequestReply(
+    val url: String,
+    val state: String? = null,
+)
+
+/** What `link-pull-requests` kept, in canonical form, and what it refused. */
+@Serializable
+public data class LinkPullRequestsReply(
+    val ok: Boolean = true,
+    val linked: List<String> = emptyList(),
+    val invalid: List<String> = emptyList(),
+)
+
+/** Whether `unlink-pull-request` removed a link that was there. */
+@Serializable
+public data class UnlinkPullRequestReply(
+    val ok: Boolean = true,
+    val changed: Boolean = false,
 )
 
 @Serializable
@@ -57,6 +82,8 @@ public data class TreeReply(
     val settlement: Boolean = false,
     /** True when the host keeps folders of projects; older hosts make a project instead. */
     @SerialName("folder_groups") val folderGroups: Boolean = false,
+    /** True when the host keeps pull requests linked to chats and lists them per chat. */
+    @SerialName("linked_pull_requests") val linkedPullRequests: Boolean = false,
 )
 
 /** A chat checkout's Git state, as `git-status` and `git-commit` answer. */
