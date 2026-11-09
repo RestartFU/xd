@@ -5,7 +5,7 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -147,7 +147,7 @@ pub struct StateStore {
     /// Stopped first on drop, before the connections it checkpoints for.
     _checkpointer: Option<Checkpointer>,
     /// Every write goes through this one connection.
-    database: Mutex<Connection>,
+    database: Arc<Mutex<Connection>>,
     /// Snapshot connections for reads; `None` when the database is not in
     /// write-ahead-log mode and reads have to share the writer.
     readers: Option<ReaderPool>,
@@ -501,11 +501,14 @@ impl StateStore {
             initialize_schema(&database)?;
             initialize_generated_worktrees(&database)?;
         }
+        let database = Arc::new(Mutex::new(database));
         Ok(Self {
             _checkpointer: write_ahead_log
-                .then(|| Checkpointer::start(database_path, DATABASE_BUSY_TIMEOUT))
+                .then(|| {
+                    Checkpointer::start(database_path, DATABASE_BUSY_TIMEOUT, database.clone())
+                })
                 .flatten(),
-            database: Mutex::new(database),
+            database,
             readers: write_ahead_log.then(|| ReaderPool::new(database_path, DATABASE_BUSY_TIMEOUT)),
             workspace_root: workspace_root.into(),
             paste_root: database_path
@@ -10091,6 +10094,63 @@ mod tests {
             lent.iter().all(|&count| count == 0),
             "a snapshot was still held while Git ran: {lent:?}"
         );
+    }
+
+    #[test]
+    fn a_log_pinned_by_overlapping_reads_is_reset_under_pressure() {
+        let fixture = Fixture::new();
+        let (store, chat) = store_with_chat(&fixture, 1);
+        let readers = store.readers.as_ref().unwrap();
+        let wal = fixture.root.join("chats.db-wal");
+        let checkpoints = Connection::open(&fixture.database).unwrap();
+        let open_snapshot = || {
+            let snapshot = readers.snapshot().unwrap();
+            snapshot
+                .query_row("SELECT COUNT(*) FROM messages", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap();
+            snapshot
+        };
+        // Two reads leapfrog each other while writes keep landing, so some
+        // read is always on an older snapshot and the log never starts over.
+        let mut older = open_snapshot();
+        let mut sizes = Vec::new();
+        for round in 0..10 {
+            for index in 0..20 {
+                store
+                    .append_turn_message(&chat, "user", &format!("{round}-{index}"), None)
+                    .unwrap();
+            }
+            let newer = open_snapshot();
+            assert!(!database::checkpoint_round(
+                &checkpoints,
+                &store.database,
+                i64::MAX
+            ));
+            drop(older);
+            older = newer;
+            sizes.push(fs::metadata(&wal).unwrap().len());
+        }
+        assert!(
+            sizes.windows(2).all(|pair| pair[1] > pair[0]),
+            "passive checkpoints alone let the log keep growing: {sizes:?}"
+        );
+        thread::scope(|scope| {
+            // The last read finishes while the reset is waiting for it.
+            scope.spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                drop(older);
+            });
+            assert!(database::checkpoint_round(&checkpoints, &store.database, 1));
+        });
+        assert_eq!(fs::metadata(&wal).unwrap().len(), 0, "the log starts over");
+        let count: i64 = store
+            .reader()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 201, "resetting the log loses nothing");
     }
 
     #[test]

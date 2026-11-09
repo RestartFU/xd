@@ -6,6 +6,8 @@
 //! even while a commit is stuck in `fsync` because other programs are flooding
 //! the same disk. Checkpoints, which copy the log back into the database file
 //! and sync it, run on a background connection instead of inside a commit.
+//! Only a log that overlapping reads have kept from starting over until it is
+//! large is reset on the writer, which then waits for that one checkpoint.
 
 use std::{
     ops::Deref,
@@ -29,6 +31,11 @@ const WRITER_AUTOCHECKPOINT_PAGES: i64 = 10_000;
 const CHECKPOINT_EVERY: Duration = Duration::from_secs(1);
 /// Size the log file is truncated back to once it has been checkpointed.
 const JOURNAL_SIZE_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
+/// Log size in frames (64 MiB at the default 4 KiB page size) at which the
+/// background checkpoint stops being passive. Reads that keep overlapping
+/// while commits land can keep a passive checkpoint from ever letting the
+/// log start over, so past this size it resets the log on the writer.
+pub(crate) const PRESSURE_FRAMES: i64 = 16_384;
 
 /// Switches a freshly opened writable connection to write-ahead logging and
 /// reports whether that worked. Opening the database first replays any
@@ -258,15 +265,23 @@ pub(crate) struct Checkpointer {
 impl Checkpointer {
     /// Starts checkpointing `path`. Without it the writer's own, rarer
     /// checkpoints still keep the log bounded, so a failure is only logged.
-    pub(crate) fn start(path: &Path, busy_timeout: Duration) -> Option<Self> {
-        Self::try_start(path, busy_timeout)
+    pub(crate) fn start(
+        path: &Path,
+        busy_timeout: Duration,
+        writer: Arc<Mutex<Connection>>,
+    ) -> Option<Self> {
+        Self::try_start(path, busy_timeout, writer)
             .inspect_err(|error| {
                 eprintln!("xd-host: cannot start background checkpoints: {error}");
             })
             .ok()
     }
 
-    fn try_start(path: &Path, busy_timeout: Duration) -> Result<Self, Box<dyn std::error::Error>> {
+    fn try_start(
+        path: &Path,
+        busy_timeout: Duration,
+        writer: Arc<Mutex<Connection>>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -283,9 +298,7 @@ impl Checkpointer {
                     if worker_stop.load(Ordering::Acquire) {
                         break;
                     }
-                    // PASSIVE copies what it can without blocking the writer
-                    // or readers. A busy result just means trying again.
-                    let _ = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+                    checkpoint_round(&connection, &writer, PRESSURE_FRAMES);
                 }
             })?;
         Ok(Self {
@@ -293,6 +306,36 @@ impl Checkpointer {
             worker: Some(worker),
         })
     }
+}
+
+/// One background checkpoint. A PASSIVE checkpoint copies what it can
+/// without blocking the writer or readers; a busy result just means trying
+/// again. Once the log has grown past `pressure_frames` anyway, it is reset
+/// from the writer connection: holding the writer's own lock makes writes
+/// wait for it instead of failing as busy, and a TRUNCATE checkpoint waits
+/// for the reads still using the old log, while new reads keep starting.
+/// Reports whether the log was reset that way.
+pub(crate) fn checkpoint_round(
+    connection: &Connection,
+    writer: &Mutex<Connection>,
+    pressure_frames: i64,
+) -> bool {
+    let log_frames = connection
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            row.get::<_, i64>(1)
+        })
+        .unwrap_or(0);
+    if log_frames < pressure_frames {
+        return false;
+    }
+    let Ok(writer) = writer.lock() else {
+        return false;
+    };
+    writer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .is_ok_and(|busy| busy == 0)
 }
 
 impl Drop for Checkpointer {
