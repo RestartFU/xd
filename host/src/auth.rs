@@ -25,6 +25,10 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 /// spent one is passed over before a turn has to fail on it.
 const WATCH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
+/// Frees an account for removal: refuses while a chat is working on it, and
+/// otherwise stops the agent processes kept running as it.
+pub(crate) type Releaser = Box<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AuthManager {
     inner: Arc<AuthInner>,
@@ -38,6 +42,9 @@ struct AuthInner {
     sessions: Mutex<HashMap<String, AuthSession>>,
     /// The outcome of the last attempt to add an account, by provider.
     notices: Mutex<HashMap<String, String>>,
+    /// Stops whatever runs as an account before it is removed; see
+    /// [`AuthManager::set_releaser`].
+    releaser: Mutex<Option<Releaser>>,
     next_session: AtomicU64,
     next_generation: AtomicU64,
     events: Arc<EventBus>,
@@ -118,10 +125,17 @@ impl AuthManager {
                 states: Mutex::new(states),
                 sessions: Mutex::new(HashMap::new()),
                 notices: Mutex::new(HashMap::new()),
+                releaser: Mutex::new(None),
                 next_session: AtomicU64::new(1),
                 next_generation: AtomicU64::new(1),
                 events,
             }),
+        }
+    }
+
+    pub(crate) fn set_releaser(&self, releaser: Releaser) {
+        if let Ok(mut current) = self.inner.releaser.lock() {
+            *current = Some(releaser);
         }
     }
 
@@ -145,15 +159,15 @@ impl AuthManager {
     }
 
     fn refresh_account(&self, provider: &str, account: &str) -> bool {
-        if self
-            .inner
-            .sessions
-            .lock()
-            .is_ok_and(|sessions| sessions.contains_key(provider))
-        {
-            return true;
-        }
         let generation = {
+            // Sessions, then states, as `begin_session` takes them: a sign-in
+            // or sign-out cannot begin between seeing none and marking checking.
+            let Ok(sessions) = self.inner.sessions.lock() else {
+                return false;
+            };
+            if sessions.contains_key(provider) {
+                return true;
+            }
             let Ok(mut states) = self.inner.states.lock() else {
                 return false;
             };
@@ -173,7 +187,10 @@ impl AuthManager {
             snapshot.device_code = None;
             snapshot.needs_input = false;
             // Taken under the same lock, so it is this check's and no one else's.
-            snapshot.generation
+            let generation = snapshot.generation;
+            drop(states);
+            drop(sessions);
+            generation
         };
         self.publish(provider);
         let manager = self.clone();
@@ -534,6 +551,30 @@ impl AuthManager {
     }
 
     fn run_session(&self, provider: &str, account: &str, serial: u64, kind: SessionKind) {
+        // Nothing may still run as an account whose home is about to go. New
+        // turns already pass it over: it reads as signing out.
+        if kind == SessionKind::Remove {
+            let released = self
+                .inner
+                .releaser
+                .lock()
+                .ok()
+                .and_then(|releaser| releaser.as_ref().map(|release| release(provider, account)))
+                .unwrap_or(Ok(()));
+            if let Err(error) = released {
+                if let Ok(mut sessions) = self.inner.sessions.lock()
+                    && sessions
+                        .get(provider)
+                        .is_some_and(|session| session.serial == serial)
+                {
+                    sessions.remove(provider);
+                }
+                self.set_snapshot(provider, account, AuthSnapshot::unknown());
+                self.set_notice(provider, error);
+                self.refresh_account(provider, account);
+                return;
+            }
+        }
         let login = matches!(kind, SessionKind::SignIn | SessionKind::Add);
         let mut command = match provider {
             "claude" => {
@@ -756,15 +797,15 @@ impl AuthManager {
             );
             return;
         };
+        // Shared while the account is still pending: nothing can run as it yet,
+        // so this cannot race Claude's own writes to the file.
+        accounts.share_settings(provider, account);
         match accounts.finish_adding(provider, account, &identity) {
             Ok(Ok(())) => {
                 self.set_notice(
                     provider,
                     format!("Added {}.", accounts.label(provider, account)),
                 );
-                // Nothing runs as the new account yet, so its settings can be
-                // shared without racing Claude's own writes.
-                accounts.share_settings(provider, account);
                 // Clears "checking" so the status check below really runs.
                 self.set_snapshot(provider, account, AuthSnapshot::unknown());
                 self.refresh_account(provider, account);

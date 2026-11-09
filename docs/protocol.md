@@ -900,7 +900,7 @@ authenticated devices, which need them to tell accounts apart.
 | `agent-auth-add` | `provider` | Signs in a new account in a new home. It joins the list once the CLI succeeds and the host has read who it is; a login already in the list is refused and its home deleted. |
 | `agent-auth-input` | `provider`, `input` | Sends a code the CLI asked for to the provider's running sign-in |
 | `agent-auth-cancel` | `provider` | Stops the provider's running sign-in; a new account being added is discarded |
-| `agent-auth-logout` | `provider`, optional `account` | Signs the `default` account out. Any other account is signed out and removed, its home deleted. |
+| `agent-auth-logout` | `provider`, optional `account` | Signs the `default` account out. Any other account is signed out and removed, its home deleted, after the agent processes kept running as it are stopped; while a chat is working on it, removal is refused and reported as the provider's `notice`. |
 | `agent-accounts-order` | `provider`, `accounts: string[]` naming each account once | Sets the priority order |
 | `agent-accounts-auto-switch` | `provider`, `enabled: boolean` | Turns automatic switching on or off |
 

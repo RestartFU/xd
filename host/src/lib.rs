@@ -204,6 +204,9 @@ impl Engine {
         let cli_updates = CliUpdates::new(events.clone());
         let cli_versions = CliVersions::new(events.clone());
         let secrets = Arc::new(SecretsStore::new(data_directory.clone()));
+        let runtime =
+            TurnRuntime::with_auth(store.clone(), events.clone(), secrets.clone(), auth.clone());
+        auth.set_releaser(runtime.releaser());
         let git_drafts = GitDraftService::new(Some(store.clone()), events.clone());
         // Unit tests send messages on hosts with no fake assistant behind them, and
         // must not reach a real CLI. The daemon tests cover titles end to end.
@@ -222,12 +225,7 @@ impl Engine {
         let shared_event_monitor = Some(SharedEventMonitor::start(events.clone()));
         let engine = Self {
             shutdown: AtomicBool::new(false),
-            runtime: Some(TurnRuntime::with_auth(
-                store.clone(),
-                events.clone(),
-                secrets.clone(),
-                auth.clone(),
-            )),
+            runtime: Some(runtime),
             store: Some(store),
             auth,
             cli_updates,

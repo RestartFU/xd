@@ -74,6 +74,10 @@ struct RuntimeInner {
     on_account_switch: Mutex<Option<AccountSwitchHandler>>,
     /// Chats whose move to another account was already explained to the user.
     explained_switches: Mutex<HashSet<String>>,
+    /// Held to read while a turn starts, from choosing its account until its
+    /// process is registered, and to write while an account is freed for
+    /// removal, so removal never misses a turn starting on it.
+    account_gate: std::sync::RwLock<()>,
 }
 
 /// Continues a chat on another account. Takes the chat and its newest user
@@ -518,8 +522,58 @@ impl TurnRuntime {
                 auth,
                 on_account_switch: Mutex::new(None),
                 explained_switches: Mutex::new(HashSet::new()),
+                account_gate: std::sync::RwLock::new(()),
             }),
         }
+    }
+
+    /// What [`AuthManager::set_releaser`] takes: frees an account for removal.
+    pub(crate) fn releaser(&self) -> crate::auth::Releaser {
+        let inner = Arc::downgrade(&self.inner);
+        Box::new(move |_provider, account| match inner.upgrade() {
+            Some(inner) => TurnRuntime { inner }.release_account(account),
+            None => Ok(()),
+        })
+    }
+
+    /// Refuses while a chat is working on the account; otherwise stops the
+    /// processes kept running as it, which would outlive its home.
+    fn release_account(&self, account: &str) -> Result<(), String> {
+        if account == crate::accounts::DEFAULT_ACCOUNT {
+            return Ok(());
+        }
+        let _gate = self
+            .inner
+            .account_gate
+            .write()
+            .map_err(|_| "Agent sessions are unavailable.".to_owned())?;
+        let mut sessions = self
+            .inner
+            .sessions
+            .lock()
+            .map_err(|_| "Agent sessions are unavailable.".to_owned())?;
+        let held = sessions
+            .iter()
+            .filter(|(_, session)| crate::accounts::tag_account(&session.account) == account)
+            .map(|(chat, session)| (chat.clone(), session.router.clone()))
+            .collect::<Vec<_>>();
+        if held
+            .iter()
+            .any(|(_, router)| router.lock().map_or(true, |router| router.sink.is_some()))
+        {
+            return Err(
+                "A chat is working on this account. Stop it or let it finish, then remove the account."
+                    .into(),
+            );
+        }
+        for (chat, _) in held {
+            if let Some(gone) = sessions.remove(&chat)
+                && let Ok(mut child) = gone.child.lock()
+            {
+                let _ = terminate_agent(&mut child);
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn set_account_switch_handler(&self, handler: AccountSwitchHandler) {
@@ -1158,6 +1212,11 @@ impl TurnRuntime {
     }
 
     pub fn start(&self, mut turn: TurnSpec) -> Result<(), String> {
+        let _gate = self
+            .inner
+            .account_gate
+            .read()
+            .map_err(|_| "Agent sessions are unavailable.".to_owned())?;
         let lineage = self
             .inner
             .store
