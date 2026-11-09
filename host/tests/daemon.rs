@@ -556,6 +556,8 @@ fn pausing_all_holds_working_chats_until_they_resume() {
     assert_eq!(reply["queued"], true, "{reply}");
     let reply = client.call(json!({"op":"send", "chat":idle_chat, "text":"forever"}));
     assert_eq!(reply["ok"], true, "{reply}");
+    let reply = client.call(json!({"op":"send", "chat":idle_chat, "text":"held"}));
+    assert_eq!(reply["queued"], true, "{reply}");
     let reply = client.call(json!({"op":"pause-all"}));
     assert_eq!(reply["paused"].as_array().unwrap().len(), 2, "{reply}");
     let chat = client.wait_for(json!({"op":"chat", "chat":busy}), |reply| {
@@ -571,6 +573,25 @@ fn pausing_all_holds_working_chats_until_they_resume() {
     });
     assert_eq!(user_messages(&mut client, "steered"), 1);
     assert_eq!(paused_in_tree(&mut client), vec![idle_chat.clone()]);
+
+    // An agent that fails to start leaves the chat paused, its queue waiting.
+    let agent = daemon.root.join("codex");
+    let hidden = daemon.root.join("codex.hidden");
+    fs::rename(&agent, &hidden).unwrap();
+    let reply = client.call(json!({"op":"resume-all"}));
+    assert_eq!(reply["resumed"], json!([]), "{reply}");
+    assert_eq!(paused_in_tree(&mut client), vec![idle_chat.clone()]);
+    let chat = client.call(json!({"op":"chat", "chat":idle_chat}));
+    assert_eq!(chat["working"], false, "{chat}");
+    assert_eq!(chat["resumable"], true, "{chat}");
+    assert_eq!(chat["queue"], json!(["held"]), "{chat}");
+    fs::rename(&hidden, &agent).unwrap();
+    let reply = client.call(json!({"op":"resume-all"}));
+    assert_eq!(reply["resumed"], json!([idle_chat]), "{reply}");
+    client.wait_for(json!({"op":"chat", "chat":idle_chat}), |reply| {
+        reply["working"] == false && reply["queue"] == json!([])
+    });
+    assert!(paused_in_tree(&mut client).is_empty());
 }
 
 #[test]

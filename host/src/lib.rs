@@ -1804,8 +1804,8 @@ impl Engine {
             Ok(resources) => resources,
             Err(_) => return error_reply("Session resources are unavailable."),
         };
-        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false)
-            || store.chat_is_paused(chat_id).unwrap_or(false);
+        let was_paused = store.chat_is_paused(chat_id).unwrap_or(false);
+        let resumes = store.chat_has_settlement_override(chat_id).unwrap_or(false) || was_paused;
         let prepared = match continues {
             Some(Continuation::AfterRestart(last_message)) => {
                 store.prepare_continuation(&request, last_message)
@@ -1851,10 +1851,22 @@ impl Engine {
                 }
                 Err(error) => {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
+                    self.keep_paused_after_failed_start(chat_id, was_paused);
                     error_reply(error)
                 }
             },
             Err(error) => error_reply(error),
+        }
+    }
+
+    /// A turn that would have picked a paused chat up never started, so the
+    /// chat stays paused: its queue waits and resuming tries it again.
+    fn keep_paused_after_failed_start(&self, chat_id: &str, was_paused: bool) {
+        if was_paused
+            && let Some(store) = self.store.as_ref()
+            && store.repause_chat(chat_id).unwrap_or(false)
+        {
+            self.events.publish(json!({"event": "tree"}));
         }
     }
 
@@ -1973,27 +1985,44 @@ impl Engine {
         };
         let mut resumed = Vec::new();
         for chat_id in chats {
+            let before = store.latest_user_message(&chat_id).ok();
             let reply = self.send_message_inner(
                 &json!({"op": "send", "chat": chat_id, "text": storage::CONTINUE_PROMPT}),
                 Some(Continuation::Resume),
             );
             if reply["ok"] != true {
+                // A continuation that was stored got as far as starting its
+                // turn, which failed and left the chat paused for another try.
+                // Only one refused outright falls back to the queue.
+                if store.latest_user_message(&chat_id).ok() != before
+                    || !store.chat_is_paused(&chat_id).unwrap_or(false)
+                {
+                    continue;
+                }
                 // Nothing to continue: the chat moved on, or its turn is still
                 // stopping. Let the queue go on, and leave the turn to resume
                 // from the chat.
-                if !store.unpause_chat(&chat_id).unwrap_or(false) {
-                    continue;
-                }
                 let queued = store
                     .chat(&chat_id)
                     .ok()
                     .and_then(|chat| chat["queue"][0].as_str().map(str::to_owned));
-                if let Some(text) = queued
-                    && let Err(error) = self.start_queued_if_idle(&chat_id, &text, false)
-                {
-                    eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
+                let started = match queued {
+                    Some(text) => self.start_queued_if_idle(&chat_id, &text, false),
+                    None => Ok(false),
+                };
+                match started {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if !store.unpause_chat(&chat_id).unwrap_or(false) {
+                            continue;
+                        }
+                        self.events.publish(json!({"event": "tree"}));
+                    }
+                    Err(error) => {
+                        eprintln!("xd-host: cannot resume chat {chat_id}'s queue: {error}");
+                        continue;
+                    }
                 }
-                self.events.publish(json!({"event": "tree"}));
             }
             self.events
                 .publish(json!({"event": "changed", "chat": chat_id}));
@@ -2050,9 +2079,11 @@ impl Engine {
     /// Like any send it starts the turn under the chat's execution gate, taken
     /// here unless the caller (`gated`) already holds it, so `pause-all` sees
     /// either the idle chat or the started turn.
-    fn start_queued_if_idle(&self, chat_id: &str, text: &str, gated: bool) -> Result<(), String> {
+    ///
+    /// True when it started the message.
+    fn start_queued_if_idle(&self, chat_id: &str, text: &str, gated: bool) -> Result<bool, String> {
         let (Some(store), Some(runtime)) = (self.store.as_ref(), self.runtime.as_ref()) else {
-            return Ok(());
+            return Ok(false);
         };
         let gate = if gated {
             None
@@ -2068,7 +2099,7 @@ impl Engine {
         };
         let chat = store.chat(chat_id).map_err(|error| error.to_string())?;
         if chat["working"] == true || chat["queue"][0].as_str() != Some(text) {
-            return Ok(());
+            return Ok(false);
         }
         let unpauses = store.chat_is_paused(chat_id).unwrap_or(false);
         let (_, event) = store
@@ -2079,18 +2110,22 @@ impl Engine {
             .prepare_send(&json!({"chat": chat_id, "text": text}))
             .map_err(|error| error.to_string())?
         {
-            SendDisposition::Queued { event, .. } => self.events.publish(event),
+            SendDisposition::Queued { event, .. } => {
+                self.events.publish(event);
+                Ok(false)
+            }
             SendDisposition::Start { turn, .. } => {
                 if unpauses {
                     self.events.publish(json!({"event": "tree"}));
                 }
                 if let Err(error) = runtime.start(turn.clone()) {
                     let _ = store.abort_turn_start(&turn.chat_id, &error);
+                    self.keep_paused_after_failed_start(chat_id, unpauses);
                     return Err(error);
                 }
+                Ok(true)
             }
         }
-        Ok(())
     }
 
     fn remove_worktree(&self, request: &Value) -> Value {

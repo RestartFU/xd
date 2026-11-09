@@ -2890,6 +2890,18 @@ impl StateStore {
         Ok(chats)
     }
 
+    /// Pauses an idle chat again after the turn that would have picked it up
+    /// failed to start, so the cut-short turn can still be resumed.
+    pub fn repause_chat(&self, chat_id: &str) -> Result<bool, StorageError> {
+        let database = self.database.lock().map_err(|_| StorageError::Poisoned)?;
+        let changed = database.execute(
+            "UPDATE chats SET paused = 1, turn_resumable = 1 \
+             WHERE id = ? AND paused = 0 AND host_working = 0",
+            [chat_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Lets a paused chat go on without continuing its turn. False when it was
     /// not paused, for example because a turn has picked it up since.
     pub fn unpause_chat(&self, chat_id: &str) -> Result<bool, StorageError> {
