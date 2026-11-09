@@ -88,9 +88,9 @@ enum Input<T> {
     Request(Request<T>),
     Bus(zbus::Result<Message>),
     BusClosed,
-    /// A shown notification whose time is up, by its id and the `Notify`
+    /// A shown notification whose time is up, by its key and the `Notify`
     /// call that showed it.
-    Close(u32, NonZeroU32),
+    Close(Key, NonZeroU32),
 }
 
 async fn run<T>(
@@ -134,7 +134,7 @@ async fn serve<T>(
     let (due, closes) = async_channel::unbounded();
     let mut inputs = pin!(stream::select(
         stream::select(requests.map(Input::Request), messages),
-        closes.map(|(id, serial)| Input::Close(id, serial)),
+        closes.map(|(key, serial)| Input::Close(key, serial)),
     ));
     while let Some(input) = inputs.next().await {
         match input {
@@ -148,19 +148,10 @@ async fn serve<T>(
                 let Some(event) = decode(&message) else {
                     continue;
                 };
+                // Ids are the server connection's that handed them out: one
+                // that restarts, or takes over the service, hands them out
+                // again, possibly to other applications.
                 let sender = message.header().sender().map(|sender| sender.to_string());
-                if let Some(id) = event.notification()
-                    && !tracker.heard_from(id, sender.as_deref())
-                {
-                    continue;
-                }
-                let shown_as = match &event {
-                    BusEvent::Reply {
-                        serial,
-                        id: Some(id),
-                    } if tracker.sent.contains_key(serial) => Some(*id),
-                    _ => None,
-                };
                 // A notification of ours was shown: close it when its time is up.
                 if let BusEvent::Reply {
                     serial,
@@ -168,32 +159,27 @@ async fn serve<T>(
                 } = &event
                     && tracker.sent.contains_key(serial)
                 {
-                    let (due, id, serial) = (due.clone(), *id, *serial);
+                    let (due, key, serial) = (due.clone(), (sender.clone(), *id), *serial);
                     thread::spawn(move || {
                         thread::sleep(close_after);
-                        let _ = due.try_send((id, serial));
+                        let _ = due.try_send((key, serial));
                     });
                 }
-                if let Some(activation) = tracker.apply(event) {
+                if let Some(activation) = tracker.apply(event, sender.as_deref()) {
                     let _ = activations.send(activation).await;
-                }
-                if let Some(shown) = shown_as.and_then(|id| tracker.shown.get_mut(&id)) {
-                    shown.owner = sender;
                 }
             }
             Input::Bus(Err(error)) => return Err(error),
             Input::BusClosed => return Ok(()),
             // Only while the id is still that notification's: one clicked or
-            // closed is gone, and a notification server that restarted can
-            // give the same id to a newer one.
-            // Sent to the server that showed it, so a server that has taken
-            // over the service since never closes one of its own.
-            Input::Close(id, serial) => {
-                if tracker.shows(id, serial)
-                    && let Some(shown) = tracker.shown.remove(&id)
-                {
+            // closed is gone. Sent to the server connection that showed it, so
+            // a server that has taken over the service never closes its own.
+            Input::Close(key, serial) => {
+                if tracker.shows(&key, serial) {
+                    tracker.shown.remove(&key);
+                    let (owner, id) = key;
                     connection
-                        .send(&close_message(id, shown.owner.as_deref())?)
+                        .send(&close_message(id, owner.as_deref())?)
                         .await?;
                 }
             }
@@ -241,16 +227,6 @@ enum BusEvent {
     Closed { id: u32 },
 }
 
-impl BusEvent {
-    /// The notification a signal is about.
-    fn notification(&self) -> Option<u32> {
-        match self {
-            Self::Reply { .. } => None,
-            Self::Token { id, .. } | Self::Action { id, .. } | Self::Closed { id } => Some(*id),
-        }
-    }
-}
-
 fn decode(message: &Message) -> Option<BusEvent> {
     let header = message.header();
     let body = message.body();
@@ -289,17 +265,17 @@ struct Shown<T> {
     token: Option<String>,
     /// The `Notify` call that showed it.
     serial: NonZeroU32,
-    /// The unique bus name of the server that showed it. Ids are only that
-    /// server's: one that restarts, or replaces it, hands them out again,
-    /// possibly to other applications.
-    owner: Option<String>,
 }
+
+/// A shown notification: the unique bus name of the server connection that
+/// showed it, and the id that connection gave it.
+type Key = (Option<String>, u32);
 
 /// What is known about each notification between sending it and it closing.
 struct Tracker<T> {
     /// `Notify` calls awaiting the id the server gives them, by call serial.
     sent: HashMap<NonZeroU32, T>,
-    shown: HashMap<u32, Shown<T>>,
+    shown: HashMap<Key, Shown<T>>,
 }
 
 impl<T> Default for Tracker<T> {
@@ -312,33 +288,26 @@ impl<T> Default for Tracker<T> {
 }
 
 impl<T> Tracker<T> {
-    /// Whether `id` is still the notification the `Notify` call `serial` showed.
-    fn shows(&self, id: u32, serial: NonZeroU32) -> bool {
+    /// Whether `key` is still the notification the `Notify` call `serial` showed.
+    fn shows(&self, key: &Key, serial: NonZeroU32) -> bool {
         self.shown
-            .get(&id)
+            .get(key)
             .is_some_and(|shown| shown.serial == serial)
     }
 
-    /// Whether a signal from `sender` can be about notification `id`: only
-    /// the server that showed it speaks for it.
-    fn heard_from(&self, id: u32, sender: Option<&str>) -> bool {
-        self.shown
-            .get(&id)
-            .and_then(|shown| shown.owner.as_deref())
-            .is_none_or(|owner| sender.is_none_or(|sender| sender == owner))
-    }
-
-    fn apply(&mut self, event: BusEvent) -> Option<Activation<T>> {
+    /// `sender` is the unique bus name the event came from: a notification
+    /// is only ever spoken for by the connection that showed it.
+    fn apply(&mut self, event: BusEvent, sender: Option<&str>) -> Option<Activation<T>> {
+        let shown_as = |id| (sender.map(str::to_owned), id);
         match event {
             BusEvent::Reply { serial, id } => {
                 if let (Some(target), Some(id)) = (self.sent.remove(&serial), id) {
                     self.shown.insert(
-                        id,
+                        shown_as(id),
                         Shown {
                             target,
                             token: None,
                             serial,
-                            owner: None,
                         },
                     );
                 }
@@ -346,20 +315,20 @@ impl<T> Tracker<T> {
             }
             // The specification sends this just before the action it is for.
             BusEvent::Token { id, token } => {
-                if let Some(shown) = self.shown.get_mut(&id) {
+                if let Some(shown) = self.shown.get_mut(&shown_as(id)) {
                     shown.token = Some(token);
                 }
                 None
             }
             BusEvent::Action { id, key } if key == DEFAULT_ACTION => {
-                self.shown.remove(&id).map(|shown| Activation {
+                self.shown.remove(&shown_as(id)).map(|shown| Activation {
                     target: shown.target,
                     token: shown.token,
                 })
             }
             BusEvent::Action { .. } => None,
             BusEvent::Closed { id } => {
-                self.shown.remove(&id);
+                self.shown.remove(&shown_as(id));
                 None
             }
         }
@@ -446,10 +415,13 @@ mod tests {
         let mut tracker = Tracker::default();
         tracker.sent.insert(serial(1), target);
         assert_eq!(
-            tracker.apply(BusEvent::Reply {
-                serial: serial(1),
-                id: Some(id),
-            }),
+            tracker.apply(
+                BusEvent::Reply {
+                    serial: serial(1),
+                    id: Some(id),
+                },
+                None
+            ),
             None
         );
         tracker
@@ -458,15 +430,21 @@ mod tests {
     #[test]
     fn clicking_reports_the_target_with_its_activation_token() {
         let mut tracker = shown(7, "chat");
-        tracker.apply(BusEvent::Token {
-            id: 7,
-            token: "token".into(),
-        });
-        assert_eq!(
-            tracker.apply(BusEvent::Action {
+        tracker.apply(
+            BusEvent::Token {
                 id: 7,
-                key: DEFAULT_ACTION.into(),
-            }),
+                token: "token".into(),
+            },
+            None,
+        );
+        assert_eq!(
+            tracker.apply(
+                BusEvent::Action {
+                    id: 7,
+                    key: DEFAULT_ACTION.into(),
+                },
+                None
+            ),
             Some(Activation {
                 target: "chat",
                 token: Some("token".into()),
@@ -479,10 +457,13 @@ mod tests {
     fn clicking_without_a_token_still_reports_the_target() {
         let mut tracker = shown(7, "chat");
         assert_eq!(
-            tracker.apply(BusEvent::Action {
-                id: 7,
-                key: DEFAULT_ACTION.into(),
-            }),
+            tracker.apply(
+                BusEvent::Action {
+                    id: 7,
+                    key: DEFAULT_ACTION.into(),
+                },
+                None
+            ),
             Some(Activation {
                 target: "chat",
                 token: None,
@@ -497,29 +478,32 @@ mod tests {
             id: 7,
             key: "other".into(),
         };
-        assert_eq!(tracker.apply(other_action), None);
+        assert_eq!(tracker.apply(other_action, None), None);
         let someone_elses_click = BusEvent::Action {
             id: 8,
             key: DEFAULT_ACTION.into(),
         };
-        assert_eq!(tracker.apply(someone_elses_click), None);
+        assert_eq!(tracker.apply(someone_elses_click, None), None);
 
-        tracker.apply(BusEvent::Closed { id: 7 });
+        tracker.apply(BusEvent::Closed { id: 7 }, None);
         let after_closing = BusEvent::Action {
             id: 7,
             key: DEFAULT_ACTION.into(),
         };
-        assert_eq!(tracker.apply(after_closing), None);
+        assert_eq!(tracker.apply(after_closing, None), None);
     }
 
     #[test]
     fn a_rejected_notification_is_forgotten() {
         let mut tracker = Tracker::default();
         tracker.sent.insert(serial(1), "chat");
-        tracker.apply(BusEvent::Reply {
-            serial: serial(1),
-            id: None,
-        });
+        tracker.apply(
+            BusEvent::Reply {
+                serial: serial(1),
+                id: None,
+            },
+            None,
+        );
         assert!(tracker.sent.is_empty());
         assert!(tracker.shown.is_empty());
     }
@@ -841,6 +825,48 @@ mod tests {
             assert_eq!(closes, Vec::<u32>::new());
             assert_eq!(click, None);
         }
+    }
+
+    #[test]
+    fn overlapping_servers_keep_their_own_notifications() {
+        // A server that took over the service gives id 7 to xd's second
+        // notification; the one it replaced then answers the first, late,
+        // with id 7 as well. Each stays its own server's.
+        let outcome = on_a_private_bus(|address| {
+            zbus::block_on(async move {
+                let (old, mut old_calls) = notification_server(&address).await?;
+                let takeover_at = address.clone();
+                against_notifier(&address, |requests, clicked| async move {
+                    requests.send(request("first")).await.unwrap();
+                    let first = next_call(&mut old_calls, "Notify").await?;
+                    old.release_name(SERVICE).await?;
+                    let (new, mut new_calls) = notification_server(&takeover_at).await?;
+                    requests.send(request("second")).await.unwrap();
+                    let second = next_call(&mut new_calls, "Notify").await?;
+                    new.reply(&second.header(), &7u32).await?;
+                    old.reply(&first.header(), &7u32).await?;
+                    new.emit_signal(
+                        None::<()>,
+                        OBJECT_PATH,
+                        SERVICE,
+                        "ActionInvoked",
+                        &(7u32, DEFAULT_ACTION),
+                    )
+                    .await?;
+                    let click = clicked.recv().await.ok();
+                    let closes = closes_during(&mut new_calls, TEST_CLOSE_AFTER * 2).await?;
+                    Ok((click.map(|click| click.target), closes))
+                })
+                .await
+            })
+        });
+        let Some((click, closes)) = outcome else {
+            return;
+        };
+        assert_eq!(click, Some("second"));
+        // The new server's notification was clicked, so it is gone: its timer
+        // has nothing left to close there, and the old one's goes to the old.
+        assert_eq!(closes, Vec::<u32>::new());
     }
 
     #[test]
